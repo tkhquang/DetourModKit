@@ -530,8 +530,8 @@ namespace DetourModKit
          *          default. A blank string-valued key reads as empty.
          * @note Setup/control-plane only: parses and allocates bounded manifest state.
          */
-        [[nodiscard]] Result<Manifest> parse(std::string_view text,
-                                             const ManifestLimits &limits = ManifestLimits::conservative());
+        [[nodiscard]] Result<Manifest>
+        parse(std::string_view text, const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
          * @brief Serializes a manifest to INI text, rejecting anything that could not round-trip.
@@ -569,8 +569,8 @@ namespace DetourModKit
          *       overrides" (the defaults pass through) rather than a hard failure.
          * @note Setup/control-plane only: performs bounded file I/O and parsing.
          */
-        [[nodiscard]] Result<Manifest> load(const std::filesystem::path &path,
-                                            const ManifestLimits &limits = ManifestLimits::conservative());
+        [[nodiscard]] Result<Manifest>
+        load(const std::filesystem::path &path, const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
          * @brief Writes a manifest to a file via @ref serialize_checked.
@@ -590,8 +590,11 @@ namespace DetourModKit
          *          target with the platform's atomic replace.
          * @note Setup/control-plane only: performs bounded serialization and file I/O.
          */
-        [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest,
-                                        const ManifestLimits &limits = ManifestLimits::conservative());
+        [[nodiscard]] Result<void> save(
+            const std::filesystem::path &path,
+            const Manifest &manifest,
+            const ManifestLimits &limits = ManifestLimits::conservative()
+        );
 
         /**
          * @brief Merges in-code anchor defaults with optional file overrides.
@@ -625,8 +628,8 @@ namespace DetourModKit
          *          A default with a non-serializable kind or empty required evidence cannot be adopted.
          *          Callers use @ref anchor::evaluate_gate for non-serializable anchors.
          */
-        [[nodiscard]] Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
-                                                             std::span<const SignatureRecord> overrides);
+        [[nodiscard]] Result<std::vector<Signature>>
+        overlay(std::span<const anchor::Anchor> defaults, std::span<const SignatureRecord> overrides);
 
         /**
          * @struct GatePolicy
@@ -849,8 +852,11 @@ namespace DetourModKit
          *          that rejected it. A rejected feature installs no hook and reads no pointer. It stays off.
          * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
          */
-        [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy = {},
-                                                  Region scope = Region::host());
+        [[nodiscard]] GateResult resolve_and_gate(
+            std::span<const Signature> signatures,
+            const GatePolicy &policy = {},
+            Region scope = Region::host()
+        );
 
         /**
          * @brief Resolves and gates a manifest under a mandatory build-revision check for mutation-capable entries.
@@ -869,9 +875,13 @@ namespace DetourModKit
          *          values remain available.
          * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
          */
-        [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const ManifestHeader &header,
-                                                  std::uint32_t build_revision, const GatePolicy &policy = {},
-                                                  Region scope = Region::host());
+        [[nodiscard]] GateResult resolve_and_gate(
+            std::span<const Signature> signatures,
+            const ManifestHeader &header,
+            std::uint32_t build_revision,
+            const GatePolicy &policy = {},
+            Region scope = Region::host()
+        );
 
         /**
          * @brief Maps a @ref BindingKind to a short human-readable label (its file token).

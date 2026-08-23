@@ -125,9 +125,25 @@ int main()
     // The corpus: OS loader/Win32/CRT images every x64 Windows host maps, plus this executable's own image,
     // whose .text is statically linked DMK + CRT C++ (the game-modding target shape).
     const wchar_t *module_names[] = {
-        L"ntdll.dll",    L"kernel32.dll", L"kernelbase.dll", L"user32.dll",  L"gdi32.dll",  L"gdi32full.dll",
-        L"msvcrt.dll",   L"ucrtbase.dll", L"ole32.dll",      L"combase.dll", L"rpcrt4.dll", L"advapi32.dll",
-        L"oleaut32.dll", L"setupapi.dll", L"shell32.dll",    L"d3d11.dll",   L"dwrite.dll", L"windows.storage.dll"};
+        L"ntdll.dll",
+        L"kernel32.dll",
+        L"kernelbase.dll",
+        L"user32.dll",
+        L"gdi32.dll",
+        L"gdi32full.dll",
+        L"msvcrt.dll",
+        L"ucrtbase.dll",
+        L"ole32.dll",
+        L"combase.dll",
+        L"rpcrt4.dll",
+        L"advapi32.dll",
+        L"oleaut32.dll",
+        L"setupapi.dll",
+        L"shell32.dll",
+        L"d3d11.dll",
+        L"dwrite.dll",
+        L"windows.storage.dll"
+    };
     std::vector<CorpusModule> corpus;
     for (const wchar_t *name : module_names)
     {
@@ -153,8 +169,11 @@ int main()
     }
     gates.fact("corpus.modules_loaded_at_least_8", corpus.size() >= 8);
     gates.fact("corpus.corpus_at_least_16mib", corpus_bytes >= (16ull << 20));
-    std::printf("Signature-health corpus: %zu modules, %.1f MiB of x64 executable bytes\n", corpus.size(),
-                static_cast<double>(corpus_bytes) / (1024.0 * 1024.0));
+    std::printf(
+        "Signature-health corpus: %zu modules, %.1f MiB of x64 executable bytes\n",
+        corpus.size(),
+        static_cast<double>(corpus_bytes) / (1024.0 * 1024.0)
+    );
     for (const CorpusModule &module : corpus)
     {
         std::printf("  %-24s %9zu bytes\n", module.name.c_str(), module.text.size());
@@ -187,8 +206,15 @@ int main()
                     if (hit)
                     {
                         char dsl[64];
-                        std::snprintf(dsl, sizeof(dsl), "48 8B 05 %02X %02X %02X %02X", module.text[offset + 3],
-                                      module.text[offset + 4], module.text[offset + 5], module.text[offset + 6]);
+                        std::snprintf(
+                            dsl,
+                            sizeof(dsl),
+                            "48 8B 05 %02X %02X %02X %02X",
+                            module.text[offset + 3],
+                            module.text[offset + 4],
+                            module.text[offset + 5],
+                            module.text[offset + 6]
+                        );
                         fixed_rip_dsl = dsl;
                         break;
                     }
@@ -218,8 +244,16 @@ int main()
         {"wildcard_heavy", "wildcard", "48 ?? ?? ?? 24 ?? ?? 89"},
     };
 
-    std::printf("\n%-22s %-18s %4s %-8s %12s %14s %10s\n", "probe", "category", "len", "grade", "est/64MiB",
-                "actual/64MiB", "raw hits");
+    std::printf(
+        "\n%-22s %-18s %4s %-8s %12s %14s %10s\n",
+        "probe",
+        "category",
+        "len",
+        "grade",
+        "est/64MiB",
+        "actual/64MiB",
+        "raw hits"
+    );
     bool all_compiled = true;
     double prologue_actual_per_64mib = 0.0;
     double prologue_estimate_per_64mib = 0.0;
@@ -242,12 +276,24 @@ int main()
             hits += count_matches(*compiled, module.text);
         }
         const double actual_per_64mib = static_cast<double>(hits) * scale_to_64mib;
-        std::printf("%-22s %-18s %4zu %-8s %12.3f %14.1f %10zu\n", probe.name, probe.category, compiled->size(),
-                    std::string(sighealth::to_string(health.grade)).c_str(), health.expected_matches, actual_per_64mib,
-                    hits);
-        std::printf("#TSV\t%s\testimate\t%.4f\tactual_per_64mib\t%.2f\traw\t%zu\tgrade\t%s\n", probe.name,
-                    health.expected_matches, actual_per_64mib, hits,
-                    std::string(sighealth::to_string(health.grade)).c_str());
+        std::printf(
+            "%-22s %-18s %4zu %-8s %12.3f %14.1f %10zu\n",
+            probe.name,
+            probe.category,
+            compiled->size(),
+            std::string(sighealth::to_string(health.grade)).c_str(),
+            health.expected_matches,
+            actual_per_64mib,
+            hits
+        );
+        std::printf(
+            "#TSV\t%s\testimate\t%.4f\tactual_per_64mib\t%.2f\traw\t%zu\tgrade\t%s\n",
+            probe.name,
+            health.expected_matches,
+            actual_per_64mib,
+            hits,
+            std::string(sighealth::to_string(health.grade)).c_str()
+        );
         if (std::strcmp(probe.name, "prologue_push_sub") == 0)
         {
             prologue_actual_per_64mib = actual_per_64mib;
@@ -267,8 +313,10 @@ int main()
     // Deterministic corpus facts: canonical prologues are common in ANY real x64 Windows image set (the
     // false-negative direction the report documents), a 10-byte invented immediate matches nothing, and the
     // frozen-disp site matches at least its own occurrence.
-    gates.fact("corpus.canonical_prologue_exceeds_fail_threshold",
-               prologue_actual_per_64mib > sighealth::HealthPolicy{}.fail_expected_matches);
+    gates.fact(
+        "corpus.canonical_prologue_exceeds_fail_threshold",
+        prologue_actual_per_64mib > sighealth::HealthPolicy{}.fail_expected_matches
+    );
     gates.fact("corpus.synthetic_unique_absent", synthetic_hits == 0);
     gates.fact("corpus.fixed_operand_site_matches", fixed_rip_hits >= 1);
 
@@ -278,7 +326,11 @@ int main()
         prologue_actual_per_64mib / (prologue_estimate_per_64mib > 0.001 ? prologue_estimate_per_64mib : 0.001);
     gates.metric("corpus.prologue_underestimate_ratio", underestimate_ratio);
     gates.metric("corpus.corpus_bytes", static_cast<double>(corpus_bytes));
-    std::printf("\nprologue_push_sub underestimate: model %.3f vs actual %.1f per 64 MiB (%.0fx)\n",
-                prologue_estimate_per_64mib, prologue_actual_per_64mib, underestimate_ratio);
+    std::printf(
+        "\nprologue_push_sub underestimate: model %.3f vs actual %.1f per 64 MiB (%.0fx)\n",
+        prologue_estimate_per_64mib,
+        prologue_actual_per_64mib,
+        underestimate_ratio
+    );
     return gates.close();
 }

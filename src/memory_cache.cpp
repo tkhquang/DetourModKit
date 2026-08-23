@@ -135,14 +135,18 @@ namespace DetourModKit
 #pragma warning(pop)
 #endif
 
-            static_assert(std::is_same_v<decltype(CacheShard::sorted_ranges),
-                                         std::deque<std::pair<std::uintptr_t, std::uintptr_t>>>,
-                          "CacheShard::sorted_ranges is pinned to std::deque so mutation never relocates the buffer.");
+            static_assert(
+                std::is_same_v<
+                    decltype(CacheShard::sorted_ranges),
+                    std::deque<std::pair<std::uintptr_t, std::uintptr_t>>>,
+                "CacheShard::sorted_ranges is pinned to std::deque so mutation never relocates the buffer."
+            );
 
             inline std::uint64_t current_time_ns() noexcept
             {
                 return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::steady_clock::now().time_since_epoch())
+                           std::chrono::steady_clock::now().time_since_epoch()
+                )
                     .count();
             }
 
@@ -322,10 +326,14 @@ namespace DetourModKit
              * @param shard_content_gen The shard's current content generation. A clear or contended invalidation
              *                           advances it. An older stamp marks the entry invalid, so lookup returns a miss.
              */
-            constexpr inline bool is_entry_valid_and_covers(const CachedMemoryRegionInfo &entry, std::uintptr_t address,
-                                                            std::size_t size, std::uint64_t current_ns,
-                                                            std::uint64_t expiry_ns,
-                                                            std::uint64_t shard_content_gen) noexcept
+            constexpr inline bool is_entry_valid_and_covers(
+                const CachedMemoryRegionInfo &entry,
+                std::uintptr_t address,
+                std::size_t size,
+                std::uint64_t current_ns,
+                std::uint64_t expiry_ns,
+                std::uint64_t shard_content_gen
+            ) noexcept
             {
                 if (!entry.valid)
                     return false;
@@ -380,8 +388,11 @@ namespace DetourModKit
              */
             void remove_sorted_range(CacheShard &shard, std::uintptr_t base_addr) noexcept
             {
-                auto it = std::lower_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(),
-                                           std::make_pair(base_addr, std::uintptr_t{0}));
+                auto it = std::lower_bound(
+                    shard.sorted_ranges.begin(),
+                    shard.sorted_ranges.end(),
+                    std::make_pair(base_addr, std::uintptr_t{0})
+                );
                 if (it != shard.sorted_ranges.end() && it->first == base_addr)
                     shard.sorted_ranges.erase(it);
             }
@@ -394,8 +405,13 @@ namespace DetourModKit
              *       queries through VirtualQuery and inserts the result. There is deliberately no
              *       per-page index. The per-shard entry count is small and bounded.
              */
-            CachedMemoryRegionInfo *find_in_shard(CacheShard &shard, std::uintptr_t address, std::size_t size,
-                                                  std::uint64_t current_ns, std::uint64_t expiry_ns) noexcept
+            CachedMemoryRegionInfo *find_in_shard(
+                CacheShard &shard,
+                std::uintptr_t address,
+                std::size_t size,
+                std::uint64_t current_ns,
+                std::uint64_t expiry_ns
+            ) noexcept
             {
                 // One acquire load reads the shard generation for both tiers. An entry with an older stamp is skipped.
                 // Thus a lost physical eviction or a clear that races a leader cannot serve a stale hit.
@@ -412,8 +428,11 @@ namespace DetourModKit
                     }
                 }
 
-                auto range_it = std::upper_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(),
-                                                 std::make_pair(address, UINTPTR_MAX));
+                auto range_it = std::upper_bound(
+                    shard.sorted_ranges.begin(),
+                    shard.sorted_ranges.end(),
+                    std::make_pair(address, UINTPTR_MAX)
+                );
                 if (range_it != shard.sorted_ranges.begin())
                 {
                     --range_it;
@@ -423,8 +442,14 @@ namespace DetourModKit
                         if (entry_it != shard.entries.end())
                         {
                             CachedMemoryRegionInfo &entry = entry_it->second;
-                            if (is_entry_valid_and_covers(entry, address, size, current_ns, expiry_ns,
-                                                          shard_content_gen))
+                            if (is_entry_valid_and_covers(
+                                    entry,
+                                    address,
+                                    size,
+                                    current_ns,
+                                    expiry_ns,
+                                    shard_content_gen
+                                ))
                             {
                                 return &entry;
                             }
@@ -482,8 +507,12 @@ namespace DetourModKit
              * @note Must be called with the shard mutex held (exclusive). It can throw. The noexcept
              *       @ref update_shard_with_region wrapper fails soft on that.
              */
-            void update_shard_with_region_impl(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
-                                               std::uint64_t current_ns, std::uint64_t content_gen)
+            void update_shard_with_region_impl(
+                CacheShard &shard,
+                const MEMORY_BASIC_INFORMATION &mbi,
+                std::uint64_t current_ns,
+                std::uint64_t content_gen
+            )
             {
                 const std::uintptr_t base_addr = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
 
@@ -584,8 +613,12 @@ namespace DetourModKit
              *          partial work after a failure, so the three shard indexes remain equal.
              * @note Must be called with the shard mutex held (exclusive).
              */
-            void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
-                                          std::uint64_t current_ns, std::uint64_t content_gen) noexcept
+            void update_shard_with_region(
+                CacheShard &shard,
+                const MEMORY_BASIC_INFORMATION &mbi,
+                std::uint64_t current_ns,
+                std::uint64_t content_gen
+            ) noexcept
             {
                 try
                 {
@@ -601,8 +634,11 @@ namespace DetourModKit
              * @note Must be called with the shard mutex held (exclusive).
              * @return Number of entries removed from this shard.
              */
-            std::size_t cleanup_expired_entries_in_shard(CacheShard &shard, std::uint64_t current_ns,
-                                                         std::uint64_t expiry_ns) noexcept
+            std::size_t cleanup_expired_entries_in_shard(
+                CacheShard &shard,
+                std::uint64_t current_ns,
+                std::uint64_t expiry_ns
+            ) noexcept
             {
                 std::size_t removed = 0;
                 auto it = shard.entries.begin();
@@ -709,14 +745,16 @@ namespace DetourModKit
                 {
                     {
                         std::unique_lock<std::mutex> lock(s_cleanup_mutex);
-                        s_cleanup_cv.wait_for(lock, std::chrono::seconds(1),
-                                              [&]()
-                                              {
-                                                  return s_cleanup_requested.load(std::memory_order_acquire) ||
-                                                         !s_cleanup_thread_running.load(std::memory_order_acquire) ||
-                                                         s_lifecycle_generation.load(std::memory_order_acquire) !=
-                                                             generation;
-                                              });
+                        s_cleanup_cv.wait_for(
+                            lock,
+                            std::chrono::seconds(1),
+                            [&]()
+                            {
+                                return s_cleanup_requested.load(std::memory_order_acquire) ||
+                                       !s_cleanup_thread_running.load(std::memory_order_acquire) ||
+                                       s_lifecycle_generation.load(std::memory_order_acquire) != generation;
+                            }
+                        );
                     }
 
                     if (!s_cleanup_thread_running.load(std::memory_order_acquire) ||
@@ -762,7 +800,8 @@ namespace DetourModKit
                     // The retained module reference keeps the detached worker's code mapped.
                     s_cleanup_thread.detach();
                     DetourModKit::diagnostics::record_intentional_leak(
-                        DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
+                        DetourModKit::diagnostics::LeakSubsystem::MemoryCache
+                    );
                     return true;
                 }
                 catch (...)
@@ -847,8 +886,12 @@ namespace DetourModKit
                 LifecycleState state = s_lifecycle_state.load(std::memory_order_seq_cst);
                 while (state == LifecycleState::Starting || state == LifecycleState::Running)
                 {
-                    if (s_lifecycle_state.compare_exchange_weak(state, LifecycleState::Stopped,
-                                                                std::memory_order_seq_cst, std::memory_order_seq_cst))
+                    if (s_lifecycle_state.compare_exchange_weak(
+                            state,
+                            LifecycleState::Stopped,
+                            std::memory_order_seq_cst,
+                            std::memory_order_seq_cst
+                        ))
                     {
                         break;
                     }
@@ -862,8 +905,11 @@ namespace DetourModKit
              *       shard is chosen from the query address). The shard remains bounded by max_capacity, and this scan
              *       never runs on a read hot path.
              */
-            std::size_t evict_overlapping_entries_in_shard(CacheShard &shard, std::uintptr_t address,
-                                                           std::uintptr_t end_address) noexcept
+            std::size_t evict_overlapping_entries_in_shard(
+                CacheShard &shard,
+                std::uintptr_t address,
+                std::uintptr_t end_address
+            ) noexcept
             {
                 std::size_t evicted = 0;
                 auto it = shard.entries.begin();
@@ -940,8 +986,11 @@ namespace DetourModKit
             /**
              * @brief Performs one-time cache initialization (allocates the shard array, configures bounds).
              */
-            bool perform_cache_initialization(std::size_t cache_size, unsigned int expiry_ms,
-                                              std::size_t shard_count) noexcept
+            bool perform_cache_initialization(
+                std::size_t cache_size,
+                unsigned int expiry_ms,
+                std::size_t shard_count
+            ) noexcept
             {
                 if (cache_size == 0)
                     cache_size = MIN_CACHE_SIZE;
@@ -996,8 +1045,8 @@ namespace DetourModKit
              * @brief Performs VirtualQuery and updates the cache with stampede coalescence.
              * @return true if VirtualQuery (or a coalesced follower read) succeeded.
              */
-            bool query_and_update_cache(std::size_t shard_idx, LPCVOID address,
-                                        MEMORY_BASIC_INFORMATION &mbi_out) noexcept
+            bool
+            query_and_update_cache(std::size_t shard_idx, LPCVOID address, MEMORY_BASIC_INFORMATION &mbi_out) noexcept
             {
                 CacheShard &shard = s_cache_shards[shard_idx];
 
@@ -1085,8 +1134,11 @@ namespace DetourModKit
              *          query, or no cursor advance returns false. The returned region contains `cursor`, which
              *          guarantees progress.
              */
-            bool range_permission_uncached(std::uintptr_t address, std::size_t size,
-                                           bool (*check_permission)(DWORD) noexcept) noexcept
+            bool range_permission_uncached(
+                std::uintptr_t address,
+                std::size_t size,
+                bool (*check_permission)(DWORD) noexcept
+            ) noexcept
             {
                 const std::uintptr_t query_end = address + size;
                 if (query_end < address)
@@ -1119,8 +1171,11 @@ namespace DetourModKit
              * @param size Number of bytes to check (0 fails closed).
              * @param check_permission Predicate that validates the protection flags.
              */
-            bool check_memory_permission(std::uintptr_t address, std::size_t size,
-                                         bool (*check_permission)(DWORD) noexcept) noexcept
+            bool check_memory_permission(
+                std::uintptr_t address,
+                std::size_t size,
+                bool (*check_permission)(DWORD) noexcept
+            ) noexcept
             {
                 if (address == 0 || size == 0)
                     return false;
@@ -1214,8 +1269,12 @@ namespace DetourModKit
              *
              * @details This test seam exposes FIFO and range index state that MemoryStats omits.
              */
-            void shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
-                                            std::size_t &ranges) noexcept
+            void shard_index_sizes_for_test(
+                Address address,
+                std::size_t &entries,
+                std::size_t &fifo,
+                std::size_t &ranges
+            ) noexcept
             {
                 entries = 0;
                 fifo = 0;
@@ -1324,9 +1383,11 @@ namespace DetourModKit
             if (s_cleanup_self_ref == nullptr)
             {
                 s_cleanup_thread_running.store(false, std::memory_order_release);
-                (void)log().try_log(LogLevel::Debug,
-                                    "MemoryCache: Module reference unavailable, using on-demand cleanup instead of "
-                                    "background cleanup.");
+                (void)log().try_log(
+                    LogLevel::Debug,
+                    "MemoryCache: Module reference unavailable, using on-demand cleanup instead of "
+                    "background cleanup."
+                );
             }
             else
             {
@@ -1344,9 +1405,11 @@ namespace DetourModKit
                     release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
                     s_cleanup_self_ref = nullptr;
                     s_cleanup_thread_running.store(false, std::memory_order_release);
-                    (void)log().try_log(LogLevel::Debug,
-                                        "MemoryCache: Background cleanup thread unavailable, using on-demand "
-                                        "cleanup.");
+                    (void)log().try_log(
+                        LogLevel::Debug,
+                        "MemoryCache: Background cleanup thread unavailable, using on-demand "
+                        "cleanup."
+                    );
                 }
             }
 
@@ -1360,7 +1423,8 @@ namespace DetourModKit
                         if (s_lifecycle_state.load(std::memory_order_seq_cst) != LifecycleState::Running)
                             return;
                         shutdown_cache();
-                    });
+                    }
+                );
                 atexit_registered = true;
             }
 
@@ -1371,8 +1435,12 @@ namespace DetourModKit
 
             // Publish only if unauthorized abandonment did not cancel this Starting generation.
             LifecycleState expected_state = LifecycleState::Starting;
-            if (!s_lifecycle_state.compare_exchange_strong(expected_state, LifecycleState::Running,
-                                                           std::memory_order_seq_cst, std::memory_order_seq_cst))
+            if (!s_lifecycle_state.compare_exchange_strong(
+                    expected_state,
+                    LifecycleState::Running,
+                    std::memory_order_seq_cst,
+                    std::memory_order_seq_cst
+                ))
             {
                 s_cleanup_thread_running.store(false, std::memory_order_release);
                 s_cleanup_cv.notify_one();
@@ -1688,8 +1756,12 @@ namespace DetourModKit::detail
         memory::hold_shard_shared_lock_for_test(address, callback);
     }
 
-    void memory_cache_shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
-                                                 std::size_t &ranges) noexcept
+    void memory_cache_shard_index_sizes_for_test(
+        Address address,
+        std::size_t &entries,
+        std::size_t &fifo,
+        std::size_t &ranges
+    ) noexcept
     {
         memory::shard_index_sizes_for_test(address, entries, fifo, ranges);
     }

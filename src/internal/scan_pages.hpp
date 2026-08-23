@@ -110,26 +110,30 @@ namespace DetourModKit
         };
 
         /// Module-scoped sweep over the image's execute-readable pages, so a match can only land on code.
-        [[nodiscard]] MatchResult scan_module_executable(const EnginePattern &pattern, ModuleSpan range,
-                                                         const ScanQuery &query) noexcept;
+        [[nodiscard]] MatchResult
+        scan_module_executable(const EnginePattern &pattern, ModuleSpan range, const ScanQuery &query) noexcept;
 
         /// Module-scoped sweep over every readable page, so one pass covers code and .rdata / .data candidates.
-        [[nodiscard]] MatchResult scan_module_readable(const EnginePattern &pattern, ModuleSpan range,
-                                                       const ScanQuery &query) noexcept;
+        [[nodiscard]] MatchResult
+        scan_module_readable(const EnginePattern &pattern, ModuleSpan range, const ScanQuery &query) noexcept;
 
         /**
          * @brief Whole-process sweep over committed execute-readable pages.
          * @details A pattern straddling two adjacent accepted regions is found via a max_match_length() - 1 carry.
          */
-        [[nodiscard]] MatchResult scan_executable_regions(const EnginePattern &pattern,
-                                                          const ScanQuery &query) noexcept;
+        [[nodiscard]] MatchResult
+        scan_executable_regions(const EnginePattern &pattern, const ScanQuery &query) noexcept;
 
         /// Whole-process sweep over committed readable pages; a strict superset of @ref scan_executable_regions.
         [[nodiscard]] MatchResult scan_readable_regions(const EnginePattern &pattern, const ScanQuery &query) noexcept;
 
         /// Maps a public scan::Pages class to the matching module-scoped sweep.
-        [[nodiscard]] MatchResult scan_module_pages(const EnginePattern &pattern, ModuleSpan range, scan::Pages pages,
-                                                    const ScanQuery &query) noexcept;
+        [[nodiscard]] MatchResult scan_module_pages(
+            const EnginePattern &pattern,
+            ModuleSpan range,
+            scan::Pages pages,
+            const ScanQuery &query
+        ) noexcept;
 
         /**
          * @brief True when a readable-page sweep of @p range can produce an authoritative result.
@@ -144,8 +148,11 @@ namespace DetourModKit
          *          sweep is always authoritative, because no query representation is placed on an execute-readable
          *          page.
          */
-        [[nodiscard]] bool readable_scan_is_authoritative(ModuleSpan range, scan::Pages pages,
-                                                          std::span<const Region> exclusions) noexcept;
+        [[nodiscard]] bool readable_scan_is_authoritative(
+            ModuleSpan range,
+            scan::Pages pages,
+            std::span<const Region> exclusions
+        ) noexcept;
 
         /**
          * @struct ExecutableWindow

@@ -155,8 +155,12 @@ namespace DetourModKit
                 catch (...)
                 {
                     DWORD expected = TLS_OUT_OF_INDEXES;
-                    (void)s_depth_tls.compare_exchange_strong(expected, TLS_UNAVAILABLE, std::memory_order_release,
-                                                              std::memory_order_relaxed);
+                    (void)s_depth_tls.compare_exchange_strong(
+                        expected,
+                        TLS_UNAVAILABLE,
+                        std::memory_order_release,
+                        std::memory_order_relaxed
+                    );
                     return false;
                 }
             }
@@ -210,8 +214,12 @@ namespace DetourModKit
             for (std::atomic<std::uint32_t> &slot : s_store_failure_threads)
             {
                 std::uint32_t expected = 0;
-                if (slot.compare_exchange_strong(expected, thread, std::memory_order_acq_rel,
-                                                 std::memory_order_relaxed))
+                if (slot.compare_exchange_strong(
+                        expected,
+                        thread,
+                        std::memory_order_acq_rel,
+                        std::memory_order_relaxed
+                    ))
                 {
                     return true;
                 }

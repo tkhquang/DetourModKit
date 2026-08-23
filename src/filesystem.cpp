@@ -36,12 +36,15 @@ namespace DetourModKit
                 // Use the address of the public function to locate the containing module (DLL or EXE).
                 if (!GetModuleHandleExW(
                         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                        reinterpret_cast<LPCWSTR>(&filesystem::get_runtime_directory), &h_self_module) ||
+                        reinterpret_cast<LPCWSTR>(&filesystem::get_runtime_directory),
+                        &h_self_module
+                    ) ||
                     h_self_module == nullptr)
                 {
                     const DWORD last_error = GetLastError();
-                    throw std::runtime_error("GetModuleHandleExW failed to retrieve module handle. Error: " +
-                                             std::to_string(last_error));
+                    throw std::runtime_error(
+                        "GetModuleHandleExW failed to retrieve module handle. Error: " + std::to_string(last_error)
+                    );
                 }
 
                 // Dynamic buffer to support paths longer than MAX_PATH
@@ -56,8 +59,9 @@ namespace DetourModKit
                     if (path_length == 0)
                     {
                         const DWORD last_error = GetLastError();
-                        throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " +
-                                                 std::to_string(last_error));
+                        throw std::runtime_error(
+                            "GetModuleFileNameW failed to retrieve module path. Error: " + std::to_string(last_error)
+                        );
                     }
                     if (path_length < buf_size)
                     {

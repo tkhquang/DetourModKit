@@ -44,8 +44,8 @@ namespace DetourModKit::config::detail
      *          "NONE". A non-empty non-sentinel input whose every token fails to parse is a user typo and
      *          emits one WARNING that names @p binding_log_name (or "<unnamed>").
      */
-    [[nodiscard]] input::KeyComboList parse_key_combo_list(const std::string &input,
-                                                           std::string_view binding_log_name = {});
+    [[nodiscard]] input::KeyComboList
+    parse_key_combo_list(const std::string &input, std::string_view binding_log_name = {});
 } // namespace DetourModKit::config::detail
 
 #endif // DETOURMODKIT_INTERNAL_CONFIG_PASS_HPP

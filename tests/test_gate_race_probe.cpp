@@ -74,7 +74,8 @@ TEST(GateRaceProbe, HookLedgerConcurrentDistinctTargetsStayConsistent)
                     EXPECT_TRUE(ledger.commit_hook(target, reservation.id));
                     (void)ledger.release_hook(target, reservation.id);
                 }
-            });
+            }
+        );
     }
     for (auto &worker : workers)
     {
@@ -118,7 +119,8 @@ TEST(GateRaceProbe, HookLedgerConcurrentSameTargetLayeringSerializes)
                 EXPECT_TRUE(ledger.commit_hook(target, reservation.id));
                 const std::lock_guard<std::mutex> lock(ids_mutex);
                 ids.push_back(reservation.id);
-            });
+            }
+        );
     }
     for (auto &worker : workers)
     {
@@ -164,7 +166,8 @@ TEST(GateRaceProbe, HookLedgerTargetSlotBlocksConcurrentInstall)
             std::this_thread::sleep_for(std::chrono::milliseconds{120});
             slot_released.store(true, std::memory_order_release);
             ledger.release_target_slot(target, first.id);
-        });
+        }
+    );
 
     while (!slot_held.load(std::memory_order_acquire))
     {
@@ -228,7 +231,8 @@ TEST(GateRaceProbe, HoldGateConcurrentDeliverStaysBalanced)
                     gate.deliver(true);
                     gate.deliver(false);
                 }
-            });
+            }
+        );
     }
     for (auto &worker : workers)
     {
@@ -264,7 +268,8 @@ TEST(GateRaceProbe, PressGateConcurrentReleaseClosesDelivery)
                 {
                     gate.deliver();
                 }
-            });
+            }
+        );
     }
 
     // Release from this thread while deliveries are in flight; it must run any in-flight on_press down to completion
@@ -289,8 +294,8 @@ namespace
 {
     constexpr auto BARRIER_TIMEOUT = std::chrono::seconds{5};
 
-    [[nodiscard]] bool wait_until_flag(const std::atomic<bool> &flag,
-                                       std::chrono::steady_clock::time_point deadline) noexcept
+    [[nodiscard]] bool
+    wait_until_flag(const std::atomic<bool> &flag, std::chrono::steady_clock::time_point deadline) noexcept
     {
         while (!flag.load(std::memory_order_acquire))
         {
@@ -373,7 +378,8 @@ TEST(GateRaceProbe, HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
         {
             gate.deliver(true);
             first_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool first_reached_callback = callback_pause.wait_until_reached(deadline);
 
     std::thread second(
@@ -390,7 +396,8 @@ TEST(GateRaceProbe, HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
             }
             gate.deliver(false);
             second_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool second_reached_idle_wait = idle_wait_pause.wait_until_reached(deadline);
 
     gate.enabled->store(false, std::memory_order_release);
@@ -439,7 +446,8 @@ TEST(GateRaceProbe, PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
         {
             gate.deliver();
             first_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool first_reached_callback = callback_pause.wait_until_reached(deadline);
 
     std::thread second(
@@ -456,7 +464,8 @@ TEST(GateRaceProbe, PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
             }
             gate.deliver();
             second_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool second_reached_idle_wait = idle_wait_pause.wait_until_reached(deadline);
 
     gate.enabled->store(false, std::memory_order_release);
@@ -498,7 +507,8 @@ TEST(GateRaceProbe, HoldGateDeferredFinalClaimSharesLastSlotRelease)
         {
             gate.deliver(true);
             delivery_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool reached_bookkeeping = bookkeeping_pause.wait_until_reached(deadline);
 
     bool release_scope_admitted = false;

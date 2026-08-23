@@ -87,8 +87,8 @@ namespace DetourModKit::detail
             return false;
         }
         DWORD expected = TLS_OUT_OF_INDEXES;
-        if (!s_mid_entry_tls.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
-                                                     std::memory_order_acquire))
+        if (!s_mid_entry_tls
+                 .compare_exchange_strong(expected, fresh, std::memory_order_acq_rel, std::memory_order_acquire))
         {
             // Another installer won. Its index is already public, and this slot contains no value.
             ::TlsFree(fresh);
@@ -125,13 +125,16 @@ namespace DetourModKit::detail
         {
             return;
         }
-        (void)log().try_log(LogLevel::Error,
-                            "hook: a mid-hook callback at 0x{:0{}X} threw; the exception was contained at the DMK "
-                            "adapter "
-                            "boundary and the callback treated as complete. A mid-hook callback must not throw: the "
-                            "backend stub it returns into adjusts the stack pointer dynamically and carries no unwind "
-                            "data. Further escapes at this site are counted but not logged.",
-                            slot.target.load(std::memory_order_relaxed), sizeof(std::uintptr_t) * 2);
+        (void)log().try_log(
+            LogLevel::Error,
+            "hook: a mid-hook callback at 0x{:0{}X} threw; the exception was contained at the DMK "
+            "adapter "
+            "boundary and the callback treated as complete. A mid-hook callback must not throw: the "
+            "backend stub it returns into adjusts the stack pointer dynamically and carries no unwind "
+            "data. Further escapes at this site are counted but not logged.",
+            slot.target.load(std::memory_order_relaxed),
+            sizeof(std::uintptr_t) * 2
+        );
     }
 
     std::size_t claim_mid_adapter_slot() noexcept
@@ -139,8 +142,12 @@ namespace DetourModKit::detail
         for (std::size_t index = 0; index < MID_ADAPTER_CAPACITY; ++index)
         {
             bool expected = false;
-            if (s_mid_slots[index].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                                   std::memory_order_relaxed))
+            if (s_mid_slots[index].claimed.compare_exchange_strong(
+                    expected,
+                    true,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed
+                ))
             {
                 s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
                 s_mid_slots[index].live.store(false, std::memory_order_relaxed);
@@ -173,16 +180,20 @@ namespace DetourModKit::detail
             // pins instead of a wait.
             return MidRundown::Unwaitable;
         }
-        return drain_until_zero([&slot]() noexcept { return slot.callbacks_in_flight.load(std::memory_order_seq_cst); },
-                                std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT)
+        return drain_until_zero(
+                   [&slot]() noexcept { return slot.callbacks_in_flight.load(std::memory_order_seq_cst); },
+                   std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT
+               )
                    ? MidRundown::Drained
                    : MidRundown::Expired;
     }
 
     bool drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
     {
-        return drain_until_zero([&slot]() noexcept { return slot.adapter_entries.load(std::memory_order_seq_cst); },
-                                std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT);
+        return drain_until_zero(
+            [&slot]() noexcept { return slot.adapter_entries.load(std::memory_order_seq_cst); },
+            std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT
+        );
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)

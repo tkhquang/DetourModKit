@@ -69,8 +69,9 @@ int main()
         static_assert(!dmk_detail::is_representation_safe_v<void (PackageSmokeMembers::*)()>);
     }
 
-    static_assert(std::is_same_v<decltype(DetourModKit::memory::read<std::uint32_t[2]>(DetourModKit::Address{})),
-                                 DetourModKit::Result<std::array<std::uint32_t, 2>>>);
+    static_assert(std::is_same_v<
+                  decltype(DetourModKit::memory::read<std::uint32_t[2]>(DetourModKit::Address{})),
+                  DetourModKit::Result<std::array<std::uint32_t, 2>>>);
     if (DetourModKit::memory::read<std::uint32_t[2]>(DetourModKit::Address{}).has_value())
     {
         return 9;

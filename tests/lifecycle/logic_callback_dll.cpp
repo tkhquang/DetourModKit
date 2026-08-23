@@ -62,18 +62,20 @@ namespace
     {
         try
         {
-            std::call_once(s_park_init,
-                           []() noexcept
-                           {
-                               for (Park &park : s_parks)
-                               {
-                                   // Manual reset on both: the host may observe entry after the body already signalled,
-                                   // and one release must let every waiter on that channel out rather than just the
-                                   // first.
-                                   park.entered = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-                                   park.release = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-                               }
-                           });
+            std::call_once(
+                s_park_init,
+                []() noexcept
+                {
+                    for (Park &park : s_parks)
+                    {
+                        // Manual reset on both: the host may observe entry after the body already signalled,
+                        // and one release must let every waiter on that channel out rather than just the
+                        // first.
+                        park.entered = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                        park.release = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                    }
+                }
+            );
         }
         catch (...)
         {
@@ -166,8 +168,8 @@ namespace
 extern "C"
 {
     /// The unmap oracle. Its address outlives the module handle, which the host cannot use after FreeLibrary.
-    __declspec(dllexport) extern const unsigned char dmk_logic_marker[16] = {
-        0x2F, 0x91, 0xC4, 0x0B, 0x6D, 0xA8, 0x13, 0x57, 0xE2, 0x74, 0x38, 0xBC, 0x05, 0x9A, 0xF6, 0x41};
+    __declspec(dllexport) extern const unsigned char dmk_logic_marker[16] =
+        {0x2F, 0x91, 0xC4, 0x0B, 0x6D, 0xA8, 0x13, 0x57, 0xE2, 0x74, 0x38, 0xBC, 0x05, 0x9A, 0xF6, 0x41};
 
     __declspec(dllexport) void dmk_logic_reset() noexcept
     {

@@ -153,13 +153,17 @@ namespace DetourModKit
              *        valid for the poller's lifetime; the poller does not own it.
              * @param wheel_target_thread_id Explicit wheel target UI thread id, or zero for automatic discovery.
              */
-            explicit InputPoller(std::vector<InputBinding> bindings,
-                                 std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
-                                 bool require_focus = true, int gamepad_index = 0,
-                                 int trigger_threshold = GamepadCode::TriggerThreshold,
-                                 int stick_threshold = GamepadCode::StickThreshold,
-                                 input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::MessageHook,
-                                 const WheelHostTable *wheel_host = nullptr, std::uint32_t wheel_target_thread_id = 0);
+            explicit InputPoller(
+                std::vector<InputBinding> bindings,
+                std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
+                bool require_focus = true,
+                int gamepad_index = 0,
+                int trigger_threshold = GamepadCode::TriggerThreshold,
+                int stick_threshold = GamepadCode::StickThreshold,
+                input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::MessageHook,
+                const WheelHostTable *wheel_host = nullptr,
+                std::uint32_t wheel_target_thread_id = 0
+            );
 
             ~InputPoller() noexcept;
 
@@ -376,16 +380,18 @@ namespace DetourModKit
              *          delivered while the DLL is mapped and every gate-owned callback is destroyed here.
              * @warning Control-plane only, and callers must be off any delivery. Runs consumer code.
              */
-            [[nodiscard]] bool retire_gates_by_name(std::string_view name,
-                                                    std::chrono::steady_clock::time_point deadline) noexcept;
+            [[nodiscard]] bool
+            retire_gates_by_name(std::string_view name, std::chrono::steady_clock::time_point deadline) noexcept;
 
             /// retire_gates_by_name over every binding, for the retire-everything drain.
             [[nodiscard]] bool retire_all_gates(std::chrono::steady_clock::time_point deadline) noexcept;
 
         private:
             /// Shared tail of the two retire entry points: retires each collected gate off the binding lock.
-            [[nodiscard]] bool retire_collected_gates(const std::vector<std::shared_ptr<BindingGate>> &gates,
-                                                      std::chrono::steady_clock::time_point deadline) noexcept;
+            [[nodiscard]] bool retire_collected_gates(
+                const std::vector<std::shared_ptr<BindingGate>> &gates,
+                std::chrono::steady_clock::time_point deadline
+            ) noexcept;
 
             void poll_loop(std::stop_token stop_token);
             void release_active_holds() noexcept;

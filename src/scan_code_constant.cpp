@@ -50,8 +50,12 @@ namespace DetourModKit
 
         namespace
         {
-            void overlay_snapshot(std::span<std::byte> destination, std::uintptr_t destination_base,
-                                  std::span<const std::byte> source, std::uintptr_t source_base) noexcept
+            void overlay_snapshot(
+                std::span<std::byte> destination,
+                std::uintptr_t destination_base,
+                std::span<const std::byte> source,
+                std::uintptr_t source_base
+            ) noexcept
             {
                 std::size_t destination_offset = 0;
                 std::size_t source_offset = 0;
@@ -79,10 +83,14 @@ namespace DetourModKit
                 std::memcpy(destination.data() + destination_offset, source.data() + source_offset, overlap);
             }
 
-            [[nodiscard]] bool selector_still_resolves_site(const Candidate &candidate, Region match_span,
-                                                            Region physical_source, std::uintptr_t decoded_site,
-                                                            std::uintptr_t window_base,
-                                                            std::span<const std::byte> window)
+            [[nodiscard]] bool selector_still_resolves_site(
+                const Candidate &candidate,
+                Region match_span,
+                Region physical_source,
+                std::uintptr_t decoded_site,
+                std::uintptr_t window_base,
+                std::span<const std::byte> window
+            )
             {
                 constexpr std::size_t MAX_EVIDENCE_SPAN =
                     detail::MAX_PATTERN_BYTES + detail::MAX_PATTERN_JUMPS * detail::MAX_JUMP_SPAN;
@@ -106,7 +114,9 @@ namespace DetourModKit
                 }
                 overlay_snapshot(std::span<std::byte>{fresh, physical_source.size}, source_base, window, window_base);
                 const detail::EnginePattern engine = detail::engine_pattern_from(
-                    *pattern, pattern->has_anchor() ? pattern->anchor_index() : pattern->size());
+                    *pattern,
+                    pattern->has_anchor() ? pattern->anchor_index() : pattern->size()
+                );
                 const detail::RawMatch fresh_match = detail::find_pattern_raw(fresh, match_span.size, engine);
                 if (fresh_match.budget_exhausted || fresh_match.start != fresh ||
                     fresh_match.end != fresh + match_span.size || fresh_match.point == nullptr ||
@@ -133,15 +143,21 @@ namespace DetourModKit
                     {
                         return false;
                     }
-                    const std::span<const std::byte> instruction_snapshot{fresh + point_offset,
-                                                                          rip->instruction_length};
+                    const std::span<const std::byte> instruction_snapshot{
+                        fresh + point_offset,
+                        rip->instruction_length
+                    };
                     fresh_site = detail::resolve_rip_relative_candidate(live_point, *rip, instruction_snapshot);
                 }
                 return fresh_site && *fresh_site == decoded_site;
             }
 
-            Result<std::int64_t> read_code_constant_impl(const CodeConstant &code_constant, Region scope,
-                                                         Region *instruction_span, Region *physical_source)
+            Result<std::int64_t> read_code_constant_impl(
+                const CodeConstant &code_constant,
+                Region scope,
+                Region *instruction_span,
+                Region *physical_source
+            )
             {
                 if (instruction_span != nullptr)
                 {
@@ -232,9 +248,14 @@ namespace DetourModKit
                 {
                     const Candidate &winning_candidate = code_constant.site[resolved->winning_index];
                     if (detail::byte_pattern_of(winning_candidate) != nullptr &&
-                        !selector_still_resolves_site(winning_candidate, resolved->match_span,
-                                                      resolved->physical_source, site, site,
-                                                      std::span<const std::byte>{buf, avail}))
+                        !selector_still_resolves_site(
+                            winning_candidate,
+                            resolved->match_span,
+                            resolved->physical_source,
+                            site,
+                            site,
+                            std::span<const std::byte>{buf, avail}
+                        ))
                     {
                         return std::unexpected(Error{ErrorCode::EvidenceMismatch, "scan::read_code_constant"});
                     }

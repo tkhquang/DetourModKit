@@ -39,8 +39,11 @@ namespace DetourModKit
         const HMODULE self_ref = detail::acquire_module_ref(diagnostics::ModulePinReason::Worker);
         if (self_ref == nullptr)
         {
-            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                    "StoppableWorker: acquire_module_ref failed");
+            throw std::system_error(
+                static_cast<int>(GetLastError()),
+                std::system_category(),
+                "StoppableWorker: acquire_module_ref failed"
+            );
         }
 
         try
@@ -59,19 +62,20 @@ namespace DetourModKit
                     {
                         // try_log, not error(): a throw from the logger here would escape the thread function
                         // and terminate the process, defeating the very containment these handlers provide.
-                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unhandled exception: {}", label,
-                                            e.what());
+                        (void)log()
+                            .try_log(LogLevel::Error, "StoppableWorker '{}': unhandled exception: {}", label, e.what());
                     }
                     catch (...)
                     {
-                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unknown exception escaped body.",
-                                            label);
+                        (void)log()
+                            .try_log(LogLevel::Error, "StoppableWorker '{}': unknown exception escaped body.", label);
                     }
                     // Last act: mark Exited so a caller can distinguish a self-exited body from a live one,
                     // unless shutdown() already moved the state to Stopping/Stopped.
                     State running = State::Running;
                     state->compare_exchange_strong(running, State::Exited, std::memory_order_acq_rel);
-                });
+                }
+            );
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *seam = detail::g_worker_post_thread_start_seam)
@@ -238,8 +242,11 @@ namespace DetourModKit
                 // Retain a still-joinable jthread so its destructor cannot retry the failed operation.
                 (void)m_thread.release();
             }
-            (void)log().try_log(LogLevel::Error,
-                                "StoppableWorker '{}': join failed; abandoning module reference to stay safe.", m_name);
+            (void)log().try_log(
+                LogLevel::Error,
+                "StoppableWorker '{}': join failed; abandoning module reference to stay safe.",
+                m_name
+            );
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
             m_self_ref = nullptr;
         }

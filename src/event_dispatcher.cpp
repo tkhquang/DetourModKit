@@ -45,8 +45,8 @@ namespace DetourModKit::detail
             return false;
         }
         DWORD unreserved = TLS_OUT_OF_INDEXES;
-        if (!s_emit_tls_index.compare_exchange_strong(unreserved, index, std::memory_order_release,
-                                                      std::memory_order_relaxed))
+        if (!s_emit_tls_index
+                 .compare_exchange_strong(unreserved, index, std::memory_order_release, std::memory_order_relaxed))
         {
             ::TlsFree(index);
         }

@@ -98,8 +98,12 @@ namespace DetourModKit
          *                          path that validates through VirtualQuery instead of faulting.
          * @return true on full success; false on any fault or rejected argument (then @p out is unspecified).
          */
-        [[nodiscard]] bool guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
-                                              volatile std::uintptr_t *fault_address_out = nullptr) noexcept;
+        [[nodiscard]] bool guarded_read_bytes(
+            std::uintptr_t address,
+            void *out,
+            std::size_t bytes,
+            volatile std::uintptr_t *fault_address_out = nullptr
+        ) noexcept;
 
         /**
          * @brief Guarded typed read for engine code: a representation-safe @p T at @p address, or nullopt on fault.
@@ -142,8 +146,8 @@ namespace DetourModKit
          * @details The forward-copy primitive exposes whether a fault occurred at byte zero or after progress, making
          *          `NotWritten` truthful without a racy permission query. This is memory::write_bytes' no-protect path.
          */
-        [[nodiscard]] GuardedWriteStatus guarded_write_bytes(std::uintptr_t address, const void *source,
-                                                             std::size_t bytes) noexcept;
+        [[nodiscard]] GuardedWriteStatus
+        guarded_write_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept;
 
         /**
          * @brief Atomically replaces one aligned pointer word when it still equals @p expected, under the fault guard.
@@ -152,8 +156,11 @@ namespace DetourModKit
          * @param replacement Value stored when the comparison succeeds.
          * @return True only when the comparison and replacement both complete; false on mismatch, fault, or rejection.
          */
-        [[nodiscard]] bool guarded_compare_exchange_word(std::uintptr_t address, std::uintptr_t expected,
-                                                         std::uintptr_t replacement) noexcept;
+        [[nodiscard]] bool guarded_compare_exchange_word(
+            std::uintptr_t address,
+            std::uintptr_t expected,
+            std::uintptr_t replacement
+        ) noexcept;
 
         /**
          * @struct ProtectionSegment
@@ -218,10 +225,14 @@ namespace DetourModKit
          *          region so protection seams restore exactly. Query, protection, capacity, and allocation failures
          *          fail closed. A rollback failure is reported separately because a temporary protection may remain.
          */
-        [[nodiscard]] ProtectionChangeOutcome
-        protect_across_regions(std::uintptr_t address, std::size_t bytes, std::uint32_t new_protection,
-                               ProtectionSegment *out, std::size_t out_cap,
-                               bool derive_writable_preserving_execute = false) noexcept;
+        [[nodiscard]] ProtectionChangeOutcome protect_across_regions(
+            std::uintptr_t address,
+            std::size_t bytes,
+            std::uint32_t new_protection,
+            ProtectionSegment *out,
+            std::size_t out_cap,
+            bool derive_writable_preserving_execute = false
+        ) noexcept;
 
         /**
          * @brief Restores every segment captured by @ref protect_across_regions to its recorded prior protection.
@@ -232,8 +243,8 @@ namespace DetourModKit
          * @return true if every segment restored; false if any VirtualProtect failed (best-effort: it still attempts
          *         the remaining segments so a single failure does not strand the rest in the changed protection).
          */
-        [[nodiscard]] bool restore_across_regions(const ProtectionSegment *segments, std::size_t count,
-                                                  std::uint32_t &os_error) noexcept;
+        [[nodiscard]] bool
+        restore_across_regions(const ProtectionSegment *segments, std::size_t count, std::uint32_t &os_error) noexcept;
 
         /**
          * @brief Drops @p segments from the protection ledger WITHOUT restoring their protection.
@@ -286,8 +297,13 @@ namespace DetourModKit
          *          Restoration failure outranks partial copy, which outranks cache-flush failure. The caller owns
          *          protection-cache invalidation.
          */
-        [[nodiscard]] PatchStatus patch_bytes(std::uintptr_t address, const void *source, std::size_t bytes,
-                                              std::uint32_t &os_error, bool flush_all_regions = false) noexcept;
+        [[nodiscard]] PatchStatus patch_bytes(
+            std::uintptr_t address,
+            const void *source,
+            std::size_t bytes,
+            std::uint32_t &os_error,
+            bool flush_all_regions = false
+        ) noexcept;
 
         /**
          * @brief Flushes the instruction cache over [@p address, @p address + @p bytes), returning whether it
@@ -343,9 +359,13 @@ namespace DetourModKit
          *          The last is added but not dereferenced. Each intermediate link is screened against its hop's floor
          *          and the user-mode ceiling. A torn or sentinel pointer stops the walk before the next dereference.
          */
-        [[nodiscard]] ChainWalkOutcome guarded_resolve_chain(Address base, const memory::ChainStep *steps,
-                                                             std::size_t count, Address *trace,
-                                                             std::size_t trace_cap) noexcept;
+        [[nodiscard]] ChainWalkOutcome guarded_resolve_chain(
+            Address base,
+            const memory::ChainStep *steps,
+            std::size_t count,
+            Address *trace,
+            std::size_t trace_cap
+        ) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         /**

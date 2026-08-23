@@ -31,9 +31,12 @@ namespace DetourModKit::detail
         Threw,
     };
 
-    [[nodiscard]] TrapTransactionOutcome
-    drive_backend_trap_transaction_for_test(void *from, void *to, std::size_t len,
-                                            const std::function<void()> &run_fn) noexcept;
+    [[nodiscard]] TrapTransactionOutcome drive_backend_trap_transaction_for_test(
+        void *from,
+        void *to,
+        std::size_t len,
+        const std::function<void()> &run_fn
+    ) noexcept;
     [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
     void set_backend_trap_change_failure_target_for_test(void *segment_address) noexcept;
     void set_backend_trap_segment_restore_failure_target_for_test(void *segment_address) noexcept;
@@ -115,7 +118,8 @@ namespace
         ScratchTrampoline() noexcept
         {
             m_base = static_cast<std::uint8_t *>(
-                ::VirtualAlloc(nullptr, PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                ::VirtualAlloc(nullptr, PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
         }
         ~ScratchTrampoline() noexcept
         {
@@ -145,16 +149,19 @@ namespace
         }
     };
 
-    [[nodiscard]] std::array<std::uint8_t *, 3> ordered_segment_starts(const TwoRegionReservation &span,
-                                                                       const ScratchTrampoline &trampoline) noexcept
+    [[nodiscard]] std::array<std::uint8_t *, 3>
+    ordered_segment_starts(const TwoRegionReservation &span, const ScratchTrampoline &trampoline) noexcept
     {
         std::array<std::uint8_t *, 3> starts{span.first_page(), span.second_page(), trampoline.base()};
         std::ranges::sort(starts, std::less<std::uint8_t *>{});
         return starts;
     }
 
-    [[nodiscard]] DWORD original_protection(const TwoRegionReservation &span, const ScratchTrampoline &trampoline,
-                                            const std::uint8_t *address) noexcept
+    [[nodiscard]] DWORD original_protection(
+        const TwoRegionReservation &span,
+        const ScratchTrampoline &trampoline,
+        const std::uint8_t *address
+    ) noexcept
     {
         if (address == span.first_page())
         {
@@ -180,13 +187,16 @@ TEST(TrapProtect, RestoresEachCrossedRegionToItsOwnPriorProtection)
     ASSERT_EQ(protection_of(span.second_page()), static_cast<DWORD>(PAGE_EXECUTE_READWRITE));
 
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        span.straddle(), trampoline.base(), PATCH_LEN,
+        span.straddle(),
+        trampoline.base(),
+        PATCH_LEN,
         [&]
         {
             EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_READWRITE));
             EXPECT_EQ(protection_of(span.second_page()), static_cast<DWORD>(PAGE_READWRITE));
             EXPECT_EQ(protection_of(trampoline.base()), static_cast<DWORD>(PAGE_READWRITE));
-        });
+        }
+    );
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);
     EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_EXECUTE_READ));
@@ -203,7 +213,11 @@ TEST(TrapProtect, ThrownBodyStillRestoresEachCrossedRegion)
     const SeamGuard guard;
 
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        span.straddle(), trampoline.base(), PATCH_LEN, [] { throw std::runtime_error{"transaction body"}; });
+        span.straddle(),
+        trampoline.base(),
+        PATCH_LEN,
+        [] { throw std::runtime_error{"transaction body"}; }
+    );
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::Threw);
     EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_EXECUTE_READ));
@@ -222,7 +236,11 @@ TEST(TrapProtect, LaterChangeFailureRollsBackEarlierSegment)
     const auto starts = ordered_segment_starts(span, trampoline);
     DetourModKit::detail::set_backend_trap_change_failure_target_for_test(starts[2]);
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        span.straddle(), trampoline.base(), PATCH_LEN, [] {});
+        span.straddle(),
+        trampoline.base(),
+        PATCH_LEN,
+        [] {}
+    );
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::ReportedFailure);
     ASSERT_EQ(DetourModKit::detail::backend_trap_restore_trace_size_for_test(), 2U);
@@ -244,7 +262,11 @@ TEST(TrapProtect, RestoreFailureTakesPriorityAndLaterRestoresContinue)
     const auto starts = ordered_segment_starts(span, trampoline);
     DetourModKit::detail::set_backend_trap_segment_restore_failure_target_for_test(starts[1]);
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        span.straddle(), trampoline.base(), PATCH_LEN, [] { throw std::runtime_error{"transaction body"}; });
+        span.straddle(),
+        trampoline.base(),
+        PATCH_LEN,
+        [] { throw std::runtime_error{"transaction body"}; }
+    );
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::ReportedFailure);
     ASSERT_EQ(DetourModKit::detail::backend_trap_restore_trace_size_for_test(), 3U);
@@ -269,8 +291,11 @@ TEST(TrapProtect, KeepsVirtualProtectPageExecutableWhenItIsTheDestination)
     constexpr DWORD executable_mask =
         PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        trampoline.base(), virtual_protect, 1,
-        [&] { EXPECT_NE(protection_of(virtual_protect) & executable_mask, 0U); });
+        trampoline.base(),
+        virtual_protect,
+        1,
+        [&] { EXPECT_NE(protection_of(virtual_protect) & executable_mask, 0U); }
+    );
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);
     EXPECT_EQ(protection_of(virtual_protect), original);
@@ -284,7 +309,11 @@ TEST(TrapProtect, SharedPageChangesAndRestoresOnce)
 
     const std::size_t calls_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
     const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
-        span.first_page() + 32, span.first_page() + 64, PATCH_LEN, [] {});
+        span.first_page() + 32,
+        span.first_page() + 64,
+        PATCH_LEN,
+        [] {}
+    );
     const std::size_t calls_after = DetourModKit::detail::backend_trap_protect_calls_for_test();
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);

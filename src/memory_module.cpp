@@ -76,9 +76,11 @@ namespace DetourModKit
                 return Region{};
 
             HMODULE owning_module = nullptr;
-            if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                      address.as<LPCWSTR>(), &owning_module) ||
+            if (!::GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    address.as<LPCWSTR>(),
+                    &owning_module
+                ) ||
                 owning_module == nullptr)
                 return Region{};
             return module_image_region(Address{owning_module});
@@ -216,8 +218,11 @@ namespace DetourModKit
                 }
 
                 HMODULE module = nullptr;
-                if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                         reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &module) == FALSE ||
+                if (::GetModuleHandleExW(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                        reinterpret_cast<LPCWSTR>(entry.modBaseAddr),
+                        &module
+                    ) == FALSE ||
                     module == nullptr)
                 {
                     continue;
@@ -265,7 +270,8 @@ namespace DetourModKit
                 reference_acquired = ::GetModuleHandleExW(
                     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
                     reinterpret_cast<LPCWSTR>(DetourModKit::detail::g_module_loaded_reference_candidate_test_override),
-                    &module);
+                    &module
+                );
             }
             else
 #endif

@@ -72,8 +72,10 @@ namespace
 
         s_reload_mutex_gate.store(true, std::memory_order_release);
         DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(false, std::memory_order_release);
-        DetourModKit::detail::g_config_reload_worker_mutex_gate_probe.store(&s_reload_mutex_gate,
-                                                                            std::memory_order_release);
+        DetourModKit::detail::g_config_reload_worker_mutex_gate_probe.store(
+            &s_reload_mutex_gate,
+            std::memory_order_release
+        );
         if (!DetourModKit::config::reload_hotkey("ReloadMutexExit", "F5"))
         {
             return false;
@@ -110,7 +112,8 @@ namespace
                 CloseHandle(self_shutdown);
             }
             return std::unexpected(
-                DetourModKit::Error{DetourModKit::ErrorCode::Unknown, "reload mutex process-exit setup"});
+                DetourModKit::Error{DetourModKit::ErrorCode::Unknown, "reload mutex process-exit setup"}
+            );
         }
         s_worker_ready.store(true, std::memory_order_release);
         if (self_shutdown != nullptr)
@@ -122,8 +125,10 @@ namespace
         return {};
     }
 
-    static_assert(std::is_trivially_copyable_v<DetourModKit::BootstrapReadyFn> &&
-                  std::is_trivially_destructible_v<DetourModKit::BootstrapReadyFn>);
+    static_assert(
+        std::is_trivially_copyable_v<DetourModKit::BootstrapReadyFn> &&
+        std::is_trivially_destructible_v<DetourModKit::BootstrapReadyFn>
+    );
 
     /// Models consumer cleanup that must be unrepresentable in the DllMain descriptor.
     struct DestructibleReadyCallback

@@ -28,9 +28,10 @@ namespace DetourModKit
             std::array<std::atomic<std::size_t>, LEAK_SUBSYSTEM_COUNT> s_leak_counts{};
 
             constexpr std::size_t MODULE_PIN_REASON_COUNT = static_cast<std::size_t>(ModulePinReason::Count);
-            static_assert(MODULE_PIN_REASON_COUNT ==
-                              DetourModKit::detail::module_pin_observability::MODULE_PIN_REASON_COUNT,
-                          "ModulePinReason::Count and the internal counter array size must stay equal");
+            static_assert(
+                MODULE_PIN_REASON_COUNT == DetourModKit::detail::module_pin_observability::MODULE_PIN_REASON_COUNT,
+                "ModulePinReason::Count and the internal counter array size must stay equal"
+            );
         } // namespace
 
         void record_intentional_leak(LeakSubsystem subsystem) noexcept
@@ -110,8 +111,9 @@ namespace DetourModKit
             // consumer's own Subscription can likewise be destroyed after them; both would then reach a destroyed
             // mutex and subscriber list, which no try/catch can contain because it is undefined behaviour rather than
             // an exception.
-            alignas(EventDispatcher<ScannerFaultEvent>) static unsigned char
-                storage[sizeof(EventDispatcher<ScannerFaultEvent>)];
+            alignas(
+                EventDispatcher<ScannerFaultEvent>
+            ) static unsigned char storage[sizeof(EventDispatcher<ScannerFaultEvent>)];
             static EventDispatcher<ScannerFaultEvent> *const dispatcher =
                 ::new (static_cast<void *>(storage)) EventDispatcher<ScannerFaultEvent>();
             return *dispatcher;
@@ -120,15 +122,16 @@ namespace DetourModKit
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle()
         {
             // Never destroyed because ~Hook and ~VmtHook may emit after this translation unit's static destructors.
-            alignas(EventDispatcher<HookLifecycleEvent>) static unsigned char
-                storage[sizeof(EventDispatcher<HookLifecycleEvent>)];
+            alignas(
+                EventDispatcher<HookLifecycleEvent>
+            ) static unsigned char storage[sizeof(EventDispatcher<HookLifecycleEvent>)];
             static EventDispatcher<HookLifecycleEvent> *const dispatcher =
                 ::new (static_cast<void *>(storage)) EventDispatcher<HookLifecycleEvent>();
             return *dispatcher;
         }
 
-        Snapshot collect(std::span<const rtti::DriftEntry> drift_report,
-                         std::span<const anchor::ResolvedAnchor> anchor_report)
+        Snapshot
+        collect(std::span<const rtti::DriftEntry> drift_report, std::span<const anchor::ResolvedAnchor> anchor_report)
         {
             Snapshot snapshot;
 
@@ -141,8 +144,11 @@ namespace DetourModKit
                 snapshot.total_intentional_leaks += snapshot.intentional_leaks[i];
             }
 
-            DetourModKit::detail::hook_population::read(snapshot.hooks_total, snapshot.hooks_active,
-                                                        snapshot.hooks_disabled);
+            DetourModKit::detail::hook_population::read(
+                snapshot.hooks_total,
+                snapshot.hooks_active,
+                snapshot.hooks_disabled
+            );
 
             // Same derivation rule as the leak total: sum the captured breakdown, not a second independent read.
             for (std::size_t i = 0; i < snapshot.module_pins.size(); ++i)

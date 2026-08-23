@@ -524,8 +524,10 @@ TEST(ConsumeRuleTest, MultipleRulesAccumulateMatchingTriggers)
     const std::array<GamepadConsumeRule, 2> rules{GamepadConsumeRule{lb, 0, up}, GamepadConsumeRule{rb, 0, down}};
 
     // Both modifiers held: both rules match and their trigger masks union.
-    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | rb | up | down), rules.data(), rules.size()),
-              static_cast<uint16_t>(up | down));
+    EXPECT_EQ(
+        evaluate_consume_rules(static_cast<uint16_t>(lb | rb | up | down), rules.data(), rules.size()),
+        static_cast<uint16_t>(up | down)
+    );
     // Only LB held: only the LB rule contributes; the RB rule does not match.
     EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | up), rules.data(), rules.size()), up);
     // Only RB held: only the RB rule contributes.
@@ -594,12 +596,18 @@ TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
 
     // The packed, seqlock-guarded list must evaluate identically to the same rules read directly: this exercises
     // pack/unpack of all three 16-bit masks and a consistent seqlock snapshot.
-    for (const uint16_t buttons : {static_cast<uint16_t>(0u), lb, static_cast<uint16_t>(lb | up),
-                                   static_cast<uint16_t>(lb | rb | up | down), static_cast<uint16_t>(rb | down)})
+    for (const uint16_t buttons :
+         {static_cast<uint16_t>(0u),
+          lb,
+          static_cast<uint16_t>(lb | up),
+          static_cast<uint16_t>(lb | rb | up | down),
+          static_cast<uint16_t>(rb | down)})
     {
-        EXPECT_EQ(evaluate_published_consume_rules(buttons),
-                  evaluate_consume_rules(buttons, rules.data(), rules.size()))
-            << "buttons=" << buttons;
+        EXPECT_EQ(
+            evaluate_published_consume_rules(buttons),
+            evaluate_consume_rules(buttons, rules.data(), rules.size())
+        ) << "buttons="
+          << buttons;
     }
 }
 
@@ -660,7 +668,8 @@ TEST_F(ConsumeRuleBuildTest, GamepadChordPublishesMaskableRule)
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     // Constructing the poller runs the same build+publish path the poll thread uses.
     detail::InputPoller poller(
-        {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})});
+        {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})}
+    );
     grant_layer_and_publish(poller);
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u); // modifier not held
@@ -700,7 +709,8 @@ TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
     // LeftTrigger is analog (not an XINPUT_GAMEPAD.wButtons bit), so there is no digital trigger to mask and no rule is
     // emitted.
     detail::InputPoller poller(
-        {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::LeftTrigger)})});
+        {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::LeftTrigger)})}
+    );
     grant_layer_and_publish(poller);
     EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
 }
@@ -713,12 +723,23 @@ namespace
     // triggers on it, and a trigger bit that is also some other chord's modifier would land in this chord's forbidden
     // mask and make the probe below reject for a reason unrelated to the bound.
     constexpr std::array<int, 13> DIGITAL_MODIFIER_BITS{
-        GamepadCode::DpadUp,     GamepadCode::DpadDown,    GamepadCode::DpadLeft,  GamepadCode::DpadRight,
-        GamepadCode::Start,      GamepadCode::Back,        GamepadCode::LeftStick, GamepadCode::RightStick,
-        GamepadCode::LeftBumper, GamepadCode::RightBumper, GamepadCode::B,         GamepadCode::X,
-        GamepadCode::Y};
-    static_assert((DIGITAL_MODIFIER_BITS.size() * (DIGITAL_MODIFIER_BITS.size() - 1)) / 2 >=
-                  MAX_GAMEPAD_CONSUME_RULES + 3);
+        GamepadCode::DpadUp,
+        GamepadCode::DpadDown,
+        GamepadCode::DpadLeft,
+        GamepadCode::DpadRight,
+        GamepadCode::Start,
+        GamepadCode::Back,
+        GamepadCode::LeftStick,
+        GamepadCode::RightStick,
+        GamepadCode::LeftBumper,
+        GamepadCode::RightBumper,
+        GamepadCode::B,
+        GamepadCode::X,
+        GamepadCode::Y
+    };
+    static_assert(
+        (DIGITAL_MODIFIER_BITS.size() * (DIGITAL_MODIFIER_BITS.size() - 1)) / 2 >= MAX_GAMEPAD_CONSUME_RULES + 3
+    );
 
     // Creates count chords with pairwise-distinct modifier pairs, so deduplication cannot collapse them. All share
     // GamepadCode::A as the trigger.
@@ -733,7 +754,8 @@ namespace
             {
                 bindings.push_back(make_consume_chord(
                     {gamepad_button(DIGITAL_MODIFIER_BITS[first]), gamepad_button(DIGITAL_MODIFIER_BITS[second])},
-                    {gamepad_button(GamepadCode::A)}));
+                    {gamepad_button(GamepadCode::A)}
+                ));
             }
         }
         return bindings;
@@ -750,8 +772,9 @@ namespace
             {
                 if (seen++ == index)
                 {
-                    return static_cast<uint16_t>(DIGITAL_MODIFIER_BITS[first] | DIGITAL_MODIFIER_BITS[second] |
-                                                 GamepadCode::A);
+                    return static_cast<uint16_t>(
+                        DIGITAL_MODIFIER_BITS[first] | DIGITAL_MODIFIER_BITS[second] | GamepadCode::A
+                    );
                 }
             }
         }
@@ -774,8 +797,10 @@ TEST_F(InputConsumeTest, CapacityManyChordsArePublishedAndReportedAsHonored)
     EXPECT_EQ(capacity.rejected, 0u);
     // Both ends of the table, so a publish that stopped one rule short cannot read as honored.
     EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(0)), static_cast<uint16_t>(GamepadCode::A));
-    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
-              static_cast<uint16_t>(GamepadCode::A));
+    EXPECT_EQ(
+        evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
+        static_cast<uint16_t>(GamepadCode::A)
+    );
 }
 
 // Presenting more eligible chords than the interception table holds must preserve the prefix that fits and report the
@@ -796,8 +821,10 @@ TEST_F(InputConsumeTest, OverCapIsRejectedOrReportedWithoutSilentGlobalDisable)
     // capacity fields above are derived from the offered count, so this is the assertion that actually discriminates
     // an over-cap publish that kept the prefix from one that emptied or truncated the table.
     EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(0)), static_cast<uint16_t>(GamepadCode::A));
-    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
-              static_cast<uint16_t>(GamepadCode::A));
+    EXPECT_EQ(
+        evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
+        static_cast<uint16_t>(GamepadCode::A)
+    );
 }
 
 // Duplicate chord shapes decide nothing the first copy did not (evaluation ORs the trigger mask), so the bound is a
@@ -808,7 +835,8 @@ TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
     for (std::size_t i = 0; i < MAX_GAMEPAD_CONSUME_RULES + 1; ++i)
     {
         bindings.push_back(
-            make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)}));
+            make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})
+        );
     }
     detail::InputPoller poller(std::move(bindings));
     grant_layer_and_publish(poller);
@@ -816,8 +844,10 @@ TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
     const auto capacity = poller.consume_capacity();
     EXPECT_EQ(capacity.active, 1u);
     EXPECT_EQ(capacity.rejected, 0u);
-    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(GamepadCode::LeftBumper | GamepadCode::DpadUp)),
-              static_cast<uint16_t>(GamepadCode::DpadUp));
+    EXPECT_EQ(
+        evaluate_published_consume_rules(static_cast<uint16_t>(GamepadCode::LeftBumper | GamepadCode::DpadUp)),
+        static_cast<uint16_t>(GamepadCode::DpadUp)
+    );
 }
 
 // Live-hook lifecycle: WH_GETMESSAGE wheel hook and XInput inline hook
@@ -854,9 +884,20 @@ namespace
     HWND make_test_window() noexcept
     {
         ensure_test_window_class_registered();
-        const HWND hwnd =
-            CreateWindowExW(0, TEST_WINDOW_CLASS, L"DMK Intercept Test", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                            CW_USEDEFAULT, 200, 150, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        const HWND hwnd = CreateWindowExW(
+            0,
+            TEST_WINDOW_CLASS,
+            L"DMK Intercept Test",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            200,
+            150,
+            nullptr,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
         if (hwnd != nullptr)
         {
             ShowWindow(hwnd, SW_SHOWNA);
@@ -955,7 +996,8 @@ namespace
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     }
-                });
+                }
+            );
             while (m_thread_id.load(std::memory_order_acquire) == 0)
             {
                 std::this_thread::yield();
@@ -1404,7 +1446,8 @@ TEST_F(InterceptMessageHookTest, MigrationLeavesNoHookOnTheOldThreadAndCountsOnc
             total += take_wheel_counts(owner())[0];
             return total > 0;
         },
-        std::chrono::seconds(2)));
+        std::chrono::seconds(2)
+    ));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     total += take_wheel_counts(owner())[0];
     EXPECT_EQ(total, 1);
@@ -1429,8 +1472,10 @@ TEST_F(InterceptMessageHookTest, TargetThreadExitRetiresRouteToRetryable)
         {
             stale_publish_authorized.store(
                 publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()),
-                std::memory_order_release);
-        });
+                std::memory_order_release
+            );
+        }
+    );
     while (!s_data_plane_entry_reached.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -1475,7 +1520,8 @@ TEST_F(InterceptMessageHookTest, CleanupBlockedRejectsASameThreadSuccessor)
     set_message_unhook_failure_for_test(false);
     worker.stop();
     ASSERT_TRUE(
-        wait_until([&] { return message_hook_route_state() == WheelRouteState::Retryable; }, std::chrono::seconds(2)));
+        wait_until([&] { return message_hook_route_state() == WheelRouteState::Retryable; }, std::chrono::seconds(2))
+    );
     ASSERT_TRUE(install_message_hook(successor, GetCurrentThreadId()));
     EXPECT_TRUE(intercept_owned_by(successor));
     uninstall(successor);
@@ -1509,7 +1555,8 @@ TEST_F(InterceptMessageHookTest, UninstallDrainsAParkedAdmittedPhase)
             teardown_started.store(true, std::memory_order_release);
             uninstall();
             uninstall_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     while (!teardown_started.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -1549,9 +1596,17 @@ TEST(InterceptMessageHookPollerTest, PollerDropsCallbackStagingCopyFailureAndCon
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
-                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
+    detail::InputPoller poller(
+        std::move(bindings),
+        std::chrono::milliseconds(2),
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::MessageHook,
+        nullptr,
+        GetCurrentThreadId()
+    );
 
     const auto cleanup = [&]() noexcept
     {
@@ -1576,7 +1631,8 @@ TEST(InterceptMessageHookPollerTest, PollerDropsCallbackStagingCopyFailureAndCon
     throw_on_copy->store(true, std::memory_order_relaxed);
     (void)post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
     EXPECT_TRUE(
-        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5))
+    );
     EXPECT_TRUE(poller.is_running());
     EXPECT_EQ(invocations->load(std::memory_order_relaxed), 0);
 
@@ -1612,9 +1668,17 @@ TEST(InterceptMessageHookPollerTest, StagingFailureDoesNotDestroyTheWheelNotch)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
-                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
+    detail::InputPoller poller(
+        std::move(bindings),
+        std::chrono::milliseconds(2),
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::MessageHook,
+        nullptr,
+        GetCurrentThreadId()
+    );
 
     const auto cleanup = [&]() noexcept
     {
@@ -1638,7 +1702,8 @@ TEST(InterceptMessageHookPollerTest, StagingFailureDoesNotDestroyTheWheelNotch)
     throw_on_copy->store(true, std::memory_order_relaxed);
     (void)post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
     ASSERT_TRUE(
-        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5))
+    );
     ASSERT_EQ(invocations->load(std::memory_order_relaxed), 0);
 
     // No further wheel record is posted. The one notch already drained from the hook must still be pending.
@@ -1738,7 +1803,8 @@ TEST(InterceptXInputTest, UninstallCleanlyReleasesAfterConcurrentCallersJoin)
                         // uninstall; both must be crash-free.
                         (void)get_state(0, &state);
                     }
-                });
+                }
+            );
         }
 
         ASSERT_TRUE(wait_until([&] { return started.load(std::memory_order_acquire) == 3; }, std::chrono::seconds(5)));
@@ -1927,8 +1993,10 @@ TEST(InterceptXInputTest, InstallAndCleanUninstallBookAndReleaseTheTypedPinReaso
     const std::uint64_t owner = next_intercept_owner();
     ASSERT_TRUE(install_xinput(0, owner));
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before + 1);
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputTarget),
-              target_before + static_cast<std::size_t>(xinput_module_refs_held() - 1));
+    EXPECT_EQ(
+        diag::module_pin_count(diag::ModulePinReason::XInputTarget),
+        target_before + static_cast<std::size_t>(xinput_module_refs_held() - 1)
+    );
 
     uninstall(owner);
     EXPECT_EQ(xinput_module_refs_held(), 0);
@@ -1973,7 +2041,8 @@ TEST(InterceptXInputTest, NonOwnerPollerConstructionCannotReplaceActiveOwnersCon
         // Construction compiles the second poller's local rule cache, but the live interceptor still belongs to A.
         // A non-owner must not replace the process-global rules the active owner's detour reads.
         detail::InputPoller non_owner(
-            {make_consume_chord({gamepad_button(GamepadCode::RightBumper)}, {gamepad_button(GamepadCode::DpadDown)})});
+            {make_consume_chord({gamepad_button(GamepadCode::RightBumper)}, {gamepad_button(GamepadCode::DpadDown)})}
+        );
 
         EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
         EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(rb | down)), 0u);
@@ -2005,7 +2074,9 @@ TEST(InterceptOwnerEpochTest, AcquisitionRepublishesTheOwnersCachedRulesExactlyO
 
     detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})},
-        std::chrono::milliseconds{2}, /*require_focus=*/false);
+        std::chrono::milliseconds{2},
+        /*require_focus=*/false
+    );
     poller.start();
     const std::uint64_t acquirer = poller.intercept_owner_for_test();
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u)
@@ -2014,9 +2085,10 @@ TEST(InterceptOwnerEpochTest, AcquisitionRepublishesTheOwnersCachedRulesExactlyO
     // Hand the layer over. The poll loop observes ownership on a later cycle and republishes what it cached.
     uninstall(incumbent);
     ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(acquirer));
-    EXPECT_TRUE(wait_until([&] { return evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)) == up; },
-                           std::chrono::seconds(2)))
-        << "acquiring the layer must republish the rules cached while the poller owned nothing";
+    EXPECT_TRUE(wait_until(
+        [&] { return evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)) == up; },
+        std::chrono::seconds(2)
+    )) << "acquiring the layer must republish the rules cached while the poller owned nothing";
 
     const GamepadConsumeRule foreign{rb, 0, down};
     ASSERT_TRUE(publish_gamepad_consume_rules(&foreign, 1, acquirer).authorized);
@@ -2065,26 +2137,32 @@ TEST(InterceptOwnerEpochTest, PausedSupersededOwnerCannotMutateOrDrainAnyDataPla
                 switch (channel)
                 {
                 case Channel::ConsumeRules:
-                    stale_authorized.store(publish_gamepad_consume_rules(&rule_a, 1, owner_a).authorized,
-                                           std::memory_order_release);
+                    stale_authorized.store(
+                        publish_gamepad_consume_rules(&rule_a, 1, owner_a).authorized,
+                        std::memory_order_release
+                    );
                     break;
                 case Channel::ReactiveMask:
                     stale_authorized.store(publish_gamepad_suppress(up, owner_a), std::memory_order_release);
                     break;
                 case Channel::RuleGate:
-                    stale_authorized.store(DetourModKit::detail::set_gamepad_rule_suppress_enabled(false, owner_a),
-                                           std::memory_order_release);
+                    stale_authorized.store(
+                        DetourModKit::detail::set_gamepad_rule_suppress_enabled(false, owner_a),
+                        std::memory_order_release
+                    );
                     break;
                 case Channel::WheelMask:
                     stale_authorized.store(
                         publish_wheel_consume(wheel_direction_bit(WheelDirection::Down), false, owner_a),
-                        std::memory_order_release);
+                        std::memory_order_release
+                    );
                     break;
                 case Channel::WheelDrain:
                     stale_counts = take_wheel_counts(owner_a);
                     break;
                 }
-            });
+            }
+        );
 
         while (!s_data_plane_entry_reached.load(std::memory_order_acquire))
         {
@@ -2186,7 +2264,8 @@ TEST(InterceptOwnerEpochTest, RevocationInvalidatesAnEnteredWheelCaptureWithoutW
         {
             uninstall(owner_a);
             revocation_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
     while (!revocation_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
@@ -2327,9 +2406,17 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
-                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
+    detail::InputPoller poller(
+        std::move(bindings),
+        std::chrono::milliseconds(2),
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::MessageHook,
+        nullptr,
+        GetCurrentThreadId()
+    );
     poller.start();
 
     const auto cleanup = [&]() noexcept
@@ -2387,9 +2474,17 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
-                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
+    detail::InputPoller poller(
+        std::move(bindings),
+        std::chrono::milliseconds(2),
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::MessageHook,
+        nullptr,
+        GetCurrentThreadId()
+    );
     poller.start();
 
     const auto cleanup = [&]() noexcept
@@ -2467,9 +2562,17 @@ TEST(InterceptDisarmTest, PollerConsumeSwallowsOnlyTheBoundWheelDirection)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
-                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
+    detail::InputPoller poller(
+        std::move(bindings),
+        std::chrono::milliseconds(2),
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::MessageHook,
+        nullptr,
+        GetCurrentThreadId()
+    );
     poller.start();
 
     const auto cleanup = [&]() noexcept

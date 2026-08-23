@@ -114,8 +114,12 @@ namespace
     // True when the needle appears verbatim somewhere in [bytes, bytes + size). The ladder cases below rely on the
     // compiled query bytes actually living inside the ladder object; asserting that keeps the case from passing
     // vacuously if the Candidate representation ever stops carrying them inline.
-    [[nodiscard]] bool contains_bytes(const std::uint8_t *bytes, std::size_t size, const std::uint8_t *needle,
-                                      std::size_t needle_size) noexcept
+    [[nodiscard]] bool contains_bytes(
+        const std::uint8_t *bytes,
+        std::size_t size,
+        const std::uint8_t *needle,
+        std::size_t needle_size
+    ) noexcept
     {
         if (needle_size == 0 || size < needle_size)
         {
@@ -335,7 +339,8 @@ TEST(ScannerTrustProof, QueryStorageInsideTheScopeIsNeverCounted)
     std::size_t storage_size = 0x500;
     ASSERT_NE(std::align(alignof(scan::Pattern), sizeof(scan::Pattern), storage, storage_size), nullptr);
     std::unique_ptr<scan::Pattern, PatternDestroyer> pattern{
-        std::construct_at(static_cast<scan::Pattern *>(storage), *compiled)};
+        std::construct_at(static_cast<scan::Pattern *>(storage), *compiled)
+    };
     std::memcpy(page.bytes() + 0x800, needle.data(), needle.size());
 
     const auto first = scan::scan(*pattern, page.range(), 1, scan::Pages::Readable);
@@ -364,10 +369,13 @@ TEST(ScannerTrustProof, EngineMaskStorageIsNeverReturned)
     // the buffer cannot report itself as the match.
     const std::uintptr_t mask_base = reinterpret_cast<std::uintptr_t>(pattern->mask.data());
     const detail::ModuleSpan mask_range{mask_base, mask_base + pattern->mask.size()};
-    const detail::MatchResult result = detail::scan_module_readable(*pattern, mask_range,
-                                                                    detail::ScanQuery{
-                                                                        .occurrence = 1,
-                                                                    });
+    const detail::MatchResult result = detail::scan_module_readable(
+        *pattern,
+        mask_range,
+        detail::ScanQuery{
+            .occurrence = 1,
+        }
+    );
     EXPECT_EQ(result.match, nullptr);
 }
 
@@ -419,12 +427,14 @@ TEST(ScannerTrustProof, MaximumOccurrenceDoesNotWrapTheCountCap)
 
     const auto base = reinterpret_cast<std::uintptr_t>(page.bytes());
     const detail::ModuleSpan range{base, base + page.size()};
-    const detail::MatchResult result =
-        detail::scan_module_readable(*pattern, range,
-                                     detail::ScanQuery{
-                                         .occurrence = std::numeric_limits<std::size_t>::max(),
-                                         .count_beyond = true,
-                                     });
+    const detail::MatchResult result = detail::scan_module_readable(
+        *pattern,
+        range,
+        detail::ScanQuery{
+            .occurrence = std::numeric_limits<std::size_t>::max(),
+            .count_beyond = true,
+        }
+    );
     EXPECT_EQ(result.match, nullptr);
     EXPECT_EQ(result.count, 3u);
     EXPECT_FALSE(result.truncated());
@@ -474,12 +484,16 @@ TEST(ScannerTrustProof, LadderStorageInsideTheScopeIsNeverAnOccurrence)
     std::size_t storage_size = page.size() - 0x100;
     ASSERT_NE(std::align(alignof(scan::Candidate), sizeof(scan::Candidate), storage, storage_size), nullptr);
     const std::unique_ptr<scan::Candidate, CandidateDestroyer> ladder{
-        std::construct_at(static_cast<scan::Candidate *>(storage), scan::Candidate::direct("ladder", *compiled))};
+        std::construct_at(static_cast<scan::Candidate *>(storage), scan::Candidate::direct("ladder", *compiled))
+    };
 
     // The ladder must really carry the query bytes, or "the exclusion did the work" is not what this measures.
-    ASSERT_TRUE(contains_bytes(static_cast<const std::uint8_t *>(storage), sizeof(scan::Candidate), needle.data(),
-                               needle.size()))
-        << "the compiled ladder no longer holds the query bytes inline; this case would pass vacuously";
+    ASSERT_TRUE(contains_bytes(
+        static_cast<const std::uint8_t *>(storage),
+        sizeof(scan::Candidate),
+        needle.data(),
+        needle.size()
+    )) << "the compiled ladder no longer holds the query bytes inline; this case would pass vacuously";
 
     const std::size_t plant_offset = page.size() - 0x100;
     ASSERT_GT(plant_offset, 0x100 + sizeof(scan::Candidate));
@@ -601,13 +615,16 @@ TEST(ScannerTrustProof, RipTargetAndWinningEvidenceUseOneImmutableSnapshot)
     page.bytes()[instruction_offset + 2] = 0x05;
     const auto instruction_address = reinterpret_cast<std::uintptr_t>(page.bytes() + instruction_offset);
     const auto original_displacement = static_cast<std::int32_t>(
-        reinterpret_cast<std::uintptr_t>(page.bytes() + original_target_offset) - (instruction_address + 7));
+        reinterpret_cast<std::uintptr_t>(page.bytes() + original_target_offset) - (instruction_address + 7)
+    );
     const auto replacement_displacement = static_cast<std::int32_t>(
-        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7));
+        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7)
+    );
     std::memcpy(page.bytes() + instruction_offset + 3, &original_displacement, sizeof(original_displacement));
 
     const scan::Candidate ladder[] = {
-        scan::Candidate::rip_relative("rip-snapshot", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+        scan::Candidate::rip_relative("rip-snapshot", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
     const scan::ScanRequest request{
         .ladder = ladder,
         .label = "rip-snapshot",
@@ -647,10 +664,12 @@ TEST(ScannerTrustProof, TruncatedWinningEvidenceRetainsPrivateRipSnapshot)
     page.bytes()[instruction_offset + 1] = 0x8B;
     page.bytes()[instruction_offset + 2] = 0x05;
     const auto instruction_address = reinterpret_cast<std::uintptr_t>(page.bytes() + instruction_offset);
-    const auto displacement = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(page.bytes() + target_offset) -
-                                                        (instruction_address + 7));
+    const auto displacement = static_cast<std::int32_t>(
+        reinterpret_cast<std::uintptr_t>(page.bytes() + target_offset) - (instruction_address + 7)
+    );
     const auto replacement_displacement = static_cast<std::int32_t>(
-        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7));
+        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7)
+    );
     std::memcpy(page.bytes() + instruction_offset + 3, &displacement, sizeof(displacement));
     page.bytes()[tail_offset + 0] = 0xDE;
     page.bytes()[tail_offset + 1] = 0xAD;
@@ -658,16 +677,22 @@ TEST(ScannerTrustProof, TruncatedWinningEvidenceRetainsPrivateRipSnapshot)
     page.bytes()[tail_offset + 3] = 0xEF;
 
     const scan::Candidate ladder[] = {scan::Candidate::rip_relative(
-        "long-rip", scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [250] DE AD BE EF"), 3, 7)};
+        "long-rip",
+        scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [250] DE AD BE EF"),
+        3,
+        7
+    )};
     Result<scan::Hit> hit;
     {
         RipDisplacementMutationGuard mutation_guard(page.bytes() + instruction_offset + 3, replacement_displacement);
-        hit = scan::resolve(scan::ScanRequest{
-            .ladder = ladder,
-            .label = "long-rip",
-            .scope = page.range(),
-            .pages = scan::Pages::Executable,
-        });
+        hit = scan::resolve(
+            scan::ScanRequest{
+                .ladder = ladder,
+                .label = "long-rip",
+                .scope = page.range(),
+                .pages = scan::Pages::Executable,
+            }
+        );
     }
 
     ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
@@ -691,7 +716,8 @@ TEST(ScannerTrustProof, BudgetExhaustionIsNotReportedAsNoMatch)
     page.bytes()[0] = 0xA5; // an anchor whose whole reachable range holds no 0xFF, so the extension burns the budget
 
     const auto pattern = scan::Pattern::compile(
-        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF"
+    );
     ASSERT_TRUE(pattern.has_value());
 
     const auto result = scan::scan(*pattern, page.range(), 1, scan::Pages::Readable);

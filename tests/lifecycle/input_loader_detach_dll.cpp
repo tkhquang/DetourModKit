@@ -21,8 +21,9 @@ namespace
 
     void make_capture_destroyed_event_name(wchar_t (&name)[96]) noexcept
     {
-        (void)std::swprintf(name, std::size(name), L"Local\\DMK_InputLoader_CaptureDestroyed_%lu",
-                            GetCurrentProcessId());
+        (
+            void
+        )std::swprintf(name, std::size(name), L"Local\\DMK_InputLoader_CaptureDestroyed_%lu", GetCurrentProcessId());
     }
 
     /// Signals the host's witness event from its destructor once armed.
@@ -57,13 +58,14 @@ namespace
  */
 extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_stage() noexcept
 {
-    DetourModKit::Result<DetourModKit::input::BindingGuard> guard =
-        DetourModKit::input::register_combo(DetourModKit::input::ComboBinding{
+    DetourModKit::Result<DetourModKit::input::BindingGuard> guard = DetourModKit::input::register_combo(
+        DetourModKit::input::ComboBinding{
             .name = "loader_detach_staged",
             .trigger = DetourModKit::input::Trigger::Press,
             .combos = {{{DetourModKit::keyboard_key(0x70)}, {}}},
             .on_press = [witness = DestructionWitness{}] {},
-        });
+        }
+    );
     if (!guard.has_value())
     {
         return FALSE;
@@ -85,13 +87,14 @@ extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_park_scope_guard
     {
         std::shared_ptr<char> capture_owner = std::make_shared<char>();
         const std::weak_ptr<char> capture_observer = capture_owner;
-        DetourModKit::Result<DetourModKit::input::BindingGuard> guard =
-            DetourModKit::input::register_combo(DetourModKit::input::ComboBinding{
+        DetourModKit::Result<DetourModKit::input::BindingGuard> guard = DetourModKit::input::register_combo(
+            DetourModKit::input::ComboBinding{
                 .name = "loader_detach_scope",
                 .trigger = DetourModKit::input::Trigger::Press,
                 .combos = {{{DetourModKit::keyboard_key(0x71)}, {}}},
                 .on_press = [witness = DestructionWitness{}, keep_alive = std::move(capture_owner)] {},
-            });
+            }
+        );
         if (!guard.has_value())
         {
             return FALSE;

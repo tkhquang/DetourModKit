@@ -120,8 +120,8 @@ namespace DetourModKit
          * @return A value on first resolve (@p out populated), or the @p candidate's Error when all candidates fail.
          */
         template <SlotAddress... Fallbacks>
-        [[nodiscard]] Result<void> identify_pointee_type_or(Address candidate, PointeeType &out,
-                                                            Fallbacks... fallbacks) noexcept
+        [[nodiscard]] Result<void>
+        identify_pointee_type_or(Address candidate, PointeeType &out, Fallbacks... fallbacks) noexcept
         {
             // Capture the primary's typed error before the fold runs so a later probe cannot clobber the value we
             // preserve; Error is a trivially copyable value.
@@ -172,9 +172,12 @@ namespace DetourModKit
          *       returns 0. If a reallocation of @p out throws, the sweep stops early and returns the count appended so
          *       far (the noexcept contract holds).
          */
-        [[nodiscard]] std::size_t reverse_scan_block(Address start, std::size_t slot_count,
-                                                     std::vector<LabeledSlot> &out,
-                                                     std::size_t stride = sizeof(std::uintptr_t)) noexcept;
+        [[nodiscard]] std::size_t reverse_scan_block(
+            Address start,
+            std::size_t slot_count,
+            std::vector<LabeledSlot> &out,
+            std::size_t stride = sizeof(std::uintptr_t)
+        ) noexcept;
 
         /**
          * @brief Byte-length overload of @ref reverse_scan_block.
@@ -185,9 +188,12 @@ namespace DetourModKit
          * @param stride Byte distance between adjacent slots. Zero is treated as sizeof(std::uintptr_t).
          * @return Number of slots appended to @p out.
          */
-        [[nodiscard]] std::size_t reverse_scan_block_bytes(Address start, std::size_t byte_len,
-                                                           std::vector<LabeledSlot> &out,
-                                                           std::size_t stride = sizeof(std::uintptr_t)) noexcept;
+        [[nodiscard]] std::size_t reverse_scan_block_bytes(
+            Address start,
+            std::size_t byte_len,
+            std::vector<LabeledSlot> &out,
+            std::size_t stride = sizeof(std::uintptr_t)
+        ) noexcept;
 
         /**
          * @enum Indirection
@@ -336,8 +342,8 @@ namespace DetourModKit
          * @warning Init-time only: the probe count is (2 * window_bytes / 8 + 1) * fp.size() prelude walks. Allocates
          *          nothing.
          */
-        [[nodiscard]] Result<FingerprintHit> solve_fingerprint(Address base, std::span<const Landmark> fp,
-                                                               std::size_t window_bytes) noexcept;
+        [[nodiscard]] Result<FingerprintHit>
+        solve_fingerprint(Address base, std::span<const Landmark> fp, std::size_t window_bytes) noexcept;
 
         /**
          * @struct DriftEntry
@@ -539,8 +545,13 @@ namespace DetourModKit
              *          @ref HealedSlot overload for writes or hooks; this form remains for compatibility/read-only
              *          use.
              */
-            [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
-                                                    std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
+            [[nodiscard]] Result<HealHit> heal_into(
+                std::string_view label,
+                const Landmark &landmark,
+                Address base,
+                std::atomic<std::ptrdiff_t> &slot,
+                bool required = true
+            ) noexcept;
 
             /**
              * @brief Validity-bearing form of @ref heal_into: publishes {value, generation, validity} to a @ref
@@ -559,8 +570,13 @@ namespace DetourModKit
              * @return The @ref heal_landmark result, or @ref ErrorCode::OffsetNotConfirmed when the heal resolved but
              *         its vtable image carried no stable generation across the evidence.
              */
-            [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
-                                                    HealedSlot &slot, bool required = true) noexcept;
+            [[nodiscard]] Result<HealHit> heal_into(
+                std::string_view label,
+                const Landmark &landmark,
+                Address base,
+                HealedSlot &slot,
+                bool required = true
+            ) noexcept;
 
             /**
              * @brief Report a drift a group recovered itself (e.g. through @ref solve_fingerprint), so the one-shot
@@ -572,8 +588,8 @@ namespace DetourModKit
              * @param nominal_offset The field's last-known offset.
              * @param healed_offset The recovered offset.
              */
-            void note_drift(std::string_view label, std::ptrdiff_t nominal_offset,
-                            std::ptrdiff_t healed_offset) noexcept;
+            void
+            note_drift(std::string_view label, std::ptrdiff_t nominal_offset, std::ptrdiff_t healed_offset) noexcept;
 
         private:
             friend class HealScheduler;

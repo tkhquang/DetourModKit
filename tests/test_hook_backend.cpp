@@ -104,7 +104,8 @@ namespace
                 .name = name,
                 .target = Address{page.addr(0)},
             },
-            reinterpret_cast<void (*)()>(&detour_leaf));
+            reinterpret_cast<void (*)()>(&detour_leaf)
+        );
     }
 
     Result<Hook> install_mid_leaf(dmk_test::ScratchPage &page, const char *name)
@@ -114,7 +115,8 @@ namespace
                 .name = name,
                 .target = Address{page.addr(0)},
             },
-            &mid_detour);
+            &mid_detour
+        );
     }
 
     /// A volatile indirection forces the call to reach the patched entry even when the optimizer can see the callee.
@@ -150,8 +152,11 @@ namespace
         s_toggle_publication.gate_owned = gate_owned;
         s_toggle_publication.status_matches = status_matches;
         s_toggle_publication.callable_matches = callable_matches;
-        DetourModKit::detail::hook_population::read(s_toggle_publication.total, s_toggle_publication.active,
-                                                    s_toggle_publication.disabled);
+        DetourModKit::detail::hook_population::read(
+            s_toggle_publication.total,
+            s_toggle_publication.active,
+            s_toggle_publication.disabled
+        );
         ++s_toggle_publication.calls;
     }
 
@@ -196,8 +201,10 @@ namespace
     public:
         BackendToggleExceptionScope(std::uintptr_t target, ToggleExceptionStage stage) noexcept
         {
-            DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target),
-                                                                        stage == ToggleExceptionStage::AfterMutation);
+            DetourModKit::detail::set_backend_toggle_exception_for_test(
+                reinterpret_cast<void *>(target),
+                stage == ToggleExceptionStage::AfterMutation
+            );
         }
         ~BackendToggleExceptionScope() noexcept
         {
@@ -286,8 +293,12 @@ namespace
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    void expect_enable_exceptions_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed, bool is_inline,
-                                             std::string_view name)
+    void expect_enable_exceptions_reconciled(
+        dmk_test::ScratchPage &page,
+        Result<Hook> installed,
+        bool is_inline,
+        std::string_view name
+    )
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         Hook hook = std::move(*installed);
@@ -301,7 +312,8 @@ namespace
                 {
                     ++enabled_events;
                 }
-            });
+            }
+        );
 
         Result<void> before_mutation;
         {
@@ -350,8 +362,12 @@ namespace
         EXPECT_EQ(armed_population(), armed_before);
     }
 
-    void expect_disable_exceptions_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed, bool is_inline,
-                                              std::string_view name)
+    void expect_disable_exceptions_reconciled(
+        dmk_test::ScratchPage &page,
+        Result<Hook> installed,
+        bool is_inline,
+        std::string_view name
+    )
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         Hook hook = std::move(*installed);
@@ -369,7 +385,8 @@ namespace
                 {
                     ++disabled_events;
                 }
-            });
+            }
+        );
 
         Result<void> before_mutation;
         {
@@ -424,8 +441,11 @@ namespace
         ASSERT_TRUE(hook.disable().has_value());
     }
 
-    void expect_teardown_after_mutation_exception_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed,
-                                                             std::string_view name)
+    void expect_teardown_after_mutation_exception_reconciled(
+        dmk_test::ScratchPage &page,
+        Result<Hook> installed,
+        std::string_view name
+    )
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         const PrologueSpan pristine = read_prologue_span(page);
@@ -440,7 +460,8 @@ namespace
                 {
                     ++removed_events;
                 }
-            });
+            }
+        );
 
         {
             // Declared first so it disarms only after Hook's destructor consumes the armed exception seam.
@@ -458,7 +479,8 @@ namespace
         EXPECT_FALSE(target_still_hooked);
         EXPECT_EQ(
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-            leaks_before);
+            leaks_before
+        );
         EXPECT_EQ(removed_events, 1u);
         if (target_still_hooked)
         {
@@ -495,8 +517,12 @@ namespace
             return;
         }
         DWORD previous = 0;
-        if (::VirtualProtect(s_witness_override_page->base(), dmk_test::ScratchPage::PAGE_SIZE, PAGE_NOACCESS,
-                             &previous) != FALSE)
+        if (::VirtualProtect(
+                s_witness_override_page->base(),
+                dmk_test::ScratchPage::PAGE_SIZE,
+                PAGE_NOACCESS,
+                &previous
+            ) != FALSE)
         {
             s_witness_previous_protection = previous;
             s_witness_page_unreadable = true;
@@ -512,8 +538,12 @@ namespace
             return true;
         }
         DWORD ignored = 0;
-        if (::VirtualProtect(s_witness_override_page->base(), dmk_test::ScratchPage::PAGE_SIZE,
-                             s_witness_previous_protection, &ignored) == FALSE)
+        if (::VirtualProtect(
+                s_witness_override_page->base(),
+                dmk_test::ScratchPage::PAGE_SIZE,
+                s_witness_previous_protection,
+                &ignored
+            ) == FALSE)
         {
             return false;
         }
@@ -552,8 +582,12 @@ namespace
         {
             s_owned_patch_before_override = read_prologue_span(*s_witness_override_page);
             DWORD previous = 0;
-            if (::VirtualProtect(s_witness_override_page->base(), dmk_test::ScratchPage::PAGE_SIZE, PAGE_NOACCESS,
-                                 &previous) != FALSE)
+            if (::VirtualProtect(
+                    s_witness_override_page->base(),
+                    dmk_test::ScratchPage::PAGE_SIZE,
+                    PAGE_NOACCESS,
+                    &previous
+                ) != FALSE)
             {
                 s_witness_previous_protection = previous;
                 s_witness_page_unreadable = true;
@@ -575,7 +609,8 @@ namespace
             s_owned_patch_before_override = read_prologue_span(*s_witness_override_page);
             DetourModKit::detail::set_backend_toggle_exception_for_test(
                 reinterpret_cast<void *>(s_witness_override_page->addr(0)),
-                s_rollback_exception_stage == ToggleExceptionStage::AfterMutation);
+                s_rollback_exception_stage == ToggleExceptionStage::AfterMutation
+            );
         }
         return false;
     }
@@ -624,8 +659,13 @@ namespace
         BackendDisableProbeScope &operator=(BackendDisableProbeScope &&) = delete;
     };
 
-    void expect_post_disable_uncertainty_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed, bool is_inline,
-                                                    PostDisableWitness witness, std::string_view name)
+    void expect_post_disable_uncertainty_reconciled(
+        dmk_test::ScratchPage &page,
+        Result<Hook> installed,
+        bool is_inline,
+        PostDisableWitness witness,
+        std::string_view name
+    )
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         Hook hook = std::move(*installed);
@@ -642,7 +682,8 @@ namespace
                 {
                     ++disabled_events;
                 }
-            });
+            }
+        );
 
         Result<void> disabled;
         {
@@ -679,8 +720,8 @@ namespace
         EXPECT_EQ(disabled_events, 1u);
     }
 
-    void expect_rollback_uncertainty_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed,
-                                                std::string_view name)
+    void
+    expect_rollback_uncertainty_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed, std::string_view name)
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         Hook hook = std::move(*installed);
@@ -694,7 +735,8 @@ namespace
                 {
                     ++enabled_events;
                 }
-            });
+            }
+        );
 
         s_rollback_exception_stage = ToggleExceptionStage::AfterMutation;
         s_enable_witness_callbacks = 0;
@@ -724,8 +766,11 @@ namespace
         EXPECT_EQ(armed_population(), armed_before);
     }
 
-    void expect_unconfirmed_post_commit_enable_is_retained(dmk_test::ScratchPage &page, const char *name,
-                                                           bool make_unreadable)
+    void expect_unconfirmed_post_commit_enable_is_retained(
+        dmk_test::ScratchPage &page,
+        const char *name,
+        bool make_unreadable
+    )
     {
         Result<Hook> installed = install_leaf(page, name);
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
@@ -740,7 +785,8 @@ namespace
                 {
                     ++enabled_events;
                 }
-            });
+            }
+        );
 
         Result<void> enabled;
         PrologueSpan owned_patch{};
@@ -750,7 +796,9 @@ namespace
         {
             const BackendToggleExceptionScope exception{page.addr(0), ToggleExceptionStage::AfterMutation};
             const HookEnableWitnessOverrideScope witness{
-                make_unreadable ? &make_unreadable_then_reject : &plant_foreign_then_reject, page};
+                make_unreadable ? &make_unreadable_then_reject : &plant_foreign_then_reject,
+                page
+            };
             enabled = hook.enable();
             owned_patch = s_owned_patch_before_override;
             protection_restored = restore_witness_page_access();
@@ -785,8 +833,12 @@ namespace
         EXPECT_EQ(armed_population(), armed_before);
     }
 
-    void expect_rollback_exceptions_reconciled(dmk_test::ScratchPage &page, Result<Hook> installed, bool is_inline,
-                                               std::string_view name)
+    void expect_rollback_exceptions_reconciled(
+        dmk_test::ScratchPage &page,
+        Result<Hook> installed,
+        bool is_inline,
+        std::string_view name
+    )
     {
         ASSERT_TRUE(installed.has_value()) << installed.error().message();
         Hook hook = std::move(*installed);
@@ -800,7 +852,8 @@ namespace
                 {
                     ++enabled_events;
                 }
-            });
+            }
+        );
 
         Result<void> before_mutation;
         s_rollback_exception_stage = ToggleExceptionStage::BeforeMutation;
@@ -921,7 +974,8 @@ TEST(HookBackendTransaction, EnableCommittedThenReportedFailurePublishesArmed)
             {
                 ++enabled_events;
             }
-        });
+        }
+    );
 
     const std::size_t armed_before = armed_population();
     Result<void> enabled{};
@@ -975,7 +1029,8 @@ TEST(HookBackendTransaction, DisableCommittedThenReportedFailurePublishesDisable
             {
                 ++disabled_events;
             }
-        });
+        }
+    );
 
     const std::size_t armed_before = armed_population();
     Result<void> disabled{};
@@ -1049,8 +1104,10 @@ TEST(HookBackendTransaction, CommittedEnableFailureStillTearsDownWithoutLeaking)
     }
 
     EXPECT_EQ(read_prologue(page), pristine);
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-              leaks_before);
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        leaks_before
+    );
 }
 
 #endif // DMK_ENABLE_TEST_SEAMS
@@ -1091,7 +1148,8 @@ TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByDisable)
         // the foreign writer's bytes survive that as well.
         EXPECT_EQ(
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-            leaks_before + 1);
+            leaks_before + 1
+        );
         EXPECT_EQ(read_prologue(page), foreign);
         pinned_target = page.addr();
         // The ledger keeps this address pinned for process life, so the fixture must not hand it back to the allocator.
@@ -1169,7 +1227,8 @@ TEST(HookBackendOwnership, IdempotentEnableReconcilesOriginal)
             }
             enabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Enabled ? 1u : 0u;
             disabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Disabled ? 1u : 0u;
-        });
+        }
+    );
     const Result<void> again = hook.enable();
     ASSERT_TRUE(again.has_value()) << again.error().message();
     EXPECT_TRUE(hook.is_enabled());
@@ -1221,7 +1280,8 @@ TEST(HookBackendOwnership, IdempotentDisableReconcilesOwnedPatch)
             }
             enabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Enabled ? 1u : 0u;
             disabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Disabled ? 1u : 0u;
-        });
+        }
+    );
     const Result<void> again = hook.disable();
     ASSERT_TRUE(again.has_value()) << again.error().message();
     EXPECT_FALSE(hook.is_enabled());
@@ -1261,7 +1321,8 @@ TEST(HookBackendOwnership, IdempotentEnableRejectsForeignBytesFromActive)
             {
                 ++events;
             }
-        });
+        }
+    );
     // Preserve the return at offset 5 because the trampoline resumes there.
     page.put(0, {0xE9, 0x7B, 0x00, 0x00, 0x00});
     const PrologueSpan foreign = read_prologue_span(page);
@@ -1308,7 +1369,8 @@ TEST(HookBackendOwnership, IdempotentDisableRejectsForeignBytesFromDisabled)
             {
                 ++events;
             }
-        });
+        }
+    );
     plant_foreign_patch(page);
     const PrologueSpan foreign = read_prologue_span(page);
 
@@ -1362,8 +1424,10 @@ TEST(HookBackendRelease, CleanManagedDestructionAllocatesNothing)
     // buffer therefore allocates inside the poisoned scope below and takes that copy's catch path, so the case would
     // prove the name-copy degradation rather than an allocation-free release. The short name is load-bearing.
     static constexpr char CLEAN_RELEASE_HOOK_NAME[] = "OOMFree";
-    static_assert(sizeof(CLEAN_RELEASE_HOOK_NAME) <= 16,
-                  "the clean-release hook name must fit the small-string buffer");
+    static_assert(
+        sizeof(CLEAN_RELEASE_HOOK_NAME) <= 16,
+        "the clean-release hook name must fit the small-string buffer"
+    );
     Result<Hook> installed = install_leaf(page, CLEAN_RELEASE_HOOK_NAME);
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     std::optional<Hook> hook{std::move(*installed)};
@@ -1382,8 +1446,10 @@ TEST(HookBackendRelease, CleanManagedDestructionAllocatesNothing)
 
     EXPECT_EQ(call_target(page), LEAF_RESULT);
     EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-              leaks_before);
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        leaks_before
+    );
 }
 
 // The HookBackendOwnership cases above are deliberately outside every seam guard: they drive the refusal through the
@@ -1395,8 +1461,12 @@ TEST(HookBackendException, InlineEnableReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_enable_exceptions_reconciled(page, install_leaf(page, "InlineEnableException"), true,
-                                        "InlineEnableException");
+    expect_enable_exceptions_reconciled(
+        page,
+        install_leaf(page, "InlineEnableException"),
+        true,
+        "InlineEnableException"
+    );
 }
 
 TEST(HookBackendException, MidEnableReconcilesBeforeAndAfterMutationThrows)
@@ -1405,8 +1475,12 @@ TEST(HookBackendException, MidEnableReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_enable_exceptions_reconciled(page, install_mid_leaf(page, "MidEnableException"), false,
-                                        "MidEnableException");
+    expect_enable_exceptions_reconciled(
+        page,
+        install_mid_leaf(page, "MidEnableException"),
+        false,
+        "MidEnableException"
+    );
 }
 
 TEST(HookBackendException, UnconfirmedPostCommitEnableRetainsConservativeActiveState)
@@ -1428,8 +1502,12 @@ TEST(HookBackendException, InlineDisableReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_disable_exceptions_reconciled(page, install_leaf(page, "InlineDisableException"), true,
-                                         "InlineDisableException");
+    expect_disable_exceptions_reconciled(
+        page,
+        install_leaf(page, "InlineDisableException"),
+        true,
+        "InlineDisableException"
+    );
 }
 
 TEST(HookBackendException, MidDisableReconcilesBeforeAndAfterMutationThrows)
@@ -1438,8 +1516,12 @@ TEST(HookBackendException, MidDisableReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_disable_exceptions_reconciled(page, install_mid_leaf(page, "MidDisableException"), false,
-                                         "MidDisableException");
+    expect_disable_exceptions_reconciled(
+        page,
+        install_mid_leaf(page, "MidDisableException"),
+        false,
+        "MidDisableException"
+    );
 }
 
 TEST(HookBackendException, InlinePostDisableForeignRetainsRecoverableActiveState)
@@ -1448,8 +1530,13 @@ TEST(HookBackendException, InlinePostDisableForeignRetainsRecoverableActiveState
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_post_disable_uncertainty_reconciled(page, install_leaf(page, "InlineDisableForeign"), true,
-                                               PostDisableWitness::Foreign, "InlineDisableForeign");
+    expect_post_disable_uncertainty_reconciled(
+        page,
+        install_leaf(page, "InlineDisableForeign"),
+        true,
+        PostDisableWitness::Foreign,
+        "InlineDisableForeign"
+    );
 }
 
 TEST(HookBackendException, MidPostDisableIndeterminateRetainsRecoverableActiveState)
@@ -1458,8 +1545,13 @@ TEST(HookBackendException, MidPostDisableIndeterminateRetainsRecoverableActiveSt
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_post_disable_uncertainty_reconciled(page, install_mid_leaf(page, "MidDisableIndeterminate"), false,
-                                               PostDisableWitness::Indeterminate, "MidDisableIndeterminate");
+    expect_post_disable_uncertainty_reconciled(
+        page,
+        install_mid_leaf(page, "MidDisableIndeterminate"),
+        false,
+        PostDisableWitness::Indeterminate,
+        "MidDisableIndeterminate"
+    );
 }
 
 TEST(HookBackendException, InlineRollbackReconcilesBeforeAndAfterMutationThrows)
@@ -1468,8 +1560,12 @@ TEST(HookBackendException, InlineRollbackReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_rollback_exceptions_reconciled(page, install_leaf(page, "InlineRollbackException"), true,
-                                          "InlineRollbackException");
+    expect_rollback_exceptions_reconciled(
+        page,
+        install_leaf(page, "InlineRollbackException"),
+        true,
+        "InlineRollbackException"
+    );
 }
 
 TEST(HookBackendException, MidRollbackReconcilesBeforeAndAfterMutationThrows)
@@ -1478,8 +1574,12 @@ TEST(HookBackendException, MidRollbackReconcilesBeforeAndAfterMutationThrows)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_rollback_exceptions_reconciled(page, install_mid_leaf(page, "MidRollbackException"), false,
-                                          "MidRollbackException");
+    expect_rollback_exceptions_reconciled(
+        page,
+        install_mid_leaf(page, "MidRollbackException"),
+        false,
+        "MidRollbackException"
+    );
 }
 
 TEST(HookBackendException, MidPostRollbackForeignRetainsRecoverableActiveState)
@@ -1497,8 +1597,11 @@ TEST(HookBackendException, InlineTeardownReconcilesAfterMutationThrow)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_teardown_after_mutation_exception_reconciled(page, install_leaf(page, "InlineTeardownException"),
-                                                        "InlineTeardownException");
+    expect_teardown_after_mutation_exception_reconciled(
+        page,
+        install_leaf(page, "InlineTeardownException"),
+        "InlineTeardownException"
+    );
 }
 
 TEST(HookBackendException, MidTeardownReconcilesAfterMutationThrow)
@@ -1507,8 +1610,11 @@ TEST(HookBackendException, MidTeardownReconcilesAfterMutationThrow)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
-    expect_teardown_after_mutation_exception_reconciled(page, install_mid_leaf(page, "MidTeardownException"),
-                                                        "MidTeardownException");
+    expect_teardown_after_mutation_exception_reconciled(
+        page,
+        install_mid_leaf(page, "MidTeardownException"),
+        "MidTeardownException"
+    );
 }
 
 TEST(HookBackendException, OriginalWitnessMakesPersistentTeardownThrowDestructionSafe)
@@ -1539,8 +1645,10 @@ TEST(HookBackendException, OriginalWitnessMakesPersistentTeardownThrowDestructio
     EXPECT_EQ(read_prologue_span(page), pristine);
     EXPECT_EQ(armed_population(), armed_before);
     EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-              leaks_before);
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        leaks_before
+    );
 }
 
 TEST(HookBackendException, TeardownPinLoggingContainsRealAllocationFailure)
@@ -1564,8 +1672,10 @@ TEST(HookBackendException, TeardownPinLoggingContainsRealAllocationFailure)
     }
 
     EXPECT_EQ(DetourModKit::detail::backend_toggle_exception_catches_for_test(), 1u);
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-              leaks_before + 1);
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        leaks_before + 1
+    );
     EXPECT_TRUE(is_target_hooked(Address{page.addr(0)}));
     page.abandon();
 }
@@ -1615,7 +1725,8 @@ TEST(HookBackendOwnership, EnableRollbackDoesNotOverwriteForeignPrologue)
         // Teardown sees the same foreign window and pins rather than restoring, so the bytes survive that too.
         EXPECT_EQ(
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-            leaks_before + 1);
+            leaks_before + 1
+        );
         EXPECT_EQ(read_prologue(page), foreign);
         pinned_target = page.addr();
         // The ledger keeps this address pinned for process life, so the fixture must not hand it back to the allocator.
@@ -1668,7 +1779,8 @@ namespace
                     probe.hook.reset();
                     ++probe.destroyed;
                 }
-            });
+            }
+        );
         probe.comparer = DetourModKit::diagnostics::hook_lifecycle().subscribe(
             [&probe, transition](const HookLifecycleEvent &event)
             {
@@ -1686,7 +1798,8 @@ namespace
                 {
                     ++probe.mismatches;
                 }
-            });
+            }
+        );
     }
 
     /// Returns a hook name beyond every supported small-string capacity.
@@ -1803,7 +1916,8 @@ TEST(HookLifecycleName, AllocationFailurePublishesEmptyName)
                 ++disabled_events;
                 empty_names += event.name.empty() ? 1u : 0u;
             }
-        });
+        }
+    );
 
     Result<void> disabled;
     {

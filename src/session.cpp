@@ -149,9 +149,10 @@ namespace DetourModKit
 
         // This trivial pointer needs no raw-storage treatment.
         BootstrapReadyFn s_on_ready_fn = nullptr;
-        static_assert(std::is_trivially_copyable_v<BootstrapReadyFn> &&
-                          std::is_trivially_destructible_v<BootstrapReadyFn>,
-                      "the DllMain attach callback must stage no consumer capture (see bootstrap_attach).");
+        static_assert(
+            std::is_trivially_copyable_v<BootstrapReadyFn> && std::is_trivially_destructible_v<BootstrapReadyFn>,
+            "the DllMain attach callback must stage no consumer capture (see bootstrap_attach)."
+        );
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // Counts signals that reached SetEvent on a handle the kernel had already invalidated. Admission is supposed to
@@ -174,8 +175,10 @@ namespace DetourModKit
                 {
                     return;
                 }
-            } while (!s_shutdown_event_access.compare_exchange_weak(access, access + 1, std::memory_order_acq_rel,
-                                                                    std::memory_order_acquire));
+            } while (
+                !s_shutdown_event_access
+                     .compare_exchange_weak(access, access + 1, std::memory_order_acq_rel, std::memory_order_acquire)
+            );
 
             if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
             {
@@ -267,8 +270,14 @@ namespace DetourModKit
                 return false;
             }
             wchar_t expected_buf[MAX_PATH];
-            const int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, expected.data(),
-                                                     static_cast<int>(expected.size()), expected_buf, MAX_PATH - 1);
+            const int wide_len = MultiByteToWideChar(
+                CP_UTF8,
+                MB_ERR_INVALID_CHARS,
+                expected.data(),
+                static_cast<int>(expected.size()),
+                expected_buf,
+                MAX_PATH - 1
+            );
             if (wide_len <= 0)
             {
                 return false;
@@ -347,8 +356,8 @@ namespace DetourModKit
             return MutexAcquire::Acquired;
         }
 
-        [[nodiscard]] Result<HANDLE> begin_session(const ModInfo &info, const char *operation,
-                                                   detail::LoaderContext loader_context) noexcept
+        [[nodiscard]] Result<HANDLE>
+        begin_session(const ModInfo &info, const char *operation, detail::LoaderContext loader_context) noexcept
         {
             if (!detail::lifecycle().begin_start())
             {
@@ -511,19 +520,27 @@ namespace DetourModKit
 
                 try
                 {
-                    Logger::configure(s_bootstrap_logger_info.name_view(), s_bootstrap_logger_info.log_file_view(),
-                                      DEFAULT_TIMESTAMP_FORMAT, s_bootstrap_logger_info.log_open_mode);
+                    Logger::configure(
+                        s_bootstrap_logger_info.name_view(),
+                        s_bootstrap_logger_info.log_file_view(),
+                        DEFAULT_TIMESTAMP_FORMAT,
+                        s_bootstrap_logger_info.log_open_mode
+                    );
                     DetourModKit::log().enable_async_mode(s_bootstrap_logger_info.logger_config());
                 }
                 catch (const std::bad_alloc &)
                 {
-                    OutputDebugStringA("DetourModKit: bootstrap logger setup ran out of memory; continuing without "
-                                       "guaranteed logging.\n");
+                    OutputDebugStringA(
+                        "DetourModKit: bootstrap logger setup ran out of memory; continuing without "
+                        "guaranteed logging.\n"
+                    );
                 }
                 catch (...)
                 {
-                    OutputDebugStringA("DetourModKit: bootstrap logger setup failed; continuing without guaranteed "
-                                       "logging.\n");
+                    OutputDebugStringA(
+                        "DetourModKit: bootstrap logger setup failed; continuing without guaranteed "
+                        "logging.\n"
+                    );
                 }
                 detail::lifecycle().mark_running();
 
@@ -534,8 +551,11 @@ namespace DetourModKit
                         Result<void> ready = ready_fn != nullptr ? ready_fn(session) : s_on_ready(session);
                         if (!ready)
                         {
-                            (void)log().try_log(LogLevel::Error, "bootstrap: on_ready reported failure: {}",
-                                                ready.error().message());
+                            (void)log().try_log(
+                                LogLevel::Error,
+                                "bootstrap: on_ready reported failure: {}",
+                                ready.error().message()
+                            );
                         }
                     }
                     catch (const std::exception &e)
@@ -590,16 +610,16 @@ namespace DetourModKit
         }
 
         // A generation publishes one callback representation.
-        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info, ReadyCallback *rich_on_ready,
-                                                  BootstrapReadyFn fn_on_ready) noexcept
+        [[nodiscard]] Result<void>
+        bootstrap_core(const ModInfo &info, ReadyCallback *rich_on_ready, BootstrapReadyFn fn_on_ready) noexcept
         {
             // Claim the slot before touching any other static. A drain nulls the worker handle and the shutdown event
             // early but publishes Drained only after it has also retired the init callback and the module identity, so
             // admitting on those handles would let this generation publish into the tail of that retirement and have
             // its own callback destroyed and its own Ready overwritten by the drainer that is still finishing.
             BootstrapState expected = BootstrapState::Drained;
-            if (!s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Starting,
-                                                           std::memory_order_acq_rel))
+            if (!s_bootstrap_state
+                     .compare_exchange_strong(expected, BootstrapState::Starting, std::memory_order_acq_rel))
             {
                 if (expected == BootstrapState::Draining)
                 {
@@ -677,8 +697,8 @@ namespace DetourModKit
             // pending decrement to underflow the word. Reopening before the handle is published also keeps a signaler
             // admitted after this point from ever loading a half-published pointer.
             std::uint64_t retired_access = SHUTDOWN_EVENT_RETIRED;
-            if (!s_shutdown_event_access.compare_exchange_strong(retired_access, 0, std::memory_order_acq_rel,
-                                                                 std::memory_order_acquire))
+            if (!s_shutdown_event_access
+                     .compare_exchange_strong(retired_access, 0, std::memory_order_acq_rel, std::memory_order_acquire))
             {
                 CloseHandle(shutdown_event);
                 unwind_bootstrap(*instance_mutex);
@@ -923,8 +943,8 @@ namespace DetourModKit
             // A drained unload has no handles left. Only its terminal transition remains.
             if (expected == BootstrapState::Drained)
             {
-                (void)s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Detached,
-                                                                std::memory_order_acq_rel);
+                (void)s_bootstrap_state
+                    .compare_exchange_strong(expected, BootstrapState::Detached, std::memory_order_acq_rel);
             }
             return;
         }
@@ -1047,8 +1067,10 @@ namespace DetourModKit
     }
 #endif
 
-    LogicDllUnloadStatus prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
-                                                  std::chrono::milliseconds timeout) noexcept
+    LogicDllUnloadStatus prepare_logic_dll_unload(
+        std::span<const std::string_view> binding_names,
+        std::chrono::milliseconds timeout
+    ) noexcept
     {
         if (!detail::blocking_teardown_permitted())
         {

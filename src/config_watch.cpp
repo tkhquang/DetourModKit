@@ -147,7 +147,8 @@ namespace DetourModKit
             {
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 return !DetourModKit::detail::blocking_teardown_permitted(
-                    DetourModKit::detail::g_config_reload_loader_lock_override);
+                    DetourModKit::detail::g_config_reload_loader_lock_override
+                );
 #else
                 return !DetourModKit::detail::blocking_teardown_permitted();
 #endif
@@ -193,7 +194,8 @@ namespace DetourModKit
                     Channel *channel = m_channel.get();
                     m_channel->worker = std::make_unique<DetourModKit::StoppableWorker>(
                         "ConfigReloadServicer",
-                        [channel](std::stop_token st) { service_loop(*channel, std::move(st)); });
+                        [channel](std::stop_token st) { service_loop(*channel, std::move(st)); }
+                    );
                 }
 
                 ~ReloadServicer() noexcept
@@ -219,7 +221,8 @@ namespace DetourModKit
                         // The detached service_loop can still read the Channel, so retain it for process lifetime.
                         (void)m_channel.release();
                         DetourModKit::diagnostics::record_intentional_leak(
-                            DetourModKit::diagnostics::LeakSubsystem::Worker);
+                            DetourModKit::diagnostics::LeakSubsystem::Worker
+                        );
                         return;
                     }
 
@@ -259,7 +262,8 @@ namespace DetourModKit
                     {
                         (void)m_channel.release();
                         DetourModKit::diagnostics::record_intentional_leak(
-                            DetourModKit::diagnostics::LeakSubsystem::Worker);
+                            DetourModKit::diagnostics::LeakSubsystem::Worker
+                        );
                         return;
                     }
                     m_channel.reset();
@@ -349,15 +353,17 @@ namespace DetourModKit
                     channel.worker_tid.store(std::this_thread::get_id(), std::memory_order_release);
 
                     // Wake the CV on a stop request so the blocked wait exits promptly.
-                    std::stop_callback stop_cb(st,
-                                               [&channel]() -> void
-                                               {
-                                                   {
-                                                       std::lock_guard<std::mutex> lock(channel.mutex);
-                                                       channel.shutdown.store(true, std::memory_order_release);
-                                                   }
-                                                   channel.cv.notify_all();
-                                               });
+                    std::stop_callback stop_cb(
+                        st,
+                        [&channel]() -> void
+                        {
+                            {
+                                std::lock_guard<std::mutex> lock(channel.mutex);
+                                channel.shutdown.store(true, std::memory_order_release);
+                            }
+                            channel.cv.notify_all();
+                        }
+                    );
 
                     while (!st.stop_requested() && !channel.shutdown.load(std::memory_order_acquire))
                     {
@@ -365,25 +371,31 @@ namespace DetourModKit
                             std::unique_lock<std::mutex> lock(channel.mutex);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                             if (auto *gate = DetourModKit::detail::g_config_reload_worker_mutex_gate_probe.load(
-                                    std::memory_order_acquire))
+                                    std::memory_order_acquire
+                                ))
                             {
                                 DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(
-                                    true, std::memory_order_release);
+                                    true,
+                                    std::memory_order_release
+                                );
                                 while (gate->load(std::memory_order_acquire))
                                 {
                                     std::this_thread::yield();
                                 }
                                 DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(
-                                    false, std::memory_order_release);
+                                    false,
+                                    std::memory_order_release
+                                );
                             }
 #endif
-                            channel.cv.wait(lock,
-                                            [&]()
-                                            {
-                                                return st.stop_requested() ||
-                                                       channel.shutdown.load(std::memory_order_acquire) ||
-                                                       channel.reload_requested.load(std::memory_order_acquire);
-                                            });
+                            channel.cv.wait(
+                                lock,
+                                [&]()
+                                {
+                                    return st.stop_requested() || channel.shutdown.load(std::memory_order_acquire) ||
+                                           channel.reload_requested.load(std::memory_order_acquire);
+                                }
+                            );
                         }
 
                         if (st.stop_requested() || channel.shutdown.load(std::memory_order_acquire))
@@ -408,13 +420,14 @@ namespace DetourModKit
                             }
                             catch (const std::exception &e)
                             {
-                                (void)logger.try_log(LogLevel::Error, "Config: reload servicer caught exception: {}",
-                                                     e.what());
+                                (void)logger
+                                    .try_log(LogLevel::Error, "Config: reload servicer caught exception: {}", e.what());
                             }
                             catch (...)
                             {
-                                (void)logger.try_log(LogLevel::Error,
-                                                     "Config: reload servicer caught unknown exception.");
+                                (
+                                    void
+                                )logger.try_log(LogLevel::Error, "Config: reload servicer caught unknown exception.");
                             }
                         }
                     }
@@ -423,7 +436,8 @@ namespace DetourModKit
                     // Holds the body between its last channel.mutex use and the exit guard below. A concurrent teardown
                     // observes a worker that is provably live and lacks an exit publication.
                     if (auto *gate = DetourModKit::detail::g_config_reload_worker_exit_gate_probe.load(
-                            std::memory_order_acquire))
+                            std::memory_order_acquire
+                        ))
                     {
                         while (gate->load(std::memory_order_acquire))
                         {
@@ -446,8 +460,8 @@ namespace DetourModKit
             // start_watcher_locked creates an auto-reload watcher on a resolved path, then connects the persisted user
             // callback. The caller must hold get_watcher_mutex(). enable_auto_reload() and load()'s re-point use this
             // single construction site, so the presence guard and construction are atomic.
-            [[nodiscard]] AutoReloadStatus start_watcher_locked(const std::string &resolved_path,
-                                                                std::chrono::milliseconds debounce)
+            [[nodiscard]] AutoReloadStatus
+            start_watcher_locked(const std::string &resolved_path, std::chrono::milliseconds debounce)
             {
                 auto &watcher = get_config_watcher();
                 if (detail::background_reloads_disabled())
@@ -458,15 +472,18 @@ namespace DetourModKit
                 // the worker publishes its active state.
                 if (watcher)
                 {
-                    log().warning("Config: Auto-reload watcher start skipped because a watcher is already present; "
-                                  "call disable_auto_reload() first.");
+                    log().warning(
+                        "Config: Auto-reload watcher start skipped because a watcher is already present; "
+                        "call disable_auto_reload() first."
+                    );
                     return AutoReloadStatus::AlreadyRunning;
                 }
 
                 // Copy the persisted user callback into the reload lambda. The persisted slot must survive. A later
                 // load()-driven re-point can then reconstruct an equivalent watcher.
                 watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
-                    resolved_path, debounce,
+                    resolved_path,
+                    debounce,
                     [user_cb = get_reload_user_callback(), birth_epoch = detail::current_reload_lifecycle_epoch()]()
                     {
                         // Gate the whole pass on the unload latch and this watcher's lifecycle epoch. The guard holds
@@ -485,7 +502,8 @@ namespace DetourModKit
                         {
                             user_cb(setters_ran);
                         }
-                    });
+                    }
+                );
 
                 if (!watcher->start())
                 {
@@ -524,10 +542,12 @@ namespace DetourModKit
                         {
                             // Inline watcher destruction self-joins the worker. Log and skip the re-point under
                             // disable_auto_reload()'s self-join rule.
-                            (void)log().try_log(LogLevel::Error,
-                                                "Config: load() switched the config file on the watcher thread; not "
-                                                "re-pointing auto-reload to avoid a self-join. Re-point from another "
-                                                "thread via disable_auto_reload()/enable_auto_reload().");
+                            (void)log().try_log(
+                                LogLevel::Error,
+                                "Config: load() switched the config file on the watcher thread; not "
+                                "re-pointing auto-reload to avoid a self-join. Re-point from another "
+                                "thread via disable_auto_reload()/enable_auto_reload()."
+                            );
                         }
                         else
                         {
@@ -665,8 +685,10 @@ namespace DetourModKit
                 // before this check makes a later re-point switch callbacks silently.
                 if (get_config_watcher())
                 {
-                    logger.warning("Config: enable_auto_reload() called while a watcher is already present; "
-                                   "call disable_auto_reload() first.");
+                    logger.warning(
+                        "Config: enable_auto_reload() called while a watcher is already present; "
+                        "call disable_auto_reload() first."
+                    );
                     return AutoReloadStatus::AlreadyRunning;
                 }
 
@@ -682,8 +704,11 @@ namespace DetourModKit
                 return status;
             }
 
-            logger.info("Config: Auto-reload enabled for {} (debounce {} ms)", resolved_path,
-                        static_cast<long long>(debounce.count()));
+            logger.info(
+                "Config: Auto-reload enabled for {} (debounce {} ms)",
+                resolved_path,
+                static_cast<long long>(debounce.count())
+            );
             return AutoReloadStatus::Started;
         }
 
@@ -693,9 +718,11 @@ namespace DetourModKit
             // the pass lock this thread holds. Refuse to avoid deadlock.
             if (detail::reload_apply_lock_held_by_current_thread())
             {
-                (void)log().try_log(LogLevel::Error,
-                                    "Config: disable_auto_reload() called from a bound setter; ignoring to avoid "
-                                    "joining a watcher that may be waiting for the active reload pass.");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "Config: disable_auto_reload() called from a bound setter; ignoring to avoid "
+                    "joining a watcher that may be waiting for the active reload pass."
+                );
                 return;
             }
 
@@ -710,7 +737,8 @@ namespace DetourModKit
                     (void)log().try_log(
                         LogLevel::Error,
                         "Config: disable_auto_reload() called from the watcher thread; ignoring to avoid self-join "
-                        "deadlock. Call from a different thread or disable the hotkey binding instead.");
+                        "deadlock. Call from a different thread or disable the hotkey binding instead."
+                    );
                     return;
                 }
                 to_drop = std::move(watcher);
@@ -727,8 +755,10 @@ namespace DetourModKit
             // An empty or opt-out default leaves the hotkey inert. Return false to expose that state.
             if (default_combo.empty())
             {
-                log().warning("Config: reload_hotkey('{}', '<empty>') rejected; provide a non-empty default combo.",
-                              std::string(ini_key));
+                log().warning(
+                    "Config: reload_hotkey('{}', '<empty>') rejected; provide a non-empty default combo.",
+                    std::string(ini_key)
+                );
                 return false;
             }
 
@@ -760,7 +790,10 @@ namespace DetourModKit
             }
 
             input::BindingGuard guard = press_combo(
-                "Input", ini_key, "Config reload hotkey", binding_name,
+                "Input",
+                ini_key,
+                "Config reload hotkey",
+                binding_name,
                 [servicer]() noexcept
                 {
                     // Press callbacks run on the poll thread and must return promptly. Defer the reload to the
@@ -770,7 +803,9 @@ namespace DetourModKit
                         servicer->request_reload();
                     }
                 },
-                default_combo, std::nullopt);
+                default_combo,
+                std::nullopt
+            );
             input::BindingGuard replaced_guard;
             bool replaced_existing = false;
 

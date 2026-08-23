@@ -96,7 +96,8 @@ namespace
                 .name = std::move(name),
                 .target = Address{reinterpret_cast<std::uintptr_t>(target)},
             },
-            detour);
+            detour
+        );
         if (!hook.has_value())
         {
             return hook;
@@ -158,7 +159,8 @@ TEST_F(MidHookDrainTest, ExpiredCallbackDrainPinsTheBackendAndBoundsTeardown)
         {
             hook.reset();
             teardown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const auto teardown_deadline = started + std::chrono::seconds(30);
     while (!teardown_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < teardown_deadline)
     {
@@ -220,7 +222,8 @@ TEST_F(MidHookDrainTest, ExpiredAdapterEntryDrainPinsTheSlotAndBoundsTeardown)
         {
             hook.reset();
             teardown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const auto teardown_deadline = started + std::chrono::seconds(30);
     while (!teardown_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < teardown_deadline)
     {

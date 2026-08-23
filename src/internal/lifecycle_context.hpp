@@ -121,8 +121,10 @@ namespace DetourModKit::detail
     };
 
     // module_handle() is callback-safe and therefore cannot use an atomic implementation backed by a hidden lock.
-    static_assert(std::atomic<LifecycleContext::Module>::is_always_lock_free,
-                  "the module identity must be a lock-free atomic pointer.");
+    static_assert(
+        std::atomic<LifecycleContext::Module>::is_always_lock_free,
+        "the module identity must be a lock-free atomic pointer."
+    );
 
     /// The one process-global session control block.
     [[nodiscard]] LifecycleContext &lifecycle() noexcept;

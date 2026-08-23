@@ -63,8 +63,11 @@ namespace DetourModKit
         void copy_foreign_bytes(std::byte *destination, const std::byte *source, std::size_t size) noexcept
         {
 #if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
-            __movsb(reinterpret_cast<unsigned char *>(destination), reinterpret_cast<const unsigned char *>(source),
-                    size);
+            __movsb(
+                reinterpret_cast<unsigned char *>(destination),
+                reinterpret_cast<const unsigned char *>(source),
+                size
+            );
 #else
             std::memcpy(destination, source, size);
 #endif
@@ -75,8 +78,8 @@ namespace DetourModKit
         // taken as a value here rather than re-read later from a span that a concurrent unmap may have invalidated.
         // An over-long span yields truncated evidence with no bytes at all, because a captured prefix would compare
         // equal against a prefix baseline and quietly authorize a mutation on partial evidence.
-        [[nodiscard]] scan::WinningEvidence capture_winning_evidence(const std::byte *start,
-                                                                     const std::byte *end) noexcept
+        [[nodiscard]] scan::WinningEvidence
+        capture_winning_evidence(const std::byte *start, const std::byte *end) noexcept
         {
             scan::WinningEvidence evidence{};
             if (start == nullptr || end == nullptr || end <= start)
@@ -94,10 +97,14 @@ namespace DetourModKit
             return evidence;
         }
 
-        [[nodiscard]] detail::InstructionSnapshot
-        capture_instruction_snapshot(const std::byte *start, const std::byte *end, const std::byte *point,
-                                     std::uintptr_t capture_limit, std::uint8_t requested_length,
-                                     const scan::WinningEvidence &evidence) noexcept
+        [[nodiscard]] detail::InstructionSnapshot capture_instruction_snapshot(
+            const std::byte *start,
+            const std::byte *end,
+            const std::byte *point,
+            std::uintptr_t capture_limit,
+            std::uint8_t requested_length,
+            const scan::WinningEvidence &evidence
+        ) noexcept
         {
             detail::InstructionSnapshot snapshot{};
             if (requested_length == 0 || requested_length > scan::MAX_X86_INSTRUCTION_LENGTH || start == nullptr ||
@@ -122,8 +129,11 @@ namespace DetourModKit
                 copy_foreign_bytes(snapshot.bytes.data(), evidence.bytes.data() + point_offset, copy_length);
                 if (copy_length < requested_length)
                 {
-                    copy_foreign_bytes(snapshot.bytes.data() + copy_length, point + copy_length,
-                                       requested_length - copy_length);
+                    copy_foreign_bytes(
+                        snapshot.bytes.data() + copy_length,
+                        point + copy_length,
+                        requested_length - copy_length
+                    );
                 }
             }
             else
@@ -144,11 +154,20 @@ namespace DetourModKit
         // already counted there, so it is skipped here. Comparing the match's true end (RawMatch::end), not a fixed
         // pattern length, is what keeps this correct for a variable-length bounded-jump match, where a fixed-length
         // overlap would double-count a short match near the boundary.
-        bool scan_region_for_match(const std::byte *region_start, std::size_t scan_size,
-                                   const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
-                                   std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
-                                   std::uintptr_t snapshot_limit, std::uint8_t instruction_snapshot_length,
-                                   ScanTally &tally, bool &out_budget_exhausted) noexcept
+        bool scan_region_for_match(
+            const std::byte *region_start,
+            std::size_t scan_size,
+            const detail::EnginePattern &pattern,
+            const ExclusionSet &exclusions,
+            std::uintptr_t count_floor,
+            std::size_t target,
+            std::size_t cap,
+            bool capture,
+            std::uintptr_t snapshot_limit,
+            std::uint8_t instruction_snapshot_length,
+            ScanTally &tally,
+            bool &out_budget_exhausted
+        ) noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
             // Inside the guard's frame, so an armed address that the declared span does not cover proves the guard
@@ -185,9 +204,14 @@ namespace DetourModKit
                         }
                         if (instruction_snapshot_length != 0)
                         {
-                            tally.nth_instruction =
-                                capture_instruction_snapshot(match.start, match.end, match.point, snapshot_limit,
-                                                             instruction_snapshot_length, tally.nth_evidence);
+                            tally.nth_instruction = capture_instruction_snapshot(
+                                match.start,
+                                match.end,
+                                match.point,
+                                snapshot_limit,
+                                instruction_snapshot_length,
+                                tally.nth_evidence
+                            );
                         }
                     }
                     if (tally.seen >= cap)
@@ -217,11 +241,21 @@ namespace DetourModKit
         // than the concurrent unmap this guard exists to absorb, so it reaches the host's handlers instead of being
         // recorded as a faulted region. A 32-bit build is rejected outright by the architecture gate in defines.hpp,
         // so only these two x64 arms exist.
-        bool scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
-                                 const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
-                                 std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
-                                 std::uintptr_t snapshot_limit, std::uint8_t instruction_snapshot_length,
-                                 ScanTally &tally, bool &out_faulted, bool &out_budget_exhausted) noexcept
+        bool scan_region_guarded(
+            const std::byte *region_start,
+            std::size_t scan_size,
+            const detail::EnginePattern &pattern,
+            const ExclusionSet &exclusions,
+            std::uintptr_t count_floor,
+            std::size_t target,
+            std::size_t cap,
+            bool capture,
+            std::uintptr_t snapshot_limit,
+            std::uint8_t instruction_snapshot_length,
+            ScanTally &tally,
+            bool &out_faulted,
+            bool &out_budget_exhausted
+        ) noexcept
         {
             out_faulted = false;
             const std::uintptr_t span_lo = reinterpret_cast<std::uintptr_t>(region_start);
@@ -242,9 +276,20 @@ namespace DetourModKit
 #ifdef _MSC_VER
             __try
             {
-                return scan_region_for_match(region_start, scan_size, pattern, exclusions, count_floor, target, cap,
-                                             capture, capture_limit, instruction_snapshot_length, tally,
-                                             out_budget_exhausted);
+                return scan_region_for_match(
+                    region_start,
+                    scan_size,
+                    pattern,
+                    exclusions,
+                    count_floor,
+                    target,
+                    cap,
+                    capture,
+                    capture_limit,
+                    instruction_snapshot_length,
+                    tally,
+                    out_budget_exhausted
+                );
             }
             __except (detail::guarded_range_fault_filter(GetExceptionInformation(), span_lo, capture_limit))
             {
@@ -271,21 +316,39 @@ namespace DetourModKit
                 ScanTally *tally;
                 bool *budget_exhausted;
                 bool cap_reached;
-            } scan_ctx{region_start,  scan_size,
-                       &pattern,      &exclusions,
-                       count_floor,   target,
-                       cap,           capture,
-                       capture_limit, instruction_snapshot_length,
-                       &tally,        &out_budget_exhausted,
-                       false};
+            } scan_ctx{
+                region_start,
+                scan_size,
+                &pattern,
+                &exclusions,
+                count_floor,
+                target,
+                cap,
+                capture,
+                capture_limit,
+                instruction_snapshot_length,
+                &tally,
+                &out_budget_exhausted,
+                false
+            };
 
             const auto run_scan = [](void *opaque) noexcept -> void
             {
                 auto *context = static_cast<ScanContext *>(opaque);
                 context->cap_reached = scan_region_for_match(
-                    context->region_start, context->scan_size, *context->pattern, *context->exclusions,
-                    context->count_floor, context->target, context->cap, context->capture, context->snapshot_limit,
-                    context->instruction_snapshot_length, *context->tally, *context->budget_exhausted);
+                    context->region_start,
+                    context->scan_size,
+                    *context->pattern,
+                    *context->exclusions,
+                    context->count_floor,
+                    context->target,
+                    context->cap,
+                    context->capture,
+                    context->snapshot_limit,
+                    context->instruction_snapshot_length,
+                    *context->tally,
+                    *context->budget_exhausted
+                );
             };
 
             if (detail::run_guarded_region(span_lo, capture_limit, run_scan, &scan_ctx))
@@ -319,9 +382,13 @@ namespace DetourModKit
         // floor, and only a match whose end reaches past it is counted. The floor, not the carry width, is what
         // prevents a double count, which is why a variable-length bounded-jump match stays correctly counted across
         // the split.
-        detail::MatchResult scan_regions_filtered(const detail::EnginePattern &pattern, const detail::ScanQuery &query,
-                                                  DWORD accept_mask, std::uintptr_t window_lo,
-                                                  std::uintptr_t window_hi) noexcept
+        detail::MatchResult scan_regions_filtered(
+            const detail::EnginePattern &pattern,
+            const detail::ScanQuery &query,
+            DWORD accept_mask,
+            std::uintptr_t window_lo,
+            std::uintptr_t window_hi
+        ) noexcept
         {
             ScanTally tally;
 
@@ -337,13 +404,17 @@ namespace DetourModKit
             detail::add_engine_pattern_storage(engine_owned, pattern);
             if (query.capture_evidence)
             {
-                engine_owned.add(reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
-                                 tally.nth_evidence.bytes.size());
+                engine_owned.add(
+                    reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
+                    tally.nth_evidence.bytes.size()
+                );
             }
             if (query.instruction_snapshot_length != 0)
             {
-                engine_owned.add(reinterpret_cast<std::uintptr_t>(tally.nth_instruction.bytes.data()),
-                                 tally.nth_instruction.bytes.size());
+                engine_owned.add(
+                    reinterpret_cast<std::uintptr_t>(tally.nth_instruction.bytes.data()),
+                    tally.nth_instruction.bytes.size()
+                );
             }
             const ExclusionSet exclusions{engine_owned, query.exclusions};
 
@@ -408,10 +479,21 @@ namespace DetourModKit
                         // backstops a concurrent decommit / reprotect that could fault the read after the gate. scan_lo
                         // is the count floor: matches that ended before it were already tallied by the previous region.
                         bool region_budget_exhausted = false;
-                        cap_reached =
-                            scan_region_guarded(region_start, scan_size, pattern, exclusions, scan_lo, target, cap,
-                                                query.capture_evidence, window_hi, query.instruction_snapshot_length,
-                                                tally, region_faulted, region_budget_exhausted);
+                        cap_reached = scan_region_guarded(
+                            region_start,
+                            scan_size,
+                            pattern,
+                            exclusions,
+                            scan_lo,
+                            target,
+                            cap,
+                            query.capture_evidence,
+                            window_hi,
+                            query.instruction_snapshot_length,
+                            tally,
+                            region_faulted,
+                            region_budget_exhausted
+                        );
                         // A spent bounded-jump backtracking budget makes any occurrence count a lower bound, exactly
                         // like a skipped faulted region, so it feeds the same incomplete signal.
                         budget_exhausted_total = budget_exhausted_total || region_budget_exhausted;
@@ -449,7 +531,8 @@ namespace DetourModKit
                     (void)log().try_log(
                         LogLevel::Debug,
                         "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
-                        faulted_regions);
+                        faulted_regions
+                    );
                 }
                 catch (...)
                 {
@@ -458,19 +541,27 @@ namespace DetourModKit
                 // The dispatcher is lazy and can allocate on first use, so diagnostics must never change the result.
                 try
                 {
-                    diagnostics::scanner_faults().emit_safe(diagnostics::ScannerFaultEvent{
-                        .faulted_regions = faulted_regions,
-                        .window_low = window_lo,
-                        .window_high = window_hi,
-                    });
+                    diagnostics::scanner_faults().emit_safe(
+                        diagnostics::ScannerFaultEvent{
+                            .faulted_regions = faulted_regions,
+                            .window_low = window_lo,
+                            .window_high = window_hi,
+                        }
+                    );
                 }
                 catch (...)
                 {
                 }
             }
-            return detail::MatchResult{tally.nth_point,       tally.nth_span, tally.nth_evidence,
-                                       tally.nth_instruction, tally.seen,     faulted_regions > 0,
-                                       budget_exhausted_total};
+            return detail::MatchResult{
+                tally.nth_point,
+                tally.nth_span,
+                tally.nth_evidence,
+                tally.nth_instruction,
+                tally.seen,
+                faulted_regions > 0,
+                budget_exhausted_total
+            };
         }
 
         // Base protections accepted by the executable-only sweeps: the three page variants that grant execute *and*
@@ -484,8 +575,8 @@ namespace DetourModKit
         constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
 
         // Shared precondition for every page-gated entry point.
-        [[nodiscard]] bool query_is_scannable(const detail::EnginePattern &pattern,
-                                              const detail::ScanQuery &query) noexcept
+        [[nodiscard]] bool
+        query_is_scannable(const detail::EnginePattern &pattern, const detail::ScanQuery &query) noexcept
         {
             return !pattern.empty() && query.occurrence != 0;
         }
@@ -536,8 +627,11 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    bool detail::readable_scan_is_authoritative(detail::ModuleSpan range, scan::Pages pages,
-                                                std::span<const Region> exclusions) noexcept
+    bool detail::readable_scan_is_authoritative(
+        detail::ModuleSpan range,
+        scan::Pages pages,
+        std::span<const Region> exclusions
+    ) noexcept
     {
         if (pages != scan::Pages::Readable || !exclusions.empty())
         {
@@ -551,8 +645,11 @@ namespace DetourModKit
         return span_is_single_allocation(range);
     }
 
-    detail::MatchResult detail::scan_module_executable(const detail::EnginePattern &pattern, detail::ModuleSpan range,
-                                                       const detail::ScanQuery &query) noexcept
+    detail::MatchResult detail::scan_module_executable(
+        const detail::EnginePattern &pattern,
+        detail::ModuleSpan range,
+        const detail::ScanQuery &query
+    ) noexcept
     {
         // EXECUTABLE_PAGE_FLAGS confines the match to code, so a data-page hit cannot pose as an instruction site.
         if (!query_is_scannable(pattern, query) || !range.valid())
@@ -562,8 +659,11 @@ namespace DetourModKit
         return scan_regions_filtered(pattern, query, EXECUTABLE_PAGE_FLAGS, range.base, range.end);
     }
 
-    detail::MatchResult detail::scan_module_readable(const detail::EnginePattern &pattern, detail::ModuleSpan range,
-                                                     const detail::ScanQuery &query) noexcept
+    detail::MatchResult detail::scan_module_readable(
+        const detail::EnginePattern &pattern,
+        detail::ModuleSpan range,
+        const detail::ScanQuery &query
+    ) noexcept
     {
         // READABLE_PAGE_FLAGS lets one pass cover both .text and .rdata / .data candidates.
         if (!query_is_scannable(pattern, query) || !range.valid())
@@ -573,8 +673,8 @@ namespace DetourModKit
         return scan_regions_filtered(pattern, query, READABLE_PAGE_FLAGS, range.base, range.end);
     }
 
-    detail::MatchResult detail::scan_executable_regions(const detail::EnginePattern &pattern,
-                                                        const detail::ScanQuery &query) noexcept
+    detail::MatchResult
+    detail::scan_executable_regions(const detail::EnginePattern &pattern, const detail::ScanQuery &query) noexcept
     {
         if (!query_is_scannable(pattern, query))
         {
@@ -585,8 +685,8 @@ namespace DetourModKit
         return scan_regions_filtered(pattern, query, EXECUTABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
     }
 
-    detail::MatchResult detail::scan_readable_regions(const detail::EnginePattern &pattern,
-                                                      const detail::ScanQuery &query) noexcept
+    detail::MatchResult
+    detail::scan_readable_regions(const detail::EnginePattern &pattern, const detail::ScanQuery &query) noexcept
     {
         if (!query_is_scannable(pattern, query))
         {
@@ -595,8 +695,12 @@ namespace DetourModKit
         return scan_regions_filtered(pattern, query, READABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
     }
 
-    detail::MatchResult detail::scan_module_pages(const detail::EnginePattern &pattern, detail::ModuleSpan range,
-                                                  scan::Pages pages, const detail::ScanQuery &query) noexcept
+    detail::MatchResult detail::scan_module_pages(
+        const detail::EnginePattern &pattern,
+        detail::ModuleSpan range,
+        scan::Pages pages,
+        const detail::ScanQuery &query
+    ) noexcept
     {
         // An out-of-range enum value must not silently widen to readable pages, so reject it as an empty result.
         switch (pages)

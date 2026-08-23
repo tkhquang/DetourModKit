@@ -90,11 +90,13 @@ namespace
             return 21;
         }
 
-        auto registration = input.register_combo(ComboBinding{
-            .name = "inert",
-            .trigger = Trigger::Press,
-            .combos = single_key(0x41),
-        });
+        auto registration = input.register_combo(
+            ComboBinding{
+                .name = "inert",
+                .trigger = Trigger::Press,
+                .combos = single_key(0x41),
+            }
+        );
         if (registration)
         {
             std::fprintf(stderr, "FAIL: inert Input accepted a registration\n");
@@ -167,7 +169,8 @@ namespace
                     instances[i] = &input;
                     (void)input.is_running();
                     completed.fetch_add(1, std::memory_order_release);
-                });
+                }
+            );
         }
 
         while (ready.load(std::memory_order_acquire) != THREAD_COUNT)
@@ -208,11 +211,13 @@ namespace
     {
         Input &input = Input::instance();
 
-        auto registration = input.register_combo(ComboBinding{
-            .name = "live",
-            .trigger = Trigger::Press,
-            .combos = single_key(0x41),
-        });
+        auto registration = input.register_combo(
+            ComboBinding{
+                .name = "live",
+                .trigger = Trigger::Press,
+                .combos = single_key(0x41),
+            }
+        );
         if (!registration)
         {
             std::fprintf(stderr, "FAIL: successful first use rejected a registration\n");

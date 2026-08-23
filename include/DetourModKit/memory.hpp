@@ -130,8 +130,10 @@ namespace DetourModKit
         [[nodiscard]] representation_read_value_t<T>
         decode_foreign_representation(const std::array<std::byte, sizeof(T)> &storage) noexcept
         {
-            static_assert(sizeof(representation_read_value_t<T>) == sizeof(T),
-                          "a built-in array read requires the equivalent std::array to have identical size");
+            static_assert(
+                sizeof(representation_read_value_t<T>) == sizeof(T),
+                "a built-in array read requires the equivalent std::array to have identical size"
+            );
             return std::bit_cast<representation_read_value_t<T>>(storage);
         }
 
@@ -171,10 +173,12 @@ namespace DetourModKit
         };
         /// @endcond
 
-        static_assert(std::is_trivially_copyable_v<Address> && std::is_standard_layout_v<Address> &&
-                          sizeof(Address) == sizeof(std::uintptr_t) && alignof(Address) == alignof(std::uintptr_t),
-                      "Address participates in representation-safe reads only while it is exactly one padding-free "
-                      "std::uintptr_t; a stored flag or a wider member would make read<Address> unsound");
+        static_assert(
+            std::is_trivially_copyable_v<Address> && std::is_standard_layout_v<Address> &&
+                sizeof(Address) == sizeof(std::uintptr_t) && alignof(Address) == alignof(std::uintptr_t),
+            "Address participates in representation-safe reads only while it is exactly one padding-free "
+            "std::uintptr_t; a stored flag or a wider member would make read<Address> unsound"
+        );
 
         /**
          * @brief True when every bit pattern of @p T's object representation is a valid value, so forming @p T from
@@ -487,8 +491,8 @@ namespace DetourModKit
          *          usually through @ref read.
          * @note Callback-safe (see @ref read_into).
          */
-        [[nodiscard]] Result<Address> walk(Address base, std::span<const ChainStep> steps,
-                                           std::span<Address> trace = {}) noexcept;
+        [[nodiscard]] Result<Address>
+        walk(Address base, std::span<const ChainStep> steps, std::span<Address> trace = {}) noexcept;
 
         /**
          * @brief Convenience @ref walk taking bare offsets, flooring every hop at @ref USERSPACE_PTR_MIN.
@@ -507,8 +511,8 @@ namespace DetourModKit
          *       the step storage. Real game pointer paths are far shorter than 32 hops, so the cap never binds in
          *       practice.
          */
-        [[nodiscard]] Result<Address> walk(Address base, std::span<const std::ptrdiff_t> offsets,
-                                           std::span<Address> trace = {}) noexcept;
+        [[nodiscard]] Result<Address>
+        walk(Address base, std::span<const std::ptrdiff_t> offsets, std::span<Address> trace = {}) noexcept;
 
         /**
          * @class ProtectGuard
@@ -673,9 +677,11 @@ namespace DetourModKit
          *       Every cache setup failure appears in the return value.
          *       Proof: MemoryTest.InitCacheRejectsWrappingAndThrowingSizes.
          */
-        [[nodiscard]] bool init_cache(std::size_t cache_size = DEFAULT_CACHE_SIZE,
-                                      unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
-                                      std::size_t shard_count = DEFAULT_CACHE_SHARD_COUNT);
+        [[nodiscard]] bool init_cache(
+            std::size_t cache_size = DEFAULT_CACHE_SIZE,
+            unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
+            std::size_t shard_count = DEFAULT_CACHE_SHARD_COUNT
+        );
 
         /**
          * @brief Clears all entries from the protection cache, leaving it initialized.
@@ -809,7 +815,8 @@ namespace DetourModKit
                 // Release; assert() discards the whole call under NDEBUG, leaving the fast path a bare copy.
                 assert(
                     is_readable(Region{address, sizeof(T)}) &&
-                    "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated");
+                    "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated"
+                );
                 std::array<std::byte, sizeof(T)> storage{};
                 std::memcpy(storage.data(), address.as<const void *>(), sizeof(T));
                 return detail::decode_foreign_representation<T>(storage);

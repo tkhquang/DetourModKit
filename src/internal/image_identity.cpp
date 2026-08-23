@@ -36,8 +36,8 @@ namespace DetourModKit
 
             // True when [offset, offset + bytes) lies wholly inside an image of image_size bytes, with an explicit
             // wrap guard so a hostile offset/size cannot alias a low offset.
-            [[nodiscard]] constexpr bool fits_image(std::uint64_t offset, std::uint64_t bytes,
-                                                    std::uint32_t image_size) noexcept
+            [[nodiscard]] constexpr bool
+            fits_image(std::uint64_t offset, std::uint64_t bytes, std::uint32_t image_size) noexcept
             {
                 return bytes <= image_size && offset <= static_cast<std::uint64_t>(image_size) - bytes;
             }
@@ -97,8 +97,11 @@ namespace DetourModKit
             // on a path that a warm TypeIdentity revalidates on every call. The buffer is the loader's own section cap,
             // so it needs no heap.
             alignas(alignof(IMAGE_SECTION_HEADER)) std::byte section_table[MAX_SECTIONS * sizeof(IMAGE_SECTION_HEADER)];
-            if (!guarded_read_bytes(module_base + static_cast<std::uintptr_t>(table_offset), section_table,
-                                    static_cast<std::size_t>(table_bytes)))
+            if (!guarded_read_bytes(
+                    module_base + static_cast<std::uintptr_t>(table_offset),
+                    section_table,
+                    static_cast<std::size_t>(table_bytes)
+                ))
             {
                 return ImageIdentityFields{};
             }
@@ -107,8 +110,11 @@ namespace DetourModKit
             for (std::uint32_t i = 0; i < num_sections; ++i)
             {
                 IMAGE_SECTION_HEADER section{};
-                std::memcpy(&section, section_table + static_cast<std::size_t>(i) * sizeof(IMAGE_SECTION_HEADER),
-                            sizeof(section));
+                std::memcpy(
+                    &section,
+                    section_table + static_cast<std::size_t>(i) * sizeof(IMAGE_SECTION_HEADER),
+                    sizeof(section)
+                );
                 std::uint64_t name = 0;
                 for (std::size_t byte = 0; byte < IMAGE_SIZEOF_SHORT_NAME; ++byte)
                 {

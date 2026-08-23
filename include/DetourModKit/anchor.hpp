@@ -82,8 +82,10 @@ namespace DetourModKit
 
         /// The number of @ref AnchorKind enumerators; sizes the per-kind deny-list in @ref ScanProfile.
         inline constexpr std::size_t ANCHOR_KIND_COUNT = 9;
-        static_assert(static_cast<std::size_t>(AnchorKind::Unset) + 1 == ANCHOR_KIND_COUNT,
-                      "ANCHOR_KIND_COUNT must track the AnchorKind enumerator count.");
+        static_assert(
+            static_cast<std::size_t>(AnchorKind::Unset) + 1 == ANCHOR_KIND_COUNT,
+            "ANCHOR_KIND_COUNT must track the AnchorKind enumerator count."
+        );
 
         /**
          * @enum QuorumMatch
@@ -474,8 +476,8 @@ namespace DetourModKit
          *         `evaluate_gate(assess_quality(report), policy)`.
          * @note Callback-safe: one allocation-free tally pass plus the threshold arithmetic.
          */
-        [[nodiscard]] GateVerdict evaluate_gate(std::span<const ResolvedAnchor> report,
-                                                const GatePolicy &policy = {}) noexcept;
+        [[nodiscard]] GateVerdict
+        evaluate_gate(std::span<const ResolvedAnchor> report, const GatePolicy &policy = {}) noexcept;
 
         /**
          * @brief Maps a @ref GateVerdict to a short human-readable label.
@@ -522,8 +524,8 @@ namespace DetourModKit
          * @return The query with @ref ScanProfile::default_broad_string_xref folded in (widen-only: an already-broad
          *         query stays broad, never downgraded).
          */
-        [[nodiscard]] scan::StringRefQuery apply_profile(const ScanProfile &profile,
-                                                         scan::StringRefQuery query) noexcept;
+        [[nodiscard]] scan::StringRefQuery
+        apply_profile(const ScanProfile &profile, scan::StringRefQuery query) noexcept;
 
         /**
          * @brief Resolves one anchor through its backend, fail-closed.
@@ -546,8 +548,8 @@ namespace DetourModKit
          * @return The number of entries written.
          * @note Setup/control-plane only (see @ref resolve).
          */
-        [[nodiscard]] std::size_t resolve_all(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
-                                              Region scope = Region::host());
+        [[nodiscard]] std::size_t
+        resolve_all(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out, Region scope = Region::host());
 
         /**
          * @brief Resolves a table of independent anchors concurrently through a fork-join worker pool.
@@ -562,8 +564,12 @@ namespace DetourModKit
          *          externally serialized.
          * @note Setup/control-plane only: spawns a worker pool. Never call it from a hook or under the loader lock.
          */
-        [[nodiscard]] std::size_t resolve_all_parallel(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
-                                                       Region scope = Region::host(), std::size_t max_workers = 0);
+        [[nodiscard]] std::size_t resolve_all_parallel(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            Region scope = Region::host(),
+            std::size_t max_workers = 0
+        );
 
         /**
          * @brief Rolls a drift report into an @ref AnchorQuality summary in one allocation-free pass (no re-resolve).
@@ -600,8 +606,8 @@ namespace DetourModKit
          *          declared module spelling so inherited and explicit spellings of the same module agree.
          * @note Callback-safe: allocation-free and side-effect-free.
          */
-        [[nodiscard]] std::uint64_t anchor_trust_fingerprint(const Anchor &anchor,
-                                                             scan::ImageIdentity scope_identity) noexcept;
+        [[nodiscard]] std::uint64_t
+        anchor_trust_fingerprint(const Anchor &anchor, scan::ImageIdentity scope_identity) noexcept;
 
         /**
          * @brief Maps an @ref AnchorStatus to a short human-readable label.
@@ -646,8 +652,8 @@ namespace DetourModKit
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
          * @note Setup/control-plane only (see @ref resolve).
          */
-        [[nodiscard]] ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile,
-                                                          Region scope = Region::host());
+        [[nodiscard]] ResolvedAnchor
+        resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope = Region::host());
 
         /**
          * @brief Resolves a table serially with a profile's defaults applied.
@@ -658,9 +664,12 @@ namespace DetourModKit
          * @return The number of entries written.
          * @note Setup/control-plane only (see @ref resolve).
          */
-        [[nodiscard]] std::size_t resolve_all_with_profile(std::span<const Anchor> anchors,
-                                                           std::span<ResolvedAnchor> out, const ScanProfile &profile,
-                                                           Region scope = Region::host());
+        [[nodiscard]] std::size_t resolve_all_with_profile(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            const ScanProfile &profile,
+            Region scope = Region::host()
+        );
 
         /**
          * @brief Resolves a table concurrently with a profile's defaults applied.
@@ -672,11 +681,13 @@ namespace DetourModKit
          * @return The number of entries written.
          * @note Setup/control-plane only: spawns a worker pool. Never call it from a hook or under the loader lock.
          */
-        [[nodiscard]] std::size_t resolve_all_with_profile_parallel(std::span<const Anchor> anchors,
-                                                                    std::span<ResolvedAnchor> out,
-                                                                    const ScanProfile &profile,
-                                                                    Region scope = Region::host(),
-                                                                    std::size_t max_workers = 0);
+        [[nodiscard]] std::size_t resolve_all_with_profile_parallel(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            const ScanProfile &profile,
+            Region scope = Region::host(),
+            std::size_t max_workers = 0
+        );
     } // namespace anchor
 } // namespace DetourModKit
 

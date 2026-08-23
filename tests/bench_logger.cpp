@@ -71,9 +71,18 @@ namespace
 
     void print_row(const char *workload, const char *policy, const Run &run) noexcept
     {
-        std::printf("%s\t%s\t%d\t%lld\t%lld\t%lld\t%lld\t%zu\t%zu\n", workload, policy, SAMPLES,
-                    percentile(run.latencies, 0.50), percentile(run.latencies, 0.99), percentile(run.latencies, 0.999),
-                    run.latencies.back(), run.accepted, run.dropped);
+        std::printf(
+            "%s\t%s\t%d\t%lld\t%lld\t%lld\t%lld\t%zu\t%zu\n",
+            workload,
+            policy,
+            SAMPLES,
+            percentile(run.latencies, 0.50),
+            percentile(run.latencies, 0.99),
+            percentile(run.latencies, 0.999),
+            run.latencies.back(),
+            run.accepted,
+            run.dropped
+        );
     }
 
     [[nodiscard]] std::filesystem::path sink_path_for(const char *tag)
@@ -156,7 +165,9 @@ int main()
     gates.metric("logger.enqueue_accepted", static_cast<double>(drop_oldest.accepted));
     gates.metric("logger.p99_ns", static_cast<double>(percentile(drop_oldest.latencies, 0.99)));
     gates.metric("logger.drop_newest_p99_ns", static_cast<double>(percentile(drop_newest.latencies, 0.99)));
-    gates.metric("logger.public_log_drop_newest_p99_ns",
-                 static_cast<double>(percentile(public_newest.latencies, 0.99)));
+    gates.metric(
+        "logger.public_log_drop_newest_p99_ns",
+        static_cast<double>(percentile(public_newest.latencies, 0.99))
+    );
     return gates.close();
 }

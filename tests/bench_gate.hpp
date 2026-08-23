@@ -53,8 +53,11 @@ namespace dmk_bench
             if (!m_suite_valid)
             {
                 ++m_refusals;
-                std::fprintf(stderr, "bench_gate: refusing suite '%s': suite must be nonempty and contain no '.'\n",
-                             suite != nullptr ? suite : "(null)");
+                std::fprintf(
+                    stderr,
+                    "bench_gate: refusing suite '%s': suite must be nonempty and contain no '.'\n",
+                    suite != nullptr ? suite : "(null)"
+                );
                 (void)std::fflush(stderr);
             }
         }
@@ -146,18 +149,25 @@ namespace dmk_bench
                 return true;
             }
             ++m_refusals;
-            std::fprintf(stderr,
-                         "bench_gate: refusing record '%s' in suite '%s': a record name must be the suite followed "
-                         "by '.' and a nonempty remainder\n",
-                         name != nullptr ? name : "(null)", m_suite);
+            std::fprintf(
+                stderr,
+                "bench_gate: refusing record '%s' in suite '%s': a record name must be the suite followed "
+                "by '.' and a nonempty remainder\n",
+                name != nullptr ? name : "(null)",
+                m_suite
+            );
             (void)std::fflush(stderr);
             return false;
         }
 
         void report_closed(const char *action) const noexcept
         {
-            std::fprintf(stderr, "bench_gate: ledger for suite '%s' is already closed; refusing to %s\n", m_suite,
-                         action);
+            std::fprintf(
+                stderr,
+                "bench_gate: ledger for suite '%s' is already closed; refusing to %s\n",
+                m_suite,
+                action
+            );
             (void)std::fflush(stderr);
         }
 
@@ -171,8 +181,14 @@ namespace dmk_bench
             std::exit(EXIT_FAILURE);
         }
 
-        void emit(const char *name, GateKind kind, bool passed, double observed, const char *relation,
-                  double threshold) noexcept
+        void emit(
+            const char *name,
+            GateKind kind,
+            bool passed,
+            double observed,
+            const char *relation,
+            double threshold
+        ) noexcept
         {
             require_open("record a gate");
             if (!identifies(name))
@@ -184,9 +200,16 @@ namespace dmk_bench
             {
                 ++m_deterministic_failures;
             }
-            std::printf("#GATE\t%s\t%s\t%s\t%s\t%.6f\t%s\t%.6f\n", m_suite, name,
-                        kind == GateKind::Deterministic ? "deterministic" : "timing", passed ? "pass" : "fail",
-                        observed, relation, threshold);
+            std::printf(
+                "#GATE\t%s\t%s\t%s\t%s\t%.6f\t%s\t%.6f\n",
+                m_suite,
+                name,
+                kind == GateKind::Deterministic ? "deterministic" : "timing",
+                passed ? "pass" : "fail",
+                observed,
+                relation,
+                threshold
+            );
         }
 
         const char *m_suite;

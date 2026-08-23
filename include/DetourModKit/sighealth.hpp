@@ -322,8 +322,8 @@ namespace DetourModKit
          *         @ref FindingKind::UncompilablePattern and grades @ref Grade::Unusable rather than throwing.
          * @note Setup/control-plane only: allocates, reads no process memory.
          */
-        [[nodiscard]] CandidateHealth analyze_candidate(const manifest::CandidateSpec &spec,
-                                                        const HealthPolicy &policy = {});
+        [[nodiscard]] CandidateHealth
+        analyze_candidate(const manifest::CandidateSpec &spec, const HealthPolicy &policy = {});
 
         /**
          * @brief Grades one signature record: its ladder (byte backends) or its text anchor (text backends).
@@ -335,8 +335,8 @@ namespace DetourModKit
          *         only worsen it, flooring an uncompilable record to @ref Grade::Unusable.
          * @note Setup/control-plane only: allocates, reads no process memory.
          */
-        [[nodiscard]] RecordHealth analyze_record(const manifest::SignatureRecord &record,
-                                                  const HealthPolicy &policy = {});
+        [[nodiscard]] RecordHealth
+        analyze_record(const manifest::SignatureRecord &record, const HealthPolicy &policy = {});
 
         /**
          * @brief Grades a whole manifest, record by record, and rolls the results into a manifest verdict.
@@ -345,8 +345,8 @@ namespace DetourModKit
          * @return The per-record health plus the grade tally; @ref ManifestHealth::grade is the weakest record's grade.
          * @note Setup/control-plane only: allocates, reads no process memory.
          */
-        [[nodiscard]] ManifestHealth analyze_manifest(const manifest::Manifest &manifest,
-                                                      const HealthPolicy &policy = {});
+        [[nodiscard]] ManifestHealth
+        analyze_manifest(const manifest::Manifest &manifest, const HealthPolicy &policy = {});
 
         /**
          * @brief Maps a @ref Severity to a short human-readable label.

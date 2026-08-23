@@ -96,7 +96,8 @@ namespace
         SplitCodeDataImage()
         {
             m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, IMAGE_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+                VirtualAlloc(nullptr, IMAGE_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            );
             if (m_base == nullptr)
             {
                 return;
@@ -550,12 +551,15 @@ TEST(CodeConstantEpochTest, FixedByteOutsideDecodedWindowFailsClosed)
 {
     CodeRegion region;
     ASSERT_TRUE(region.ok());
-    region.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
-                       0xA0}); // add rax, 0xF0, then selector bytes
+    region.put(
+        0x100,
+        {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xA0}
+    ); // add rax, 0xF0, then selector bytes
 
     // Offset 16 is outside both the instruction and the 15-byte decode snapshot.
     const scan::Candidate cands[] = {
-        scan::Candidate::direct("add-imm-tail", aob("48 05 F0 00 00 00 90 91 92 93 94 95 96 97 98 99 A0"))};
+        scan::Candidate::direct("add-imm-tail", aob("48 05 F0 00 00 00 90 91 92 93 94 95 96 97 98 99 A0"))
+    };
     scan::CodeConstant cc{};
     cc.site = cands;
     cc.kind = scan::OperandKind::Immediate;
@@ -596,10 +600,13 @@ TEST(CodeConstantEpochTest, RipRelativeReferenceMutationFailsClosed)
     const std::int32_t displacement =
         static_cast<std::int32_t>(region.addr(TARGET_OFFSET) - (region.addr(REFERENCE_OFFSET) + 7));
     region.put(REFERENCE_OFFSET, {0x48, 0x8D, 0x05}); // lea rax, [rip+disp32]
-    region.put(REFERENCE_OFFSET + 3,
-               {static_cast<std::uint8_t>(displacement & 0xFF), static_cast<std::uint8_t>((displacement >> 8) & 0xFF),
-                static_cast<std::uint8_t>((displacement >> 16) & 0xFF),
-                static_cast<std::uint8_t>((displacement >> 24) & 0xFF)});
+    region.put(
+        REFERENCE_OFFSET + 3,
+        {static_cast<std::uint8_t>(displacement & 0xFF),
+         static_cast<std::uint8_t>((displacement >> 8) & 0xFF),
+         static_cast<std::uint8_t>((displacement >> 16) & 0xFF),
+         static_cast<std::uint8_t>((displacement >> 24) & 0xFF)}
+    );
     region.put(TARGET_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
 
     const scan::Candidate cands[] = {scan::Candidate::rip_relative("lea-ref", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
@@ -649,22 +656,28 @@ TEST(CodeConstantEpochTest, RipRelativeWildcardDriftCannotMoveTheDecodedSite)
     ASSERT_EQ((displacement_a >> 8), (displacement_b >> 8));
 
     region.put(REFERENCE_OFFSET, {0x48, 0x8D, 0x05});
-    region.put(REFERENCE_OFFSET + 3, {static_cast<std::uint8_t>(displacement_a & 0xFF),
-                                      static_cast<std::uint8_t>((displacement_a >> 8) & 0xFF),
-                                      static_cast<std::uint8_t>((displacement_a >> 16) & 0xFF),
-                                      static_cast<std::uint8_t>((displacement_a >> 24) & 0xFF)});
+    region.put(
+        REFERENCE_OFFSET + 3,
+        {static_cast<std::uint8_t>(displacement_a & 0xFF),
+         static_cast<std::uint8_t>((displacement_a >> 8) & 0xFF),
+         static_cast<std::uint8_t>((displacement_a >> 16) & 0xFF),
+         static_cast<std::uint8_t>((displacement_a >> 24) & 0xFF)}
+    );
     region.put(TARGET_A_OFFSET, {0x48, 0x05, 0x11, 0x00, 0x00, 0x00});
     region.put(TARGET_B_OFFSET, {0x48, 0x05, 0x22, 0x00, 0x00, 0x00});
 
     const scan::Candidate cands[] = {
-        scan::Candidate::rip_relative("moving-target", aob("48 8D 05 ?? ?? ?? ??"), 3, INSTRUCTION_LENGTH)};
+        scan::Candidate::rip_relative("moving-target", aob("48 8D 05 ?? ?? ?? ??"), 3, INSTRUCTION_LENGTH)
+    };
     scan::CodeConstant cc{};
     cc.site = cands;
     cc.kind = scan::OperandKind::Immediate;
     cc.operand_index = 1;
 
-    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(REFERENCE_OFFSET + 3)),
-                             static_cast<std::uint8_t>(displacement_b & 0xFF)};
+    EpochMutationGuard guard{
+        reinterpret_cast<std::uint8_t *>(region.addr(REFERENCE_OFFSET + 3)),
+        static_cast<std::uint8_t>(displacement_b & 0xFF)
+    };
     const auto value = scan::read_code_constant(cc, region.range());
     ASSERT_FALSE(value.has_value()) << "published value from the stale RIP target " << *value;
     EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
@@ -743,7 +756,8 @@ TEST(CodeConstantTest, ResolvedDataAddressYieldsNoMatch)
     image.put(DATA_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
 
     const scan::Candidate candidates[] = {
-        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
+        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)
+    };
     scan::CodeConstant code_constant{};
     code_constant.site = candidates;
     code_constant.kind = scan::OperandKind::Immediate;

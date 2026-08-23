@@ -49,8 +49,11 @@ extern "C"
         // Resolve this module by an address inside it rather than by name: both variants ship under different file
         // names, and an address lookup cannot pick the wrong one.
         HMODULE self = nullptr;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCSTR>(&s_graph[0]), &self) == 0)
+        if (GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCSTR>(&s_graph[0]),
+                &self
+            ) == 0)
         {
             return 0;
         }

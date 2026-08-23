@@ -43,8 +43,9 @@ namespace dmk_test
     {
     public:
         NoAccessPage() noexcept
-            : m_base(static_cast<std::byte *>(
-                  ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS)))
+            : m_base(
+                  static_cast<std::byte *>(::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS))
+              )
         {
         }
 
@@ -76,8 +77,11 @@ namespace dmk_test
     {
     public:
         explicit ProtectedPage(DWORD protection, std::uint8_t fill = 0x00) noexcept
-            : m_base(static_cast<std::byte *>(
-                  ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)))
+            : m_base(
+                  static_cast<std::byte *>(
+                      ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
+                  )
+              )
         {
             if (m_base == nullptr)
             {
@@ -157,8 +161,11 @@ namespace dmk_test
     {
     public:
         ExecutablePage() noexcept
-            : m_base(static_cast<std::byte *>(
-                  ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)))
+            : m_base(
+                  static_cast<std::byte *>(
+                      ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)
+                  )
+              )
         {
         }
 

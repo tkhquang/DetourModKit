@@ -26,9 +26,11 @@ TEST(PlatformTest, AcquireModuleRef_ReturnsThisModuleAndBooksItsReason)
 
     // The reference identifies the module that owns this test's code.
     HMODULE by_address = nullptr;
-    ASSERT_TRUE(
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&is_loader_lock_held), &by_address));
+    ASSERT_TRUE(GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&is_loader_lock_held),
+        &by_address
+    ));
     EXPECT_EQ(ref, by_address);
 
     release_module_ref(ref, ModulePinReason::Worker);

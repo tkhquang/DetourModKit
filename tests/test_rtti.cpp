@@ -436,8 +436,11 @@ TEST_F(RttiTest, FindInTable_HitsFirstMatchingSlot)
         obj_other_b.address(),
     };
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVTarget@@");
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVTarget@@"
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj_target.address());
 }
@@ -450,8 +453,11 @@ TEST_F(RttiTest, FindInTable_NoMatchReturnsNullopt)
 
     std::array<std::uintptr_t, 2> table{obj_a.address(), obj_b.address()};
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVMissing@@");
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVMissing@@"
+    );
     EXPECT_FALSE(hit.has_value());
 }
 
@@ -462,8 +468,11 @@ TEST_F(RttiTest, FindInTable_SkipsNullSlots)
 
     std::array<std::uintptr_t, 4> table{0, 0, obj.address(), 0};
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVNullSkip@@");
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVNullSkip@@"
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj.address());
 }
@@ -475,8 +484,11 @@ TEST_F(RttiTest, FindInTable_SkipsLowAddressSlots)
 
     std::array<std::uintptr_t, 3> table{0x100, 0x200, obj.address()};
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVLowSkip@@");
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVLowSkip@@"
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj.address());
 }
@@ -489,8 +501,12 @@ TEST_F(RttiTest, FindInTable_CachePopulatedOnFirstHit)
     std::array<std::uintptr_t, 1> table{obj.address()};
 
     std::atomic<Address> cache{Address{}};
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVCacheTest@@", &cache);
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVCacheTest@@",
+        &cache
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(cache.load().raw(), target.vtable());
 }
@@ -506,8 +522,12 @@ TEST_F(RttiTest, FindInTable_WarmCacheSkipsRttiWalk)
 
     // Pre-seed the cache with the target vtable; the warm path is now active.
     std::atomic<Address> cache{Address{target.vtable()}};
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVWarm@@", &cache);
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVWarm@@",
+        &cache
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj_target.address());
 }
@@ -520,8 +540,12 @@ TEST_F(RttiTest, FindInTable_StaleWarmCacheFallsBackAndRefreshes)
     std::array<std::uintptr_t, 1> table{obj.address()};
 
     std::atomic<Address> cache{Address{0xDEADBEEFCAFEULL}};
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVRefreshed@@", &cache);
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVRefreshed@@",
+        &cache
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj.address());
     EXPECT_EQ(cache.load(std::memory_order_relaxed).raw(), target.vtable());
@@ -536,29 +560,53 @@ TEST_F(RttiTest, FindInTable_GenerationCacheRejectsSameAddressReplacement)
     std::array<std::uintptr_t, 1> table{first_object.address()};
     rtti::PointerTableCache cache;
 
-    ASSERT_TRUE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                            ".?AVOriginal@@", cache)
-                    .has_value());
+    ASSERT_TRUE(
+        rtti::find_in_pointer_table(
+            Address{reinterpret_cast<std::uintptr_t>(table.data())},
+            table.size(),
+            ".?AVOriginal@@",
+            cache
+        )
+            .has_value()
+    );
 
     original.overwrite_name(".?AVReplacement@@");
     generation.set(202);
-    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                             ".?AVOriginal@@", cache)
-                     .has_value());
+    EXPECT_FALSE(
+        rtti::find_in_pointer_table(
+            Address{reinterpret_cast<std::uintptr_t>(table.data())},
+            table.size(),
+            ".?AVOriginal@@",
+            cache
+        )
+            .has_value()
+    );
 
     SyntheticVtable current(".?AVOriginal@@");
     SyntheticObject current_object(current.vtable());
     table[0] = current_object.address();
     generation.set(303);
-    ASSERT_TRUE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                            ".?AVOriginal@@", cache)
-                    .has_value());
+    ASSERT_TRUE(
+        rtti::find_in_pointer_table(
+            Address{reinterpret_cast<std::uintptr_t>(table.data())},
+            table.size(),
+            ".?AVOriginal@@",
+            cache
+        )
+            .has_value()
+    );
 
     cache.reset();
     current.overwrite_name(".?AVReplacement@@");
-    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                             ".?AVOriginal@@", cache)
-                     .has_value());
+    EXPECT_FALSE(
+        rtti::find_in_pointer_table(
+            Address{reinterpret_cast<std::uintptr_t>(table.data())},
+            table.size(),
+            ".?AVOriginal@@",
+            cache
+        )
+            .has_value()
+    );
 }
 
 TEST_F(RttiTest, FindInTable_WarmCacheRevalidatesGenerationTwicePerCall)
@@ -597,8 +645,10 @@ TEST_F(RttiTest, FindInTable_ZeroSlotsRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, 0, ".?AVZero@@")
-                     .has_value());
+    EXPECT_FALSE(
+        rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, 0, ".?AVZero@@")
+            .has_value()
+    );
 }
 
 TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
@@ -607,8 +657,10 @@ TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(), "")
-                     .has_value());
+    EXPECT_FALSE(
+        rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(), "")
+            .has_value()
+    );
 }
 
 TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
@@ -620,8 +672,13 @@ TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
     // pointer.
     std::array<std::uintptr_t, 4> table{obj.address(), 0xAAAAAAAAu, obj.address(), 0xBBBBBBBBu};
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, 2, ".?AVStride@@",
-                                           nullptr, 16);
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        2,
+        ".?AVStride@@",
+        nullptr,
+        16
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj.address());
 }
@@ -633,8 +690,13 @@ TEST_F(RttiTest, FindInTable_ZeroStrideDefaultsToQword)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVZeroStride@@", nullptr, 0);
+    auto hit = rtti::find_in_pointer_table(
+        Address{reinterpret_cast<std::uintptr_t>(table.data())},
+        table.size(),
+        ".?AVZeroStride@@",
+        nullptr,
+        0
+    );
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->raw(), obj.address());
 }
@@ -811,7 +873,8 @@ TEST(RttiGenerationTest, PointerTableCacheDoesNotSurviveASameBaseReplacement)
     std::memcpy(
         &expected_object,
         reinterpret_cast<const void *>(table.raw() + dmk_test::RTTI_FIXTURE_VTABLE_SLOT * sizeof(std::uintptr_t)),
-        sizeof(expected_object));
+        sizeof(expected_object)
+    );
     ASSERT_NE(expected_object, 0U);
 
     rtti::PointerTableCache cache;
@@ -822,19 +885,32 @@ TEST(RttiGenerationTest, PointerTableCacheDoesNotSurviveASameBaseReplacement)
     // A second call is what actually reads the cache; without it the case would only exercise the cold path.
     ASSERT_TRUE(
         rtti::find_in_pointer_table(table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS, dmk_test::RTTI_FIXTURE_TYPE_A, cache)
-            .has_value());
+            .has_value()
+    );
 
     ASSERT_TRUE(swap.swap_to_b());
     // The table sits at the same address in the replacement, and its slot still holds a valid vtable, but of a type
     // that is no longer the one asked for. A cache that trusted its stale generation would hand it back.
     const Address replaced_table{swap.module().table()};
     ASSERT_EQ(replaced_table.raw(), table.raw());
-    EXPECT_FALSE(rtti::find_in_pointer_table(replaced_table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
-                                             dmk_test::RTTI_FIXTURE_TYPE_A, cache)
-                     .has_value());
-    EXPECT_TRUE(rtti::find_in_pointer_table(replaced_table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
-                                            dmk_test::RTTI_FIXTURE_TYPE_B, cache)
-                    .has_value());
+    EXPECT_FALSE(
+        rtti::find_in_pointer_table(
+            replaced_table,
+            dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
+            dmk_test::RTTI_FIXTURE_TYPE_A,
+            cache
+        )
+            .has_value()
+    );
+    EXPECT_TRUE(
+        rtti::find_in_pointer_table(
+            replaced_table,
+            dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
+            dmk_test::RTTI_FIXTURE_TYPE_B,
+            cache
+        )
+            .has_value()
+    );
 }
 
 TEST(RttiGenerationTest, TypeIdentityDoesNotSurviveASameBaseReplacement)

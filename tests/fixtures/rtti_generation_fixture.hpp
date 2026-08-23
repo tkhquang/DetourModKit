@@ -60,13 +60,17 @@ namespace dmk_test
                 return;
             }
             m_prepare = reinterpret_cast<UintFn>(
-                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_prepare")));
+                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_prepare"))
+            );
             m_vtable = reinterpret_cast<UintFn>(
-                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_vtable")));
+                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_vtable"))
+            );
             m_table = reinterpret_cast<UintFn>(
-                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_table")));
+                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_table"))
+            );
             m_type_name = reinterpret_cast<NameFn>(
-                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_type_name")));
+                reinterpret_cast<void *>(::GetProcAddress(m_handle, "dmk_rtti_fixture_type_name"))
+            );
         }
 
         ~GenerationFixtureModule() { release(); }

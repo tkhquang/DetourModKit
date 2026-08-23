@@ -125,8 +125,8 @@ namespace DetourModKit
          *       vtable_is_type or @ref type_name_into to avoid the allocation.
          * @note Setup/control-plane only: the read allocates and runs the loader-querying COL prelude.
          */
-        [[nodiscard]] std::optional<std::string> type_name_of(Address vtable,
-                                                              std::size_t max_len = DEFAULT_TYPE_NAME_MAX) noexcept;
+        [[nodiscard]] std::optional<std::string>
+        type_name_of(Address vtable, std::size_t max_len = DEFAULT_TYPE_NAME_MAX) noexcept;
 
         /**
          * @brief Zero-allocation form of @ref type_name_of.
@@ -215,9 +215,13 @@ namespace DetourModKit
             void reset() noexcept;
 
         private:
-            friend std::optional<Address> find_in_pointer_table(Address table, std::size_t slot_count,
-                                                                std::string_view expected, PointerTableCache &cache,
-                                                                std::size_t stride) noexcept;
+            friend std::optional<Address> find_in_pointer_table(
+                Address table,
+                std::size_t slot_count,
+                std::string_view expected,
+                PointerTableCache &cache,
+                std::size_t stride
+            ) noexcept;
 
             // Single-writer sequence protects a coherent {vtable, image base, generation} snapshot.
             std::atomic_flag m_writer{};
@@ -254,10 +258,13 @@ namespace DetourModKit
          * @note Callback-safe on the warm-cache path (guarded reads and compares). A cold or stale cache walks RTTI
          *       through the loader-querying prelude, which is setup/control-plane work.
          */
-        [[nodiscard]] std::optional<Address>
-        find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
-                              std::atomic<Address> *vtable_cache = nullptr,
-                              std::size_t stride = sizeof(std::uintptr_t)) noexcept;
+        [[nodiscard]] std::optional<Address> find_in_pointer_table(
+            Address table,
+            std::size_t slot_count,
+            std::string_view expected,
+            std::atomic<Address> *vtable_cache = nullptr,
+            std::size_t stride = sizeof(std::uintptr_t)
+        ) noexcept;
 
         /**
          * @brief Generation-checked overload of @ref find_in_pointer_table.
@@ -275,9 +282,13 @@ namespace DetourModKit
          * @note Callback-safe on the warm-cache path; a cold or stale cache is setup/control-plane work (see the
          *       compatibility overload).
          */
-        [[nodiscard]] std::optional<Address>
-        find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
-                              PointerTableCache &cache, std::size_t stride = sizeof(std::uintptr_t)) noexcept;
+        [[nodiscard]] std::optional<Address> find_in_pointer_table(
+            Address table,
+            std::size_t slot_count,
+            std::string_view expected,
+            PointerTableCache &cache,
+            std::size_t stride = sizeof(std::uintptr_t)
+        ) noexcept;
 
         /**
          * @brief Resolves the primary (most-derived) vtable for a class by its
@@ -297,8 +308,8 @@ namespace DetourModKit
          * @note Setup/control-plane only: it sweeps the module's readable sections, so run it once at init (or behind a
          *       cached @ref TypeIdentity), never per-frame.
          */
-        [[nodiscard]] std::optional<Address> vtable_for_type(std::string_view mangled,
-                                                             Region range = Region::host()) noexcept;
+        [[nodiscard]] std::optional<Address>
+        vtable_for_type(std::string_view mangled, Region range = Region::host()) noexcept;
 
         /**
          * @brief Collects every sub-object vtable sharing a class's mangled name.
@@ -316,8 +327,12 @@ namespace DetourModKit
          *         total uses @ref vtables_for_type_checked.
          * @note Setup/control-plane only (see @ref vtable_for_type).
          */
-        [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
-                                                   Region range = Region::host()) noexcept;
+        [[nodiscard]] std::size_t vtables_for_type(
+            std::string_view mangled,
+            Address *out,
+            std::size_t out_cap,
+            Region range = Region::host()
+        ) noexcept;
 
         /**
          * @brief Completeness-reporting form of @ref vtables_for_type.
@@ -330,9 +345,12 @@ namespace DetourModKit
          *         Traversal::Complete means the count is a floor, not the authoritative total).
          * @note Setup/control-plane only (see @ref vtable_for_type).
          */
-        [[nodiscard]] VtablesResult vtables_for_type_checked(std::string_view mangled, Address *out,
-                                                             std::size_t out_cap,
-                                                             Region range = Region::host()) noexcept;
+        [[nodiscard]] VtablesResult vtables_for_type_checked(
+            std::string_view mangled,
+            Address *out,
+            std::size_t out_cap,
+            Region range = Region::host()
+        ) noexcept;
 
         /**
          * @brief Reports whether a module region currently contains any resolvable MSVC RTTI record.

@@ -141,8 +141,8 @@ namespace
         std::atomic<std::uint64_t> consume_state{pack_consume(1, 0)};
         std::atomic<std::uint64_t> consume_deadline_ms{0};
         std::array<std::atomic<std::uint64_t>, 2> remainder{pack_remainder(1, false, 0), pack_remainder(1, false, 0)};
-        std::array<std::atomic<std::uint64_t>, DMK_WHEEL_DIRECTIONS> counts{pack_count(1, 0), pack_count(1, 0),
-                                                                            pack_count(1, 0), pack_count(1, 0)};
+        std::array<std::atomic<std::uint64_t>, DMK_WHEEL_DIRECTIONS>
+            counts{pack_count(1, 0), pack_count(1, 0), pack_count(1, 0), pack_count(1, 0)};
 
         void reset_data_plane(std::uint64_t active_epoch) noexcept
         {
@@ -429,8 +429,8 @@ namespace
         return result;
     }
 
-    int32_t DMK_WHEELHOST_CALL open_lease(void *host_context, std::uint64_t owner, std::uint64_t generation,
-                                          WheelHostLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    open_lease(void *host_context, std::uint64_t owner, std::uint64_t generation, WheelHostLease *out_lease) noexcept
     {
         if (!valid_context(host_context) || out_lease == nullptr || owner == 0 || generation == 0)
         {
@@ -460,8 +460,13 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL publish_capture(void *host_context, WheelHostLease lease, std::uint32_t capture_enabled,
-                                               std::uint32_t consume_mask, std::uint32_t ttl_ms) noexcept
+    int32_t DMK_WHEELHOST_CALL publish_capture(
+        void *host_context,
+        WheelHostLease lease,
+        std::uint32_t capture_enabled,
+        std::uint32_t consume_mask,
+        std::uint32_t ttl_ms
+    ) noexcept
     {
         if (!valid_context(host_context) || (capture_enabled & ~CAPTURE_FLAG_MASK) != 0 ||
             (consume_mask & ~CONSUME_MASK) != 0)
@@ -491,15 +496,19 @@ namespace
         {
             const std::uint64_t now = GetTickCount64();
             const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
-            g_host.consume_deadline_ms.store(now > maximum - ttl_ms ? maximum : now + ttl_ms,
-                                             std::memory_order_relaxed);
+            g_host.consume_deadline_ms.store(
+                now > maximum - ttl_ms ? maximum : now + ttl_ms,
+                std::memory_order_relaxed
+            );
         }
         else
         {
             g_host.consume_deadline_ms.store(0, std::memory_order_relaxed);
         }
-        g_host.consume_state.store(pack_consume(g_host.epoch, consume_active ? consume_mask : 0u),
-                                   std::memory_order_release);
+        g_host.consume_state.store(
+            pack_consume(g_host.epoch, consume_active ? consume_mask : 0u),
+            std::memory_order_release
+        );
         // Capture arms only through a mounted, ready route. An unmounted lease keeps counting disabled.
         const std::uint64_t flags =
             g_host.route_state == DMK_WHEELHOST_ROUTE_READY ? (capture_enabled & CAPTURE_FLAG_MASK) : 0u;
@@ -507,8 +516,8 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL drain_counts(void *host_context, WheelHostLease lease,
-                                            std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    drain_counts(void *host_context, WheelHostLease lease, std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         if (!valid_context(host_context) || out_counts == nullptr)
         {
@@ -541,8 +550,8 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL close_lease(void *host_context, WheelHostLease lease, std::uint64_t owner,
-                                           std::uint64_t generation) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    close_lease(void *host_context, WheelHostLease lease, std::uint64_t owner, std::uint64_t generation) noexcept
     {
         if (!valid_context(host_context))
         {
@@ -619,8 +628,11 @@ namespace
     [[nodiscard]] bool pin_host_module() noexcept
     {
         HMODULE module = nullptr;
-        return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                                  reinterpret_cast<LPCWSTR>(&resident_hook), &module) != 0;
+        return GetModuleHandleExW(
+                   GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                   reinterpret_cast<LPCWSTR>(&resident_hook),
+                   &module
+               ) != 0;
     }
 
     [[nodiscard]] HANDLE open_target_thread(std::uint32_t target_thread_id) noexcept
@@ -687,8 +699,12 @@ namespace
         }
     }
 
-    int32_t DMK_WHEELHOST_CALL route_status(void *host_context, WheelHostLease lease, std::uint32_t status_capacity,
-                                            WheelHostRouteStatus *out_status) noexcept
+    int32_t DMK_WHEELHOST_CALL route_status(
+        void *host_context,
+        WheelHostLease lease,
+        std::uint32_t status_capacity,
+        WheelHostRouteStatus *out_status
+    ) noexcept
     {
         if (!valid_context(host_context) || out_status == nullptr)
         {
@@ -727,8 +743,8 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL retarget(void *host_context, WheelHostLease lease,
-                                        std::uint32_t target_thread_id) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    retarget(void *host_context, WheelHostLease lease, std::uint32_t target_thread_id) noexcept
     {
         if (!valid_context(host_context) || target_thread_id == 0)
         {
@@ -832,8 +848,12 @@ namespace
     }
 } // namespace
 
-int32_t DMK_WHEELHOST_CALL wheel_host_start(uint32_t target_thread_id, uint32_t requested_abi_version,
-                                            uint32_t table_capacity, WheelHostTable *out_table) noexcept
+int32_t DMK_WHEELHOST_CALL wheel_host_start(
+    uint32_t target_thread_id,
+    uint32_t requested_abi_version,
+    uint32_t table_capacity,
+    WheelHostTable *out_table
+) noexcept
 {
     if (out_table == nullptr)
     {
@@ -982,9 +1002,12 @@ extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_process_focus(int32_t foc
     g_process_focus_override.store(focused, std::memory_order_release);
 }
 
-extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(uint32_t *mounted_hooks, uint32_t *thread_handles,
-                                                            uint32_t *active_leases,
-                                                            uint64_t *mount_generation) noexcept
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
+    uint32_t *mounted_hooks,
+    uint32_t *thread_handles,
+    uint32_t *active_leases,
+    uint64_t *mount_generation
+) noexcept
 {
     const ControlLock lock(g_host.control_lock);
     if (mounted_hooks != nullptr)

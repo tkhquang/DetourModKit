@@ -61,8 +61,8 @@ namespace DetourModKit
          * @param out Receives the resolved provenance on success; left default on any failure.
          * @return The resolved address, or the same typed failure @ref scan::resolve_export reports.
          */
-        [[nodiscard]] Result<Address> resolve_export_with_provenance(std::string_view export_name, Region module,
-                                                                     ExportResolution &out) noexcept;
+        [[nodiscard]] Result<Address>
+        resolve_export_with_provenance(std::string_view export_name, Region module, ExportResolution &out) noexcept;
     } // namespace detail
 } // namespace DetourModKit
 

@@ -31,8 +31,10 @@ using DetourModKit::mouse_button;
 
 // clear() runs inside the noexcept Session teardown chain, so a throw from it would terminate the host. Its
 // diagnostic logging routes through the no-throw try_log path to keep the contract honest; pin it here.
-static_assert(noexcept(config::clear()),
-              "config::clear() must be noexcept (it runs inside the noexcept teardown chain).");
+static_assert(
+    noexcept(config::clear()),
+    "config::clear() must be noexcept (it runs inside the noexcept teardown chain)."
+);
 
 namespace DetourModKit::detail
 {
@@ -60,8 +62,10 @@ namespace
         {
             std::this_thread::yield();
         }
-        s_guard_disposal_probe_saw_unlocked.store(s_guard_disposal_probe_acquired_lock.load(std::memory_order_acquire),
-                                                  std::memory_order_release);
+        s_guard_disposal_probe_saw_unlocked.store(
+            s_guard_disposal_probe_acquired_lock.load(std::memory_order_acquire),
+            std::memory_order_release
+        );
     }
 
     // Disposal that never ran and disposal that ran under the mutex are different failures, so they are reported
@@ -95,7 +99,8 @@ namespace
                 }
                 DetourModKit::detail::lock_config_watcher_mutex_for_test();
                 s_guard_disposal_probe_acquired_lock.store(true, std::memory_order_release);
-            });
+            }
+        );
 
         DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = &observe_reload_hotkey_guard_disposal_lock;
         try
@@ -110,8 +115,10 @@ namespace
         }
         DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
         lock_contender.join();
-        return {s_guard_disposal_probe_started.load(std::memory_order_acquire),
-                s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire)};
+        return {
+            s_guard_disposal_probe_started.load(std::memory_order_acquire),
+            s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire)
+        };
     }
 } // namespace
 
@@ -177,8 +184,12 @@ TEST_F(ConfigTest, RegisterString)
     std::string test_value;
 
     config::bind_string(
-        "TestSection", "TestKeyString", "test_string", [&test_value](std::string_view v) { test_value = v; },
-        "default_value");
+        "TestSection",
+        "TestKeyString",
+        "test_string",
+        [&test_value](std::string_view v) { test_value = v; },
+        "default_value"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     EXPECT_EQ(test_value, "default_value");
@@ -203,7 +214,12 @@ TEST_F(ConfigTest, LoadFromFile)
     config::bind_float("TestSection", "TestFloat", "test_float", [&test_float](float v) { test_float = v; }, 0.0f);
     config::bind_bool("TestSection", "TestBool", "test_bool", [&test_bool](bool v) { test_bool = v; }, false);
     config::bind_string(
-        "TestSection", "TestString", "test_string", [&test_string](std::string_view v) { test_string = v; }, "");
+        "TestSection",
+        "TestString",
+        "test_string",
+        [&test_string](std::string_view v) { test_string = v; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -230,7 +246,12 @@ TEST_F(ConfigTest, KeyCombo_HexFormats)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -251,7 +272,12 @@ TEST_F(ConfigTest, KeyCombo_NamedKeys)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -271,7 +297,12 @@ TEST_F(ConfigTest, KeyCombo_MouseButton)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -289,7 +320,12 @@ TEST_F(ConfigTest, KeyCombo_GamepadButton)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -307,7 +343,12 @@ TEST_F(ConfigTest, KeyCombo_GamepadCombo)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -327,7 +368,12 @@ TEST_F(ConfigTest, KeyCombo_InvalidHex)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -345,7 +391,12 @@ TEST_F(ConfigTest, KeyCombo_CommentOnlyLineYieldsEmpty)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     EXPECT_TRUE(test_value.empty());
 }
@@ -359,7 +410,12 @@ TEST_F(ConfigTest, KeyCombo_EmptyCommaSeparatorsAreSkipped)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(test_value.size(), 2u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
@@ -375,7 +431,12 @@ TEST_F(ConfigTest, KeyCombo_HexWithOnlyPrefixIsSkipped)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
@@ -391,7 +452,12 @@ TEST_F(ConfigTest, KeyCombo_HexValueAboveIntMaxIsSkipped)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
@@ -406,7 +472,12 @@ TEST_F(ConfigTest, KeyCombo_DoublePlusSkipsEmptySegment)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(test_value.size(), 1u);
     ASSERT_EQ(test_value[0].modifiers.size(), 1u);
@@ -425,7 +496,12 @@ TEST_F(ConfigTest, KeyCombo_TrailingPlusParsedAsTrigger)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x11));
@@ -441,7 +517,12 @@ TEST_F(ConfigTest, KeyCombo_OnlyPlusSignsYieldsEmpty)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "F3");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        "F3"
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
     EXPECT_TRUE(test_value.empty());
 }
@@ -451,8 +532,12 @@ TEST_F(ConfigTest, KeyCombo_DefaultParsesMultipleCombos)
     input::KeyComboList captured;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&captured](const input::KeyComboList &c) { captured = c; },
-        "Ctrl+F3,Gamepad_LT+Gamepad_A");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&captured](const input::KeyComboList &c) { captured = c; },
+        "Ctrl+F3,Gamepad_LT+Gamepad_A"
+    );
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
     ASSERT_EQ(captured.size(), 2u);
@@ -657,9 +742,19 @@ TEST_F(ConfigTest, MixedConfigTypes)
     config::bind_float("Section1", "FloatVal", "float_val", [&float_val](float v) { float_val = v; }, 0.0f);
     config::bind_bool("Section2", "BoolVal", "bool_val", [&bool_val](bool v) { bool_val = v; }, false);
     config::bind_string(
-        "Section2", "StringVal", "string_val", [&string_val](std::string_view v) { string_val = v; }, "");
+        "Section2",
+        "StringVal",
+        "string_val",
+        [&string_val](std::string_view v) { string_val = v; },
+        ""
+    );
     config::bind_combos(
-        "Section2", "Keys", "keys_val", [&keys_val](const input::KeyComboList &c) { keys_val = c; }, "");
+        "Section2",
+        "Keys",
+        "keys_val",
+        [&keys_val](const input::KeyComboList &c) { keys_val = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -727,7 +822,12 @@ TEST_F(ConfigTest, KeyCombo_CommentsAndSpaces)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -746,7 +846,12 @@ TEST_F(ConfigTest, KeyCombo_JustPrefix)
     input::KeyComboList test_value;
 
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -804,7 +909,12 @@ TEST_F(ConfigTest, KeyCombo_InlineTokenComment)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -822,7 +932,12 @@ TEST_F(ConfigTest, KeyCombo_EmptyTokenFromConsecutiveCommas)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -840,7 +955,12 @@ TEST_F(ConfigTest, KeyCombo_OverflowValue)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -869,7 +989,12 @@ TEST_F(ConfigTest, KeyCombo_DefaultOverflow)
 {
     input::KeyComboList val;
     config::bind_combos(
-        "S", "K3", "k3", [&val](const input::KeyComboList &c) { val = c; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
+        "S",
+        "K3",
+        "k3",
+        [&val](const input::KeyComboList &c) { val = c; },
+        "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43"
+    );
     config::load(m_test_ini_file.string());
     ASSERT_EQ(val.size(), 1u);
     EXPECT_EQ(val[0].keys[0], keyboard_key(0x43));
@@ -884,7 +1009,12 @@ TEST_F(ConfigTest, KeyCombo_ValueExceedingIntMax)
 
     input::KeyComboList test_value;
     config::bind_combos(
-        "TestSection", "Keys", "keys", [&test_value](const input::KeyComboList &c) { test_value = c; }, "");
+        "TestSection",
+        "Keys",
+        "keys",
+        [&test_value](const input::KeyComboList &c) { test_value = c; },
+        ""
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1137,7 +1267,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_SingleModifier)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "0x11+0x72");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "0x11+0x72"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1152,7 +1287,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_NamedModifier)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "Ctrl+F3");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Ctrl+F3"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1167,7 +1307,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_MultipleModifiers)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "Ctrl+Shift+F3");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Ctrl+Shift+F3"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1183,7 +1328,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_MultipleTriggerKeys)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "Ctrl+F3,F4");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Ctrl+F3,F4"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1272,7 +1422,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_InvalidModifierSkipped)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "0xGG+Ctrl+F3");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "0xGG+Ctrl+F3"
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1287,8 +1442,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_WhitespaceAroundPlus)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; },
-        "  Ctrl  +  Shift  +  F3  ");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "  Ctrl  +  Shift  +  F3  "
+    );
 
     EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
 
@@ -1304,7 +1463,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_DefaultValueApplied)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "Ctrl+F3");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Ctrl+F3"
+    );
 
     // Before load(), the setter should have been called with the parsed default
     ASSERT_EQ(combo.size(), 1u);
@@ -1318,7 +1482,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_LogAll)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combo](const input::KeyComboList &c) { combo = c; }, "Ctrl+F3");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Ctrl+F3"
+    );
 
     config::load(m_test_ini_file.string());
 
@@ -1330,7 +1499,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_GamepadDefault)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "GP", "gp", [&combo](const input::KeyComboList &c) { combo = c; }, "Gamepad_LB+Gamepad_A,Gamepad_B");
+        "Hotkeys",
+        "GP",
+        "gp",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Gamepad_LB+Gamepad_A,Gamepad_B"
+    );
 
     ASSERT_EQ(combo.size(), 2u);
     EXPECT_EQ(combo[0].keys[0], gamepad_button(GamepadCode::A));
@@ -1357,7 +1531,12 @@ TEST_F(ConfigTest, RegisterKeyCombo_ThumbstickDefault)
     input::KeyComboList combo;
 
     config::bind_combos(
-        "Hotkeys", "LS", "ls", [&combo](const input::KeyComboList &c) { combo = c; }, "Gamepad_LB+Gamepad_LSUp");
+        "Hotkeys",
+        "LS",
+        "ls",
+        [&combo](const input::KeyComboList &c) { combo = c; },
+        "Gamepad_LB+Gamepad_LSUp"
+    );
 
     ASSERT_EQ(combo.size(), 1u);
     EXPECT_EQ(combo[0].keys[0], gamepad_button(GamepadCode::LeftStickUp));
@@ -1411,8 +1590,12 @@ TEST_F(ConfigTest, KeyComboList_IndependentCombosDefault)
     input::KeyComboList combos;
 
     config::bind_combos(
-        "Hotkeys", "Toggle", "toggle", [&combos](const input::KeyComboList &c) { combos = c; },
-        "F3,Gamepad_LT+Gamepad_B");
+        "Hotkeys",
+        "Toggle",
+        "toggle",
+        [&combos](const input::KeyComboList &c) { combos = c; },
+        "F3,Gamepad_LT+Gamepad_B"
+    );
 
     ASSERT_EQ(combos.size(), 2u);
     ASSERT_EQ(combos[0].keys.size(), 1u);
@@ -1429,8 +1612,12 @@ TEST_F(ConfigTest, KeyComboList_MixedDeviceCombos)
     input::KeyComboList combos;
 
     config::bind_combos(
-        "Hotkeys", "Action", "action", [&combos](const input::KeyComboList &c) { combos = c; },
-        "Ctrl+F3,Mouse4,Gamepad_LB+Gamepad_A");
+        "Hotkeys",
+        "Action",
+        "action",
+        [&combos](const input::KeyComboList &c) { combos = c; },
+        "Ctrl+F3,Mouse4,Gamepad_LB+Gamepad_A"
+    );
 
     ASSERT_EQ(combos.size(), 3u);
     EXPECT_EQ(combos[0].keys[0], keyboard_key(0x72));
@@ -1585,14 +1772,17 @@ TEST_F(ConfigTest, AccumulativeSetterMustBeIdempotent)
     std::vector<std::string> items;
 
     config::bind_string(
-        "TestSection", "Items", "items",
+        "TestSection",
+        "Items",
+        "items",
         [&items](std::string_view v)
         {
             // Idempotent pattern: clear before applying
             items.clear();
             items.push_back(std::string(v));
         },
-        "default_item");
+        "default_item"
+    );
 
     // After registration: ["default_item"]
     ASSERT_EQ(items.size(), 1u);
@@ -1610,7 +1800,12 @@ TEST_F(ConfigTest, SetterCalledTwice_Float)
     std::vector<float> invocations;
 
     config::bind_float(
-        "TestSection", "TestFloat", "test_float", [&invocations](float v) { invocations.push_back(v); }, 1.5f);
+        "TestSection",
+        "TestFloat",
+        "test_float",
+        [&invocations](float v) { invocations.push_back(v); },
+        1.5f
+    );
 
     ASSERT_EQ(invocations.size(), 1u);
     EXPECT_NEAR(invocations[0], 1.5f, 0.01f);
@@ -1626,7 +1821,12 @@ TEST_F(ConfigTest, SetterCalledTwice_Bool)
     std::vector<bool> invocations;
 
     config::bind_bool(
-        "TestSection", "TestBool", "test_bool", [&invocations](bool v) { invocations.push_back(v); }, true);
+        "TestSection",
+        "TestBool",
+        "test_bool",
+        [&invocations](bool v) { invocations.push_back(v); },
+        true
+    );
 
     ASSERT_EQ(invocations.size(), 1u);
     EXPECT_TRUE(invocations[0]);
@@ -1642,7 +1842,12 @@ TEST_F(ConfigTest, SetterCalledTwice_KeyCombo)
     int call_count = 0;
 
     config::bind_combos(
-        "TestSection", "TestKeys", "test_keys", [&call_count](const input::KeyComboList &) { ++call_count; }, "F3");
+        "TestSection",
+        "TestKeys",
+        "test_keys",
+        [&call_count](const input::KeyComboList &) { ++call_count; },
+        "F3"
+    );
 
     EXPECT_EQ(call_count, 1);
 
@@ -1763,8 +1968,12 @@ TEST_F(ConfigTest, Reload_PreservesRegistrations)
     config::bind_int("S", "Count", "count", [&](int v) { int_invocations.push_back(v); }, 0);
     config::bind_bool("S", "Enabled", "enabled", [&](bool v) { bool_invocations.push_back(v); }, false);
     config::bind_string(
-        "S", "Label", "label", [&](std::string_view v) { string_invocations.push_back(std::string(v)); },
-        std::string("default"));
+        "S",
+        "Label",
+        "label",
+        [&](std::string_view v) { string_invocations.push_back(std::string(v)); },
+        std::string("default")
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -1813,7 +2022,9 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
     std::atomic<bool> t2_applied{false};
 
     config::bind_int(
-        "S", "Val", "val",
+        "S",
+        "Val",
+        "val",
         [&](int v)
         {
             if (v == 1)
@@ -1835,7 +2046,8 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
                 t2_applied.store(true, std::memory_order_release);
             }
         },
-        0);
+        0
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -1896,11 +2108,18 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
     std::atomic<int> throw_count{0};
 
     config::bind_int(
-        "S", "First", "first", [&first_value](int v) { first_value.store(v, std::memory_order_release); }, 0);
+        "S",
+        "First",
+        "first",
+        [&first_value](int v) { first_value.store(v, std::memory_order_release); },
+        0
+    );
     // Setter fires once at register, once at load, once at reload; start throwing only on the third invocation so the
     // failure lands on the reload path.
     config::bind_int(
-        "S", "Middle", "middle",
+        "S",
+        "Middle",
+        "middle",
         [&throw_count](int /*v*/)
         {
             const int calls = throw_count.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1909,9 +2128,15 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
                 throw std::runtime_error("middle setter deliberately throws");
             }
         },
-        0);
+        0
+    );
     config::bind_int(
-        "S", "Third", "third", [&third_value](int v) { third_value.store(v, std::memory_order_release); }, 0);
+        "S",
+        "Third",
+        "third",
+        [&third_value](int v) { third_value.store(v, std::memory_order_release); },
+        0
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -1938,7 +2163,9 @@ TEST_F(ConfigTest, Reload_TransientSetterFailureRetriesIdenticalContent)
     std::atomic<int> observed{0};
     std::atomic<bool> fail_next_reload{true};
     config::bind_int(
-        "S", "K", "k",
+        "S",
+        "K",
+        "k",
         [&observed, &fail_next_reload](int value)
         {
             if (value == 2 && fail_next_reload.exchange(false, std::memory_order_acq_rel))
@@ -1947,7 +2174,8 @@ TEST_F(ConfigTest, Reload_TransientSetterFailureRetriesIdenticalContent)
             }
             observed.store(value, std::memory_order_release);
         },
-        0);
+        0
+    );
 
     {
         std::ofstream file(m_test_ini_file);
@@ -1974,7 +2202,9 @@ TEST_F(ConfigTest, Load_TransientSetterFailureLeavesContentRetryable)
     std::atomic<int> observed{0};
     std::atomic<bool> fail_once{true};
     config::bind_int(
-        "S", "K", "k",
+        "S",
+        "K",
+        "k",
         [&observed, &fail_once](int value)
         {
             if (value == 2 && fail_once.exchange(false, std::memory_order_acq_rel))
@@ -1983,7 +2213,8 @@ TEST_F(ConfigTest, Load_TransientSetterFailureLeavesContentRetryable)
             }
             observed.store(value, std::memory_order_release);
         },
-        0);
+        0
+    );
 
     {
         std::ofstream file(m_test_ini_file);
@@ -2070,13 +2301,15 @@ TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMu
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
 
     bool replacement_registered = false;
-    const auto disposal = observe_reload_hotkey_guard_disposal(
-        [&replacement_registered] { replacement_registered = config::reload_hotkey("ReloadConfig", "F6"); });
+    const auto disposal =
+        observe_reload_hotkey_guard_disposal([&replacement_registered]
+                                             { replacement_registered = config::reload_hotkey("ReloadConfig", "F6"); });
 
     EXPECT_TRUE(replacement_registered);
     EXPECT_TRUE(disposal.probe_ran) << "config::reload_hotkey() disposed no replaced BindingGuard";
-    EXPECT_TRUE(disposal.saw_unlocked)
-        << "config::reload_hotkey() disposed the replaced BindingGuard while holding the watcher mutex";
+    EXPECT_TRUE(
+        disposal.saw_unlocked
+    ) << "config::reload_hotkey() disposed the replaced BindingGuard while holding the watcher mutex";
     config::clear();
     input::Input::instance().shutdown();
 }
@@ -2143,14 +2376,18 @@ TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
     std::atomic<int> on_reload_hits{0};
-    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool /*setters_ran*/)
-                                         {
-                                             on_reload_hits.fetch_add(1, std::memory_order_relaxed);
-                                             // Self-call must not deadlock the worker.
-                                             config::disable_auto_reload();
-                                         }),
-              config::AutoReloadStatus::Started);
+    ASSERT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool /*setters_ran*/)
+            {
+                on_reload_hits.fetch_add(1, std::memory_order_relaxed);
+                // Self-call must not deadlock the worker.
+                config::disable_auto_reload();
+            }
+        ),
+        config::AutoReloadStatus::Started
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds{150});
 
@@ -2183,13 +2420,16 @@ TEST_F(ConfigTest, AutoReload_EndToEnd)
     std::atomic<int> setter_invocations{0};
 
     config::bind_int(
-        "S", "K", "k",
+        "S",
+        "K",
+        "k",
         [&](int v)
         {
             current_value.store(v, std::memory_order_release);
             setter_invocations.fetch_add(1, std::memory_order_relaxed);
         },
-        0);
+        0
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -2199,9 +2439,13 @@ TEST_F(ConfigTest, AutoReload_EndToEnd)
     EXPECT_EQ(current_value.load(), 10);
 
     std::atomic<int> on_reload_hits{0};
-    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool /*setters_ran*/) { on_reload_hits.fetch_add(1); }),
-              config::AutoReloadStatus::Started);
+    ASSERT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool /*setters_ran*/) { on_reload_hits.fetch_add(1); }
+        ),
+        config::AutoReloadStatus::Started
+    );
 
     // Give the watcher thread time to issue its first ReadDirectoryChangesW.
     std::this_thread::sleep_for(std::chrono::milliseconds{150});
@@ -2338,7 +2582,9 @@ TEST_F(ConfigTest, AutoReload_ServicerThreadDisableIsRefusedWithoutDeadlock)
     std::atomic<int> setter_runs{0};
     std::atomic<std::thread::id> last_setter_tid{};
     config::bind_int(
-        "S", "K", "k",
+        "S",
+        "K",
+        "k",
         [&](int)
         {
             last_setter_tid.store(std::this_thread::get_id(), std::memory_order_release);
@@ -2346,7 +2592,8 @@ TEST_F(ConfigTest, AutoReload_ServicerThreadDisableIsRefusedWithoutDeadlock)
             config::disable_auto_reload();
             setter_runs.fetch_add(1, std::memory_order_release);
         },
-        0);
+        0
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -2412,16 +2659,20 @@ TEST_F(ConfigTest, AutoReload_EmptySetterPassNeverReportsSettersRan)
 
     std::atomic<int> on_reload_hits{0};
     std::atomic<bool> saw_setters_ran{false};
-    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool setters_ran)
-                                         {
-                                             if (setters_ran)
-                                             {
-                                                 saw_setters_ran.store(true, std::memory_order_release);
-                                             }
-                                             on_reload_hits.fetch_add(1, std::memory_order_release);
-                                         }),
-              config::AutoReloadStatus::Started);
+    ASSERT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool setters_ran)
+            {
+                if (setters_ran)
+                {
+                    saw_setters_ran.store(true, std::memory_order_release);
+                }
+                on_reload_hits.fetch_add(1, std::memory_order_release);
+            }
+        ),
+        config::AutoReloadStatus::Started
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds{150});
 
@@ -2463,15 +2714,19 @@ TEST_F(ConfigTest, AutoReload_NonEmptySetterPassReportsSettersRan)
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
     std::atomic<bool> saw_setters_ran{false};
-    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool setters_ran)
-                                         {
-                                             if (setters_ran)
-                                             {
-                                                 saw_setters_ran.store(true, std::memory_order_release);
-                                             }
-                                         }),
-              config::AutoReloadStatus::Started);
+    ASSERT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool setters_ran)
+            {
+                if (setters_ran)
+                {
+                    saw_setters_ran.store(true, std::memory_order_release);
+                }
+            }
+        ),
+        config::AutoReloadStatus::Started
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds{150});
 
@@ -2534,7 +2789,8 @@ TEST_F(ConfigTest, AutoReload_ConcurrentLoadRepointIsConsistent)
             {
                 config::load(file_a.string());
             }
-        });
+        }
+    );
     std::thread t2(
         [&]
         {
@@ -2542,7 +2798,8 @@ TEST_F(ConfigTest, AutoReload_ConcurrentLoadRepointIsConsistent)
             {
                 config::load(file_b.string());
             }
-        });
+        }
+    );
     t1.join();
     t2.join();
 
@@ -2612,12 +2869,20 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsAlreadyRunning)
 
     std::atomic<int> original_callback_hits{0};
     std::atomic<int> rejected_callback_hits{0};
-    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool) { original_callback_hits.fetch_add(1, std::memory_order_relaxed); }),
-              config::AutoReloadStatus::Started);
-    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool) { rejected_callback_hits.fetch_add(1, std::memory_order_relaxed); }),
-              config::AutoReloadStatus::AlreadyRunning);
+    EXPECT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool) { original_callback_hits.fetch_add(1, std::memory_order_relaxed); }
+        ),
+        config::AutoReloadStatus::Started
+    );
+    EXPECT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool) { rejected_callback_hits.fetch_add(1, std::memory_order_relaxed); }
+        ),
+        config::AutoReloadStatus::AlreadyRunning
+    );
 
     // Re-pointing must retain the callback accepted by the original enable. A rejected duplicate enable must not
     // overwrite the persisted callback that load() uses to construct the replacement watcher.
@@ -2791,14 +3056,17 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
     // the setter at most once; subsequent unchanged-bytes calls short-circuit on the content hash.
     std::atomic<int> setter_hits{0};
     config::bind_int(
-        "S", "K", "k",
+        "S",
+        "K",
+        "k",
         [&](int /*v*/)
         {
             // Sleep so overlapping reload() calls from multiple threads actually race.
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
             setter_hits.fetch_add(1, std::memory_order_relaxed);
         },
-        0);
+        0
+    );
 
     {
         std::ofstream f(m_test_ini_file);
@@ -2849,13 +3117,17 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsSettersRanFalse)
     // test's timeline. Every wait and assertion below therefore keys on hit values, never on hit counts or positions.
     std::mutex hits_mutex;
     std::vector<bool> hits;
-    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool setters_ran)
-                                         {
-                                             std::lock_guard<std::mutex> lock(hits_mutex);
-                                             hits.push_back(setters_ran);
-                                         }),
-              config::AutoReloadStatus::Started);
+    ASSERT_EQ(
+        config::enable_auto_reload(
+            std::chrono::milliseconds{100},
+            [&](bool setters_ran)
+            {
+                std::lock_guard<std::mutex> lock(hits_mutex);
+                hits.push_back(setters_ran);
+            }
+        ),
+        config::AutoReloadStatus::Started
+    );
     // No arming delay is needed: enable_auto_reload() returns Started only after the watcher has queued its first
     // ReadDirectoryChangesW, so every directory change from here on is captured.
 
@@ -2895,8 +3167,8 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsSettersRanFalse)
     // instead of the first hit tolerates any spurious overflow-driven false hits landing first.
     replace_atomically("[S]\nK=43\n");
     ASSERT_TRUE(
-        wait_for_hits(std::chrono::seconds{3}, [&] { return std::find(hits.begin(), hits.end(), true) != hits.end(); }))
-        << "Watcher never reported setters_ran=true for the changed-bytes replace.";
+        wait_for_hits(std::chrono::seconds{3}, [&] { return std::find(hits.begin(), hits.end(), true) != hits.end(); })
+    ) << "Watcher never reported setters_ran=true for the changed-bytes replace.";
 
     // The true hit means the stored hash now matches the on-disk bytes, and the atomic replace guarantees no torn
     // intermediate content was ever observable, so every reload after this point, whether driven by the
@@ -3023,8 +3295,13 @@ TEST_F(ConfigTest, RegisterPressCombo_EmptyDefaultRegistersName)
 
     std::atomic<int> press_count{0};
     auto guard = config::press_combo(
-        "Input", "EmptyDefaultKey", "binding with empty default", "empty-default-binding",
-        [&]() { press_count.fetch_add(1, std::memory_order_relaxed); }, "");
+        "Input",
+        "EmptyDefaultKey",
+        "binding with empty default",
+        "empty-default-binding",
+        [&]() { press_count.fetch_add(1, std::memory_order_relaxed); },
+        ""
+    );
 
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1))
         << "Empty default must still reserve the binding name as a pending binding.";
@@ -3225,8 +3502,10 @@ namespace
             while (true)
             {
                 const std::size_t next = content.find('\n', pos);
-                const std::string_view line(content.data() + pos,
-                                            (next == std::string::npos ? content.size() : next) - pos);
+                const std::string_view line(
+                    content.data() + pos,
+                    (next == std::string::npos ? content.size() : next) - pos
+                );
                 if (line.find("[WARNING]") != std::string_view::npos && line.find(needle) != std::string_view::npos)
                 {
                     return true;
@@ -3261,14 +3540,18 @@ namespace
 
     // Drives the combo-list parser indirectly via config::bind_combos, which is the only reachable entry point for the
     // parser from outside the TU.
-    DetourModKit::input::KeyComboList parse_via_register(std::string_view default_value,
-                                                         std::string_view log_name = "test binding")
+    DetourModKit::input::KeyComboList
+    parse_via_register(std::string_view default_value, std::string_view log_name = "test binding")
     {
         DetourModKit::config::clear();
         DetourModKit::input::KeyComboList captured;
         DetourModKit::config::bind_combos(
-            "ParserSec", "ParserKey", log_name,
-            [&captured](const DetourModKit::input::KeyComboList &c) { captured = c; }, default_value);
+            "ParserSec",
+            "ParserKey",
+            log_name,
+            [&captured](const DetourModKit::input::KeyComboList &c) { captured = c; },
+            default_value
+        );
         return captured;
     }
 } // anonymous namespace
@@ -3447,9 +3730,14 @@ namespace
 
     template <typename T>
     struct ConfigBindCallable<
-        T, std::void_t<decltype(config::bind<T>(std::declval<std::string_view>(), std::declval<std::string_view>(),
-                                                std::declval<std::string_view>(), std::declval<std::atomic<T> &>(),
-                                                std::declval<T>()))>> : std::true_type
+        T,
+        std::void_t<decltype(config::bind<T>(
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::atomic<T> &>(),
+            std::declval<T>()
+        ))>> : std::true_type
     {
     };
 
@@ -3459,9 +3747,13 @@ namespace
 
     template <typename T>
     struct ConfigBindDefaultCallable<
-        T, std::void_t<decltype(config::bind<T>(std::declval<std::string_view>(), std::declval<std::string_view>(),
-                                                std::declval<std::string_view>(), std::declval<std::atomic<T> &>()))>>
-        : std::true_type
+        T,
+        std::void_t<decltype(config::bind<T>(
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::atomic<T> &>()
+        ))>> : std::true_type
     {
     };
 } // anonymous namespace
@@ -3471,17 +3763,25 @@ namespace
 static_assert(ConfigBindCallable<int>::value, "config::bind<int> must remain available.");
 static_assert(ConfigBindCallable<bool>::value, "config::bind<bool> must remain available.");
 static_assert(ConfigBindCallable<float>::value, "config::bind<float> must remain available.");
-static_assert(!ConfigBindCallable<double>::value,
-              "config::bind<double> must be unavailable; only int, bool, and float satisfy BindableScalar.");
-static_assert(!ConfigBindCallable<long>::value,
-              "config::bind<long> must be unavailable; only int, bool, and float satisfy BindableScalar.");
+static_assert(
+    !ConfigBindCallable<double>::value,
+    "config::bind<double> must be unavailable; only int, bool, and float satisfy BindableScalar."
+);
+static_assert(
+    !ConfigBindCallable<long>::value,
+    "config::bind<long> must be unavailable; only int, bool, and float satisfy BindableScalar."
+);
 static_assert(ConfigBindDefaultCallable<int>::value, "config::bind<int> inferred-default overload must exist.");
 static_assert(ConfigBindDefaultCallable<bool>::value, "config::bind<bool> inferred-default overload must exist.");
 static_assert(ConfigBindDefaultCallable<float>::value, "config::bind<float> inferred-default overload must exist.");
-static_assert(!ConfigBindDefaultCallable<double>::value,
-              "config::bind<double> inferred-default overload must stay unavailable.");
-static_assert(!ConfigBindDefaultCallable<long>::value,
-              "config::bind<long> inferred-default overload must stay unavailable.");
+static_assert(
+    !ConfigBindDefaultCallable<double>::value,
+    "config::bind<double> inferred-default overload must stay unavailable."
+);
+static_assert(
+    !ConfigBindDefaultCallable<long>::value,
+    "config::bind<long> inferred-default overload must stay unavailable."
+);
 
 // Input-binding fusion: the BindingGuard release action, the HoldGate teardown gate, and the hold_combo / consume
 // facet (config layer). The HoldGate synchronization is exercised directly through its internal header because the
@@ -3744,7 +4044,8 @@ TEST(HoldGate, ConcurrentReleaseNeverStrandsHeld)
                     state = !state;
                     gate->deliver(state);
                 }
-            });
+            }
+        );
 
         // Race the release against a producer that has already delivered at least one edge.
         while (last.load(std::memory_order_relaxed) == -1)
@@ -3823,14 +4124,22 @@ TEST_F(ConfigTest, PressCombo_ConsumeFalseRegistersFacetAndLeavesRulesEmpty)
     input::Input::instance().shutdown();
     LoggerFileCapture cap;
     auto guard = config::press_combo(
-        "Camera", "ToggleKey", "toggle", "toggle-suppress-false", []() {}, "Gamepad_A",
-        /*consume=*/false);
+        "Camera",
+        "ToggleKey",
+        "toggle",
+        "toggle-suppress-false",
+        []() {},
+        "Gamepad_A",
+        /*consume=*/false
+    );
     config::log_all();
     EXPECT_NE(cap.read_all().find("ToggleKey.Consume"), std::string::npos);
 
-    (void)input::Input::instance().start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)input::Input::instance().start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -3846,14 +4155,22 @@ TEST_F(ConfigTest, HoldCombo_ConsumeTrueRegistersFacetAndPublishesRule)
     input::Input::instance().shutdown();
     LoggerFileCapture cap;
     auto guard = config::hold_combo(
-        "Camera", "ZoomKey", "zoom hold", "zoom-hold-suppress-true", [](bool) {}, "Gamepad_A",
-        /*consume=*/true);
+        "Camera",
+        "ZoomKey",
+        "zoom hold",
+        "zoom-hold-suppress-true",
+        [](bool) {},
+        "Gamepad_A",
+        /*consume=*/true
+    );
     config::log_all();
     EXPECT_NE(cap.read_all().find("ZoomKey.Consume"), std::string::npos);
 
-    (void)input::Input::instance().start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)input::Input::instance().start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -3875,13 +4192,21 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     // Register with the consume facet defaulting to false; load() must then apply the INI-sourced
     // "<ini_key>.Consume = true" through the combo helper's consume item so the published rule masks the button.
     auto guard = config::hold_combo(
-        "Camera", "ZoomKey", "zoom hold", "zoom-hold-consume-ini", [](bool) {}, "Gamepad_A",
-        /*consume=*/false);
+        "Camera",
+        "ZoomKey",
+        "zoom hold",
+        "zoom-hold-consume-ini",
+        [](bool) {},
+        "Gamepad_A",
+        /*consume=*/false
+    );
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
-    (void)input::Input::instance().start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)input::Input::instance().start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -4080,14 +4405,17 @@ TEST_F(ConfigTest, Reload_SetterReentryFailsFastWithoutDeadlock)
     bool reentry_returned = false;
     bool reentry_result = true;
     config::bind_int(
-        "S", "V", "v",
+        "S",
+        "V",
+        "v",
         [&](int)
         {
             // Re-enter reload() on the same (pass-holding) thread. Must be refused, not deadlock.
             reentry_result = config::reload();
             reentry_returned = true;
         },
-        0);
+        0
+    );
 
     // load() runs the setter, which re-enters reload(); this must return without hanging.
     config::load(m_test_ini_file.string());
@@ -4106,7 +4434,9 @@ TEST_F(ConfigTest, Load_SetterReentryFailsFastWithoutDeadlock)
     bool armed = false;
     bool reentry_returned = false;
     config::bind_int(
-        "S", "V", "v",
+        "S",
+        "V",
+        "v",
         [&](int)
         {
             if (armed)
@@ -4115,7 +4445,8 @@ TEST_F(ConfigTest, Load_SetterReentryFailsFastWithoutDeadlock)
                 reentry_returned = true;
             }
         },
-        0);
+        0
+    );
 
     armed = true;
     config::load(m_test_ini_file.string());
@@ -4134,13 +4465,16 @@ TEST_F(ConfigTest, Reload_ParseFailureDoesNotCacheHashAndIdenticalRetryReapplies
     int applied = -1;
     int setter_calls = 0;
     config::bind_int(
-        "S", "V", "v",
+        "S",
+        "V",
+        "v",
         [&](int v)
         {
             applied = v;
             ++setter_calls;
         },
-        0);
+        0
+    );
     config::load(m_test_ini_file.string());
     ASSERT_EQ(applied, 7);
     const int calls_after_load = setter_calls;
@@ -4179,7 +4513,9 @@ TEST_F(ConfigTest, Reload_PartialApplyDoesNotCacheHashSoRevertReapplies)
     bool poison_b = false;
     config::bind_int("S", "A", "a", [&](int v) { applied_a = v; }, 0);
     config::bind_int(
-        "S", "B", "b",
+        "S",
+        "B",
+        "b",
         [&](int v)
         {
             if (poison_b)
@@ -4188,7 +4524,8 @@ TEST_F(ConfigTest, Reload_PartialApplyDoesNotCacheHashSoRevertReapplies)
             }
             applied_b = v;
         },
-        0);
+        0
+    );
     config::load(m_test_ini_file.string());
     ASSERT_EQ(applied_a, 1);
     ASSERT_EQ(applied_b, 1);
@@ -4226,13 +4563,16 @@ TEST_F(ConfigTest, Reload_SeekTellFailureRetainsLastGoodAndRetries)
     int applied = -1;
     int setter_calls = 0;
     config::bind_int(
-        "S", "V", "v",
+        "S",
+        "V",
+        "v",
         [&](int v)
         {
             applied = v;
             ++setter_calls;
         },
-        0);
+        0
+    );
     config::load(m_test_ini_file.string());
     ASSERT_EQ(applied, 5);
     const int calls_after_load = setter_calls;

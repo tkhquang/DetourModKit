@@ -212,10 +212,12 @@ extern "C"
             s_drain_timeout_ms = options->drain_timeout_ms;
             s_external_wheel = options->wheel_host != nullptr;
 
-            Result<Session> started = Session::start(ModInfo{
-                .name = "STAGED_GEN",
-                .log_file = options->log_file != nullptr ? options->log_file : "staged_gen.log",
-            });
+            Result<Session> started = Session::start(
+                ModInfo{
+                    .name = "STAGED_GEN",
+                    .log_file = options->log_file != nullptr ? options->log_file : "staged_gen.log",
+                }
+            );
             if (!started)
             {
                 return 0;
@@ -226,7 +228,8 @@ extern "C"
             const auto target = reinterpret_cast<TargetFn>(
                 s_target_lib != nullptr
                     ? reinterpret_cast<void *>(::GetProcAddress(s_target_lib, staged_gen::HOOK_TARGET_SYMBOL))
-                    : nullptr);
+                    : nullptr
+            );
             if (target == nullptr)
             {
                 roll_back_generation();
@@ -237,7 +240,8 @@ extern "C"
                     .name = "staged_gen_hook",
                     .target = Address{reinterpret_cast<std::uintptr_t>(target)},
                 },
-                &compute_damage_detour);
+                &compute_damage_detour
+            );
             if (!installed)
             {
                 roll_back_generation();
@@ -264,26 +268,27 @@ extern "C"
 
             if (options->enable_probe_binding != 0)
             {
-                Result<input::BindingGuard> probe = input::register_combo(input::ComboBinding{
-                    .name = "staged.probe",
-                    .trigger = input::Trigger::Press,
-                    .combos = {{.keys = {keyboard_key(PROBE_VK)}, .modifiers = {}}},
-                    .on_press =
-                        []() noexcept
-                    {
-                        if (!s_park_armed.load(std::memory_order_acquire))
+                Result<input::BindingGuard> probe = input::register_combo(
+                    input::ComboBinding{
+                        .name = "staged.probe",
+                        .trigger = input::Trigger::Press,
+                        .combos = {{.keys = {keyboard_key(PROBE_VK)}, .modifiers = {}}},
+                        .on_press = []() noexcept
                         {
-                            return;
-                        }
-                        s_park_entered.store(true, std::memory_order_release);
-                        const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
-                        while (!s_park_release.load(std::memory_order_acquire) &&
-                               std::chrono::steady_clock::now() < deadline)
-                        {
-                            ::Sleep(1);
-                        }
-                    },
-                });
+                            if (!s_park_armed.load(std::memory_order_acquire))
+                            {
+                                return;
+                            }
+                            s_park_entered.store(true, std::memory_order_release);
+                            const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
+                            while (!s_park_release.load(std::memory_order_acquire) &&
+                                   std::chrono::steady_clock::now() < deadline)
+                            {
+                                ::Sleep(1);
+                            }
+                        },
+                    }
+                );
                 if (!probe)
                 {
                     roll_back_generation();
@@ -293,13 +298,15 @@ extern "C"
             }
             if (options->enable_wheel != 0)
             {
-                Result<input::BindingGuard> wheel = input::register_combo(input::ComboBinding{
-                    .name = "staged.wheel",
-                    .trigger = input::Trigger::Press,
-                    .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
-                    .consume = true,
-                    .on_press = []() noexcept {},
-                });
+                Result<input::BindingGuard> wheel = input::register_combo(
+                    input::ComboBinding{
+                        .name = "staged.wheel",
+                        .trigger = input::Trigger::Press,
+                        .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
+                        .consume = true,
+                        .on_press = []() noexcept {},
+                    }
+                );
                 if (!wheel)
                 {
                     roll_back_generation();
@@ -309,19 +316,21 @@ extern "C"
             }
             if (options->enable_consume_gamepad != 0)
             {
-                Result<input::BindingGuard> chord = input::register_combo(input::ComboBinding{
-                    .name = "staged.chord",
-                    .trigger = input::Trigger::Press,
-                    .combos =
-                        {
+                Result<input::BindingGuard> chord = input::register_combo(
+                    input::ComboBinding{
+                        .name = "staged.chord",
+                        .trigger = input::Trigger::Press,
+                        .combos =
                             {
-                                .keys = {gamepad_button(GamepadCode::DpadUp)},
-                                .modifiers = {gamepad_button(GamepadCode::LeftBumper)},
+                                {
+                                    .keys = {gamepad_button(GamepadCode::DpadUp)},
+                                    .modifiers = {gamepad_button(GamepadCode::LeftBumper)},
+                                },
                             },
-                        },
-                    .consume = true,
-                    .on_press = []() noexcept {},
-                });
+                        .consume = true,
+                        .on_press = []() noexcept {},
+                    }
+                );
                 if (!chord)
                 {
                     roll_back_generation();
@@ -372,8 +381,10 @@ extern "C"
                 roll_back_generation();
                 return 0;
             }
-            if (!wait_for_interception(options->enable_wheel != 0 && !s_external_wheel,
-                                       options->enable_consume_gamepad != 0))
+            if (!wait_for_interception(
+                    options->enable_wheel != 0 && !s_external_wheel,
+                    options->enable_consume_gamepad != 0
+                ))
             {
                 roll_back_generation();
                 return 0;

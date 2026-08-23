@@ -71,30 +71,33 @@ namespace
         KeyComboList combos;
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
 
-        auto registration = Input::instance().register_combo(ComboBinding{
-            .name = "self-shutdown",
-            .trigger = Trigger::Hold,
-            .combos = combos,
-            .on_state_change =
-                [owner, &hold_thread, &release_thread, &shutdown_returned, &capture_survived,
-                 &released](bool active) noexcept
-            {
-                if (active)
+        auto registration = Input::instance().register_combo(
+            ComboBinding{
+                .name = "self-shutdown",
+                .trigger = Trigger::Hold,
+                .combos = combos,
+                .on_state_change =
+                    [owner, &hold_thread, &release_thread, &shutdown_returned, &capture_survived, &released](
+                        bool active
+                    ) noexcept
                 {
-                    hold_thread.store(std::this_thread::get_id(), std::memory_order_release);
-                    // The call under proof. A self-join here terminates the process.
-                    Input::instance().shutdown();
-                    // The captured owner must still be intact after the deferred rundown was requested. Publish this
-                    // before the flag the main thread waits on, so its acquire load cannot read a not-yet-written
-                    // verdict and fail the case spuriously.
-                    capture_survived.store(owner->marker == CapturedOwner::LIVE, std::memory_order_release);
-                    shutdown_returned.store(true, std::memory_order_release);
-                    return;
-                }
-                release_thread.store(std::this_thread::get_id(), std::memory_order_release);
-                released.store(true, std::memory_order_release);
-            },
-        });
+                    if (active)
+                    {
+                        hold_thread.store(std::this_thread::get_id(), std::memory_order_release);
+                        // The call under proof. A self-join here terminates the process.
+                        Input::instance().shutdown();
+                        // The captured owner must still be intact after the deferred rundown was requested. Publish
+                        // this before the flag the main thread waits on, so its acquire load cannot read a
+                        // not-yet-written verdict and fail the case spuriously.
+                        capture_survived.store(owner->marker == CapturedOwner::LIVE, std::memory_order_release);
+                        shutdown_returned.store(true, std::memory_order_release);
+                        return;
+                    }
+                    release_thread.store(std::this_thread::get_id(), std::memory_order_release);
+                    released.store(true, std::memory_order_release);
+                },
+            }
+        );
 
         if (!registration)
         {
@@ -110,13 +113,14 @@ namespace
         // Declared after everything the callback captured, so every failure exit below joins the poll thread and the
         // deferred rundown while that state is still alive, then clears the probe. The balancing release is the only
         // signal that the reaper finished: shutdown() reached from the callback returns before it has been delivered.
-        const dmk_lifecycle::InputSeamOwner cleanup{{},
-                                                    [&]
-                                                    {
-                                                        return released.load(std::memory_order_acquire) ||
-                                                               hold_thread.load(std::memory_order_acquire) ==
-                                                                   std::thread::id{};
-                                                    }};
+        const dmk_lifecycle::InputSeamOwner cleanup{
+            {},
+            [&]
+            {
+                return released.load(std::memory_order_acquire) ||
+                       hold_thread.load(std::memory_order_acquire) == std::thread::id{};
+            }
+        };
 
         if (!wait_until([&] { return shutdown_returned.load(std::memory_order_acquire); }))
         {
@@ -168,24 +172,25 @@ namespace
         KeyComboList combos;
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
 
-        auto registration = Input::instance().register_combo(ComboBinding{
-            .name = "race-shutdown",
-            .trigger = Trigger::Hold,
-            .combos = combos,
-            .on_state_change =
-                [&shutdown_requested, &rundown_done](bool active) noexcept
-            {
-                if (active)
+        auto registration = Input::instance().register_combo(
+            ComboBinding{
+                .name = "race-shutdown",
+                .trigger = Trigger::Hold,
+                .combos = combos,
+                .on_state_change = [&shutdown_requested, &rundown_done](bool active) noexcept
                 {
-                    if (!shutdown_requested.exchange(true, std::memory_order_acq_rel))
+                    if (active)
                     {
-                        Input::instance().shutdown();
+                        if (!shutdown_requested.exchange(true, std::memory_order_acq_rel))
+                        {
+                            Input::instance().shutdown();
+                        }
+                        return;
                     }
-                    return;
-                }
-                rundown_done.store(true, std::memory_order_release);
-            },
-        });
+                    rundown_done.store(true, std::memory_order_release);
+                },
+            }
+        );
         if (!registration || !Input::instance().start(START_SETTINGS))
         {
             std::fprintf(stderr, "FAIL: could not arm the registration race\n");
@@ -194,12 +199,14 @@ namespace
 
         // shutdown_requested is set before the callback calls shutdown(), so once it is true a rundown may be in the
         // reaper's hands and only rundown_done proves it is over.
-        const dmk_lifecycle::InputSeamOwner cleanup{{},
-                                                    [&]
-                                                    {
-                                                        return rundown_done.load(std::memory_order_acquire) ||
-                                                               !shutdown_requested.load(std::memory_order_acquire);
-                                                    }};
+        const dmk_lifecycle::InputSeamOwner cleanup{
+            {},
+            [&]
+            {
+                return rundown_done.load(std::memory_order_acquire) ||
+                       !shutdown_requested.load(std::memory_order_acquire);
+            }
+        };
 
         std::thread registrar(
             [&registrations_done]() noexcept
@@ -208,17 +215,20 @@ namespace
                 {
                     KeyComboList extra;
                     extra.push_back({{keyboard_key(0x42)}, {}});
-                    auto guard = Input::instance().register_combo(ComboBinding{
-                        .name = "racer",
-                        .trigger = Trigger::Press,
-                        .combos = extra,
-                    });
+                    auto guard = Input::instance().register_combo(
+                        ComboBinding{
+                            .name = "racer",
+                            .trigger = Trigger::Press,
+                            .combos = extra,
+                        }
+                    );
                     (void)guard;
                     (void)Input::instance().binding_count();
                     (void)Input::instance().is_active("racer");
                 }
                 registrations_done.store(true, std::memory_order_release);
-            });
+            }
+        );
 
         const bool completed = wait_until([&] { return registrations_done.load(std::memory_order_acquire); }) &&
                                wait_until([&] { return shutdown_requested.load(std::memory_order_acquire); });
@@ -251,22 +261,23 @@ namespace
 
         KeyComboList combos;
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
-        auto registration = Input::instance().register_combo(ComboBinding{
-            .name = "external-shutdown",
-            .trigger = Trigger::Hold,
-            .combos = combos,
-            .on_state_change =
-                [&](bool active) noexcept
-            {
-                if (active)
+        auto registration = Input::instance().register_combo(
+            ComboBinding{
+                .name = "external-shutdown",
+                .trigger = Trigger::Hold,
+                .combos = combos,
+                .on_state_change = [&](bool active) noexcept
                 {
-                    held.store(true, std::memory_order_release);
-                    return;
-                }
-                release_thread.store(std::this_thread::get_id(), std::memory_order_release);
-                released.store(true, std::memory_order_release);
-            },
-        });
+                    if (active)
+                    {
+                        held.store(true, std::memory_order_release);
+                        return;
+                    }
+                    release_thread.store(std::this_thread::get_id(), std::memory_order_release);
+                    released.store(true, std::memory_order_release);
+                },
+            }
+        );
         if (!registration || !Input::instance().start(START_SETTINGS))
         {
             std::fprintf(stderr, "FAIL: could not start the external-shutdown control\n");
@@ -319,39 +330,48 @@ namespace
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
 
         {
-            auto registration = Input::instance().register_combo(ComboBinding{
-                .name = "abandoned-premise",
-                .trigger = Trigger::Hold,
-                .combos = combos,
-                .on_state_change =
-                    [&parked, &proceed, &shutdown_requested, &shutdown_returned, &callback_finished, &rundown_done,
-                     &seam_live_in_callback](bool active) noexcept
-                {
-                    if (!active)
+            auto registration = Input::instance().register_combo(
+                ComboBinding{
+                    .name = "abandoned-premise",
+                    .trigger = Trigger::Hold,
+                    .combos = combos,
+                    .on_state_change = [&parked,
+                                        &proceed,
+                                        &shutdown_requested,
+                                        &shutdown_returned,
+                                        &callback_finished,
+                                        &rundown_done,
+                                        &seam_live_in_callback](bool active) noexcept
                     {
-                        rundown_done.store(true, std::memory_order_release);
-                        return;
-                    }
-                    shutdown_requested.store(true, std::memory_order_release);
-                    // This is the distinct path under proof: the facade releases its poller to the reaper and returns
-                    // while this callback is still executing. The outer cleanup therefore has no poller it can join.
-                    Input::instance().shutdown();
-                    shutdown_returned.store(true, std::memory_order_release);
-                    parked.store(true, std::memory_order_release);
-                    while (!proceed.load(std::memory_order_acquire))
-                    {
-                        std::this_thread::yield();
-                    }
-                    // Read the seam from inside the poll thread, after a delay a correct rundown cannot
-                    // use: it is blocked joining THIS body, so the probe it owns must still be installed.
-                    // A rundown that cleared before joining loses that race and is seen doing it. The
-                    // read races the clear on purpose; that race is the defect under proof.
-                    std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
-                    seam_live_in_callback.store(static_cast<bool>(DetourModKit::detail::g_input_key_state_probe),
-                                                std::memory_order_release);
-                    callback_finished.store(true, std::memory_order_release);
-                },
-            });
+                        if (!active)
+                        {
+                            rundown_done.store(true, std::memory_order_release);
+                            return;
+                        }
+                        shutdown_requested.store(true, std::memory_order_release);
+                        // This is the distinct path under proof: the facade releases its poller to the reaper and
+                        // returns while this callback is still executing. The outer cleanup therefore has no poller it
+                        // can join.
+                        Input::instance().shutdown();
+                        shutdown_returned.store(true, std::memory_order_release);
+                        parked.store(true, std::memory_order_release);
+                        while (!proceed.load(std::memory_order_acquire))
+                        {
+                            std::this_thread::yield();
+                        }
+                        // Read the seam from inside the poll thread, after a delay a correct rundown cannot
+                        // use: it is blocked joining THIS body, so the probe it owns must still be installed.
+                        // A rundown that cleared before joining loses that race and is seen doing it. The
+                        // read races the clear on purpose; that race is the defect under proof.
+                        std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                        seam_live_in_callback.store(
+                            static_cast<bool>(DetourModKit::detail::g_input_key_state_probe),
+                            std::memory_order_release
+                        );
+                        callback_finished.store(true, std::memory_order_release);
+                    },
+                }
+            );
             if (!registration)
             {
                 std::fprintf(stderr, "FAIL: could not register the abandoned-premise binding\n");
@@ -363,19 +383,22 @@ namespace
                 return 18;
             }
 
-            const dmk_lifecycle::InputSeamOwner cleanup{[&] { proceed.store(true, std::memory_order_release); },
-                                                        [&]
-                                                        {
-                                                            return rundown_done.load(std::memory_order_acquire) ||
-                                                                   !shutdown_requested.load(std::memory_order_acquire);
-                                                        }};
+            const dmk_lifecycle::InputSeamOwner cleanup{
+                [&] { proceed.store(true, std::memory_order_release); },
+                [&]
+                {
+                    return rundown_done.load(std::memory_order_acquire) ||
+                           !shutdown_requested.load(std::memory_order_acquire);
+                }
+            };
 
             if (!wait_until(
                     [&]
                     {
                         return parked.load(std::memory_order_acquire) &&
                                shutdown_returned.load(std::memory_order_acquire);
-                    }))
+                    }
+                ))
             {
                 std::fprintf(stderr, "FAIL: callback self-shutdown never returned and parked\n");
                 return 19;
@@ -421,8 +444,11 @@ int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        std::fprintf(stderr, "usage: input_self_shutdown "
-                             "<self-shutdown|registration-race|external-shutdown|abandoned-premise>\n");
+        std::fprintf(
+            stderr,
+            "usage: input_self_shutdown "
+            "<self-shutdown|registration-race|external-shutdown|abandoned-premise>\n"
+        );
         return 1;
     }
 

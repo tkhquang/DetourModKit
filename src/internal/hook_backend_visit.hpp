@@ -150,8 +150,11 @@ namespace DetourModKit::detail
     /// Returns the current target-byte witness, or Indeterminate when no backend is reachable.
     template <class BackendVariant> [[nodiscard]] detail::PatchWitness witness_of(BackendVariant &backend) noexcept
     {
-        return backend_value_or(backend, detail::PatchWitness::Indeterminate,
-                                [](auto &one) noexcept { return detail::witness_patch(one); });
+        return backend_value_or(
+            backend,
+            detail::PatchWitness::Indeterminate,
+            [](auto &one) noexcept { return detail::witness_patch(one); }
+        );
     }
 } // namespace DetourModKit::detail
 

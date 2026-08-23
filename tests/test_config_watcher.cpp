@@ -26,9 +26,11 @@ using namespace std::chrono_literals;
 // pattern at the type level rather than referencing Impl directly: if std::unique_ptr ever ceased to be
 // nothrow-move-constructible, the leak cell could no longer be constructed from a noexcept context without risking
 // std::terminate.
-static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<int>>,
-              "std::unique_ptr must remain nothrow-move-constructible for the "
-              "ConfigWatcher loader-lock leak path to keep ~ConfigWatcher noexcept honest.");
+static_assert(
+    std::is_nothrow_move_constructible_v<std::unique_ptr<int>>,
+    "std::unique_ptr must remain nothrow-move-constructible for the "
+    "ConfigWatcher loader-lock leak path to keep ~ConfigWatcher noexcept honest."
+);
 
 namespace
 {
@@ -150,13 +152,15 @@ namespace
     {
         std::atomic<bool> observed{false};
         std::atomic<std::thread::id> cb_tid{};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                                    [&]()
-                                                    {
-                                                        cb_tid.store(std::this_thread::get_id(),
-                                                                     std::memory_order_release);
-                                                        observed.store(true, std::memory_order_release);
-                                                    });
+        DetourModKit::detail::ConfigWatcher watcher(
+            m_ini_path.string(),
+            50ms,
+            [&]()
+            {
+                cb_tid.store(std::this_thread::get_id(), std::memory_order_release);
+                observed.store(true, std::memory_order_release);
+            }
+        );
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -176,13 +180,15 @@ namespace
         // return a false positive, suppressing a genuine stop request as a self-call.
         std::atomic<bool> observed{false};
         std::atomic<std::thread::id> cb_tid{};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                                    [&]()
-                                                    {
-                                                        cb_tid.store(std::this_thread::get_id(),
-                                                                     std::memory_order_release);
-                                                        observed.store(true, std::memory_order_release);
-                                                    });
+        DetourModKit::detail::ConfigWatcher watcher(
+            m_ini_path.string(),
+            50ms,
+            [&]()
+            {
+                cb_tid.store(std::this_thread::get_id(), std::memory_order_release);
+                observed.store(true, std::memory_order_release);
+            }
+        );
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -212,8 +218,11 @@ namespace
         // the id on that return, and start()'s failure path joins the worker before returning, so by the time start()
         // reports false the slot is back to the no-thread id. Complements IsWorkerThreadFalseAfterStop, which covers
         // the normal-exit reset with a captured worker id.
-        DetourModKit::detail::ConfigWatcher watcher((m_temp_dir / "nonexistent_subdir" / "file.ini").string(), 50ms,
-                                                    []() {});
+        DetourModKit::detail::ConfigWatcher watcher(
+            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
+            50ms,
+            []() {}
+        );
 
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
@@ -324,7 +333,8 @@ namespace
                     out.close();
                     std::this_thread::sleep_for(15ms);
                 }
-            });
+            }
+        );
 
         // One target write. With the deadline evaluated every iteration, it must fire ~debounce after this write even
         // while the sibling churn keeps the pump continuously busy.
@@ -336,8 +346,9 @@ namespace
         churn.join();
         watcher.stop();
 
-        EXPECT_TRUE(fired)
-            << "the target reload must fire under sustained foreign-file churn, not be starved until the churn stops";
+        EXPECT_TRUE(
+            fired
+        ) << "the target reload must fire under sustained foreign-file churn, not be starved until the churn stops";
     }
 
     // Filename matching must be case-insensitive (ordinal fold, matching NTFS/exFAT semantics). The watcher is
@@ -376,8 +387,11 @@ namespace
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             out << "[S]\nK=99\n";
         }
-        const BOOL ok = ::MoveFileExW(tmp.wstring().c_str(), m_ini_path.wstring().c_str(),
-                                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        const BOOL ok = ::MoveFileExW(
+            tmp.wstring().c_str(),
+            m_ini_path.wstring().c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        );
         ASSERT_TRUE(ok) << "MoveFileExW failed, GLE=" << ::GetLastError();
 
         EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s));
@@ -511,8 +525,11 @@ namespace
 
     TEST_F(ConfigWatcherTest, Construct_InvalidPath_StartReturnsFalse)
     {
-        DetourModKit::detail::ConfigWatcher watcher((m_temp_dir / "nonexistent_subdir" / "file.ini").string(), 100ms,
-                                                    []() {});
+        DetourModKit::detail::ConfigWatcher watcher(
+            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
+            100ms,
+            []() {}
+        );
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
     }
@@ -525,12 +542,15 @@ namespace
     TEST_F(ConfigWatcherTest, ThrowingCallbackIsContainedAndWatcherKeepsPumping)
     {
         std::atomic<int> fires{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                                    [&fires]()
-                                                    {
-                                                        fires.fetch_add(1);
-                                                        throw std::runtime_error("reload callback boom");
-                                                    });
+        DetourModKit::detail::ConfigWatcher watcher(
+            m_ini_path.string(),
+            50ms,
+            [&fires]()
+            {
+                fires.fetch_add(1);
+                throw std::runtime_error("reload callback boom");
+            }
+        );
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -554,12 +574,15 @@ namespace
     TEST_F(ConfigWatcherTest, ThrowingCallbackIsContainedOnStopTimeFlush)
     {
         std::atomic<int> fires{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 2000ms,
-                                                    [&fires]()
-                                                    {
-                                                        fires.fetch_add(1);
-                                                        throw std::runtime_error("stop-flush boom");
-                                                    });
+        DetourModKit::detail::ConfigWatcher watcher(
+            m_ini_path.string(),
+            2000ms,
+            [&fires]()
+            {
+                fires.fetch_add(1);
+                throw std::runtime_error("stop-flush boom");
+            }
+        );
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -591,7 +614,8 @@ namespace
                 {
                     (void)watcher.is_running();
                 }
-            });
+            }
+        );
 
         for (int i = 0; i < 20; ++i)
         {
@@ -630,8 +654,8 @@ namespace
                 std::filesystem::create_directories(m_temp_dir, mkec);
                 return std::filesystem::is_directory(m_temp_dir);
             },
-            5s))
-            << "the watched parent must be recreatable after the worker releases its handle";
+            5s
+        )) << "the watched parent must be recreatable after the worker releases its handle";
         write_ini("[S]\nK=2\n");
 
         ASSERT_TRUE(watcher.start()) << "restart must succeed after a post-start worker exit";
@@ -652,15 +676,18 @@ namespace
         std::atomic<bool> callback_entered{false};
         std::atomic<bool> release{false};
         // Long debounce so an edit stays pending (un-fired) until stop() flushes it.
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 3000ms,
-                                                    [&]()
-                                                    {
-                                                        callback_entered.store(true, std::memory_order_release);
-                                                        while (!release.load(std::memory_order_acquire))
-                                                        {
-                                                            std::this_thread::sleep_for(1ms);
-                                                        }
-                                                    });
+        DetourModKit::detail::ConfigWatcher watcher(
+            m_ini_path.string(),
+            3000ms,
+            [&]()
+            {
+                callback_entered.store(true, std::memory_order_release);
+                while (!release.load(std::memory_order_acquire))
+                {
+                    std::this_thread::sleep_for(1ms);
+                }
+            }
+        );
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -675,7 +702,8 @@ namespace
             {
                 watcher.stop();
                 stop_returned.store(true, std::memory_order_release);
-            });
+            }
+        );
 
         const bool entered = wait_until([&]() { return callback_entered.load(std::memory_order_acquire); }, 5s);
         EXPECT_TRUE(entered) << "stop() must run the pending debounced callback synchronously (honest rundown)";

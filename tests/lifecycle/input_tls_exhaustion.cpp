@@ -203,7 +203,8 @@ namespace
         const dmk_lifecycle::InputSeamOwner cleanup;
 
         auto registered = manager.register_combo(
-            make_hold_binding("tls_exhaustion", KEY_A, [&](bool) { edges.fetch_add(1, std::memory_order_relaxed); }));
+            make_hold_binding("tls_exhaustion", KEY_A, [&](bool) { edges.fetch_add(1, std::memory_order_relaxed); })
+        );
         if (!registered)
         {
             error_code = 10;
@@ -212,7 +213,8 @@ namespace
         input::BindingGuard guard = std::move(*registered);
 
         const auto started = manager.start(
-            input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false});
+            input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}
+        );
         if (!started)
         {
             error_code = 11;
@@ -250,27 +252,31 @@ namespace
         detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
 
         {
-            auto registered = manager.register_combo(
-                make_hold_binding("tls_abandoned", KEY_A,
-                                  [&](bool active)
-                                  {
-                                      if (!active)
-                                      {
-                                          return;
-                                      }
-                                      parked.store(true, std::memory_order_release);
-                                      while (!proceed.load(std::memory_order_acquire))
-                                      {
-                                          std::this_thread::yield();
-                                      }
-                                      // Read from inside the poll thread, after a window a correct rundown cannot use:
-                                      // it is blocked joining this body, so its probe must still be installed. The race
-                                      // with a clear is the defect.
-                                      std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
-                                      seam_live_in_callback.store(static_cast<bool>(detail::g_input_key_state_probe),
-                                                                  std::memory_order_release);
-                                      callback_finished.store(true, std::memory_order_release);
-                                  }));
+            auto registered = manager.register_combo(make_hold_binding(
+                "tls_abandoned",
+                KEY_A,
+                [&](bool active)
+                {
+                    if (!active)
+                    {
+                        return;
+                    }
+                    parked.store(true, std::memory_order_release);
+                    while (!proceed.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::yield();
+                    }
+                    // Read from inside the poll thread, after a window a correct rundown cannot use:
+                    // it is blocked joining this body, so its probe must still be installed. The race
+                    // with a clear is the defect.
+                    std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                    seam_live_in_callback.store(
+                        static_cast<bool>(detail::g_input_key_state_probe),
+                        std::memory_order_release
+                    );
+                    callback_finished.store(true, std::memory_order_release);
+                }
+            ));
             if (!registered)
             {
                 std::fputs("FAIL: could not register the abandoned-premise binding\n", stderr);
@@ -279,7 +285,8 @@ namespace
             input::BindingGuard guard = std::move(*registered);
 
             if (!manager.start(
-                    input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}))
+                    input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}
+                ))
             {
                 std::fputs("FAIL: could not start the abandoned-premise engine\n", stderr);
                 return 61;
@@ -580,12 +587,15 @@ namespace
             }
             std::thread observer(
                 [&foreign_thread_in_delivery]
-                { foreign_thread_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release); });
+                { foreign_thread_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release); }
+            );
             observer.join();
             if (foreign_thread_in_delivery.load(std::memory_order_acquire))
             {
-                std::fputs("FAIL: a mandatory teardown span made an unrelated thread read as callback-entrant\n",
-                           stderr);
+                std::fputs(
+                    "FAIL: a mandatory teardown span made an unrelated thread read as callback-entrant\n",
+                    stderr
+                );
                 (void)detail::set_delivery_scope_store_failure_for_test(false);
                 return 53;
             }

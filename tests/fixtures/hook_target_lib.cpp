@@ -35,8 +35,8 @@ extern "C"
     // the resolved address falls inside the DLL image. The bytes are arbitrary and chosen not to collide with real code
     // or string content. `extern` forces external linkage: a namespace-scope `const` defaults to internal linkage in
     // C++, which dllexport cannot apply to.
-    __declspec(dllexport) extern const unsigned char dmk_scan_marker[16] = {
-        0xA7, 0x3C, 0xF1, 0x88, 0x5E, 0x22, 0xD9, 0x04, 0x6B, 0xB0, 0x1F, 0x97, 0x4A, 0xE3, 0x7D, 0x50};
+    __declspec(dllexport) extern const unsigned char dmk_scan_marker[16] =
+        {0xA7, 0x3C, 0xF1, 0x88, 0x5E, 0x22, 0xD9, 0x04, 0x6B, 0xB0, 0x1F, 0x97, 0x4A, 0xE3, 0x7D, 0x50};
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)

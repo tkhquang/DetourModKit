@@ -190,8 +190,12 @@ void operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexce
     ::_aligned_free(p);
 }
 
-extern "C" __declspec(dllexport) int dmk_diagnostics_probe(unsigned long long *refusals, std::size_t *total,
-                                                           std::size_t *active, std::size_t *disabled) noexcept
+extern "C" __declspec(dllexport) int dmk_diagnostics_probe(
+    unsigned long long *refusals,
+    std::size_t *total,
+    std::size_t *active,
+    std::size_t *disabled
+) noexcept
 {
     // Snapshot the load-time count before the control below adds a refusal of its own.
     const unsigned long long load_refusals = s_refusals.load(std::memory_order_relaxed);
@@ -262,10 +266,12 @@ namespace
         const HMODULE probe = ::LoadLibraryA("dmk_diagnostics_oom_probe.dll");
         if (probe == nullptr)
         {
-            std::fprintf(stderr,
-                         "FAIL: loading the probe DLL failed with %lu. ERROR_DLL_INIT_FAILED (1114) is the signature "
-                         "of an allocating DMK initializer propagating out of module load.\n",
-                         ::GetLastError());
+            std::fprintf(
+                stderr,
+                "FAIL: loading the probe DLL failed with %lu. ERROR_DLL_INIT_FAILED (1114) is the signature "
+                "of an allocating DMK initializer propagating out of module load.\n",
+                ::GetLastError()
+            );
             return 10;
         }
 
@@ -284,32 +290,42 @@ namespace
         const int control = probe_fn(&refusals, &total, &active, &disabled);
         if (control != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL: the probe's own %s allocation was served while poisoned, so that operator new "
-                         "replacement never took effect and this run proves nothing\n",
-                         control == 2 ? "over-aligned" : "plain");
+            std::fprintf(
+                stderr,
+                "FAIL: the probe's own %s allocation was served while poisoned, so that operator new "
+                "replacement never took effect and this run proves nothing\n",
+                control == 2 ? "over-aligned" : "plain"
+            );
             return 12;
         }
 
         if (refusals != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL: %llu allocation(s) were attempted and refused while the loader ran this module's "
-                         "initializers. DMK must reach user code without asking for memory.\n",
-                         refusals);
+            std::fprintf(
+                stderr,
+                "FAIL: %llu allocation(s) were attempted and refused while the loader ran this module's "
+                "initializers. DMK must reach user code without asking for memory.\n",
+                refusals
+            );
             return 13;
         }
         if (total != 0 || active != 0 || disabled != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL: a freshly loaded module reported a nonzero hook population (total=%zu active=%zu "
-                         "disabled=%zu)\n",
-                         total, active, disabled);
+            std::fprintf(
+                stderr,
+                "FAIL: a freshly loaded module reported a nonzero hook population (total=%zu active=%zu "
+                "disabled=%zu)\n",
+                total,
+                active,
+                disabled
+            );
             return 14;
         }
 
-        std::printf("diagnostics-first-use-oom: module loaded with the heap poisoned, attempted no allocation, and "
-                    "reports exact zero population\n");
+        std::printf(
+            "diagnostics-first-use-oom: module loaded with the heap poisoned, attempted no allocation, and "
+            "reports exact zero population\n"
+        );
 
         if (::FreeLibrary(probe) == 0)
         {

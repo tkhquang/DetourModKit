@@ -126,8 +126,10 @@ namespace DetourModKit
              */
             template <typename T> [[nodiscard]] T lane(std::size_t index) const noexcept
             {
-                static_assert(std::is_trivially_copyable_v<T>,
-                              "XmmView::lane<T> requires a trivially-copyable lane type");
+                static_assert(
+                    std::is_trivially_copyable_v<T>,
+                    "XmmView::lane<T> requires a trivially-copyable lane type"
+                );
                 T value{};
                 // Fail closed on an out-of-range lane: a bad index must not read past the 16-byte register.
                 if (index >= bytes.size() / sizeof(T))
@@ -810,12 +812,22 @@ namespace DetourModKit
              * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
              */
             template <class Fn>
-            [[nodiscard]] static HookSpec inline_hook(std::string name, scan::OwnedScanRequest target, Fn *detour,
-                                                      Severity severity = Severity::Mandatory, Options options = {})
+            [[nodiscard]] static HookSpec inline_hook(
+                std::string name,
+                scan::OwnedScanRequest target,
+                Fn *detour,
+                Severity severity = Severity::Mandatory,
+                Options options = {}
+            )
             {
                 static_assert(sizeof(Fn *) == sizeof(void *), "function pointer must be word-sized");
-                return HookSpec{std::move(name), std::move(target), InlineDetour{reinterpret_cast<void *>(detour)},
-                                severity, options};
+                return HookSpec{
+                    std::move(name),
+                    std::move(target),
+                    InlineDetour{reinterpret_cast<void *>(detour)},
+                    severity,
+                    options
+                };
             }
 
             /**
@@ -829,8 +841,13 @@ namespace DetourModKit
              * @return A declarative table row consumed by @ref install_all.
              * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
              */
-            [[nodiscard]] static HookSpec mid_hook(std::string name, scan::OwnedScanRequest target, MidHookFn detour,
-                                                   Severity severity = Severity::Mandatory, Options options = {})
+            [[nodiscard]] static HookSpec mid_hook(
+                std::string name,
+                scan::OwnedScanRequest target,
+                MidHookFn detour,
+                Severity severity = Severity::Mandatory,
+                Options options = {}
+            )
             {
                 return HookSpec{std::move(name), std::move(target), detour, severity, options};
             }
@@ -843,8 +860,13 @@ namespace DetourModKit
             [[nodiscard]] const Options &options() const noexcept { return m_options; }
 
         private:
-            HookSpec(std::string name, scan::OwnedScanRequest target, std::variant<InlineDetour, MidHookFn> detour,
-                     Severity severity, Options options) noexcept
+            HookSpec(
+                std::string name,
+                scan::OwnedScanRequest target,
+                std::variant<InlineDetour, MidHookFn> detour,
+                Severity severity,
+                Options options
+            ) noexcept
                 : m_name(std::move(name)), m_target(std::move(target)), m_detour(std::move(detour)),
                   m_severity(severity), m_options(options)
             {

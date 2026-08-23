@@ -58,8 +58,12 @@ namespace
         return std::string((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     }
 
-    int run_generation(std::wstring_view route_token, std::wstring_view mode_token, std::wstring_view marker,
-                       const std::filesystem::path &log_path)
+    int run_generation(
+        std::wstring_view route_token,
+        std::wstring_view mode_token,
+        std::wstring_view marker,
+        const std::filesystem::path &log_path
+    )
     {
         const std::wstring exe = own_executable_path();
         if (exe.empty())
@@ -75,8 +79,18 @@ namespace
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         PROCESS_INFORMATION process{};
-        if (!CreateProcessW(exe.c_str(), command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
-                            &process))
+        if (!CreateProcessW(
+                exe.c_str(),
+                command_line.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                0,
+                nullptr,
+                nullptr,
+                &startup,
+                &process
+            ))
         {
             std::fprintf(stderr, "CreateProcessW failed: %lu\n", GetLastError());
             return 21;
@@ -103,8 +117,12 @@ namespace
         return static_cast<int>(exit_code);
     }
 
-    int run_child(std::string_view route_token, std::string_view mode_token, std::string_view marker,
-                  std::string_view log_path)
+    int run_child(
+        std::string_view route_token,
+        std::string_view mode_token,
+        std::string_view marker,
+        std::string_view log_path
+    )
     {
         DetourModKit::ModInfo info{};
         info.name = "DMKGenLogProof";
@@ -140,13 +158,14 @@ namespace
             return 13;
         }
 
-        DetourModKit::Result<void> started =
-            DetourModKit::bootstrap(info,
-                                    [marker](DetourModKit::Session &) -> DetourModKit::Result<void>
-                                    {
-                                        (void)DetourModKit::log().log(DetourModKit::LogLevel::Info, marker);
-                                        return {};
-                                    });
+        DetourModKit::Result<void> started = DetourModKit::bootstrap(
+            info,
+            [marker](DetourModKit::Session &) -> DetourModKit::Result<void>
+            {
+                (void)DetourModKit::log().log(DetourModKit::LogLevel::Info, marker);
+                return {};
+            }
+        );
         if (!started)
         {
             std::fprintf(stderr, "bootstrap failed: %s\n", started.error().message().c_str());

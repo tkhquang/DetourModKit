@@ -72,8 +72,12 @@ namespace
     void region_scan_body(void *raw) noexcept
     {
         const auto *const ctx = static_cast<const RegionScanContext *>(raw);
-        (void)scan::scan(scan::Pattern::literal("DE AD C0 DE"), Region{Address{ctx->scope_base}, ctx->scope_size}, 1,
-                         scan::Pages::Executable);
+        (void)scan::scan(
+            scan::Pattern::literal("DE AD C0 DE"),
+            Region{Address{ctx->scope_base}, ctx->scope_size},
+            1,
+            scan::Pages::Executable
+        );
     }
 
     // String-xref phase 2. Phase 1 must locate the planted literal first, so the narrow window sweep (the guarded

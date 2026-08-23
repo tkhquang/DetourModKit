@@ -64,7 +64,8 @@ namespace
             GetSystemInfo(&si);
             m_size = si.dwPageSize;
             m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
         }
 
         ~StringImage()
@@ -504,8 +505,12 @@ namespace
                 return false;
             }
             DWORD old_protection = 0;
-            return VirtualProtect(static_cast<std::byte *>(m_base) + offset, IMAGE_BYTES - offset, PAGE_NOACCESS,
-                                  &old_protection) != FALSE;
+            return VirtualProtect(
+                       static_cast<std::byte *>(m_base) + offset,
+                       IMAGE_BYTES - offset,
+                       PAGE_NOACCESS,
+                       &old_protection
+                   ) != FALSE;
         }
 
     private:
@@ -682,15 +687,18 @@ TEST(ScanExportTest, OutOfImageExportDirectoryAndArraysFailClosed)
     IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
     nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {
         static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES - sizeof(IMAGE_EXPORT_DIRECTORY)),
-        static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) + 1)};
+        static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) + 1)
+    };
     image.put(SyntheticExportImage::NT_RVA, nt);
 
     const dmk::Result<dmk::Address> directory_result = sc::resolve_export("fixture_export", image.range());
     ASSERT_FALSE(directory_result.has_value());
     EXPECT_EQ(directory_result.error().code, dmk::ErrorCode::ExportNotFound);
 
-    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {SyntheticExportImage::EXPORT_RVA,
-                                                                     SyntheticExportImage::EXPORT_BYTES};
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {
+        SyntheticExportImage::EXPORT_RVA,
+        SyntheticExportImage::EXPORT_BYTES
+    };
     image.put(SyntheticExportImage::NT_RVA, nt);
     IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
     exports.AddressOfNames = static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES - 2);
@@ -755,7 +763,9 @@ TEST(ScanExportTest, UndersizedExportDirectoryFailsClosed)
     ASSERT_TRUE(image.ok());
     IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
     nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {
-        SyntheticExportImage::EXPORT_RVA, static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) - 1)};
+        SyntheticExportImage::EXPORT_RVA,
+        static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) - 1)
+    };
     image.put(SyntheticExportImage::NT_RVA, nt);
 
     const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
@@ -858,8 +868,10 @@ TEST(ScanExportTest, MalformedNameAfterAMatchFailsClosed)
     IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
     exports.NumberOfNames = 2;
     image.put(SyntheticExportImage::EXPORT_RVA, exports);
-    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t),
-              static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES));
+    image.put(
+        SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t),
+        static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES)
+    );
 
     dmk::detail::ExportResolution provenance{
         .module_base = 1,
@@ -1176,8 +1188,10 @@ TEST(AnchorTest, ExportProvenanceNamesTheSlotAndTheTarget)
     EXPECT_EQ(other_image_resolution.function_index, syn_one.function_index);
     EXPECT_EQ(other_image_resolution.function_rva, syn_one.function_rva);
     EXPECT_EQ(other_image_resolution.target, *other_image_result);
-    EXPECT_EQ(other_image_resolution.target.raw(),
-              other_image_resolution.module_base + other_image_resolution.function_rva);
+    EXPECT_EQ(
+        other_image_resolution.target.raw(),
+        other_image_resolution.module_base + other_image_resolution.function_rva
+    );
     EXPECT_FALSE(dmk::detail::same_export_site(syn_one, other_image_resolution));
 }
 
@@ -2045,10 +2059,14 @@ TEST(AnchorTest, QuorumRejectsReorderedIdenticalLadders)
     // reordered copy decodes the same site and is dependent evidence, not corroboration: the independence gate must
     // be order-INDEPENDENT. (Here both rungs resolve to 0xF0, so a storage/order-sensitive gate would have let this
     // pair falsely corroborate; the fix reports QuorumNotIndependent before any resolve.)
-    const sc::Candidate ladder_ab[] = {sc::Candidate::direct("a", aob("48 05 F0 00 00 00")),
-                                       sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00"))};
-    const sc::Candidate ladder_ba[] = {sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00")),
-                                       sc::Candidate::direct("a", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate ladder_ab[] = {
+        sc::Candidate::direct("a", aob("48 05 F0 00 00 00")),
+        sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00"))
+    };
+    const sc::Candidate ladder_ba[] = {
+        sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00")),
+        sc::Candidate::direct("a", aob("48 05 F0 00 00 00"))
+    };
 
     an::Anchor sub_ab{};
     sub_ab.kind = an::AnchorKind::CodeOperand;
@@ -2151,12 +2169,15 @@ TEST(AnchorTest, QuorumRejectsRungMatchingAnotherWinnersTrailingImmediate)
     constexpr std::size_t instruction_offset = 0x100;
     constexpr std::size_t target_offset = 0x300;
     const std::uintptr_t instruction_address = page.addr(instruction_offset);
-    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(page.addr(target_offset)) -
-                                                        static_cast<std::int64_t>(instruction_address + 10));
+    const auto displacement = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(page.addr(target_offset)) - static_cast<std::int64_t>(instruction_address + 10)
+    );
     const auto disp_byte = [displacement](unsigned shift) noexcept
     { return static_cast<std::uint8_t>((static_cast<std::uint32_t>(displacement) >> shift) & 0xFFu); };
-    page.put(instruction_offset,
-             {0xC7, 0x05, disp_byte(0), disp_byte(8), disp_byte(16), disp_byte(24), 0xDE, 0xC0, 0xAD, 0x0B});
+    page.put(
+        instruction_offset,
+        {0xC7, 0x05, disp_byte(0), disp_byte(8), disp_byte(16), disp_byte(24), 0xDE, 0xC0, 0xAD, 0x0B}
+    );
 
     const sc::Candidate head[] = {sc::Candidate::rip_relative("rip-head", aob("C7 05 ?? ?? ?? ??"), 2, 10)};
     an::Anchor sub_a{};
@@ -2266,7 +2287,8 @@ TEST(AnchorTest, QuorumAcceptsStringXrefAndDistinctRipInstruction)
     sub_a.xref_text = literal;
 
     const sc::Candidate site_b[] = {
-        sc::Candidate::rip_relative("distinct-instruction", aob("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+        sc::Candidate::rip_relative("distinct-instruction", aob("48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
     an::Anchor sub_b{};
     sub_b.kind = an::AnchorKind::RipGlobal;
     sub_b.site = site_b;
@@ -2361,10 +2383,14 @@ TEST(AnchorTest, QuorumRejectsPartialLadderOverlap)
 {
     // Both ladders carry the SAME second rung ("48 05 F0 00 00 00") and a DIFFERENT first rung. Same operand selector,
     // so the shared rung yields the same evidence atom in both members.
-    const sc::Candidate ladder_a[] = {sc::Candidate::direct("a-primary", aob("48 81 C1 F0 00 00 00")),
-                                      sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))};
-    const sc::Candidate ladder_b[] = {sc::Candidate::direct("b-primary", aob("48 81 C2 F0 00 00 00")),
-                                      sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate ladder_a[] = {
+        sc::Candidate::direct("a-primary", aob("48 81 C1 F0 00 00 00")),
+        sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))
+    };
+    const sc::Candidate ladder_b[] = {
+        sc::Candidate::direct("b-primary", aob("48 81 C2 F0 00 00 00")),
+        sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))
+    };
 
     an::Anchor sub_a{};
     sub_a.kind = an::AnchorKind::CodeOperand;
@@ -2938,8 +2964,10 @@ TEST(AnchorQuorumTest, CorrelatedPhysicalSourceCannotDoubleVote)
     an::Anchor export_quorum{};
     export_quorum.kind = an::AnchorKind::Quorum;
     export_quorum.quorum_members = export_members;
-    EXPECT_EQ(an::resolve(export_quorum, dmk::Region::module_named(ExportFixture::MODULE_NAME)).status,
-              an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(
+        an::resolve(export_quorum, dmk::Region::module_named(ExportFixture::MODULE_NAME)).status,
+        an::AnchorStatus::QuorumNotIndependent
+    );
 }
 
 TEST(AnchorQuorumTest, OrderAndPhysicalIndependenceAgree)
@@ -3112,11 +3140,15 @@ TEST(PolicyDomainTest, InvalidEnumsFailClosedEverywhere)
     rip_control.site = rip_site;
     an::ScanProfile bad_order_profile{};
     bad_order_profile.candidate_order = static_cast<sc::CandidateOrder>(0xFF);
-    ASSERT_EQ(an::resolve_with_profile(rip_control, an::ScanProfile{}, page.range()).status,
-              an::AnchorStatus::Resolved);
+    ASSERT_EQ(
+        an::resolve_with_profile(rip_control, an::ScanProfile{}, page.range()).status,
+        an::AnchorStatus::Resolved
+    );
     EXPECT_EQ(an::resolve_with_profile(rip_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
-    ASSERT_EQ(an::resolve_with_profile(code_control, an::ScanProfile{}, page.range()).status,
-              an::AnchorStatus::Resolved);
+    ASSERT_EQ(
+        an::resolve_with_profile(code_control, an::ScanProfile{}, page.range()).status,
+        an::AnchorStatus::Resolved
+    );
     EXPECT_EQ(an::resolve_with_profile(code_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
 }
 
@@ -3371,10 +3403,14 @@ TEST(AnchorFingerprintTest, CascadeFieldBoundaryResistsByteRedistribution)
     // Two RipGlobal cascades of the same cardinality cover the identical "AA BB CC" stream, differing only in where
     // the boundary between patterns falls: [AA BB][CC] vs [AA][BB CC]. Each pattern's bytes/mask are length-prefixed in
     // the fingerprint, so the prefix pins each pattern's extent and moving the boundary is different evidence.
-    const sc::Candidate split_left[] = {sc::Candidate::direct("c0", aob("AA BB")),
-                                        sc::Candidate::direct("c1", aob("CC"))};
-    const sc::Candidate split_right[] = {sc::Candidate::direct("c0", aob("AA")),
-                                         sc::Candidate::direct("c1", aob("BB CC"))};
+    const sc::Candidate split_left[] = {
+        sc::Candidate::direct("c0", aob("AA BB")),
+        sc::Candidate::direct("c1", aob("CC"))
+    };
+    const sc::Candidate split_right[] = {
+        sc::Candidate::direct("c0", aob("AA")),
+        sc::Candidate::direct("c1", aob("BB CC"))
+    };
     an::Anchor a{};
     a.kind = an::AnchorKind::RipGlobal;
     a.site = split_left;
@@ -3390,8 +3426,10 @@ TEST(AnchorFingerprintTest, CascadeCardinalityIsEvidence)
     // only the cascade length differs. The cascade's leading count prefix makes cardinality evidence, so a duplicated
     // ladder row cannot alias the singleton it duplicates.
     const sc::Candidate one[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};
-    const sc::Candidate two[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??")),
-                                 sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};
+    const sc::Candidate two[] = {
+        sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??")),
+        sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))
+    };
     an::Anchor a{};
     a.kind = an::AnchorKind::RipGlobal;
     a.site = one;
@@ -3791,18 +3829,22 @@ namespace
 
 TEST(AnchorGateTest, AllResolvedPassesDefaultPolicy)
 {
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::VtableIdentity, an::AnchorStatus::Resolved)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::VtableIdentity, an::AnchorStatus::Resolved)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Pass);
 }
 
 TEST(AnchorGateTest, FailedAnchorFailsDefaultPolicy)
 {
     // Default max_failed is 0, so a single failure disables the feature regardless of how many others resolved.
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Fail);
 }
 
@@ -3810,78 +3852,108 @@ TEST(AnchorGateTest, QuorumNotIndependentCountsAsHardFailure)
 {
     // A quorum whose sub-anchors were not independent committed no value; it fails closed and counts against max_failed
     // exactly like a Failed anchor.
-    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::Quorum, an::AnchorStatus::QuorumNotIndependent)};
+    const std::array<an::ResolvedAnchor, 2> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::Quorum, an::AnchorStatus::QuorumNotIndependent)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Fail);
 }
 
 TEST(AnchorGateTest, PartialResolveIsGatedByRatio)
 {
     // One of three resolvable anchors resolved; the other two are Unresolved (an untouched slot still drags the ratio).
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)
+    };
 
     // 1/3 < 0.5 -> Fail.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.5,
-                                }),
-              an::GateVerdict::Fail);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.5,
+            }
+        ),
+        an::GateVerdict::Fail
+    );
     // 1/3 >= 0.3 -> clears the ratio; no failure and no manual, so Pass.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.3,
-                                }),
-              an::GateVerdict::Pass);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.3,
+            }
+        ),
+        an::GateVerdict::Pass
+    );
 }
 
 TEST(AnchorGateTest, UnsupportedKindExcludedFromDenominator)
 {
     // Two resolved plus one CallArgHome (no resolver, always Unsupported). Under the strict default ratio 1.0 the
     // unsupported kind must NOT be counted against the manifest, so 2/2 resolvable resolved -> Pass.
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Pass);
 }
 
 TEST(AnchorGateTest, ResolvedManualDowngradesToDegraded)
 {
     // Every anchor resolved, but one is a pinned Manual literal that cannot self-heal: Degraded by default...
-    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved)};
+    const std::array<an::ResolvedAnchor, 2> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Degraded);
     // ...but a policy that opts out of the manual downgrade treats it as a plain Pass.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .manual_at_risk_degrades = false,
-                                }),
-              an::GateVerdict::Pass);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .manual_at_risk_degrades = false,
+            }
+        ),
+        an::GateVerdict::Pass
+    );
 }
 
 TEST(AnchorGateTest, FailedManualStillCountsAtRisk)
 {
     // manual_at_risk counts every Manual entry regardless of status: the pin cannot self-heal whether or not it
     // resolved this run. A policy that tolerates the failure therefore lands on Degraded, not Pass.
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Failed)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::Manual, an::AnchorStatus::Failed)
+    };
     EXPECT_EQ(an::assess_quality(report).manual_at_risk, 1u);
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.5,
-                                    .max_failed = 1,
-                                }),
-              an::GateVerdict::Degraded);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.5,
+                .max_failed = 1,
+            }
+        ),
+        an::GateVerdict::Degraded
+    );
     // Opting out of the manual downgrade restores the tolerated-failure Pass.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.5,
-                                    .max_failed = 1,
-                                    .manual_at_risk_degrades = false,
-                                }),
-              an::GateVerdict::Pass);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.5,
+                .max_failed = 1,
+                .manual_at_risk_degrades = false,
+            }
+        ),
+        an::GateVerdict::Pass
+    );
 }
 
 TEST(AnchorGateTest, EmptyReportIsDegraded)
@@ -3893,8 +3965,10 @@ TEST(AnchorGateTest, EmptyReportIsDegraded)
 TEST(AnchorGateTest, AllUnsupportedReportIsDegraded)
 {
     // A non-empty report with nothing assessable proves nothing about health: Degraded, never a false Pass.
-    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported),
-                                                   ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)};
+    const std::array<an::ResolvedAnchor, 2> report{
+        ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported),
+        ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)
+    };
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Degraded);
 }
 
@@ -3902,40 +3976,60 @@ TEST(AnchorGateTest, MaxFailedToleratesConfiguredFailures)
 {
     // Two failures with a cap of two clears the hard-failure gate; the remaining resolved fraction then decides. Here
     // 1 resolved of 3 resolvable at ratio 0.3 passes the ratio, so the verdict is Pass.
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed)};
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.3,
-                                    .max_failed = 2,
-                                }),
-              an::GateVerdict::Pass);
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed)
+    };
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.3,
+                .max_failed = 2,
+            }
+        ),
+        an::GateVerdict::Pass
+    );
     // One below the cap still fails.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 0.3,
-                                    .max_failed = 1,
-                                }),
-              an::GateVerdict::Fail);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 0.3,
+                .max_failed = 1,
+            }
+        ),
+        an::GateVerdict::Fail
+    );
 }
 
 TEST(AnchorGateTest, OutOfRangeRatioIsClamped)
 {
-    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
+    const std::array<an::ResolvedAnchor, 2> report{
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)
+    };
     // A ratio above 1.0 clamps to 1.0 (still requires every resolvable anchor): 1/2 -> Fail.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = 5.0,
-                                }),
-              an::GateVerdict::Fail);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = 5.0,
+            }
+        ),
+        an::GateVerdict::Fail
+    );
     // A negative ratio clamps to 0.0 (any resolved fraction clears it): Pass.
-    EXPECT_EQ(an::evaluate_gate(report,
-                                an::GatePolicy{
-                                    .min_resolved_ratio = -1.0,
-                                }),
-              an::GateVerdict::Pass);
+    EXPECT_EQ(
+        an::evaluate_gate(
+            report,
+            an::GatePolicy{
+                .min_resolved_ratio = -1.0,
+            }
+        ),
+        an::GateVerdict::Pass
+    );
     // NaN is treated as the strict default, not as a threshold that silently passes every report.
     const an::GatePolicy nan_policy{
         .min_resolved_ratio = std::numeric_limits<double>::quiet_NaN(),
@@ -3945,9 +4039,11 @@ TEST(AnchorGateTest, OutOfRangeRatioIsClamped)
 
 TEST(AnchorGateTest, SpanOverloadMatchesQualityOverload)
 {
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)
+    };
     const an::GatePolicy policy{
         .min_resolved_ratio = 0.5,
         .max_failed = 1,
@@ -4086,8 +4182,9 @@ TEST(ImageIdentityTest, ExcessiveAndUnreadableSectionTablesFailClosed)
     constexpr std::uint32_t second_page_rva = 0x1000;
     constexpr std::uint32_t section_table_rva =
         second_page_rva - static_cast<std::uint32_t>(sizeof(IMAGE_SECTION_HEADER) / 2);
-    nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(section_table_rva - SyntheticExportImage::NT_RVA -
-                                                           offsetof(IMAGE_NT_HEADERS64, OptionalHeader));
+    nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(
+        section_table_rva - SyntheticExportImage::NT_RVA - offsetof(IMAGE_NT_HEADERS64, OptionalHeader)
+    );
     unreadable.put(SyntheticExportImage::NT_RVA, nt);
     IMAGE_SECTION_HEADER section{};
     std::memcpy(section.Name, ".data", 5);
@@ -4146,8 +4243,10 @@ TEST(AnchorTrustFingerprintTest, InheritedEmptyExportModuleScopeCollidesWithExpl
 
     // Two ways to name one effective export collapse to one TRUST key (the declared module string is replaced by the
     // effective identity), even though their DEFINITION fingerprints differ (one folds the module string).
-    EXPECT_EQ(an::anchor_trust_fingerprint(inherited, effective),
-              an::anchor_trust_fingerprint(explicit_mod, effective));
+    EXPECT_EQ(
+        an::anchor_trust_fingerprint(inherited, effective),
+        an::anchor_trust_fingerprint(explicit_mod, effective)
+    );
     EXPECT_NE(an::anchor_fingerprint(inherited), an::anchor_fingerprint(explicit_mod));
 }
 
@@ -4448,9 +4547,12 @@ namespace
         {
             return true;
         }
-        void *const mapping =
-            ::VirtualAlloc(reinterpret_cast<void *>(s_private_replacement_base), s_private_replacement_image_size,
-                           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void *const mapping = ::VirtualAlloc(
+            reinterpret_cast<void *>(s_private_replacement_base),
+            s_private_replacement_image_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE
+        );
         if (reinterpret_cast<std::uintptr_t>(mapping) != s_private_replacement_base)
         {
             if (mapping != nullptr)
@@ -4468,8 +4570,11 @@ namespace
     class ScopedPrivateImageReplacement
     {
     public:
-        ScopedPrivateImageReplacement(dmk_test::GenerationFixtureModule &module, dmk::Region image,
-                                      std::span<const std::byte> header) noexcept
+        ScopedPrivateImageReplacement(
+            dmk_test::GenerationFixtureModule &module,
+            dmk::Region image,
+            std::span<const std::byte> header
+        ) noexcept
         {
             s_private_replacement_module = &module;
             s_private_replacement_header = header.data();
@@ -4772,8 +4877,12 @@ namespace
             }
             if (reserved_prefix)
             {
-                void *const committed = ::VirtualAlloc(reinterpret_cast<void *>(base + ScratchPage::PAGE_SIZE),
-                                                       ScratchPage::PAGE_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *const committed = ::VirtualAlloc(
+                    reinterpret_cast<void *>(base + ScratchPage::PAGE_SIZE),
+                    ScratchPage::PAGE_SIZE,
+                    MEM_COMMIT,
+                    PAGE_EXECUTE_READWRITE
+                );
                 if (reinterpret_cast<std::uintptr_t>(committed) != base + ScratchPage::PAGE_SIZE)
                 {
                     (void)::VirtualFree(mapping, 0, MEM_RELEASE);
@@ -4847,18 +4956,29 @@ namespace
             return true;
         }
         s_split_original_mapping = nullptr;
-        s_split_first_mapping = ::VirtualAlloc(reinterpret_cast<void *>(s_split_base), s_split_granularity,
-                                               MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        s_split_second_mapping = ::VirtualAlloc(reinterpret_cast<void *>(s_split_base + s_split_granularity),
-                                                s_split_granularity, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        s_split_first_mapping = ::VirtualAlloc(
+            reinterpret_cast<void *>(s_split_base),
+            s_split_granularity,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE
+        );
+        s_split_second_mapping = ::VirtualAlloc(
+            reinterpret_cast<void *>(s_split_base + s_split_granularity),
+            s_split_granularity,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE
+        );
         if (reinterpret_cast<std::uintptr_t>(s_split_first_mapping) != s_split_base ||
             reinterpret_cast<std::uintptr_t>(s_split_second_mapping) != s_split_base + s_split_granularity)
         {
             return true;
         }
         std::memcpy(reinterpret_cast<void *>(s_split_base + SPLIT_MARKER_OFFSET), s_split_marker, s_split_marker_size);
-        std::memcpy(reinterpret_cast<void *>(s_split_base + s_split_granularity + SPLIT_MARKER_OFFSET), s_split_marker,
-                    s_split_marker_size);
+        std::memcpy(
+            reinterpret_cast<void *>(s_split_base + s_split_granularity + SPLIT_MARKER_OFFSET),
+            s_split_marker,
+            s_split_marker_size
+        );
         s_split_happened = true;
         return true;
     }
@@ -4936,7 +5056,8 @@ namespace
             m_page_size = system_info.dwPageSize;
             m_size = m_page_size * REGION_COUNT;
             m_base = static_cast<std::byte *>(
-                ::VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                ::VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
             if (m_base == nullptr)
             {
                 return;
@@ -5016,9 +5137,12 @@ namespace
     public:
         explicit FixedExecutablePage(std::uintptr_t requested) noexcept
         {
-            m_base =
-                static_cast<std::uint8_t *>(::VirtualAlloc(reinterpret_cast<void *>(requested), ScratchPage::PAGE_SIZE,
-                                                           MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+            m_base = static_cast<std::uint8_t *>(::VirtualAlloc(
+                reinterpret_cast<void *>(requested),
+                ScratchPage::PAGE_SIZE,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE
+            ));
             if (reinterpret_cast<std::uintptr_t>(m_base) != requested)
             {
                 if (m_base != nullptr)
@@ -5212,11 +5336,18 @@ TEST(AnchorTrustTransactionTest, ImageMappingWithUnreadableExtentFailsClosed)
     const std::uintptr_t marker_address = module.table();
     const auto marker = transaction_marker(target ^ marker_address ^ ::GetCurrentProcessId());
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(marker_address), marker.size(), PAGE_EXECUTE_READWRITE,
-                                 &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(marker_address),
+            marker.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(marker_address), marker.data(), marker.size());
-    const sc::Candidate candidates[] = {sc::Candidate::direct("missing-module-range", aob(aob_for_bytes(marker)),
-                                                              target_delta(marker_address, target))};
+    const sc::Candidate candidates[] = {
+        sc::Candidate::direct("missing-module-range", aob(aob_for_bytes(marker)), target_delta(marker_address, target))
+    };
 
     an::Anchor anchor{};
     anchor.label = "fixture.missing.range";
@@ -5227,8 +5358,10 @@ TEST(AnchorTrustTransactionTest, ImageMappingWithUnreadableExtentFailsClosed)
     const ScopedMissingModuleRange missing_range(module.base());
     ASSERT_TRUE(missing_range.ok()) << "fixture SizeOfImage could not be made invalid";
     MEMORY_BASIC_INFORMATION memory_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(target), &memory_info, sizeof(memory_info)),
-              sizeof(memory_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(target), &memory_info, sizeof(memory_info)),
+        sizeof(memory_info)
+    );
     ASSERT_EQ(memory_info.Type, static_cast<DWORD>(MEM_IMAGE));
     ASSERT_FALSE(sc::image_identity(scope).present()) << "the unreadable-extent premise was not established";
 
@@ -5290,8 +5423,14 @@ TEST(AnchorTrustTransactionTest, ReplacementBetweenOwnerIdentitySamplesFailsClos
     const std::uintptr_t instruction_address = swap.module().table();
     constexpr std::array<std::uint8_t, 6> instruction{0x48, 0x05, 0xF0, 0x00, 0x00, 0x00};
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(instruction_address), instruction.size(),
-                                 PAGE_EXECUTE_READWRITE, &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(instruction_address),
+            instruction.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(instruction_address), instruction.data(), instruction.size());
 
     const sc::Candidate candidates[] = {sc::Candidate::direct("identity-sample-swap", aob("48 05 F0 00 00 00"))};
@@ -5386,8 +5525,10 @@ TEST(AnchorTrustTransactionTest, ImageReplacementByPrivatePeCopyFailsClosed)
 
     ASSERT_TRUE(replacement.happened()) << "the loader image was not replaced by a private mapping at the same base";
     MEMORY_BASIC_INFORMATION memory_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
-              sizeof(memory_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
+        sizeof(memory_info)
+    );
     EXPECT_EQ(memory_info.Type, static_cast<DWORD>(MEM_PRIVATE));
     EXPECT_EQ(sc::image_identity(dmk::Region{fixture.base, 1}), original_identity)
         << "the private replacement must retain the PE identity that defeated an identity-only recheck";
@@ -5415,8 +5556,14 @@ TEST(AnchorTrustTransactionTest, PrivateReplacementInsideOwnerIdentityBracketFai
     const std::uintptr_t instruction_address = module.table();
     constexpr std::array<std::uint8_t, 6> instruction{0x48, 0x05, 0xF0, 0x00, 0x00, 0x00};
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(instruction_address), instruction.size(),
-                                 PAGE_EXECUTE_READWRITE, &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(instruction_address),
+            instruction.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(instruction_address), instruction.data(), instruction.size());
 
     const sc::Candidate candidates[] = {sc::Candidate::direct("private-during-identity", aob("48 05 F0 00 00 00"))};
@@ -5438,8 +5585,10 @@ TEST(AnchorTrustTransactionTest, PrivateReplacementInsideOwnerIdentityBracketFai
     ASSERT_TRUE(replacement.happened()) << "the image was not replaced inside the owner-identity bracket";
     EXPECT_FALSE(replacement.restored()) << "the middle mapping check did not stop before the restore seam";
     MEMORY_BASIC_INFORMATION memory_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
-              sizeof(memory_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
+        sizeof(memory_info)
+    );
     EXPECT_EQ(memory_info.Type, static_cast<DWORD>(MEM_PRIVATE));
     EXPECT_EQ(sc::image_identity(dmk::Region{fixture.base, 1}), original_identity)
         << "the private clone must remain identity-equal so only the post-read mapping check can reject it";
@@ -5466,12 +5615,19 @@ TEST(AnchorTrustTransactionTest, PrivateReplacementAfterConfirmedIdentityFailsCl
     const std::uintptr_t instruction_address = module.table();
     constexpr std::array<std::uint8_t, 6> instruction{0x48, 0x05, 0xF0, 0x00, 0x00, 0x00};
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(instruction_address), instruction.size(),
-                                 PAGE_EXECUTE_READWRITE, &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(instruction_address),
+            instruction.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(instruction_address), instruction.data(), instruction.size());
 
     const sc::Candidate candidates[] = {
-        sc::Candidate::direct("private-after-confirmed-identity", aob("48 05 F0 00 00 00"))};
+        sc::Candidate::direct("private-after-confirmed-identity", aob("48 05 F0 00 00 00"))
+    };
     an::Anchor anchor{};
     anchor.label = "fixture.private.after.confirmed.identity";
     anchor.kind = an::AnchorKind::CodeOperand;
@@ -5488,8 +5644,10 @@ TEST(AnchorTrustTransactionTest, PrivateReplacementAfterConfirmedIdentityFailsCl
 
     ASSERT_TRUE(replacement.happened()) << "the image was not replaced after the confirmed identity sample";
     MEMORY_BASIC_INFORMATION memory_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
-              sizeof(memory_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(fixture.base.raw()), &memory_info, sizeof(memory_info)),
+        sizeof(memory_info)
+    );
     EXPECT_EQ(memory_info.Type, static_cast<DWORD>(MEM_PRIVATE));
     EXPECT_EQ(sc::image_identity(dmk::Region{fixture.base, 1}), original_identity)
         << "the private clone must remain identity-equal so only the final mapping check can reject it";
@@ -5555,8 +5713,10 @@ TEST(AnchorTrustTransactionTest, SyntheticReplacementByImageFailsClosed)
 
     ASSERT_TRUE(replacement.happened()) << "the synthetic mapping was not replaced by the fixture image";
     MEMORY_BASIC_INFORMATION memory_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &memory_info, sizeof(memory_info)),
-              sizeof(memory_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &memory_info, sizeof(memory_info)),
+        sizeof(memory_info)
+    );
     EXPECT_EQ(memory_info.Type, static_cast<DWORD>(MEM_IMAGE));
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
@@ -5579,11 +5739,18 @@ TEST(AnchorTrustTransactionTest, ReservedPrefixCodeOperandReplacementByImageFail
     ASSERT_TRUE(replacement.ok()) << "a reserved-prefix synthetic scope could not claim the fixture's fixed base";
     MEMORY_BASIC_INFORMATION prefix_info{};
     MEMORY_BASIC_INFORMATION code_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &prefix_info, sizeof(prefix_info)),
-              sizeof(prefix_info));
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(preferred_base + ScratchPage::PAGE_SIZE), &code_info,
-                             sizeof(code_info)),
-              sizeof(code_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &prefix_info, sizeof(prefix_info)),
+        sizeof(prefix_info)
+    );
+    ASSERT_EQ(
+        ::VirtualQuery(
+            reinterpret_cast<const void *>(preferred_base + ScratchPage::PAGE_SIZE),
+            &code_info,
+            sizeof(code_info)
+        ),
+        sizeof(code_info)
+    );
     ASSERT_EQ(prefix_info.State, static_cast<DWORD>(MEM_RESERVE));
     ASSERT_EQ(code_info.State, static_cast<DWORD>(MEM_COMMIT));
     ASSERT_EQ(code_info.Type, static_cast<DWORD>(MEM_PRIVATE));
@@ -5612,8 +5779,10 @@ TEST(AnchorTrustTransactionTest, ReservedPrefixCodeOperandReplacementByImageFail
 
     ASSERT_TRUE(replacement.happened()) << "the reserved-prefix allocation was not replaced by the fixture image";
     MEMORY_BASIC_INFORMATION image_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &image_info, sizeof(image_info)),
-              sizeof(image_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(preferred_base), &image_info, sizeof(image_info)),
+        sizeof(image_info)
+    );
     EXPECT_EQ(image_info.Type, static_cast<DWORD>(MEM_IMAGE));
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
@@ -5663,11 +5832,18 @@ TEST(AnchorTrustTransactionTest, ScopeSplitIntoMultipleAllocationsInsideValidato
     ASSERT_TRUE(split.happened()) << "the one-allocation scope was not split during validation";
     MEMORY_BASIC_INFORMATION first_info{};
     MEMORY_BASIC_INFORMATION second_info{};
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(split.address()), &first_info, sizeof(first_info)),
-              sizeof(first_info));
-    ASSERT_EQ(::VirtualQuery(reinterpret_cast<const void *>(split.address(s_split_granularity)), &second_info,
-                             sizeof(second_info)),
-              sizeof(second_info));
+    ASSERT_EQ(
+        ::VirtualQuery(reinterpret_cast<const void *>(split.address()), &first_info, sizeof(first_info)),
+        sizeof(first_info)
+    );
+    ASSERT_EQ(
+        ::VirtualQuery(
+            reinterpret_cast<const void *>(split.address(s_split_granularity)),
+            &second_info,
+            sizeof(second_info)
+        ),
+        sizeof(second_info)
+    );
     EXPECT_NE(first_info.AllocationBase, second_info.AllocationBase);
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
@@ -5883,8 +6059,14 @@ TEST(AnchorTrustTransactionTest, StableCrossModuleImageOwnersCanCorroborate)
     std::array<std::uint8_t, 10> instruction{0x48, 0xB8};
     std::memcpy(instruction.data() + 2, &target, sizeof(target));
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(instruction_address), original_bytes.size(),
-                                 PAGE_EXECUTE_READWRITE, &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(instruction_address),
+            original_bytes.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(instruction_address), instruction.data(), instruction.size());
 
     const sc::Candidate candidates[] = {sc::Candidate::direct("cross-module-operand", aob(aob_for_bytes(instruction)))};
@@ -5905,8 +6087,9 @@ TEST(AnchorTrustTransactionTest, StableCrossModuleImageOwnersCanCorroborate)
 
     std::memcpy(reinterpret_cast<void *>(instruction_address), original_bytes.data(), original_bytes.size());
     DWORD ignored = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(instruction_address), original_bytes.size(), old_protection,
-                                 &ignored));
+    ASSERT_TRUE(
+        ::VirtualProtect(reinterpret_cast<void *>(instruction_address), original_bytes.size(), old_protection, &ignored)
+    );
 
     ASSERT_EQ(operand_result.status, an::AnchorStatus::Resolved);
     ASSERT_EQ(static_cast<std::uintptr_t>(operand_result.value), target);
@@ -5930,7 +6113,8 @@ TEST(AnchorTrustTransactionTest, WideExecutableScopeAcrossAllocationsFailsClosed
     page.put(TRANSACTION_MARKER_OFFSET, marker);
     const std::uintptr_t marker_address = page.address(TRANSACTION_MARKER_OFFSET);
     const sc::Candidate candidates[] = {
-        sc::Candidate::direct("wide-scope-target", aob(aob_for_bytes(marker)), target_delta(marker_address, target))};
+        sc::Candidate::direct("wide-scope-target", aob(aob_for_bytes(marker)), target_delta(marker_address, target))
+    };
 
     an::Anchor anchor{};
     anchor.label = "fixture.wide.target";
@@ -5960,9 +6144,10 @@ TEST(AnchorTrustTransactionTest, ReplacementDuringDiscoveryAfterScopeOwnerCaptur
         dmk_test::GenerationFixtureModule variant_b(dmk_test::RTTI_FIXTURE_VARIANT_B);
         ASSERT_TRUE(variant_b.ok()) << "variant B did not map while checking its shared header";
         ASSERT_EQ(variant_b.base(), fixture_base);
-        ASSERT_EQ(std::memcmp(shared_header.data(), reinterpret_cast<const void *>(fixture_base), shared_header.size()),
-                  0)
-            << "the discovery replacement needs byte-identical evidence in both images";
+        ASSERT_EQ(
+            std::memcmp(shared_header.data(), reinterpret_cast<const void *>(fixture_base), shared_header.size()),
+            0
+        ) << "the discovery replacement needs byte-identical evidence in both images";
     }
 
     dmk_test::SameBaseSwap swap;
@@ -6002,16 +6187,26 @@ TEST(AnchorTrustTransactionTest, TemporalDriftOverridesPhysicalDependenceStatus)
     const std::uintptr_t marker_address = swap.module().table();
     const auto marker = transaction_marker(target ^ marker_address ^ ::GetCurrentProcessId());
     DWORD old_protection = 0;
-    ASSERT_TRUE(::VirtualProtect(reinterpret_cast<void *>(marker_address), marker.size(), PAGE_EXECUTE_READWRITE,
-                                 &old_protection));
+    ASSERT_TRUE(
+        ::VirtualProtect(
+            reinterpret_cast<void *>(marker_address),
+            marker.size(),
+            PAGE_EXECUTE_READWRITE,
+            &old_protection
+        )
+    );
     std::memcpy(reinterpret_cast<void *>(marker_address), marker.data(), marker.size());
 
     const sc::Candidate full_candidates[] = {
-        sc::Candidate::direct("module-full", aob(aob_for_bytes(marker)), target_delta(marker_address, target))};
+        sc::Candidate::direct("module-full", aob(aob_for_bytes(marker)), target_delta(marker_address, target))
+    };
     constexpr std::size_t suffix_offset = 8;
     const std::span<const std::uint8_t> suffix{marker.data() + suffix_offset, marker.size() - suffix_offset};
     const sc::Candidate suffix_candidates[] = {sc::Candidate::direct(
-        "module-suffix", aob(aob_for_bytes(suffix)), target_delta(marker_address + suffix_offset, target))};
+        "module-suffix",
+        aob(aob_for_bytes(suffix)),
+        target_delta(marker_address + suffix_offset, target)
+    )};
 
     an::Anchor full{};
     full.label = "fixture.module.full";
@@ -6126,9 +6321,11 @@ TEST(AnchorTrustTransactionTest, ScopeEvidenceModuleReplacementFailsClosed)
 // traffic, so a startup gate decision stays available there. Resolution can allocate, scan memory, or create threads.
 TEST(AnchorLoaderBoundary, TrustAndQualityQueriesAreAllocationFree)
 {
-    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
-                                                   ra(an::AnchorKind::ExportName, an::AnchorStatus::Failed)};
+    const std::array<an::ResolvedAnchor, 3> report{
+        ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+        ra(an::AnchorKind::ExportName, an::AnchorStatus::Failed)
+    };
 
     an::Anchor anchor{};
     anchor.kind = an::AnchorKind::ExportName;

@@ -73,8 +73,10 @@ namespace DetourModKit::detail
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 #endif
-        static_assert(offsetof(PoolSlot, str) == 0,
-                      "PoolSlot::str must be the first member for pointer arithmetic in deallocate()");
+        static_assert(
+            offsetof(PoolSlot, str) == 0,
+            "PoolSlot::str must be the first member for pointer arithmetic in deallocate()"
+        );
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif

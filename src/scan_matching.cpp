@@ -36,8 +36,13 @@ namespace DetourModKit
             return scan(pattern, scope, std::span<const Region>{}, occurrence, pages);
         }
 
-        Result<Address> scan(const Pattern &pattern, Region scope, std::span<const Region> exclusions,
-                             std::size_t occurrence, Pages pages) noexcept
+        Result<Address> scan(
+            const Pattern &pattern,
+            Region scope,
+            std::span<const Region> exclusions,
+            std::size_t occurrence,
+            Pages pages
+        ) noexcept
         {
             if (occurrence == 0)
             {
@@ -73,12 +78,16 @@ namespace DetourModKit
 
                 const detail::HaystackHistogram histogram = detail::sample_haystack(scope);
                 const detail::EnginePattern compiled = detail::to_engine_pattern(pattern, histogram);
-                const detail::MatchResult result = detail::scan_module_pages(compiled, range, pages,
-                                                                             detail::ScanQuery{
-                                                                                 .occurrence = occurrence,
-                                                                                 .count_beyond = false,
-                                                                                 .exclusions = &excluded,
-                                                                             });
+                const detail::MatchResult result = detail::scan_module_pages(
+                    compiled,
+                    range,
+                    pages,
+                    detail::ScanQuery{
+                        .occurrence = occurrence,
+                        .count_beyond = false,
+                        .exclusions = &excluded,
+                    }
+                );
                 // A truncated sweep never visited part of the scope, so an earlier occurrence may hide there: the match
                 // it did find is not provably the Nth one. That makes truncation fatal to the result whether or not a
                 // match was found. The two causes are distinct caller problems and stay distinct codes: a concurrent

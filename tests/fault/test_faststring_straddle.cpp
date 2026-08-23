@@ -114,8 +114,8 @@ namespace
          * @warning The caller must name a range that is still writable. A read of the blocked page faults the test
          *          itself, which is the harness bug the first round of this proof recorded.
          */
-        [[nodiscard]] std::size_t count_not_equal(std::size_t offset, std::size_t count,
-                                                  std::uint8_t value) const noexcept
+        [[nodiscard]] std::size_t
+        count_not_equal(std::size_t offset, std::size_t count, std::uint8_t value) const noexcept
         {
             std::size_t bad = 0;
             for (std::size_t i = 0; i < count; ++i)
@@ -199,8 +199,11 @@ TEST(FastStringStraddle, MidSpanSeamReportsMayBePartialWithTheFullPrefixCommitte
                     ASSERT_TRUE(region.seed());
                     ASSERT_TRUE(region.block(dmk_test::PAGE_BYTES, protection));
 
-                    const GuardedWriteStatus status = detail::guarded_write_bytes(region.addr_of(destination_offset),
-                                                                                  source.data(), prefix + overrun);
+                    const GuardedWriteStatus status = detail::guarded_write_bytes(
+                        region.addr_of(destination_offset),
+                        source.data(),
+                        prefix + overrun
+                    );
 
                     ASSERT_EQ(status, GuardedWriteStatus::MayBePartial)
                         << "protection=" << protection << " seam prefix=" << prefix << " overrun=" << overrun

@@ -60,9 +60,11 @@ namespace DetourModKit
              * @param on_reload Callback invoked on the watcher thread when a debounced change is observed. May be empty
              *                  to construct an inert watcher.
              */
-            explicit ConfigWatcher(std::string_view ini_path,
-                                   std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
-                                   std::function<void()> on_reload = {});
+            explicit ConfigWatcher(
+                std::string_view ini_path,
+                std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
+                std::function<void()> on_reload = {}
+            );
 
             ~ConfigWatcher() noexcept;
 

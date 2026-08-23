@@ -85,8 +85,13 @@ namespace
         return per_op[n / 2];
     }
 
-    void bench_emit(std::size_t subscriber_count, std::size_t iterations, std::size_t samples, const char *label,
-                    bool use_safe)
+    void bench_emit(
+        std::size_t subscriber_count,
+        std::size_t iterations,
+        std::size_t samples,
+        const char *label,
+        bool use_safe
+    )
     {
         DetourModKit::EventDispatcher<BenchEvent> dispatcher;
         std::vector<DetourModKit::Subscription> subs;
@@ -98,24 +103,33 @@ namespace
 
         const BenchEvent evt{42};
         const auto total_start = Clock::now();
-        const double med = median_ns_per_op(iterations, samples,
-                                            [&]()
-                                            {
-                                                if (use_safe)
-                                                {
-                                                    dispatcher.emit_safe(evt);
-                                                }
-                                                else
-                                                {
-                                                    dispatcher.emit(evt);
-                                                }
-                                            });
+        const double med = median_ns_per_op(
+            iterations,
+            samples,
+            [&]()
+            {
+                if (use_safe)
+                {
+                    dispatcher.emit_safe(evt);
+                }
+                else
+                {
+                    dispatcher.emit(evt);
+                }
+            }
+        );
         const auto total_end = Clock::now();
 
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
 
-        std::printf("%s\t%zu\t%zu\t%.2f\t%lld\n", label, subscriber_count, iterations, med,
-                    static_cast<long long>(total_ms));
+        std::printf(
+            "%s\t%zu\t%zu\t%.2f\t%lld\n",
+            label,
+            subscriber_count,
+            iterations,
+            med,
+            static_cast<long long>(total_ms)
+        );
     }
 
     void bench_subscribe_unsubscribe(std::size_t iterations, std::size_t samples)
@@ -123,18 +137,25 @@ namespace
         DetourModKit::EventDispatcher<BenchEvent> dispatcher;
 
         const auto total_start = Clock::now();
-        const double med = median_ns_per_op(iterations, samples,
-                                            [&]()
-                                            {
-                                                auto sub = dispatcher.subscribe(&noop_handler);
-                                                // sub destroyed here: triggers unsubscribe
-                                            });
+        const double med = median_ns_per_op(
+            iterations,
+            samples,
+            [&]()
+            {
+                auto sub = dispatcher.subscribe(&noop_handler);
+                // sub destroyed here: triggers unsubscribe
+            }
+        );
         const auto total_end = Clock::now();
 
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
 
-        std::printf("subscribe_unsub_roundtrip\t0\t%zu\t%.2f\t%lld\n", iterations, med,
-                    static_cast<long long>(total_ms));
+        std::printf(
+            "subscribe_unsub_roundtrip\t0\t%zu\t%.2f\t%lld\n",
+            iterations,
+            med,
+            static_cast<long long>(total_ms)
+        );
     }
 
     void bench_concurrent_emit(std::size_t thread_count, std::size_t per_thread_iters, std::size_t subscriber_count)
@@ -166,7 +187,8 @@ namespace
                     {
                         dispatcher.emit(evt);
                     }
-                });
+                }
+            );
         }
 
         const auto start = Clock::now();
@@ -181,8 +203,14 @@ namespace
         const auto total_ops = thread_count * per_thread_iters;
         const double per_op = static_cast<double>(total_ns) / static_cast<double>(total_ops);
 
-        std::printf("emit_concurrent_%zu_threads\t%zu\t%zu\t%.2f\t%lld\n", thread_count, subscriber_count, total_ops,
-                    per_op, static_cast<long long>(total_ns / 1'000'000));
+        std::printf(
+            "emit_concurrent_%zu_threads\t%zu\t%zu\t%.2f\t%lld\n",
+            thread_count,
+            subscriber_count,
+            total_ops,
+            per_op,
+            static_cast<long long>(total_ns / 1'000'000)
+        );
     }
 
     /**
@@ -201,7 +229,8 @@ namespace
             {
                 auto inner = dispatcher.subscribe(&noop_handler);
                 inner_admitted = inner.active() || inner_admitted;
-            });
+            }
+        );
 
         const BenchEvent evt{0};
 

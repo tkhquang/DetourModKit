@@ -33,7 +33,11 @@ namespace DetourModKit::detail
     {
         /// The game or runtime determines which DLL contains the XInput export.
         constexpr const wchar_t *XINPUT_DLL_NAMES[] = {
-            L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinput1_2.dll", L"xinput1_1.dll",
+            L"xinput1_4.dll",
+            L"xinput1_3.dll",
+            L"xinput9_1_0.dll",
+            L"xinput1_2.dll",
+            L"xinput1_1.dll",
         };
 
         /// Identifies the undocumented ordinal that exports XInputGetStateEx and reports the Guide button.
@@ -94,8 +98,8 @@ namespace DetourModKit::detail
         static_assert(WHEEL_DELTA < WHEEL_REMAINDER_BIAS, "a sub-notch remainder must fit the biased value field");
         static_assert(WHEEL_EPOCH_MAX <= (std::numeric_limits<std::uint64_t>::max() >> WHEEL_REMAINDER_EPOCH_SHIFT));
 
-        [[nodiscard]] constexpr std::uint64_t wheel_remainder_slot(std::uint64_t epoch, bool owned,
-                                                                   int remainder) noexcept
+        [[nodiscard]] constexpr std::uint64_t
+        wheel_remainder_slot(std::uint64_t epoch, bool owned, int remainder) noexcept
         {
             return (epoch << WHEEL_REMAINDER_EPOCH_SHIFT) | (owned ? WHEEL_REMAINDER_OWNED_BIT : 0) |
                    static_cast<std::uint64_t>(remainder + WHEEL_REMAINDER_BIAS);
@@ -298,8 +302,10 @@ namespace DetourModKit::detail
             HMODULE ex_target_ref{nullptr};
         };
         alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
-        static_assert(std::is_trivially_destructible_v<decltype(s_xinput_permanent_cell)>,
-                      "the raw XInput placement cell must have no automatic destructor");
+        static_assert(
+            std::is_trivially_destructible_v<decltype(s_xinput_permanent_cell)>,
+            "the raw XInput placement cell must have no automatic destructor"
+        );
         bool s_xinput_permanent_cell_ready{false};
         PermanentXInputHooks *s_xinput_permanent_hooks{nullptr};
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -457,14 +463,20 @@ namespace DetourModKit::detail
             {
                 return;
             }
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->ex_target_ref,
-                                                     diagnostics::ModulePinReason::XInputTarget);
+            DetourModKit::detail::release_module_ref(
+                s_xinput_permanent_hooks->ex_target_ref,
+                diagnostics::ModulePinReason::XInputTarget
+            );
             s_xinput_permanent_hooks->ex_target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->target_ref,
-                                                     diagnostics::ModulePinReason::XInputTarget);
+            DetourModKit::detail::release_module_ref(
+                s_xinput_permanent_hooks->target_ref,
+                diagnostics::ModulePinReason::XInputTarget
+            );
             s_xinput_permanent_hooks->target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->self_ref,
-                                                     diagnostics::ModulePinReason::XInputKeepalive);
+            DetourModKit::detail::release_module_ref(
+                s_xinput_permanent_hooks->self_ref,
+                diagnostics::ModulePinReason::XInputKeepalive
+            );
             s_xinput_permanent_hooks->self_ref = nullptr;
         }
 
@@ -523,10 +535,13 @@ namespace DetourModKit::detail
         };
 
         /** @brief Arms a freshly created raw hook and reconciles a failed transaction from its target bytes. */
-        [[nodiscard]] XInputArmOutcome arm_xinput_hook(safetyhook::InlineHook &hook,
-                                                       std::atomic<XInputGetStateFn> &original,
-                                                       bool original_was_published, std::atomic<bool> &warning_latch,
-                                                       std::string_view warning) noexcept
+        [[nodiscard]] XInputArmOutcome arm_xinput_hook(
+            safetyhook::InlineHook &hook,
+            std::atomic<XInputGetStateFn> &original,
+            bool original_was_published,
+            std::atomic<bool> &warning_latch,
+            std::string_view warning
+        ) noexcept
         {
             const PatchWitness before = xinput_patch_witness(hook);
             if (!witness_permits_write(before))
@@ -576,8 +591,12 @@ namespace DetourModKit::detail
          * @details Creation remains separate from the arm, so the whole pair exists before any prologue patch. A
          *          creation failure rolls back completely and publishes nothing.
          */
-        [[nodiscard]] bool create_disabled_xinput_hook(safetyhook::RouteRetentionCredit &credit, void *target,
-                                                       void *detour, safetyhook::InlineHook &destination) noexcept
+        [[nodiscard]] bool create_disabled_xinput_hook(
+            safetyhook::RouteRetentionCredit &credit,
+            void *target,
+            void *detour,
+            safetyhook::InlineHook &destination
+        ) noexcept
         {
             try
             {
@@ -590,10 +609,14 @@ namespace DetourModKit::detail
                 }
 #endif
                 auto created = safetyhook::InlineHook::create(
-                    allocator, target, detour,
-                    static_cast<safetyhook::InlineHook::Flags>(safetyhook::InlineHook::StartDisabled |
-                                                               safetyhook::InlineHook::RoutedExternal),
-                    credit);
+                    allocator,
+                    target,
+                    detour,
+                    static_cast<safetyhook::InlineHook::Flags>(
+                        safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+                    ),
+                    credit
+                );
                 if (!created)
                 {
                     return false;
@@ -650,10 +673,12 @@ namespace DetourModKit::detail
          * @details Reuses the hook object and its trampoline, so nothing is created and no executable storage is
          *          freed or replaced. arm_xinput_hook's witnesses still gate the write and decide reachability.
          */
-        [[nodiscard]] XInputArmOutcome arm_created_xinput_hook(safetyhook::InlineHook &hook,
-                                                               std::atomic<XInputGetStateFn> &original,
-                                                               std::atomic<bool> &warning_latch,
-                                                               std::string_view warning) noexcept
+        [[nodiscard]] XInputArmOutcome arm_created_xinput_hook(
+            safetyhook::InlineHook &hook,
+            std::atomic<XInputGetStateFn> &original,
+            std::atomic<bool> &warning_latch,
+            std::string_view warning
+        ) noexcept
         {
             if (!hook)
             {
@@ -669,8 +694,12 @@ namespace DetourModKit::detail
         }
 
         /// Reports whether rearm restores the forward path.
-        [[nodiscard]] bool rearm_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original,
-                                             std::atomic<bool> &warning_latch, std::string_view warning) noexcept
+        [[nodiscard]] bool rearm_xinput_hook(
+            safetyhook::InlineHook &hook,
+            std::atomic<XInputGetStateFn> &original,
+            std::atomic<bool> &warning_latch,
+            std::string_view warning
+        ) noexcept
         {
             return arm_created_xinput_hook(hook, original, warning_latch, warning) == XInputArmOutcome::Armed;
         }
@@ -743,16 +772,22 @@ namespace DetourModKit::detail
          *       Omit the snapshot only when a successful drain preceded the retention decision.
          *       Forwarding state then selects the published chains on its own.
          */
-        void retain_xinput_hooks(PatchWitness primary_witness, PatchWitness ex_witness, XInputRetentionReason reason,
-                                 XInputRetentionLog &deferred_log, XInputPublishedChains published_chains = {}) noexcept
+        void retain_xinput_hooks(
+            PatchWitness primary_witness,
+            PatchWitness ex_witness,
+            XInputRetentionReason reason,
+            XInputRetentionLog &deferred_log,
+            XInputPublishedChains published_chains = {}
+        ) noexcept
         {
             PermanentXInputHooks *const permanent = permanent_cell();
             const bool primary_valid = static_cast<bool>(permanent->primary);
             const bool ex_valid = static_cast<bool>(permanent->ex);
             const bool primary_forwarding_required = primary_valid && permanent->primary.enabled();
             const bool ex_forwarding_required = ex_valid && permanent->ex.enabled();
-            permanent->primary.reconcile_enabled(primary_forwarding_required &&
-                                                 primary_witness != PatchWitness::Original);
+            permanent->primary.reconcile_enabled(
+                primary_forwarding_required && primary_witness != PatchWitness::Original
+            );
             permanent->ex.reconcile_enabled(ex_forwarding_required && ex_witness != PatchWitness::Original);
 
             // Keep a chain published when the backend still forwards. Also keep it when pointer publication preceded
@@ -760,29 +795,45 @@ namespace DetourModKit::detail
             const bool primary_chain_required =
                 primary_forwarding_required || (primary_valid && published_chains.primary);
             const bool ex_chain_required = ex_forwarding_required || (ex_valid && published_chains.ex);
-            s_xinput_original.store(primary_chain_required ? permanent->primary.original<XInputGetStateFn>() : nullptr,
-                                    std::memory_order_seq_cst);
-            s_xinput_ex_original.store(ex_chain_required ? permanent->ex.original<XInputGetStateFn>() : nullptr,
-                                       std::memory_order_seq_cst);
+            s_xinput_original.store(
+                primary_chain_required ? permanent->primary.original<XInputGetStateFn>() : nullptr,
+                std::memory_order_seq_cst
+            );
+            s_xinput_ex_original.store(
+                ex_chain_required ? permanent->ex.original<XInputGetStateFn>() : nullptr,
+                std::memory_order_seq_cst
+            );
             s_xinput_permanent_detour.store(true, std::memory_order_release);
             s_xinput_installed.store(false, std::memory_order_release);
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
 
             // Build the loader attribution under the lock. The caller emits it after the critical section.
             deferred_log.reason = reason;
-            append_text(deferred_log.attribution, deferred_log.attribution_length,
-                        "XInput retention attribution: XInputGetState target ");
-            append_hex_address(deferred_log.attribution, deferred_log.attribution_length,
-                               permanent->primary ? permanent->primary.target_address() : std::uintptr_t{0});
+            append_text(
+                deferred_log.attribution,
+                deferred_log.attribution_length,
+                "XInput retention attribution: XInputGetState target "
+            );
+            append_hex_address(
+                deferred_log.attribution,
+                deferred_log.attribution_length,
+                permanent->primary ? permanent->primary.target_address() : std::uintptr_t{0}
+            );
             append_text(deferred_log.attribution, deferred_log.attribution_length, " (");
-            append_text(deferred_log.attribution, deferred_log.attribution_length,
-                        witness_description(primary_witness));
+            append_text(
+                deferred_log.attribution,
+                deferred_log.attribution_length,
+                witness_description(primary_witness)
+            );
             append_text(deferred_log.attribution, deferred_log.attribution_length, ")");
             if (permanent->ex)
             {
                 append_text(deferred_log.attribution, deferred_log.attribution_length, ". XInputGetStateEx target ");
-                append_hex_address(deferred_log.attribution, deferred_log.attribution_length,
-                                   permanent->ex.target_address());
+                append_hex_address(
+                    deferred_log.attribution,
+                    deferred_log.attribution_length,
+                    permanent->ex.target_address()
+                );
                 append_text(deferred_log.attribution, deferred_log.attribution_length, " (");
                 append_text(deferred_log.attribution, deferred_log.attribution_length, witness_description(ex_witness));
                 append_text(deferred_log.attribution, deferred_log.attribution_length, ")");
@@ -880,8 +931,12 @@ namespace DetourModKit::detail
          *          point bypasses. The layer remains claimed and degraded.
          * @return true when coverage was published.
          */
-        [[nodiscard]] bool publish_xinput_pair_if_whole(safetyhook::InlineHook &primary, safetyhook::InlineHook &ex,
-                                                        int user_index, std::uint64_t owner) noexcept
+        [[nodiscard]] bool publish_xinput_pair_if_whole(
+            safetyhook::InlineHook &primary,
+            safetyhook::InlineHook &ex,
+            int user_index,
+            std::uint64_t owner
+        ) noexcept
         {
             const bool primary_covered = xinput_member_covers_entry(primary, true);
             const bool ex_covered = xinput_member_covers_entry(ex, static_cast<bool>(ex));
@@ -907,17 +962,25 @@ namespace DetourModKit::detail
             bool primary_covered = xinput_member_covers_entry(primary, true);
             if (!primary_covered && !primary.enabled())
             {
-                (void)rearm_xinput_hook(primary, s_xinput_original, s_xinput_enable_warned,
-                                        "InputIntercept: the XInputGetState re-arm did not complete cleanly, so XInput "
-                                        "coverage stays degraded and both entries pass through.");
+                (void)rearm_xinput_hook(
+                    primary,
+                    s_xinput_original,
+                    s_xinput_enable_warned,
+                    "InputIntercept: the XInputGetState re-arm did not complete cleanly, so XInput "
+                    "coverage stays degraded and both entries pass through."
+                );
                 primary_covered = xinput_member_entry_witnessed(primary, true);
             }
             bool ex_covered = xinput_member_covers_entry(ex, static_cast<bool>(ex));
             if (!ex_covered && !ex.enabled())
             {
-                (void)rearm_xinput_hook(ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
-                                        "InputIntercept: the XInputGetStateEx re-arm did not complete cleanly, so "
-                                        "XInput coverage stays degraded and both entries pass through.");
+                (void)rearm_xinput_hook(
+                    ex,
+                    s_xinput_ex_original,
+                    s_xinput_ex_enable_warned,
+                    "InputIntercept: the XInputGetStateEx re-arm did not complete cleanly, so "
+                    "XInput coverage stays degraded and both entries pass through."
+                );
                 ex_covered = xinput_member_entry_witnessed(ex, static_cast<bool>(ex));
             }
             return primary_covered && ex_covered;
@@ -929,20 +992,27 @@ namespace DetourModKit::detail
          *          loss of pair integrity after publication. Every publication uses the final pair witness.
          * @return true when complete coverage is published for @p owner.
          */
-        [[nodiscard]] bool maintain_xinput_pair(safetyhook::InlineHook &primary, safetyhook::InlineHook &ex,
-                                                const void *target_module, int user_index, std::uint64_t owner) noexcept
+        [[nodiscard]] bool maintain_xinput_pair(
+            safetyhook::InlineHook &primary,
+            safetyhook::InlineHook &ex,
+            const void *target_module,
+            int user_index,
+            std::uint64_t owner
+        ) noexcept
         {
             if (publish_xinput_pair_if_whole(primary, ex, user_index, owner))
             {
                 return true;
             }
 
-            const XInputRecoveryEvidence evidence{target_module,
-                                                  owner,
-                                                  xinput_member_entry_witnessed(primary, true),
-                                                  xinput_member_entry_witnessed(ex, static_cast<bool>(ex)),
-                                                  witness_permits_write(xinput_patch_witness(primary)),
-                                                  witness_permits_write(xinput_patch_witness(ex))};
+            const XInputRecoveryEvidence evidence{
+                target_module,
+                owner,
+                xinput_member_entry_witnessed(primary, true),
+                xinput_member_entry_witnessed(ex, static_cast<bool>(ex)),
+                witness_permits_write(xinput_patch_witness(primary)),
+                witness_permits_write(xinput_patch_witness(ex))
+            };
             if (!xinput_recovery_due(evidence))
             {
                 return false;
@@ -999,17 +1069,25 @@ namespace DetourModKit::detail
         /// Unpacks a consume rule.
         constexpr GamepadConsumeRule unpack_consume_rule(uint64_t packed) noexcept
         {
-            return GamepadConsumeRule{static_cast<uint16_t>(packed & 0xFFFFu),
-                                      static_cast<uint16_t>((packed >> 16) & 0xFFFFu),
-                                      static_cast<uint16_t>((packed >> 32) & 0xFFFFu)};
+            return GamepadConsumeRule{
+                static_cast<uint16_t>(packed & 0xFFFFu),
+                static_cast<uint16_t>((packed >> 16) & 0xFFFFu),
+                static_cast<uint16_t>((packed >> 32) & 0xFFFFu)
+            };
         }
 
-        std::array<std::atomic<std::uint64_t>, 4> s_wheel_count{wheel_count_slot(1, 0), wheel_count_slot(1, 0),
-                                                                wheel_count_slot(1, 0), wheel_count_slot(1, 0)};
+        std::array<std::atomic<std::uint64_t>, 4> s_wheel_count{
+            wheel_count_slot(1, 0),
+            wheel_count_slot(1, 0),
+            wheel_count_slot(1, 0),
+            wheel_count_slot(1, 0)
+        };
         // Index zero stores vertical distance, and index one stores horizontal distance. Each axis has one signed
         // remainder because a reversal cancels sub-notch distance while the axes remain independent.
-        std::array<std::atomic<std::uint64_t>, 2> s_wheel_remainder{wheel_remainder_slot(1, false, 0),
-                                                                    wheel_remainder_slot(1, false, 0)};
+        std::array<std::atomic<std::uint64_t>, 2> s_wheel_remainder{
+            wheel_remainder_slot(1, false, 0),
+            wheel_remainder_slot(1, false, 0)
+        };
         // The per-direction wheel-swallow mask uses WheelDirection bits and pairs with a TTL. Each poll cycle refreshes
         // it, so a stalled poll thread stops the swallow action. "Ctrl+WheelUp" must not eat bare WheelDown or WheelUp.
         std::atomic<uint8_t> s_wheel_consume_mask{0};
@@ -1082,8 +1160,11 @@ namespace DetourModKit::detail
             }
 
             HMODULE module = nullptr;
-            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(address),
-                                    &module))
+            if (!GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(address),
+                    &module
+                ))
             {
                 return nullptr;
             }
@@ -1098,8 +1179,8 @@ namespace DetourModKit::detail
          * @return true when the slot records the notches or is already saturated. Returns false when @p epoch is
          *         retired.
          */
-        [[nodiscard]] bool bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch,
-                                            std::uint64_t notches = 1) noexcept
+        [[nodiscard]] bool
+        bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch, std::uint64_t notches = 1) noexcept
         {
             std::uint64_t current = slot.load(std::memory_order_relaxed);
             while (wheel_slot_epoch(current) == epoch)
@@ -1111,8 +1192,12 @@ namespace DetourModKit::detail
                 }
                 const std::uint64_t next =
                     std::min<std::uint64_t>(count + notches, static_cast<std::uint64_t>(MAX_WHEEL_NOTCHES));
-                if (slot.compare_exchange_weak(current, wheel_count_slot(epoch, next), std::memory_order_relaxed,
-                                               std::memory_order_relaxed))
+                if (slot.compare_exchange_weak(
+                        current,
+                        wheel_count_slot(epoch, next),
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed
+                    ))
                 {
                     return true;
                 }
@@ -1131,8 +1216,12 @@ namespace DetourModKit::detail
             bool admitted;
             int notches;
         };
-        [[nodiscard]] WheelFold accumulate_wheel_remainder(std::atomic<std::uint64_t> &slot, std::uint64_t epoch,
-                                                           bool owned, int delta) noexcept
+        [[nodiscard]] WheelFold accumulate_wheel_remainder(
+            std::atomic<std::uint64_t> &slot,
+            std::uint64_t epoch,
+            bool owned,
+            int delta
+        ) noexcept
         {
             std::uint64_t current = slot.load(std::memory_order_relaxed);
             while ((current >> WHEEL_REMAINDER_EPOCH_SHIFT) == epoch)
@@ -1147,8 +1236,12 @@ namespace DetourModKit::detail
                 const int total = prior + delta;
                 const int notches = total / WHEEL_DELTA;
                 const int remainder = total % WHEEL_DELTA;
-                if (slot.compare_exchange_weak(current, wheel_remainder_slot(epoch, owned, remainder),
-                                               std::memory_order_relaxed, std::memory_order_relaxed))
+                if (slot.compare_exchange_weak(
+                        current,
+                        wheel_remainder_slot(epoch, owned, remainder),
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed
+                    ))
                 {
                     return WheelFold{true, notches};
                 }
@@ -1499,8 +1592,10 @@ namespace DetourModKit::detail
                 const DataPlaneLockGuard data_lock;
                 reset_wheel_data_plane(wheel_epoch);
             }
-            s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::Retryable),
-                                         std::memory_order_release);
+            s_msg_hook_route_state.store(
+                static_cast<std::uint8_t>(WheelRouteState::Retryable),
+                std::memory_order_release
+            );
         }
 
         /**
@@ -1535,8 +1630,10 @@ namespace DetourModKit::detail
             {
                 // Cleanup only. The permanent module reference is retained either way, because Microsoft permits a
                 // selected callback to run after UnhookWindowsHookEx returns.
-                s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::CleanupBlocked),
-                                             std::memory_order_release);
+                s_msg_hook_route_state.store(
+                    static_cast<std::uint8_t>(WheelRouteState::CleanupBlocked),
+                    std::memory_order_release
+                );
                 return;
             }
             else
@@ -1548,8 +1645,10 @@ namespace DetourModKit::detail
                     CloseHandle(s_msg_hook_thread);
                     s_msg_hook_thread = nullptr;
                 }
-                s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::TargetWait),
-                                             std::memory_order_release);
+                s_msg_hook_route_state.store(
+                    static_cast<std::uint8_t>(WheelRouteState::TargetWait),
+                    std::memory_order_release
+                );
             }
             // The caller's revocation already advanced the capture epoch and reset the data plane at that epoch. A
             // second advance here would leave the count and remainder slots tagged with a stale epoch, so the next
@@ -1589,8 +1688,13 @@ namespace DetourModKit::detail
         }
     }
 
-    uint16_t step_gamepad_suppress(GamepadSuppressState &state, uint16_t owned_now, uint16_t true_buttons,
-                                   uint64_t now_ms, uint64_t grace_ms) noexcept
+    uint16_t step_gamepad_suppress(
+        GamepadSuppressState &state,
+        uint16_t owned_now,
+        uint16_t true_buttons,
+        uint64_t now_ms,
+        uint64_t grace_ms
+    ) noexcept
     {
         // Sentinel deadline denotes "actively held, with no release underway."
         constexpr uint64_t held_sentinel = UINT64_MAX;
@@ -1653,8 +1757,8 @@ namespace DetourModKit::detail
         return mask;
     }
 
-    ConsumePublish publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count,
-                                                 std::uint64_t owner) noexcept
+    ConsumePublish
+    publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count, std::uint64_t owner) noexcept
     {
         run_data_plane_entry_seam();
         const DataPlaneLockGuard data_lock;
@@ -1763,9 +1867,10 @@ namespace DetourModKit::detail
         {
             return XInputPairCoverage{false, true};
         }
-        return XInputPairCoverage{xinput_member_entry_witnessed(s_xinput_permanent_hooks->primary, true),
-                                  xinput_member_entry_witnessed(s_xinput_permanent_hooks->ex,
-                                                                static_cast<bool>(s_xinput_permanent_hooks->ex))};
+        return XInputPairCoverage{
+            xinput_member_entry_witnessed(s_xinput_permanent_hooks->primary, true),
+            xinput_member_entry_witnessed(s_xinput_permanent_hooks->ex, static_cast<bool>(s_xinput_permanent_hooks->ex))
+        };
     }
 
     std::size_t xinput_recovery_attempts_for_test() noexcept
@@ -1823,10 +1928,13 @@ namespace DetourModKit::detail
             }
             // Recovery re-arms each absent member through its retained hook. It never creates a second hook over the
             // current prologue.
-            const bool whole = maintain_xinput_pair(permanent->primary, permanent->ex,
-                                                    permanent->ex_target_ref != nullptr ? permanent->ex_target_ref
-                                                                                        : permanent->target_ref,
-                                                    user_index, owner);
+            const bool whole = maintain_xinput_pair(
+                permanent->primary,
+                permanent->ex,
+                permanent->ex_target_ref != nullptr ? permanent->ex_target_ref : permanent->target_ref,
+                user_index,
+                owner
+            );
             return whole;
         }
 
@@ -1834,11 +1942,14 @@ namespace DetourModKit::detail
         // captures the first hook's jmp as its original and corrupts the trampoline chain.
         if (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary))
         {
-            return maintain_xinput_pair(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex,
-                                        s_xinput_permanent_hooks->ex_target_ref != nullptr
-                                            ? s_xinput_permanent_hooks->ex_target_ref
-                                            : s_xinput_permanent_hooks->target_ref,
-                                        user_index, owner);
+            return maintain_xinput_pair(
+                s_xinput_permanent_hooks->primary,
+                s_xinput_permanent_hooks->ex,
+                s_xinput_permanent_hooks->ex_target_ref != nullptr ? s_xinput_permanent_hooks->ex_target_ref
+                                                                   : s_xinput_permanent_hooks->target_ref,
+                user_index,
+                owner
+            );
         }
 
         HMODULE module = nullptr;
@@ -1922,9 +2033,11 @@ namespace DetourModKit::detail
         {
             if (!s_xinput_capacity_warned.exchange(true, std::memory_order_relaxed))
             {
-                (void)log().log_noexcept(LogLevel::Warning,
-                                         "InputIntercept: the routed retention ceiling refused the XInput hook pair, "
-                                         "so no XInput interception was installed and both entries remain open.");
+                (void)log().log_noexcept(
+                    LogLevel::Warning,
+                    "InputIntercept: the routed retention ceiling refused the XInput hook pair, "
+                    "so no XInput interception was installed and both entries remain open."
+                );
             }
             release_xinput_module_refs();
             return false;
@@ -1932,15 +2045,22 @@ namespace DetourModKit::detail
 
         // Create both members before either prologue patch. Before an arm runs, no thread enters a detour. A creation
         // failure rolls the whole transaction back and leaves both entries open.
-        if (!create_disabled_xinput_hook(pair_credit, get_state, reinterpret_cast<void *>(&xinput_get_state_detour),
-                                         s_xinput_permanent_hooks->primary))
+        if (!create_disabled_xinput_hook(
+                pair_credit,
+                get_state,
+                reinterpret_cast<void *>(&xinput_get_state_detour),
+                s_xinput_permanent_hooks->primary
+            ))
         {
             release_xinput_module_refs();
             return false;
         }
-        if (ex_is_distinct_member && !create_disabled_xinput_hook(pair_credit, get_state_ex,
-                                                                  reinterpret_cast<void *>(&xinput_get_state_ex_detour),
-                                                                  s_xinput_permanent_hooks->ex))
+        if (ex_is_distinct_member && !create_disabled_xinput_hook(
+                                         pair_credit,
+                                         get_state_ex,
+                                         reinterpret_cast<void *>(&xinput_get_state_ex_detour),
+                                         s_xinput_permanent_hooks->ex
+                                     ))
         {
             reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
             release_xinput_module_refs();
@@ -1948,19 +2068,28 @@ namespace DetourModKit::detail
         }
 
         const XInputArmOutcome primary_outcome = arm_created_xinput_hook(
-            s_xinput_permanent_hooks->primary, s_xinput_original, s_xinput_enable_warned,
+            s_xinput_permanent_hooks->primary,
+            s_xinput_original,
+            s_xinput_enable_warned,
             "InputIntercept: XInputGetState hook transaction did not complete cleanly; state was "
-            "reconciled from the target bytes.");
+            "reconciled from the target bytes."
+        );
         if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
         {
             // A game thread can hold this trampoline and nothing here can drain it. Retain the created, disabled
             // ordinal-100 member too. Recovery must arm that retained object rather than treat an empty
             // slot as the absent/alias exemption.
-            const XInputPublishedChains published_chains{s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
-                                                         s_xinput_ex_original.load(std::memory_order_seq_cst) !=
-                                                             nullptr};
-            retain_xinput_hooks(PatchWitness::Original, PatchWitness::Original, XInputRetentionReason::UnprovedInstall,
-                                deferred_log, published_chains);
+            const XInputPublishedChains published_chains{
+                s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
+                s_xinput_ex_original.load(std::memory_order_seq_cst) != nullptr
+            };
+            retain_xinput_hooks(
+                PatchWitness::Original,
+                PatchWitness::Original,
+                XInputRetentionReason::UnprovedInstall,
+                deferred_log,
+                published_chains
+            );
             lock.unlock();
             emit_xinput_retention_log(deferred_log);
             return false;
@@ -1976,15 +2105,22 @@ namespace DetourModKit::detail
         if (ex_is_distinct_member)
         {
             (void)arm_created_xinput_hook(
-                s_xinput_permanent_hooks->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
+                s_xinput_permanent_hooks->ex,
+                s_xinput_ex_original,
+                s_xinput_ex_enable_warned,
                 "InputIntercept: the XInputGetStateEx hook transaction did not complete cleanly, so XInput coverage "
-                "stays degraded and both entries pass through.");
+                "stays degraded and both entries pass through."
+            );
         }
 
         // The final pair witness reads both prologues before the store that enables suppression. A member
         // restored by a rival writer degrades the pair and prevents publication of incomplete coverage.
-        if (publish_xinput_pair_if_whole(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex, user_index,
-                                         owner))
+        if (publish_xinput_pair_if_whole(
+                s_xinput_permanent_hooks->primary,
+                s_xinput_permanent_hooks->ex,
+                user_index,
+                owner
+            ))
         {
             return true;
         }
@@ -2059,8 +2195,10 @@ namespace DetourModKit::detail
             }
             if (!drain_wheel_admitted_phases())
             {
-                s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::Retryable),
-                                             std::memory_order_release);
+                s_msg_hook_route_state.store(
+                    static_cast<std::uint8_t>(WheelRouteState::Retryable),
+                    std::memory_order_release
+                );
                 return false;
             }
             if (msg_hook_target_thread_exited_locked())
@@ -2070,8 +2208,10 @@ namespace DetourModKit::detail
             else if (!unhook_or_already_gone(mounted))
             {
                 // Old-hook removal failed on a live thread. Block the new mount until that thread exits.
-                s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::CleanupBlocked),
-                                             std::memory_order_release);
+                s_msg_hook_route_state.store(
+                    static_cast<std::uint8_t>(WheelRouteState::CleanupBlocked),
+                    std::memory_order_release
+                );
                 return false;
             }
             else
@@ -2089,15 +2229,19 @@ namespace DetourModKit::detail
         HANDLE thread = OpenThread(SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION, FALSE, target_thread_id);
         if (thread == nullptr)
         {
-            s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::Retryable),
-                                         std::memory_order_release);
+            s_msg_hook_route_state.store(
+                static_cast<std::uint8_t>(WheelRouteState::Retryable),
+                std::memory_order_release
+            );
             return false;
         }
         if (GetProcessIdOfThread(thread) != GetCurrentProcessId() || WaitForSingleObject(thread, 0) == WAIT_OBJECT_0)
         {
             CloseHandle(thread);
-            s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::Retryable),
-                                         std::memory_order_release);
+            s_msg_hook_route_state.store(
+                static_cast<std::uint8_t>(WheelRouteState::Retryable),
+                std::memory_order_release
+            );
             return false;
         }
 
@@ -2119,8 +2263,10 @@ namespace DetourModKit::detail
         {
             release_module_ref(new_ref, diagnostics::ModulePinReason::MessageHookKeepalive);
             CloseHandle(thread);
-            s_msg_hook_route_state.store(static_cast<std::uint8_t>(WheelRouteState::Retryable),
-                                         std::memory_order_release);
+            s_msg_hook_route_state.store(
+                static_cast<std::uint8_t>(WheelRouteState::Retryable),
+                std::memory_order_release
+            );
             return false;
         }
         if (new_ref != nullptr)
@@ -2174,7 +2320,9 @@ namespace DetourModKit::detail
         for (int dir = 0; dir < 4; ++dir)
         {
             const std::uint64_t packed = s_wheel_count[static_cast<size_t>(dir)].exchange(
-                wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
+                wheel_count_slot(wheel_epoch, 0),
+                std::memory_order_relaxed
+            );
             if (wheel_slot_epoch(packed) == wheel_epoch)
             {
                 out[static_cast<size_t>(dir)] = static_cast<int>(packed & WHEEL_COUNT_MASK);
@@ -2199,8 +2347,10 @@ namespace DetourModKit::detail
             {
                 n = MAX_WHEEL_NOTCHES;
             }
-            s_wheel_count[dir].store(wheel_count_slot(wheel_epoch, static_cast<std::uint64_t>(n)),
-                                     std::memory_order_relaxed);
+            s_wheel_count[dir].store(
+                wheel_count_slot(wheel_epoch, static_cast<std::uint64_t>(n)),
+                std::memory_order_relaxed
+            );
         }
     }
 #endif
@@ -2241,8 +2391,9 @@ namespace DetourModKit::detail
 
     void set_xinput_route_entry_hold_for_test(bool hold) noexcept
     {
-        safetyhook::set_route_park_for_test(hold ? safetyhook::RouteParkStage::BEFORE_DESTINATION
-                                                 : safetyhook::RouteParkStage::NONE);
+        safetyhook::set_route_park_for_test(
+            hold ? safetyhook::RouteParkStage::BEFORE_DESTINATION : safetyhook::RouteParkStage::NONE
+        );
     }
 
     bool xinput_route_entry_reached_for_test() noexcept
@@ -2269,19 +2420,24 @@ namespace DetourModKit::detail
     {
         if (target == nullptr)
         {
-            safetyhook::g_trap_exception_stage_override.store(safetyhook::TrapExceptionStage::NONE,
-                                                              std::memory_order_release);
+            safetyhook::g_trap_exception_stage_override.store(
+                safetyhook::TrapExceptionStage::NONE,
+                std::memory_order_release
+            );
             safetyhook::g_trap_exception_target_override.store(nullptr, std::memory_order_relaxed);
             return;
         }
 
         s_xinput_backend_toggle_exception_catches.store(0, std::memory_order_relaxed);
-        safetyhook::g_trap_exception_target_override.store(static_cast<std::uint8_t *>(target),
-                                                           std::memory_order_relaxed);
-        safetyhook::g_trap_exception_stage_override.store(after_mutation
-                                                              ? safetyhook::TrapExceptionStage::AFTER_MUTATION
-                                                              : safetyhook::TrapExceptionStage::BEFORE_MUTATION,
-                                                          std::memory_order_release);
+        safetyhook::g_trap_exception_target_override.store(
+            static_cast<std::uint8_t *>(target),
+            std::memory_order_relaxed
+        );
+        safetyhook::g_trap_exception_stage_override.store(
+            after_mutation ? safetyhook::TrapExceptionStage::AFTER_MUTATION
+                           : safetyhook::TrapExceptionStage::BEFORE_MUTATION,
+            std::memory_order_release
+        );
     }
 
     std::size_t xinput_backend_toggle_exception_catches_for_test() noexcept
@@ -2445,8 +2601,10 @@ namespace DetourModKit::detail
 
         // Retire the published trampoline pointers before the drain. A late entrant sees nullptr instead of a pointer
         // into a hook near destruction. seq_cst places these stores and the drain load in the detour total order.
-        const XInputPublishedChains published_chains{s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
-                                                     s_xinput_ex_original.load(std::memory_order_seq_cst) != nullptr};
+        const XInputPublishedChains published_chains{
+            s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
+            s_xinput_ex_original.load(std::memory_order_seq_cst) != nullptr
+        };
         s_xinput_ex_original.store(nullptr, std::memory_order_seq_cst);
         s_xinput_original.store(nullptr, std::memory_order_seq_cst);
 
@@ -2467,9 +2625,13 @@ namespace DetourModKit::detail
                                           s_xinput_permanent_hooks->ex.route_entries() != 0;
         if (route_still_inflight)
         {
-            retain_xinput_hooks(xinput_teardown_witness(s_xinput_permanent_hooks->primary),
-                                xinput_teardown_witness(s_xinput_permanent_hooks->ex),
-                                XInputRetentionReason::InflightTimeout, deferred_log, published_chains);
+            retain_xinput_hooks(
+                xinput_teardown_witness(s_xinput_permanent_hooks->primary),
+                xinput_teardown_witness(s_xinput_permanent_hooks->ex),
+                XInputRetentionReason::InflightTimeout,
+                deferred_log,
+                published_chains
+            );
             lock.unlock();
             emit_xinput_retention_log(deferred_log);
             return;
@@ -2505,9 +2667,13 @@ namespace DetourModKit::detail
             // Compensation reuses the current hook, and its own witness gate declines rather than fight a newer
             // writer.
             const PatchWitness ex_compensated =
-                rearm_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
-                                  "InputIntercept: the XInputGetStateEx re-arm that compensates a refused primary "
-                                  "restore did not complete cleanly; Ex state was reconciled from the target bytes.")
+                rearm_xinput_hook(
+                    s_xinput_permanent_hooks->ex,
+                    s_xinput_ex_original,
+                    s_xinput_ex_enable_warned,
+                    "InputIntercept: the XInputGetStateEx re-arm that compensates a refused primary "
+                    "restore did not complete cleanly; Ex state was reconciled from the target bytes."
+                )
                     ? xinput_teardown_witness(s_xinput_permanent_hooks->ex)
                     : PatchWitness::Original;
             retain_xinput_hooks(primary_after, ex_compensated, XInputRetentionReason::UnrestoredPatch, deferred_log);

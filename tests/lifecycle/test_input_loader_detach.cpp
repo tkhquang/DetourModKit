@@ -20,8 +20,9 @@ namespace
 
     void make_capture_destroyed_event_name(wchar_t (&name)[96]) noexcept
     {
-        (void)std::swprintf(name, std::size(name), L"Local\\DMK_InputLoader_CaptureDestroyed_%lu",
-                            GetCurrentProcessId());
+        (
+            void
+        )std::swprintf(name, std::size(name), L"Local\\DMK_InputLoader_CaptureDestroyed_%lu", GetCurrentProcessId());
     }
 
     FARPROC resolve_required(HMODULE dll, const char *symbol) noexcept
@@ -38,9 +39,11 @@ namespace
     bool module_owns(void *addr) noexcept
     {
         HMODULE owner = nullptr;
-        const BOOL ok =
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCWSTR>(addr), &owner);
+        const BOOL ok = GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(addr),
+            &owner
+        );
         return ok != FALSE && owner != nullptr;
     }
 } // namespace
@@ -180,8 +183,11 @@ int main(int argc, char **argv)
     const DWORD witness_state = WaitForSingleObject(capture_destroyed, 0);
     if (witness_state == WAIT_OBJECT_0)
     {
-        std::fprintf(stderr, "FAIL: loader-lock static destruction destroyed a staged or Scope-parked consumer "
-                             "capture\n");
+        std::fprintf(
+            stderr,
+            "FAIL: loader-lock static destruction destroyed a staged or Scope-parked consumer "
+            "capture\n"
+        );
         CloseHandle(capture_destroyed);
         return 1;
     }

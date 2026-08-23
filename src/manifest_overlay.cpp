@@ -54,14 +54,20 @@ namespace DetourModKit::manifest
                 // programmatic Signature::compile path cannot bypass it. This explicit check reports InvalidArg through
                 // Result instead of an exception from the factory.
                 if (spec.displacement_at < 0 ||
-                    !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
-                                                        spec.instruction_length) ||
+                    !scan::is_valid_rip_relative_layout(
+                        static_cast<std::size_t>(spec.displacement_at),
+                        spec.instruction_length
+                    ) ||
                     !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at)))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::compile");
                 }
-                return scan::Candidate::rip_relative(spec.name, *pattern, spec.displacement_at,
-                                                     spec.instruction_length);
+                return scan::Candidate::rip_relative(
+                    spec.name,
+                    *pattern,
+                    spec.displacement_at,
+                    spec.instruction_length
+                );
             }
             case scan::Mode::RttiVtable:
                 return scan::Candidate::rtti_vtable(spec.name, spec.mangled);
@@ -83,8 +89,8 @@ namespace DetourModKit::manifest
         // Reports whether a binding can authorize a write against a resolved typed domain. MidHook needs an executable
         // code site. VmtMethod needs a vtable. Address and PointerChain accept only code or data addresses. Scalar,
         // Unknown, and out-of-range kinds authorize nothing.
-        [[nodiscard]] constexpr bool binding_authorizes_mutation(BindingKind binding_kind,
-                                                                 anchor::ResultDomain domain) noexcept
+        [[nodiscard]] constexpr bool
+        binding_authorizes_mutation(BindingKind binding_kind, anchor::ResultDomain domain) noexcept
         {
             switch (binding_kind)
             {
@@ -426,8 +432,8 @@ namespace DetourModKit::manifest
         class GateAccess
         {
         public:
-            [[nodiscard]] static anchor::ResolvedAnchor resolve(const Signature &signature, Region scope,
-                                                                Region &winning_span)
+            [[nodiscard]] static anchor::ResolvedAnchor
+            resolve(const Signature &signature, Region scope, Region &winning_span)
             {
                 return signature.resolve_for_gate(scope, winning_span);
             }
@@ -457,8 +463,8 @@ namespace DetourModKit::manifest
 
     } // namespace
 
-    Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
-                                           std::span<const SignatureRecord> overrides)
+    Result<std::vector<Signature>>
+    overlay(std::span<const anchor::Anchor> defaults, std::span<const SignatureRecord> overrides)
     {
         std::vector<Signature> merged;
         merged.reserve(defaults.size());
@@ -479,8 +485,10 @@ namespace DetourModKit::manifest
             if (override_record != nullptr && !is_serializable_anchor_kind(def.kind))
             {
                 // A flat file rung cannot preserve Quorum corroboration.
-                log().warning("manifest overlay: override '{}' targets a non-serializable in-code default; ignored",
-                              def.label);
+                log().warning(
+                    "manifest overlay: override '{}' targets a non-serializable in-code default; ignored",
+                    def.label
+                );
                 override_record = nullptr;
             }
 
@@ -488,17 +496,21 @@ namespace DetourModKit::manifest
                 ((override_record->kind == anchor::AnchorKind::Manual) != (def.kind == anchor::AnchorKind::Manual)))
             {
                 // Manual anchors bypass backend-only validator requirements.
-                log().warning("manifest overlay: override '{}' changes the Manual validation posture; keeping in-code "
-                              "default",
-                              def.label);
+                log().warning(
+                    "manifest overlay: override '{}' changes the Manual validation posture; keeping in-code "
+                    "default",
+                    def.label
+                );
                 override_record = nullptr;
             }
 
             if (override_record != nullptr && record_declared_domain(*override_record) != anchor::declared_domain(def))
             {
-                log().warning("manifest overlay: override '{}' changes the declared result domain; keeping in-code "
-                              "default",
-                              def.label);
+                log().warning(
+                    "manifest overlay: override '{}' changes the declared result domain; keeping in-code "
+                    "default",
+                    def.label
+                );
                 override_record = nullptr;
             }
 
@@ -519,8 +531,11 @@ namespace DetourModKit::manifest
                 }
                 // A malformed override falls back to the in-code default. An override must never produce a worse
                 // result than file absence.
-                log().warning("manifest overlay: override '{}' failed to compile ({}); keeping in-code default",
-                              def.label, compiled.error().message());
+                log().warning(
+                    "manifest overlay: override '{}' failed to compile ({}); keeping in-code default",
+                    def.label,
+                    compiled.error().message()
+                );
             }
 
             Result<Signature> adopted = Signature::adopt(def);
@@ -532,8 +547,10 @@ namespace DetourModKit::manifest
             {
                 // A Quorum or CallArgHome default has no flat Signature representation. Skip it rather than mis-adopt
                 // it.
-                log().warning("manifest overlay: default '{}' is not a serializable anchor kind; gate it in code",
-                              def.label);
+                log().warning(
+                    "manifest overlay: default '{}' is not a serializable anchor kind; gate it in code",
+                    def.label
+                );
             }
         }
         return merged;
@@ -555,8 +572,13 @@ namespace DetourModKit::manifest
     {
         // revision_checked is deliberately separate from revision_ok: "compatible" and "never checked" are the same
         // value there and must not be.
-        [[nodiscard]] GateResult gate_impl(std::span<const Signature> signatures, const GatePolicy &policy,
-                                           Region scope, bool revision_checked, bool revision_ok)
+        [[nodiscard]] GateResult gate_impl(
+            std::span<const Signature> signatures,
+            const GatePolicy &policy,
+            Region scope,
+            bool revision_checked,
+            bool revision_ok
+        )
         {
             GateResult result;
 
@@ -588,32 +610,38 @@ namespace DetourModKit::manifest
                 // A non-unique or missed locate is never trusted.
                 if (resolved.status != anchor::AnchorStatus::Resolved)
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(),
-                        .status = resolved.status,
-                        .fingerprint = fingerprint,
-                        .reason = GateReason::Unresolved,
-                    });
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = resolved.status,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::Unresolved,
+                        }
+                    );
                     continue;
                 }
                 if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(),
-                        .status = anchor::AnchorStatus::Resolved,
-                        .fingerprint = FingerprintState::Drifted,
-                        .reason = GateReason::FingerprintDrifted,
-                    });
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = FingerprintState::Drifted,
+                            .reason = GateReason::FingerprintDrifted,
+                        }
+                    );
                     continue;
                 }
                 if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(),
-                        .status = anchor::AnchorStatus::Resolved,
-                        .fingerprint = FingerprintState::Unset,
-                        .reason = GateReason::FingerprintUnset,
-                    });
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = FingerprintState::Unset,
+                            .reason = GateReason::FingerprintUnset,
+                        }
+                    );
                     continue;
                 }
                 // Evaluate binding_authorizes_mutation once here. Every later mutation gate uses this live, writable
@@ -624,24 +652,28 @@ namespace DetourModKit::manifest
                 // pin or binding-domain mismatch equals !mutation_capable and causes rejection.
                 if (policy.require_mutation_safe_binding && !mutation_capable)
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(),
-                        .status = anchor::AnchorStatus::Resolved,
-                        .fingerprint = fingerprint,
-                        .reason = GateReason::BindingCannotMutate,
-                    });
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::BindingCannotMutate,
+                        }
+                    );
                     continue;
                 }
                 // An unchecked revision and an incompatible revision both refuse authorization. The first skips
                 // comparison. The second comparison finds disagreement.
                 if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(),
-                        .status = anchor::AnchorStatus::Resolved,
-                        .fingerprint = fingerprint,
-                        .reason = GateReason::ContractRevision,
-                    });
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::ContractRevision,
+                        }
+                    );
                     continue;
                 }
                 if (mutation_capable && (policy.require_live_image_identity || policy.require_captured_image_identity))
@@ -653,12 +685,14 @@ namespace DetourModKit::manifest
                                             (!live.present() || expected != live);
                     if (missing_baseline || mismatched)
                     {
-                        result.rejected.push_back(RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = fingerprint,
-                            .reason = GateReason::ImageIdentity,
-                        });
+                        result.rejected.push_back(
+                            RejectedSignature{
+                                .label = signature.label(),
+                                .status = anchor::AnchorStatus::Resolved,
+                                .fingerprint = fingerprint,
+                                .reason = GateReason::ImageIdentity,
+                            }
+                        );
                         continue;
                     }
                 }
@@ -674,27 +708,34 @@ namespace DetourModKit::manifest
                     const bool span_matches =
                         expected.present() && live.present() && expected == live &&
                         winning_span.size == expected.length &&
-                        DetourModKit::detail::guarded_read_bytes(winning_span.base.raw(), current.data(),
-                                                                 expected.length) &&
+                        DetourModKit::detail::guarded_read_bytes(
+                            winning_span.base.raw(),
+                            current.data(),
+                            expected.length
+                        ) &&
                         std::equal(current.begin(), current.begin() + expected.length, expected.bytes.begin());
                     if (!span_matches)
                     {
-                        result.rejected.push_back(RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = fingerprint,
-                            .reason = GateReason::WinningEvidence,
-                        });
+                        result.rejected.push_back(
+                            RejectedSignature{
+                                .label = signature.label(),
+                                .status = anchor::AnchorStatus::Resolved,
+                                .fingerprint = fingerprint,
+                                .reason = GateReason::WinningEvidence,
+                            }
+                        );
                         continue;
                     }
                 }
 
-                result.trusted.push_back(GatedSignature{
-                    .label = signature.label(),
-                    .kind = signature.kind(),
-                    .address = Address{static_cast<std::uintptr_t>(resolved.value)},
-                    .binding = &signature.binding(),
-                });
+                result.trusted.push_back(
+                    GatedSignature{
+                        .label = signature.label(),
+                        .kind = signature.kind(),
+                        .address = Address{static_cast<std::uintptr_t>(resolved.value)},
+                        .binding = &signature.binding(),
+                    }
+                );
                 trusted_fingerprints.push_back(fingerprint);
             }
 
@@ -717,12 +758,14 @@ namespace DetourModKit::manifest
                 {
                     for (std::size_t index = 0; index < result.trusted.size(); ++index)
                     {
-                        result.rejected.push_back(RejectedSignature{
-                            .label = result.trusted[index].label,
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = trusted_fingerprints[index],
-                            .reason = GateReason::HealthFloor,
-                        });
+                        result.rejected.push_back(
+                            RejectedSignature{
+                                .label = result.trusted[index].label,
+                                .status = anchor::AnchorStatus::Resolved,
+                                .fingerprint = trusted_fingerprints[index],
+                                .reason = GateReason::HealthFloor,
+                            }
+                        );
                     }
                     result.trusted.clear();
                 }
@@ -739,11 +782,21 @@ namespace DetourModKit::manifest
         return gate_impl(signatures, policy, scope, /*revision_checked=*/false, /*revision_ok=*/true);
     }
 
-    GateResult resolve_and_gate(std::span<const Signature> signatures, const ManifestHeader &header,
-                                std::uint32_t build_revision, const GatePolicy &policy, Region scope)
+    GateResult resolve_and_gate(
+        std::span<const Signature> signatures,
+        const ManifestHeader &header,
+        std::uint32_t build_revision,
+        const GatePolicy &policy,
+        Region scope
+    )
     {
-        return gate_impl(signatures, policy, scope, /*revision_checked=*/build_revision != 0,
-                         revision_compatible(header, build_revision));
+        return gate_impl(
+            signatures,
+            policy,
+            scope,
+            /*revision_checked=*/build_revision != 0,
+            revision_compatible(header, build_revision)
+        );
     }
 
     std::string_view fingerprint_state_to_string(FingerprintState state) noexcept
