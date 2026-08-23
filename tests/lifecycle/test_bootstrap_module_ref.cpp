@@ -65,9 +65,11 @@ namespace
     bool module_owns(void *addr) noexcept
     {
         HMODULE owner = nullptr;
-        const BOOL ok =
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCWSTR>(addr), &owner);
+        const BOOL ok = GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(addr),
+            &owner
+        );
         return ok != FALSE && owner != nullptr;
     }
 
@@ -112,8 +114,11 @@ namespace
 
         if (!module_owns(marker))
         {
-            std::fprintf(stderr, "FAIL[mapped]: the DLL unmapped after a bare FreeLibrary; the worker reference was "
-                                 "not acquired before the caller could unload the module\n");
+            std::fprintf(
+                stderr,
+                "FAIL[mapped]: the DLL unmapped after a bare FreeLibrary; the worker reference was "
+                "not acquired before the caller could unload the module\n"
+            );
             CloseHandle(release_worker);
             return 1;
         }
@@ -148,7 +153,8 @@ namespace
         }
 
         std::printf(
-            "PASS[mapped]: the worker's counted module reference kept the DLL mapped across a bare FreeLibrary\n");
+            "PASS[mapped]: the worker's counted module reference kept the DLL mapped across a bare FreeLibrary\n"
+        );
         return 0;
     }
 
@@ -202,14 +208,20 @@ namespace
         // demonstrably the one this module binds.
         if (selftest_count == 0)
         {
-            std::fprintf(stderr, "FAIL[leaf]: the probe's operator new replacement did not interpose, so the "
-                                 "attach-allocation measurement proves nothing\n");
+            std::fprintf(
+                stderr,
+                "FAIL[leaf]: the probe's operator new replacement did not interpose, so the "
+                "attach-allocation measurement proves nothing\n"
+            );
             return 1;
         }
         if (allocation_count != 0)
         {
-            std::fprintf(stderr, "FAIL[leaf]: bootstrap_attach made %llu attach-thread heap allocation(s)\n",
-                         static_cast<unsigned long long>(allocation_count));
+            std::fprintf(
+                stderr,
+                "FAIL[leaf]: bootstrap_attach made %llu attach-thread heap allocation(s)\n",
+                static_cast<unsigned long long>(allocation_count)
+            );
             return 1;
         }
         if (!drain_ok)
@@ -290,9 +302,11 @@ namespace
         }
         if (module_owns(marker))
         {
-            std::fprintf(stderr,
-                         "FAIL[bare]: the worker's terminal release did not complete the real detach within %lu ms\n",
-                         waited);
+            std::fprintf(
+                stderr,
+                "FAIL[bare]: the worker's terminal release did not complete the real detach within %lu ms\n",
+                waited
+            );
             return 1;
         }
 
@@ -354,15 +368,19 @@ namespace
 
         if (module_owns(marker))
         {
-            std::fprintf(stderr,
-                         "FAIL[unload]: the DLL is still mapped %lu ms after a drained FreeLibrary; the worker's "
-                         "reference was not released (a permanent pin would leave it mapped like this)\n",
-                         waited);
+            std::fprintf(
+                stderr,
+                "FAIL[unload]: the DLL is still mapped %lu ms after a drained FreeLibrary; the worker's "
+                "reference was not released (a permanent pin would leave it mapped like this)\n",
+                waited
+            );
             return 1;
         }
 
-        std::printf("PASS[unload]: draining the worker released its module reference; the DLL unloaded after %lu ms\n",
-                    waited);
+        std::printf(
+            "PASS[unload]: draining the worker released its module reference; the DLL unloaded after %lu ms\n",
+            waited
+        );
         return 0;
     }
 
@@ -455,8 +473,11 @@ namespace
         }
         if (!wait_for_worker_ready(worker_ready))
         {
-            std::fprintf(stderr, "FAIL[reload-exit]: worker did not report readiness within %lu ms\n",
-                         READY_POLL_BUDGET_MS);
+            std::fprintf(
+                stderr,
+                "FAIL[reload-exit]: worker did not report readiness within %lu ms\n",
+                READY_POLL_BUDGET_MS
+            );
             CloseHandle(requested);
             return 1;
         }
@@ -515,7 +536,10 @@ int main(int argc, char **argv)
         return run_reload_mutex_process_exit(wide_path);
     }
 
-    std::fprintf(stderr, "usage: %s <mapped|leaf|unload|bare|exit|reload-exit> [path-to-bootstrap_probe.dll]\n",
-                 argv[0]);
+    std::fprintf(
+        stderr,
+        "usage: %s <mapped|leaf|unload|bare|exit|reload-exit> [path-to-bootstrap_probe.dll]\n",
+        argv[0]
+    );
     return 2;
 }

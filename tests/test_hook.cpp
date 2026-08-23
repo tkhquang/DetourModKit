@@ -242,7 +242,8 @@ TEST(HookInline, CreateSucceedsDisabled)
             .name = "InlineCreate",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
 
     Hook h = std::move(*r);
@@ -261,7 +262,8 @@ TEST(HookInline, CreateInvalidTargetAddress)
             .name = "BadTarget",
             .target = Address{std::uintptr_t{0}},
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidTargetAddress);
 }
@@ -274,7 +276,8 @@ TEST(HookInline, CreateNullDetour)
             .name = "NullDetour",
             .target = addr_of(&real_hook_target_add),
         },
-        null_detour);
+        null_detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidDetourFunction);
 }
@@ -286,7 +289,8 @@ TEST(HookInline, CreateEmptyName)
             .name = "",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
@@ -337,7 +341,8 @@ TEST(HookInline, TypedTrampolineCallsOriginal)
             .name = "Trampoline",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -358,7 +363,8 @@ TEST(HookInline, EnableDisableTogglesDetour)
             .name = "Toggle",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -382,7 +388,8 @@ TEST(HookInline, EnableDisableAreIdempotent)
             .name = "Idempotent",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -404,7 +411,8 @@ TEST(HookInline, OriginalNullForDisengagedHandle)
             .name = "Disengaged",
             .target = addr_of(&leak_target_disengaged),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -424,8 +432,12 @@ namespace
     void noop_detour() noexcept {}
 
     // Plants a prologue at the start of a fresh executable page and returns the install result.
-    Result<Hook> install_on_planted_prologue(dmk_test::ScratchPage &page, const char *name,
-                                             std::initializer_list<std::uint8_t> prologue, Options options = {})
+    Result<Hook> install_on_planted_prologue(
+        dmk_test::ScratchPage &page,
+        const char *name,
+        std::initializer_list<std::uint8_t> prologue,
+        Options options = {}
+    )
     {
         page.put(0, prologue);
         return inline_at(
@@ -434,7 +446,8 @@ namespace
                 .target = Address{page.addr(0)},
                 .options = options,
             },
-            reinterpret_cast<void (*)()>(&noop_detour));
+            reinterpret_cast<void (*)()>(&noop_detour)
+        );
     }
 
     // A function whose first instruction is a rel32 call is assembled on an executable page:
@@ -454,14 +467,24 @@ namespace
     {
         const std::int32_t disp =
             static_cast<std::int32_t>(LEADING_CALL_CALLEE_OFFSET) - 5; // rel32 is relative to the next instruction
-        page.put(0, {0xE8, static_cast<std::uint8_t>(disp & 0xFF), static_cast<std::uint8_t>((disp >> 8) & 0xFF),
-                     static_cast<std::uint8_t>((disp >> 16) & 0xFF), static_cast<std::uint8_t>((disp >> 24) & 0xFF),
-                     0xC3});
-        page.put(LEADING_CALL_CALLEE_OFFSET,
-                 {0xB8, static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
-                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
-                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
-                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF), 0xC3});
+        page.put(
+            0,
+            {0xE8,
+             static_cast<std::uint8_t>(disp & 0xFF),
+             static_cast<std::uint8_t>((disp >> 8) & 0xFF),
+             static_cast<std::uint8_t>((disp >> 16) & 0xFF),
+             static_cast<std::uint8_t>((disp >> 24) & 0xFF),
+             0xC3}
+        );
+        page.put(
+            LEADING_CALL_CALLEE_OFFSET,
+            {0xB8,
+             static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
+             static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
+             static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
+             static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF),
+             0xC3}
+        );
         FlushInstructionCache(GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE);
     }
 
@@ -502,7 +525,8 @@ TEST(HookInlinePrologue, DefaultInstallsOnNormalTarget)
             .name = "NormalPrologue",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << "Default policy must not refuse a normal function prologue: " << r.error().message();
     EXPECT_TRUE(static_cast<bool>(*r));
 }
@@ -525,7 +549,8 @@ TEST(HookInlinePrologue, LeadingRel32CallUsesBackendCapability)
             .name = "LeadingRel32Call",
             .target = Address{page.addr(0)},
         },
-        reinterpret_cast<void (*)()>(&leading_call_detour));
+        reinterpret_cast<void (*)()>(&leading_call_detour)
+    );
     ASSERT_TRUE(r.has_value()) << "A backend-relocatable leading E8 rel32 call must not be refused by DMK under the "
                                   "default policy: "
                                << r.error().message();
@@ -558,7 +583,8 @@ TEST(HookInlinePrologue, RelocatePolicyStillRefusesNonExecutableTarget)
             .target = addr_of(data_prologue),
             .options = Options{.prologue = Prologue::Relocate},
         },
-        reinterpret_cast<void (*)()>(&noop_detour));
+        reinterpret_cast<void (*)()>(&noop_detour)
+    );
     ASSERT_FALSE(r.has_value()) << "Prologue::Relocate must not authorize a non-executable target.";
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -704,7 +730,8 @@ namespace
                 .name = name,
                 .target = Address{target},
             },
-            reinterpret_cast<void (*)()>(&noop_detour));
+            reinterpret_cast<void (*)()>(&noop_detour)
+        );
     }
 
     /// Plants `mov eax, 1; ret` at @p page offset 0: a complete leaf function, long enough for either patch form.
@@ -805,10 +832,15 @@ TEST(InlineHookFaultProof, InstructionStraddlingTwoValidPagesIsHooked)
 
     constexpr std::size_t mov_eax_imm32_length = 5;
     const std::uintptr_t entry = region.boundary() - 3;
-    region.put(entry, {0xB8, static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
-                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
-                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
-                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF), 0xC3});
+    region.put(
+        entry,
+        {0xB8,
+         static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
+         static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
+         static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
+         static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF),
+         0xC3}
+    );
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void *>(entry), 16);
 
     // Assert the straddle rather than assume it: the instruction must begin on the first page and end on the second,
@@ -824,7 +856,8 @@ TEST(InlineHookFaultProof, InstructionStraddlingTwoValidPagesIsHooked)
             .name = "StraddlingInstruction",
             .target = Address{entry},
         },
-        reinterpret_cast<void (*)()>(&leading_call_detour));
+        reinterpret_cast<void (*)()>(&leading_call_detour)
+    );
     ASSERT_TRUE(r.has_value()) << "an instruction spanning two valid pages must not be refused: "
                                << r.error().message();
     Hook h = std::move(*r);
@@ -893,8 +926,11 @@ TEST(InlineHookFaultProof, ReliableFunctionBoundOverrunReturnsTypedFailure)
 
     // Exactly the fallback form's patch: long enough for either form, so the bound must not refuse it.
     {
-        RuntimeFunctionRegistration registration{page.addr(), 0,
-                                                 static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH)};
+        RuntimeFunctionRegistration registration{
+            page.addr(),
+            0,
+            static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH)
+        };
         ASSERT_TRUE(registration.ok());
 
         const DetourModKit::detail::TargetWindowResult verdict =
@@ -936,7 +972,8 @@ TEST(InlineHookFaultProof, UnrelatedFaultIsNotSwallowedByTheHookGate)
             .name = "AfterUnrelatedFault",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     EXPECT_TRUE(r.has_value()) << "an unrelated contained fault must not disturb later hook installs";
     VirtualFree(unrelated, 0, MEM_RELEASE);
 }
@@ -1028,7 +1065,8 @@ TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
             .name = "DupBase",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
@@ -1038,7 +1076,8 @@ TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
             .target = addr_of(&real_hook_target_add),
             .options = Options{.fail_if_already_hooked = true},
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(second.has_value());
     // The ledger refuses before the prologue decode runs, so this is the same-kit mechanism, not the foreign one.
     EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
@@ -1052,7 +1091,8 @@ TEST(HookInline, DefaultModeLayersSecondHook)
             .name = "LayerBase",
             .target = addr_of(&real_hook_target_mul),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
@@ -1062,7 +1102,8 @@ TEST(HookInline, DefaultModeLayersSecondHook)
             .name = "LayerSecond",
             .target = addr_of(&real_hook_target_mul),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(second.has_value()) << second.error().message();
     Hook layer = std::move(*second);
     // Teardown is newest-first by natural reverse-order destruction: layer (declared last) is destroyed before base.
@@ -1134,7 +1175,8 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
             .target = Address{page->addr(0)},
             .options = Options{.fail_if_already_hooked = true},
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_FALSE(r.has_value());
     // The ledger was asserted blind to this address above, so only the foreign-JMP decode can be the refuser.
     EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
@@ -1151,10 +1193,11 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAJumpIntoModulelessMemory)
     dmk_test::ScratchPage destination;
     ASSERT_TRUE(destination.ok());
     HMODULE owner = nullptr;
-    ASSERT_FALSE(
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(destination.addr(0)), &owner))
-        << "a private page must belong to no module, or this case degenerates into the kernel32 one above";
+    ASSERT_FALSE(GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(destination.addr(0)),
+        &owner
+    )) << "a private page must belong to no module, or this case degenerates into the kernel32 one above";
 
     // Same ledger-blindness requirement as the case above.
     std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
@@ -1173,7 +1216,8 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAJumpIntoModulelessMemory)
             .target = Address{page->addr(0)},
             .options = Options{.fail_if_already_hooked = true},
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
 }
@@ -1195,7 +1239,8 @@ TEST(HookLedger, IsTargetHookedTrueWhileLiveFalseAfterDrop)
                 .name = "LedgerLive",
                 .target = target,
             },
-            &real_hook_detour_add);
+            &real_hook_detour_add
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         EXPECT_TRUE(is_target_hooked(target));
@@ -1247,7 +1292,8 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
             }
             EXPECT_TRUE(ledger.commit_hook(target, second.id));
             (void)ledger.release_hook(target, second.id);
-        });
+        }
+    );
 
     // Wait for the waiter to enter try_reserve_hook. If it does not start in time, tear it down safely before
     // failing: an early return here would destroy a still-joinable std::thread and call std::terminate. Committing
@@ -1290,7 +1336,8 @@ TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
             .name = "GuardedCall",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1311,7 +1358,8 @@ TEST(HookCall, GuardedCallPassesLvalueByValue)
             .name = "GuardedLvalue",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1328,7 +1376,8 @@ TEST(HookCall, GuardedCallReturnsValueInitWhenInactive)
             .name = "GuardedInactive",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1347,7 +1396,8 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
             .name = "MoveAssignOld",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook dest = std::move(*first);
     ASSERT_TRUE(dest.enable().has_value()) << "dest enable failed";
@@ -1358,7 +1408,8 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
             .name = "MoveAssignNew",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(second.has_value()) << second.error().message();
     Hook src = std::move(*second);
     ASSERT_TRUE(src.enable().has_value()) << "src enable failed";
@@ -1384,7 +1435,8 @@ TEST(HookCall, TryCallReachesOriginalAndReturnsValue)
             .name = "TryCallActive",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1403,7 +1455,8 @@ TEST(HookCall, TryCallFailsClosedWhenInactive)
             .name = "TryCallInactive",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1423,7 +1476,8 @@ TEST(HookCall, TryCallVoidReportsDispatchAndFailClosed)
             .name = "TryCallVoid",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1445,7 +1499,8 @@ TEST(HookCall, TryCallOnMovedFromHandleFailsClosed)
             .name = "TryCallMovedFrom",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     Hook moved = std::move(h);
@@ -1467,7 +1522,8 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
             .name = "Released",
             .target = target,
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1490,7 +1546,8 @@ TEST(HookTeardown, DestructorRestoresPrologue)
                 .name = "TeardownRestore",
                 .target = addr_of(&echo),
             },
-            &echo_detour);
+            &echo_detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1508,7 +1565,8 @@ TEST(HookTeardown, MovedFromHandleIsInert)
                 .name = "MovedFrom",
                 .target = addr_of(&echo),
             },
-            &echo_detour);
+            &echo_detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook a = std::move(*r);
         ASSERT_TRUE(a.enable().has_value()) << "enable failed";
@@ -1534,7 +1592,8 @@ TEST(HookMid, CreateSucceedsDisabled)
             .name = "MidCreate",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     EXPECT_TRUE(static_cast<bool>(h));
@@ -1553,7 +1612,8 @@ TEST(HookMid, CreateInvalidTargetAddress)
             .name = "MidBadTarget",
             .target = Address{std::uintptr_t{0}},
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidTargetAddress);
 }
@@ -1566,7 +1626,8 @@ TEST(HookMid, CreateNullDetour)
             .name = "MidNullDetour",
             .target = addr_of(&real_hook_target_add),
         },
-        null_detour);
+        null_detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidDetourFunction);
 }
@@ -1579,7 +1640,8 @@ TEST(HookMid, CreateEmptyName)
             .name = "",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
@@ -1592,7 +1654,8 @@ TEST(HookMid, EnableDisableToggles)
             .name = "MidToggle",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1613,7 +1676,8 @@ TEST(HookMid, OriginalIsNullForMidHook)
             .name = "MidNoOriginal",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     EXPECT_EQ(h.original<EchoFn>(), nullptr);
@@ -1627,7 +1691,8 @@ TEST(HookMid, FailIfAlreadyHookedRefusesSecondMid)
             .name = "MidDupBase",
             .target = addr_of(&real_hook_target_mul),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
@@ -1637,7 +1702,8 @@ TEST(HookMid, FailIfAlreadyHookedRefusesSecondMid)
             .target = addr_of(&real_hook_target_mul),
             .options = Options{.fail_if_already_hooked = true},
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
@@ -1651,7 +1717,8 @@ TEST(HookMid, FailIfAlreadyHookedRefusesOverInline)
             .name = "MidOverInlineBase",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(inl.has_value()) << inl.error().message();
     Hook base = std::move(*inl);
 
@@ -1662,7 +1729,8 @@ TEST(HookMid, FailIfAlreadyHookedRefusesOverInline)
             .target = addr_of(&real_hook_target_add),
             .options = Options{.fail_if_already_hooked = true},
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(mid.has_value());
     EXPECT_EQ(mid.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
@@ -1680,7 +1748,8 @@ TEST(HookMid, DefaultFailsOnInt3Prologue)
             .name = "MidInt3Prologue",
             .target = Address{page.addr(0)},
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -1696,7 +1765,8 @@ TEST(HookMid, DefaultRefusesNonExecutableTarget)
             .name = "MidDataTarget",
             .target = addr_of(mid_data_prologue),
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -1713,7 +1783,8 @@ TEST(HookMid, RealCreateModifiesArgViaRcx)
             .name = "MidRealCreate",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1733,7 +1804,8 @@ TEST(HookMid, RealCreateDisabledRestoresOriginal)
             .name = "MidRealDisabled",
             .target = addr_of(&real_hook_target_add),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1756,7 +1828,8 @@ TEST(HookMid, TeardownRestoresOriginal)
                 .name = "MidTeardown",
                 .target = addr_of(&real_hook_target_mul),
             },
-            detour);
+            detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value());
@@ -1777,7 +1850,8 @@ TEST(HookMid, ReleaseLeavesMidInstalled)
             .name = "MidReleased",
             .target = addr_of(&leak_target_mid),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value());
@@ -1801,7 +1875,8 @@ TEST(HookMid, MovedFromMidHandleIsInert)
                 .name = "MidMovedFrom",
                 .target = addr_of(&real_hook_target_mul),
             },
-            detour);
+            detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook a = std::move(*r);
         ASSERT_TRUE(a.enable().has_value());
@@ -1866,7 +1941,8 @@ namespace
         const auto addr = reinterpret_cast<std::uintptr_t>(fn);
         scan::OwnedScanRequest req;
         req.ladder.push_back(
-            scan::Candidate::direct(std::move(name), scan::Pattern::compile(aob_of(addr, aob_len)).value()));
+            scan::Candidate::direct(std::move(name), scan::Pattern::compile(aob_of(addr, aob_len)).value())
+        );
         req.scope = Region{Address{addr}, aob_len + 16};
         return req;
     }
@@ -1875,8 +1951,12 @@ namespace
     [[nodiscard]] scan::OwnedScanRequest unresolvable_request(std::string name)
     {
         scan::OwnedScanRequest req;
-        req.ladder.push_back(scan::Candidate::direct(
-            std::move(name), scan::Pattern::compile("FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF").value()));
+        req.ladder.push_back(
+            scan::Candidate::direct(
+                std::move(name),
+                scan::Pattern::compile("FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF").value()
+            )
+        );
         req.scope = Region{Address{reinterpret_cast<std::uintptr_t>(&install_target_one)}, 32};
         return req;
     }
@@ -1885,10 +1965,18 @@ namespace
 TEST(HookInstallAll, TwoMandatoryRowsBothResolve)
 {
     const HookSpec table[] = {
-        HookSpec::inline_hook("RowOne", resolvable_request("RowOnePat", &install_target_one), &install_detour_one,
-                              Severity::Mandatory),
-        HookSpec::inline_hook("RowTwo", resolvable_request("RowTwoPat", &install_target_two), &install_detour_two,
-                              Severity::Mandatory),
+        HookSpec::inline_hook(
+            "RowOne",
+            resolvable_request("RowOnePat", &install_target_one),
+            &install_detour_one,
+            Severity::Mandatory
+        ),
+        HookSpec::inline_hook(
+            "RowTwo",
+            resolvable_request("RowTwoPat", &install_target_two),
+            &install_detour_two,
+            Severity::Mandatory
+        ),
     };
 
     Result<std::vector<InstallOutcome>> res = install_all(table);
@@ -1915,10 +2003,18 @@ TEST(HookInstallAll, TwoMandatoryRowsBothResolve)
 TEST(HookInstallAll, MandatoryMissFailsWholeCall)
 {
     const HookSpec table[] = {
-        HookSpec::inline_hook("MandHit", resolvable_request("MandHitPat", &install_target_one), &install_detour_one,
-                              Severity::Mandatory),
-        HookSpec::inline_hook("MandMiss", unresolvable_request("MandMissPat"), &install_detour_two,
-                              Severity::Mandatory),
+        HookSpec::inline_hook(
+            "MandHit",
+            resolvable_request("MandHitPat", &install_target_one),
+            &install_detour_one,
+            Severity::Mandatory
+        ),
+        HookSpec::inline_hook(
+            "MandMiss",
+            unresolvable_request("MandMissPat"),
+            &install_detour_two,
+            Severity::Mandatory
+        ),
     };
 
     Result<std::vector<InstallOutcome>> res = install_all(table);
@@ -1932,8 +2028,12 @@ TEST(HookInstallAll, BestEffortMissStillSucceedsWithMandatoryHit)
 {
     const HookSpec table[] = {
         HookSpec::inline_hook("BeMiss", unresolvable_request("BeMissPat"), &install_detour_one, Severity::BestEffort),
-        HookSpec::inline_hook("MandHit2", resolvable_request("MandHit2Pat", &install_target_two), &install_detour_two,
-                              Severity::Mandatory),
+        HookSpec::inline_hook(
+            "MandHit2",
+            resolvable_request("MandHit2Pat", &install_target_two),
+            &install_detour_two,
+            Severity::Mandatory
+        ),
     };
 
     Result<std::vector<InstallOutcome>> res = install_all(table);
@@ -1956,8 +2056,10 @@ TEST(HookInstallAll, BestEffortMissStillSucceedsWithMandatoryHit)
 // out-of-memory, reports the failure in its own result shape rather than terminating the host. Its shape is a
 // single Result<vector<InstallOutcome>>, so a container-allocation failure surfaces as unexpected(Error{OutOfMemory}),
 // not an empty vector. Pin the noexcept property at compile time so a signature change cannot silently drop it.
-static_assert(noexcept(install_all(std::span<const HookSpec>{})),
-              "hook::install_all must be noexcept: it degrades under OOM rather than terminating the host.");
+static_assert(
+    noexcept(install_all(std::span<const HookSpec>{})),
+    "hook::install_all must be noexcept: it degrades under OOM rather than terminating the host."
+);
 
 // A declarative table row carries its own install Options, which install_all applies verbatim. A row that opts into
 // fail_if_already_hooked refuses an already-hooked target, while a default-Options row layers on top. The paired
@@ -1971,18 +2073,23 @@ TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
             .name = "PerRowPreHook",
             .target = addr_of(&install_target_one),
         },
-        &install_detour_one);
+        &install_detour_one
+    );
     ASSERT_TRUE(pre.has_value()) << pre.error().message();
     Hook keep = std::move(*pre);
 
     // A BestEffort row that opts into fail_if_already_hooked through its per-row Options: it must refuse the
     // already-hooked target rather than layer.
     const HookSpec strict_table[] = {
-        HookSpec::inline_hook("StrictRow", resolvable_request("StrictRowPat", &install_target_one), &install_detour_two,
-                              Severity::BestEffort,
-                              Options{
-                                  .fail_if_already_hooked = true,
-                              }),
+        HookSpec::inline_hook(
+            "StrictRow",
+            resolvable_request("StrictRowPat", &install_target_one),
+            &install_detour_two,
+            Severity::BestEffort,
+            Options{
+                .fail_if_already_hooked = true,
+            }
+        ),
     };
     Result<std::vector<InstallOutcome>> strict = install_all(strict_table);
     ASSERT_TRUE(strict.has_value()) << strict.error().message();
@@ -1993,8 +2100,12 @@ TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
     // Control: the same row with the default Options layers on top and succeeds, so the refusal above is attributable
     // to the per-row policy, not to the target being unhookable.
     const HookSpec permissive_table[] = {
-        HookSpec::inline_hook("PermissiveRow", resolvable_request("PermissiveRowPat", &install_target_one),
-                              &install_detour_two, Severity::BestEffort),
+        HookSpec::inline_hook(
+            "PermissiveRow",
+            resolvable_request("PermissiveRowPat", &install_target_one),
+            &install_detour_two,
+            Severity::BestEffort
+        ),
     };
     Result<std::vector<InstallOutcome>> permissive = install_all(permissive_table);
     ASSERT_TRUE(permissive.has_value()) << permissive.error().message();
@@ -2007,8 +2118,12 @@ TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
     const HookSpec table[] = {
-        HookSpec::inline_hook("OomRow", resolvable_request("OomRowPat", &install_target_one), &install_detour_one,
-                              Severity::Mandatory),
+        HookSpec::inline_hook(
+            "OomRow",
+            resolvable_request("OomRowPat", &install_target_one),
+            &install_detour_one,
+            Severity::Mandatory
+        ),
     };
 
     Result<std::vector<InstallOutcome>> res;
@@ -2038,15 +2153,28 @@ TEST(HookInstallAll, MandatoryMissRollsBackNewestFirst)
             {
                 removed.emplace_back(e.name);
             }
-        });
+        }
+    );
 
     const HookSpec table[] = {
-        HookSpec::inline_hook("RollbackOlder", resolvable_request("RbOlderPat", &install_target_one),
-                              &install_detour_one, Severity::Mandatory),
-        HookSpec::inline_hook("RollbackNewer", resolvable_request("RbNewerPat", &install_target_two),
-                              &install_detour_two, Severity::Mandatory),
-        HookSpec::inline_hook("RollbackMiss", unresolvable_request("RbMissPat"), &install_detour_one,
-                              Severity::Mandatory),
+        HookSpec::inline_hook(
+            "RollbackOlder",
+            resolvable_request("RbOlderPat", &install_target_one),
+            &install_detour_one,
+            Severity::Mandatory
+        ),
+        HookSpec::inline_hook(
+            "RollbackNewer",
+            resolvable_request("RbNewerPat", &install_target_two),
+            &install_detour_two,
+            Severity::Mandatory
+        ),
+        HookSpec::inline_hook(
+            "RollbackMiss",
+            unresolvable_request("RbMissPat"),
+            &install_detour_one,
+            Severity::Mandatory
+        ),
     };
 
     Result<std::vector<InstallOutcome>> res = install_all(table);
@@ -2456,8 +2584,12 @@ namespace
             if (s_vmt_backend_count_probe_succeeded)
             {
                 DWORD ignored = 0;
-                (void)::VirtualProtect(s_vmt_backend_count_race_page, VMT_PUBLISH_RACE_PAGE_BYTES,
-                                       s_vmt_backend_count_previous_protection, &ignored);
+                (void)::VirtualProtect(
+                    s_vmt_backend_count_race_page,
+                    VMT_PUBLISH_RACE_PAGE_BYTES,
+                    s_vmt_backend_count_previous_protection,
+                    &ignored
+                );
             }
             s_vmt_backend_count_race_page = nullptr;
         }
@@ -2499,8 +2631,10 @@ namespace
         {
             Sleep(1);
         }
-        s_vmt_warning_inner_done_in_window.store(s_vmt_warning_inner_done.load(std::memory_order_acquire),
-                                                 std::memory_order_release);
+        s_vmt_warning_inner_done_in_window.store(
+            s_vmt_warning_inner_done.load(std::memory_order_acquire),
+            std::memory_order_release
+        );
     }
 
     class VmtTeardownWarningProbeScope
@@ -2532,7 +2666,8 @@ TEST(HookEnableWitness, InlineFailureLeavesHookDisabledAndTargetPristine)
             .name = "InlineWitnessFailure",
             .target = target,
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook h = std::move(*created);
 
@@ -2560,7 +2695,8 @@ TEST(HookEnableWitness, MidFailureLeavesHookDisabledAndTargetPristine)
             .name = "MidWitnessFailure",
             .target = target,
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook h = std::move(*created);
 
@@ -2716,7 +2852,8 @@ TEST(HookPublicationProof, DisabledUntilCallerPublishesContext)
                 .name = "PublicationProof",
                 .target = addr_of(&publication_proof_target),
             },
-            &publication_proof_detour);
+            &publication_proof_detour
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         handle.emplace(std::move(*created));
     }
@@ -2765,7 +2902,8 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
                     .name = "OomPublication",
                     .target = target,
                 },
-                &oom_publication_detour);
+                &oom_publication_detour
+            );
         }
 
         ASSERT_FALSE(installed.has_value()) << "step " << static_cast<int>(step) << " did not fail the install";
@@ -2781,7 +2919,8 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
             .name = "OomRecovery",
             .target = target,
         },
-        &oom_publication_detour);
+        &oom_publication_detour
+    );
     ASSERT_TRUE(ok.has_value()) << ok.error().message();
     Hook h = std::move(*ok);
     ASSERT_TRUE(h.enable().has_value());
@@ -2799,7 +2938,8 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
                     .name = "OomPublicationMid",
                     .target = mid_target,
                 },
-                &oom_publication_mid_detour);
+                &oom_publication_mid_detour
+            );
         }
 
         ASSERT_FALSE(installed.has_value()) << "mid step " << static_cast<int>(step) << " did not fail the install";
@@ -2815,7 +2955,8 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
             .name = "OomRecoveryMid",
             .target = mid_target,
         },
-        &oom_publication_mid_detour);
+        &oom_publication_mid_detour
+    );
     ASSERT_TRUE(mid_ok.has_value()) << mid_ok.error().message();
     Hook mid_hook = std::move(*mid_ok);
     ASSERT_TRUE(mid_hook.enable().has_value());
@@ -2841,7 +2982,8 @@ TEST(HookPublicationProof, MidHookIsDisabledUntilCallerPublishesContext)
                 .name = "PublicationProofMid",
                 .target = addr_of(&publication_proof_mid_target),
             },
-            detour);
+            detour
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         handle.emplace(std::move(*created));
     }
@@ -2871,7 +3013,8 @@ TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
             .name = "InlineAcquireFail",
             .target = addr_of(&real_hook_target_add),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
     EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
@@ -2886,7 +3029,8 @@ TEST(HookModuleRef, MidAtAcquireFailurePopulatesErrorDetail)
             .name = "MidAcquireFail",
             .target = addr_of(&real_hook_target_mul),
         },
-        detour);
+        detour
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
     EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
@@ -2938,7 +3082,8 @@ TEST(HookVmt, ObjectGateReleasedBeforeCreateLifecycleEmit)
                     inner_ok.store(inner.has_value(), std::memory_order_release);
                     inner_done.store(true, std::memory_order_release);
                     // `inner` (if present) destructs here, restoring inner_target's vptr under the free object gate.
-                });
+                }
+            );
             // A released gate lets the concurrent vmt_for finish in microseconds; a still-held gate blocks it for the
             // whole window (this thread holds the gate, so it could only proceed after this outer vmt_for returns).
             for (int i = 0; i < 500 && !inner_done.load(std::memory_order_acquire); ++i)
@@ -2946,7 +3091,8 @@ TEST(HookVmt, ObjectGateReleasedBeforeCreateLifecycleEmit)
                 Sleep(1);
             }
             inner_done_in_window.store(inner_done.load(std::memory_order_acquire), std::memory_order_release);
-        });
+        }
+    );
 
     Result<VmtHook> outer = vmt_for("OuterConcurrent", outer_target.get());
     ASSERT_TRUE(outer.has_value()) << outer.error().message();
@@ -2967,17 +3113,23 @@ TEST(HookVmt, FailIfAlreadyHookedRefusesDoubleCreate)
 {
     auto target = std::make_unique<VmtTestTarget>();
 
-    Result<VmtHook> first = vmt_for("FirstVmt", target.get(),
-                                    VmtOptions{
-                                        .fail_if_already_hooked = true,
-                                    });
+    Result<VmtHook> first = vmt_for(
+        "FirstVmt",
+        target.get(),
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        }
+    );
     ASSERT_TRUE(first.has_value()) << first.error().message();
     VmtHook vh = std::move(*first);
 
-    Result<VmtHook> second = vmt_for("SecondVmt", target.get(),
-                                     VmtOptions{
-                                         .fail_if_already_hooked = true,
-                                     });
+    Result<VmtHook> second = vmt_for(
+        "SecondVmt",
+        target.get(),
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        }
+    );
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::HookAlreadyExists);
 }
@@ -3130,9 +3282,12 @@ TEST(HookVmt, ApplyToOwnCloneIsNoOpAnotherCloneFails)
     VmtHook vb = std::move(*rb);
 
     // target_b is already on vb's clone. Applying va onto target_b with fail_if_already_hooked must be refused.
-    Result<void> cross = va.apply_to(target_b.get(), VmtOptions{
-                                                         .fail_if_already_hooked = true,
-                                                     });
+    Result<void> cross = va.apply_to(
+        target_b.get(),
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        }
+    );
     ASSERT_FALSE(cross.has_value());
     EXPECT_EQ(cross.error().code, ErrorCode::HookAlreadyExists);
 }
@@ -3254,7 +3409,8 @@ TEST(HookDiagnosticContainment, RiskyPrologueWarningContainsEveryAllocationFailu
             const long long measured = dmk_test::thread_new_calls() - before;
             EXPECT_FALSE(has_value);
             return measured;
-        });
+        }
+    );
     EXPECT_NE(capture.drain().find("begins with a breakpoint (0xCC/0xCD)"), std::string::npos);
 }
 
@@ -3280,7 +3436,8 @@ TEST(HookDiagnosticContainment, TargetWindowWarningContainsEveryAllocationFailur
             const long long measured = dmk_test::thread_new_calls() - before;
             EXPECT_FALSE(has_value);
             return measured;
-        });
+        }
+    );
     EXPECT_NE(capture.drain().find("refused target"), std::string::npos);
 }
 
@@ -3295,7 +3452,8 @@ TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailur
             .name = "LayerWarnBase",
             .target = Address{page.addr(0)},
         },
-        reinterpret_cast<void (*)()>(&noop_detour));
+        reinterpret_cast<void (*)()>(&noop_detour)
+    );
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     Hook base = std::move(*installed);
     ScopedLogCapture capture;
@@ -3317,7 +3475,8 @@ TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailur
             const long long measured = dmk_test::thread_new_calls() - before;
             EXPECT_FALSE(has_value);
             return measured;
-        });
+        }
+    );
     EXPECT_NE(capture.drain().find("layers on a hook this kit already placed"), std::string::npos);
 }
 
@@ -3353,7 +3512,8 @@ TEST(HookDiagnosticContainment, ForeignJumpWarningContainsEveryAllocationFailure
             const long long measured = dmk_test::thread_new_calls() - before;
             EXPECT_FALSE(has_value);
             return measured;
-        });
+        }
+    );
     EXPECT_NE(capture.drain().find("detects another module's inline hook"), std::string::npos);
 }
 
@@ -3451,7 +3611,8 @@ TEST(HookDiagnosticContainment, VmtForCloneWarningContainsEveryAllocationFailure
             EXPECT_EQ(after_owner.module_pins[hook_pin_index], population_before.module_pins[hook_pin_index]);
             EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), leaks_before);
             return measured;
-        });
+        }
+    );
     EXPECT_TRUE(saw_injected_failure);
     // The sweep proves containment only while it keeps reaching the clone diagnostic.
     EXPECT_NE(capture.drain().find("hook::vmt_for: VMT hook 'CloneSweepOfClone'"), std::string::npos);
@@ -3493,7 +3654,8 @@ TEST(HookDiagnosticContainment, VmtApplyCloneWarningContainsEveryAllocationFailu
                 (void)mover.remove_from(owner_object.get());
             }
             return measured;
-        });
+        }
+    );
     // The sweep proves containment only while it keeps reaching the clone diagnostic.
     EXPECT_NE(capture.drain().find("hook::vmt_apply: VMT hook 'ApplySweepMover'"), std::string::npos);
 }
@@ -3590,11 +3752,11 @@ namespace
 // E9 jmp +3, landing on the ret three bytes past the instruction's end; the trailing int3s stop a decode running on.
 #if defined(_MSC_VER)
 #pragma section(".text$dmk", read, execute)
-__declspec(allocate(".text$dmk")) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] = {
-    0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+__declspec(allocate(".text$dmk")) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] =
+    {0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
 #else
-__attribute__((section(".text$dmk"), used)) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] = {
-    0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+__attribute__((section(".text$dmk"), used)) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] =
+    {0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
 #endif
 
 TEST(HookVmt, PreFlightRefusesInt3FirstSlot)
@@ -3624,10 +3786,13 @@ TEST(HookVmt, PreFlightRefusesInt3FirstSlot)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> r = vmt_for("Int3Vmt", &vptr,
-                                VmtOptions{
-                                    .fail_on_non_function_pointer = true,
-                                });
+    Result<VmtHook> r = vmt_for(
+        "Int3Vmt",
+        &vptr,
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
 
@@ -3649,10 +3814,13 @@ TEST(HookVmt, PreFlightAcceptsFunctionPrologue)
     vtable.methods[0] = slot_bodies().at(SlotBodyPage::PROLOGUE);
     void *vptr = &vtable.methods[0];
 
-    Result<VmtHook> r = vmt_for("PrologueVmt", &vptr,
-                                VmtOptions{
-                                    .fail_on_non_function_pointer = true,
-                                });
+    Result<VmtHook> r = vmt_for(
+        "PrologueVmt",
+        &vptr,
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        }
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     {
         VmtHook vh = std::move(*r);
@@ -3684,10 +3852,13 @@ TEST(HookVmt, PreFlightOffByDefault)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> strict = vmt_for("RetSlotVmtStrict", &vptr,
-                                     VmtOptions{
-                                         .fail_on_non_function_pointer = true,
-                                     });
+    Result<VmtHook> strict = vmt_for(
+        "RetSlotVmtStrict",
+        &vptr,
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        }
+    );
     ASSERT_FALSE(strict.has_value());
     EXPECT_EQ(strict.error().code, ErrorCode::InvalidObject);
 }
@@ -3715,10 +3886,13 @@ TEST(HookVmt, PreFlightRefusesSameModuleJumpStub)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> r = vmt_for("JmpStubVmt", &vptr,
-                                VmtOptions{
-                                    .fail_on_non_function_pointer = true,
-                                });
+    Result<VmtHook> r = vmt_for(
+        "JmpStubVmt",
+        &vptr,
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
     EXPECT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
@@ -3742,9 +3916,12 @@ TEST(HookVmt, ApplyPreFlightRefusesInt3FirstSlot)
     vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
     void *vptr = &vtable;
 
-    Result<void> applied = vh.apply_to(&vptr, VmtOptions{
-                                                  .fail_on_non_function_pointer = true,
-                                              });
+    Result<void> applied = vh.apply_to(
+        &vptr,
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        }
+    );
     ASSERT_FALSE(applied.has_value());
     EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
     EXPECT_EQ(vptr, static_cast<void *>(&vtable));
@@ -4004,7 +4181,8 @@ TEST(HookLifecycle, InlineEventsAreEmitted)
                 .name = "LifecycleHook",
                 .target = addr_of(&echo),
             },
-            &echo_detour);
+            &echo_detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         // Created on install (disabled), then the arming enable, then a real disable -> enable transition pair, then
@@ -4040,7 +4218,8 @@ TEST(HookLifecycle, MidEventReportsMidKind)
             .name = "MidLifecycleHook",
             .target = addr_of(&real_hook_target_mul),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -4096,7 +4275,8 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
             .name = "NoOpLifecycleHook",
             .target = addr_of(&leak_target_lifecycle),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_EQ(events.size(), 1u); // Created only
@@ -4237,14 +4417,16 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
                     .name = "LayeredBase",
                     .target = addr_of(&layered_disabled_target),
                 },
-                &layered_disabled_detour_a);
+                &layered_disabled_detour_a
+            );
             ASSERT_TRUE(base.has_value()) << base.error().message();
             Result<Hook> top = inline_at(
                 InlineRequest{
                     .name = "LayeredTop",
                     .target = addr_of(&layered_disabled_target),
                 },
-                &layered_disabled_detour_b);
+                &layered_disabled_detour_b
+            );
             ASSERT_TRUE(top.has_value()) << top.error().message();
 
             Hook h_base = std::move(*base);
@@ -4291,7 +4473,8 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
             .name = "GateQuery",
             .target = addr_of(&gate_query_target),
         },
-        &gate_query_detour);
+        &gate_query_detour
+    );
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook hook = std::move(*created);
     ASSERT_TRUE(hook.enable().has_value());
@@ -4324,7 +4507,8 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
                     const int observed = call_unfolded(&gate_query_target, 5);
                     ASSERT_TRUE(observed == 5 || observed == 305) << "observed " << observed;
                 }
-            });
+            }
+        );
     }
 
     // Every reader is inside its loop before the first toggle. Without this handshake the whole storm could finish
@@ -4415,7 +4599,8 @@ TEST(HookTeardownFaultProof, ReportedDisableFailurePinsBackendAndBooksLeak)
                 .name = "TeardownPin",
                 .target = target,
             },
-            &teardown_pin_detour);
+            &teardown_pin_detour
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook hook = std::move(*created);
         ASSERT_TRUE(hook.enable().has_value());
@@ -4452,7 +4637,8 @@ TEST(HookTeardownFaultProof, SyncExceptionDuringTeardownIsContainedAndPins)
                 .name = "TeardownThrow",
                 .target = target,
             },
-            &teardown_throw_detour);
+            &teardown_throw_detour
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook hook = std::move(*created);
         ASSERT_TRUE(hook.enable().has_value());
@@ -4483,7 +4669,8 @@ TEST(HookLayerStateProof, LowerLayerCannotOverwriteNewerLayer)
                 .name = "LayerStateBase",
                 .target = addr_of(&layer_state_target),
             },
-            &layer_state_detour_base);
+            &layer_state_detour_base
+        );
         ASSERT_TRUE(base.has_value()) << base.error().message();
         Hook h_base = std::move(*base);
         ASSERT_TRUE(h_base.enable().has_value());
@@ -4497,7 +4684,8 @@ TEST(HookLayerStateProof, LowerLayerCannotOverwriteNewerLayer)
                     .name = "LayerStateTop",
                     .target = addr_of(&layer_state_target),
                 },
-                &layer_state_detour_top);
+                &layer_state_detour_top
+            );
             ASSERT_TRUE(top.has_value()) << top.error().message();
             Hook h_top = std::move(*top);
             ASSERT_TRUE(h_top.enable().has_value());
@@ -4539,7 +4727,8 @@ TEST(HookLayerStateProof, NonTopLayerToggleCannotChangeTargetBytes)
             .name = "LayerBytesBase",
             .target = addr_of(&layer_state_target),
         },
-        &layer_state_detour_base);
+        &layer_state_detour_base
+    );
     ASSERT_TRUE(base.has_value()) << base.error().message();
     Hook h_base = std::move(*base);
     ASSERT_TRUE(h_base.enable().has_value());
@@ -4549,7 +4738,8 @@ TEST(HookLayerStateProof, NonTopLayerToggleCannotChangeTargetBytes)
             .name = "LayerBytesTop",
             .target = addr_of(&layer_state_target),
         },
-        &layer_state_detour_top);
+        &layer_state_detour_top
+    );
     ASSERT_TRUE(top.has_value()) << top.error().message();
     Hook h_top = std::move(*top);
     ASSERT_TRUE(h_top.enable().has_value());
@@ -4582,7 +4772,8 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
             {
                 removed.emplace_back(e.name);
             }
-        });
+        }
+    );
 
     {
         HookStack stack;
@@ -4591,7 +4782,8 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
                 .name = "StackBase",
                 .target = addr_of(&stack_target_primary),
             },
-            &stack_detour);
+            &stack_detour
+        );
         ASSERT_TRUE(base.has_value()) << base.error().message();
         stack.push(std::move(*base));
 
@@ -4600,7 +4792,8 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
                 .name = "StackLayer",
                 .target = addr_of(&stack_target_primary),
             },
-            &stack_detour);
+            &stack_detour
+        );
         ASSERT_TRUE(layer.has_value()) << layer.error().message();
         stack.push(std::move(*layer));
 
@@ -4625,7 +4818,8 @@ TEST(HookStackTest, MoveConstructTransfersOwnershipAndLeavesSourceEmpty)
             .name = "MoveCtorHook",
             .target = addr_of(&stack_target_secondary),
         },
-        &stack_detour);
+        &stack_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     ASSERT_TRUE(source.push(std::move(*r)).enable().has_value());
 
@@ -4653,7 +4847,8 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
             {
                 removed.emplace_back(e.name);
             }
-        });
+        }
+    );
 
     HookStack dest;
     {
@@ -4662,7 +4857,8 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
                 .name = "MoveBase",
                 .target = addr_of(&stack_target_secondary),
             },
-            &stack_detour);
+            &stack_detour
+        );
         ASSERT_TRUE(base.has_value()) << base.error().message();
         ASSERT_TRUE(dest.push(std::move(*base)).enable().has_value());
 
@@ -4671,7 +4867,8 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
                 .name = "MoveLayer",
                 .target = addr_of(&stack_target_secondary),
             },
-            &stack_detour);
+            &stack_detour
+        );
         ASSERT_TRUE(layer.has_value()) << layer.error().message();
         ASSERT_TRUE(dest.push(std::move(*layer)).enable().has_value());
     }
@@ -4684,7 +4881,8 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
             .name = "MoveAdopted",
             .target = addr_of(&stack_target_primary),
         },
-        &stack_detour);
+        &stack_detour
+    );
     ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
     ASSERT_TRUE(replacement.push(std::move(*adopted)).enable().has_value());
 
@@ -4718,7 +4916,8 @@ TEST(HookStackTest, ClearTearsDownNewestFirstAndEmpties)
             {
                 removed.emplace_back(e.name);
             }
-        });
+        }
+    );
 
     HookStack stack;
     Result<Hook> base = inline_at(
@@ -4726,7 +4925,8 @@ TEST(HookStackTest, ClearTearsDownNewestFirstAndEmpties)
             .name = "ClearBase",
             .target = addr_of(&stack_target_primary),
         },
-        &stack_detour);
+        &stack_detour
+    );
     ASSERT_TRUE(base.has_value()) << base.error().message();
     stack.push(std::move(*base));
 
@@ -4735,7 +4935,8 @@ TEST(HookStackTest, ClearTearsDownNewestFirstAndEmpties)
             .name = "ClearLayer",
             .target = addr_of(&stack_target_primary),
         },
-        &stack_detour);
+        &stack_detour
+    );
     ASSERT_TRUE(layer.has_value()) << layer.error().message();
     stack.push(std::move(*layer));
 
@@ -4761,7 +4962,8 @@ TEST(HookStackTest, PushReturnsUsableHandleAndReportsSize)
             .name = "StackEcho",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook &stored = stack.push(std::move(*r));
     ASSERT_TRUE(stored.enable().has_value());
@@ -4834,7 +5036,8 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
             .name = "ConcEnableDisable",
             .target = addr_of(&echo),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -4867,7 +5070,8 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
                         (void)h.disable();
                     }
                 }
-            });
+            }
+        );
     }
     pool.emplace_back(
         [&h, &go, &status_reads]
@@ -4881,7 +5085,8 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
                 (void)h.is_enabled();
                 status_reads.fetch_add(1, std::memory_order_relaxed);
             }
-        });
+        }
+    );
     go.store(true, std::memory_order_release);
     for (std::thread &worker : pool)
     {
@@ -4904,7 +5109,8 @@ TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
             .name = "Reentrant",
             .target = addr_of(&reentrant_target),
         },
-        &reentrant_detour);
+        &reentrant_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value());
@@ -4928,7 +5134,8 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
             .name = "DrainCall",
             .target = addr_of(&parking_original),
         },
-        &echo_detour);
+        &echo_detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()); // publish the trampoline so call() dispatches to the parking original
@@ -4953,7 +5160,8 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
             disable_started.store(true, std::memory_order_release);
             (void)h.disable();
             disable_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     while (!disable_started.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -5027,7 +5235,8 @@ TEST(HookLedgerTargetSlot, BlocksConcurrentInstallUntilSlotReleased)
             }
             EXPECT_TRUE(ledger.commit_hook(target, second.id));
             (void)ledger.release_hook(target, second.id);
-        });
+        }
+    );
 
     if (!wait_for_flag(install_started, 100))
     {
@@ -5155,14 +5364,16 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
             .name = "LayerOld",
             .target = addr_of(&leak_target_layered),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(older.has_value()) << older.error().message();
     Result<Hook> newer = inline_at(
         InlineRequest{
             .name = "LayerNew",
             .target = addr_of(&leak_target_layered),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(newer.has_value()) << newer.error().message();
 
     std::optional<Hook> old_handle(std::move(older.value()));
@@ -5185,7 +5396,8 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
             .target = addr_of(&leak_target_layered),
             .options = Options{.fail_if_already_hooked = true},
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedByThisKit)
         << "a leaked backend remains physically installed and must stay represented in the ledger";
@@ -5210,7 +5422,8 @@ TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
             .name = "RetainPin",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
     Hook pin_handle = std::move(*pinned);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -5224,7 +5437,8 @@ TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
                 .name = "RetainLater",
                 .target = target,
             },
-            &real_hook_detour_add);
+            &real_hook_detour_add
+        );
         ASSERT_TRUE(later.has_value()) << later.error().message();
         Hook later_handle = std::move(*later);
         ASSERT_TRUE(later_handle.enable().has_value());
@@ -5247,7 +5461,8 @@ TEST(HookLedgerRetainedId, OlderLayerUnderAPinnedNewerLayerMustLeak)
             .name = "RetainOlder",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(older.has_value()) << older.error().message();
     Hook older_handle = std::move(*older);
     ASSERT_TRUE(older_handle.enable().has_value());
@@ -5257,7 +5472,8 @@ TEST(HookLedgerRetainedId, OlderLayerUnderAPinnedNewerLayerMustLeak)
             .name = "RetainNewer",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(newer.has_value()) << newer.error().message();
     Hook newer_handle = std::move(*newer);
     ASSERT_TRUE(newer_handle.enable().has_value());
@@ -5287,7 +5503,8 @@ TEST(HookLedgerRetainedId, LiveOlderLayerUnderAPinIsRefusedWithLayerConflict)
             .name = "ConflictOlder",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(older.has_value()) << older.error().message();
     Hook older_handle = std::move(*older);
     ASSERT_TRUE(older_handle.enable().has_value());
@@ -5297,7 +5514,8 @@ TEST(HookLedgerRetainedId, LiveOlderLayerUnderAPinIsRefusedWithLayerConflict)
             .name = "ConflictPin",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(pin.has_value()) << pin.error().message();
     Hook pin_handle = std::move(*pin);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -5332,7 +5550,8 @@ TEST(HookLedgerRetainedId, StrictInstallAfterAPinIsRefusedNotBlocked)
             .name = "RetainStrictPin",
             .target = target,
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
     Hook pin_handle = std::move(*pinned);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -5345,7 +5564,8 @@ TEST(HookLedgerRetainedId, StrictInstallAfterAPinIsRefusedNotBlocked)
             .target = target,
             .options = Options{.fail_if_already_hooked = true},
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(strict.has_value());
     EXPECT_EQ(strict.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
@@ -5367,7 +5587,8 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
                 .name = "ReleaseBooksDisabled",
                 .target = addr_of(&leak_target_release_disabled),
             },
-            &real_hook_detour_add);
+            &real_hook_detour_add
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook handle = std::move(*created);
         handle.release();
@@ -5387,7 +5608,8 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
             .target = addr_of(&leak_target_release_disabled),
             .options = Options{.fail_if_already_hooked = true},
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_FALSE(after_disabled_pin.has_value());
     EXPECT_EQ(after_disabled_pin.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 
@@ -5398,7 +5620,8 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
                 .name = "ReleaseBooks",
                 .target = addr_of(&leak_target_release_booked),
             },
-            &real_hook_detour_add);
+            &real_hook_detour_add
+        );
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook handle = std::move(*created);
         ASSERT_TRUE(handle.enable().has_value());
@@ -5418,10 +5641,13 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
     EXPECT_EQ(diag::total_intentional_leaks(), vmt_before + 1) << "VmtHook::release must book its deliberate leak";
     // The retention half of the VMT contract, asserted while the object still carries the leaked clone: the ledger
     // keeps the clone base, so a strict re-clone of the same object still recognises it.
-    Result<VmtHook> after_vmt_pin = vmt_for("ReleaseBooksVmtStrict", probe.get(),
-                                            VmtOptions{
-                                                .fail_if_already_hooked = true,
-                                            });
+    Result<VmtHook> after_vmt_pin = vmt_for(
+        "ReleaseBooksVmtStrict",
+        probe.get(),
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        }
+    );
     ASSERT_FALSE(after_vmt_pin.has_value());
     EXPECT_EQ(after_vmt_pin.error().code, ErrorCode::HookAlreadyExists)
         << "a released clone base must stay recorded for VmtOptions::fail_if_already_hooked";
@@ -5542,8 +5768,12 @@ TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
             .fail_on_non_function_pointer = true,
         },
     };
-    const std::array<ObjectWordState, 4> states{ObjectWordState::NoAccess, ObjectWordState::ReadOnly,
-                                                ObjectWordState::Reserved, ObjectWordState::Guarded};
+    const std::array<ObjectWordState, 4> states{
+        ObjectWordState::NoAccess,
+        ObjectWordState::ReadOnly,
+        ObjectWordState::Reserved,
+        ObjectWordState::Guarded
+    };
 
     for (const ObjectWordState state : states)
     {
@@ -5788,8 +6018,11 @@ TEST(VmtHookFaultProof, PublicationRaceReturnsTypedFailureWithoutResidue)
     ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
     VmtHook vh = std::move(*seeded);
 
-    const std::array<VmtPublishRace, 3> races{VmtPublishRace::Unmap, VmtPublishRace::Displace,
-                                              VmtPublishRace::ReadOnly};
+    const std::array<VmtPublishRace, 3> races{
+        VmtPublishRace::Unmap,
+        VmtPublishRace::Displace,
+        VmtPublishRace::ReadOnly
+    };
     for (const VmtPublishRace race : races)
     {
         void *const create_object =
@@ -6024,7 +6257,8 @@ TEST(HookVmtLayered, TeardownWarningRunsAfterObjectGateRelease)
             Result<VmtHook> inner = vmt_for("WarningGateInner", inner_object.get());
             inner_ok.store(inner.has_value(), std::memory_order_release);
             s_vmt_warning_inner_done.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     older.reset();
     inner_thread.join();
@@ -6202,9 +6436,12 @@ TEST(HookVmt, ApplyToUntrackedObjectOnOwnCloneIsRefusedUnderEveryPolicy)
         ~RestoreStowaway() noexcept { *reinterpret_cast<std::uintptr_t *>(object) = vptr; }
     } const restore{stowaway.get(), stowaway_pristine};
 
-    const std::array<VmtOptions, 2> policies{VmtOptions{}, VmtOptions{
-                                                               .fail_if_already_hooked = true,
-                                                           }};
+    const std::array<VmtOptions, 2> policies{
+        VmtOptions{},
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        }
+    };
     for (const VmtOptions &options : policies)
     {
         const Result<void> applied = vh.apply_to(stowaway.get(), options);
@@ -6275,8 +6512,10 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
         const LedgerLockFailureScope fail;
         EXPECT_TRUE(ledger.is_target_hooked(reinterpret_cast<std::uintptr_t>(&leak_target_ledger_sync)));
         EXPECT_TRUE(ledger.is_vmt_clone_base(0x1000));
-        EXPECT_EQ(ledger.try_reserve_hook(0x2000, false).status,
-                  DetourModKit::detail::HookLedger::ReserveStatus::OutOfMemory);
+        EXPECT_EQ(
+            ledger.try_reserve_hook(0x2000, false).status,
+            DetourModKit::detail::HookLedger::ReserveStatus::OutOfMemory
+        );
         EXPECT_FALSE(ledger.try_record_vmt(0x3000).has_value());
         // A write slot that cannot be claimed reports a positive newer-count, so its caller refuses or leaks.
         EXPECT_GT(ledger.acquire_target_slot(0x2000, 1), 0u);
@@ -6305,7 +6544,8 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
                 .name = "LedgerCommitFailure",
                 .target = addr_of(&ledger_commit_failure_target),
             },
-            &real_hook_detour_add);
+            &real_hook_detour_add
+        );
         ASSERT_FALSE(failed.has_value());
         EXPECT_EQ(failed.error().code, ErrorCode::OutOfMemory);
         ASSERT_TRUE(s_last_publish_step.has_value()) << "install failed before creating a backend, so commit_hook was "
@@ -6321,7 +6561,8 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
             .name = "LedgerSync",
             .target = addr_of(&leak_target_ledger_sync),
         },
-        &real_hook_detour_add);
+        &real_hook_detour_add
+    );
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook hook = std::move(*created);
     ASSERT_TRUE(hook.enable().has_value());
@@ -6380,10 +6621,13 @@ TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
         std::thread later(
             [&ledger, returned, status]
             {
-                status->store(static_cast<int>(ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false).status),
-                              std::memory_order_relaxed);
+                status->store(
+                    static_cast<int>(ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false).status),
+                    std::memory_order_relaxed
+                );
                 returned->store(true, std::memory_order_release);
-            });
+            }
+        );
 
         bool completed = false;
         for (int i = 0; i < 2000 && !completed; ++i)
@@ -6398,8 +6642,10 @@ TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
         if (completed)
         {
             later.join();
-            EXPECT_EQ(static_cast<HookLedger::ReserveStatus>(status->load(std::memory_order_relaxed)),
-                      HookLedger::ReserveStatus::OutOfMemory);
+            EXPECT_EQ(
+                static_cast<HookLedger::ReserveStatus>(status->load(std::memory_order_relaxed)),
+                HookLedger::ReserveStatus::OutOfMemory
+            );
         }
         else
         {

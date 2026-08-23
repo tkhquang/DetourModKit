@@ -70,8 +70,8 @@ namespace DetourModKit
         // "not applicable" then). The rebuilt pattern carries offset 0: replacing the prologue dropped the original `|`
         // anchor, which the caller re-applies after the scan so a `|`-anchored candidate recovered here lands on the
         // same byte the direct scan would have.
-        std::optional<detail::EnginePattern> build_rebuilt_prologue(const scan::Pattern &original,
-                                                                    const PrologueShape &shape)
+        std::optional<detail::EnginePattern>
+        build_rebuilt_prologue(const scan::Pattern &original, const PrologueShape &shape)
         {
             // A bounded-jump pattern cannot be rebuilt by a flat byte-and-mask concatenation: this rebuild drops the
             // instruction-rounded stolen span and prepends the jump prefix, but it copies only bytes/mask and never
@@ -181,9 +181,13 @@ namespace DetourModKit
         // in the scope's executable pages (a hooked prologue is code), decode the jump to confirm a real redirect, and
         // resolve the anchored match. applicable becomes true once the rebuilt pattern is usable (enough literal tail),
         // independent of whether it then matches, so the caller can tell "no shape applied" from "applied but missed".
-        std::optional<std::uintptr_t> try_prologue_shape(const scan::DirectPattern &direct, const PrologueShape &shape,
-                                                         detail::ModuleSpan range, bool &applicable,
-                                                         detail::FallbackOutcome &outcome)
+        std::optional<std::uintptr_t> try_prologue_shape(
+            const scan::DirectPattern &direct,
+            const PrologueShape &shape,
+            detail::ModuleSpan range,
+            bool &applicable,
+            detail::FallbackOutcome &outcome
+        )
         {
             const scan::Pattern &pattern = direct.pattern;
             const std::optional<detail::EnginePattern> rebuilt = build_rebuilt_prologue(pattern, shape);
@@ -197,12 +201,15 @@ namespace DetourModKit
             // the ambiguity verdict describe the same view of memory. A truncated sweep (a faulted region skipped, or
             // bounded-jump backtracking spent) makes the count a lower bound, so a single hit does not prove
             // uniqueness; fail closed. More than one hit makes the rebuilt jump ambiguous; fail closed.
-            const detail::MatchResult found = detail::scan_module_executable(*rebuilt, range,
-                                                                             detail::ScanQuery{
-                                                                                 .occurrence = 1,
-                                                                                 .count_beyond = true,
-                                                                                 .exclusions = nullptr,
-                                                                             });
+            const detail::MatchResult found = detail::scan_module_executable(
+                *rebuilt,
+                range,
+                detail::ScanQuery{
+                    .occurrence = 1,
+                    .count_beyond = true,
+                    .exclusions = nullptr,
+                }
+            );
             // Truncation is recorded even when this shape would have been rejected anyway: it says the executable
             // pages were not fully read, so the caller must not report the whole recovery pass as a proven absence.
             // build_rebuilt_prologue refuses jump-bearing patterns, so a skipped faulted region is the only channel.
@@ -243,8 +250,11 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    detail::FallbackOutcome detail::resolve_prologue_fallback(const scan::ScanRequest &request,
-                                                              std::span<const std::size_t> order, ModuleSpan range)
+    detail::FallbackOutcome detail::resolve_prologue_fallback(
+        const scan::ScanRequest &request,
+        std::span<const std::size_t> order,
+        ModuleSpan range
+    )
     {
         FallbackOutcome outcome;
         const scan::FallbackPolicy policy = request.fallback_policy;

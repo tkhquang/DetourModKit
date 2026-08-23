@@ -81,8 +81,8 @@ namespace DetourModKit
          *       reported as MalformedLine / MissingHeader on the next read and overwritten. Do not route load-bearing
          *       data through this path without first making the write atomic (temp file + replace).
          */
-        [[nodiscard]] Result<void> write_drift_report_to_file(const std::string &path,
-                                                              std::span<const DriftEntry> entries);
+        [[nodiscard]] Result<void>
+        write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries);
 
         /**
          * @brief Reads and parses a drift manifest file.

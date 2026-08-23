@@ -25,8 +25,11 @@ namespace DetourModKit
 {
     namespace scan
     {
-        Result<Address> resolve_rip_relative(Address instruction, std::size_t displacement_offset,
-                                             std::size_t instruction_length) noexcept
+        Result<Address> resolve_rip_relative(
+            Address instruction,
+            std::size_t displacement_offset,
+            std::size_t instruction_length
+        ) noexcept
         {
             if (!instruction)
             {
@@ -64,8 +67,11 @@ namespace DetourModKit
             return Address{target};
         }
 
-        Result<Address> find_and_resolve_rip_relative(Region search, std::span<const std::byte> opcode_prefix,
-                                                      std::size_t instruction_length) noexcept
+        Result<Address> find_and_resolve_rip_relative(
+            Region search,
+            std::span<const std::byte> opcode_prefix,
+            std::size_t instruction_length
+        ) noexcept
         {
             const std::byte *search_start = search.base.ptr<const std::byte>();
             if (!search_start || opcode_prefix.empty())
@@ -126,9 +132,11 @@ namespace DetourModKit
 
     namespace detail
     {
-        std::optional<std::int32_t> decode_rip_displacement(std::span<const std::byte> instruction_bytes,
-                                                            std::size_t displacement_offset,
-                                                            std::size_t instruction_length) noexcept
+        std::optional<std::int32_t> decode_rip_displacement(
+            std::span<const std::byte> instruction_bytes,
+            std::size_t displacement_offset,
+            std::size_t instruction_length
+        ) noexcept
         {
             if (!scan::is_valid_rip_relative_layout(displacement_offset, instruction_length) ||
                 instruction_bytes.size() != instruction_length)
@@ -143,8 +151,13 @@ namespace DetourModKit
             }
             ZydisDecodedInstruction instruction;
             ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, instruction_bytes.data(), instruction_bytes.size(),
-                                                     &instruction, operands)))
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(
+                    &decoder,
+                    instruction_bytes.data(),
+                    instruction_bytes.size(),
+                    &instruction,
+                    operands
+                )))
             {
                 return std::nullopt;
             }

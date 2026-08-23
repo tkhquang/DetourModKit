@@ -211,7 +211,8 @@ namespace DetourModKit::detail
                     {
                     }
                     DetourModKit::diagnostics::record_intentional_leak(
-                        DetourModKit::diagnostics::LeakSubsystem::Worker);
+                        DetourModKit::diagnostics::LeakSubsystem::Worker
+                    );
                     return parcel.thread == nullptr || !parcel.thread->joinable();
                 }
             }
@@ -233,8 +234,11 @@ namespace DetourModKit::detail
         }
     } // namespace
 
-    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref,
-                            DetourModKit::diagnostics::ModulePinReason ref_reason) noexcept
+    void reap_worker_thread(
+        std::unique_ptr<std::jthread> thread,
+        void *module_ref,
+        DetourModKit::diagnostics::ModulePinReason ref_reason
+    ) noexcept
     {
         Parcel parcel;
         parcel.thread = std::move(thread);

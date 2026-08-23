@@ -76,13 +76,15 @@ namespace DetourModKit
                     m_by_target.emplace(target, std::move(entry));
                 }
 
-                m_install_cv.wait(guard,
-                                  [this, target, id]
-                                  {
-                                      const auto current = m_by_target.find(target);
-                                      return current != m_by_target.end() && !current->second.pending.empty() &&
-                                             current->second.pending.front() == id;
-                                  });
+                m_install_cv.wait(
+                    guard,
+                    [this, target, id]
+                    {
+                        const auto current = m_by_target.find(target);
+                        return current != m_by_target.end() && !current->second.pending.empty() &&
+                               current->second.pending.front() == id;
+                    }
+                );
                 return Reservation{ReserveStatus::Reserved, id, preexisting};
             }
             catch (...)
@@ -185,13 +187,15 @@ namespace DetourModKit
             }
             // Wait our turn behind any installer already mid-patch on this target (front of pending), exactly as an
             // installer does. Once this id is front, no install is touching the target's prologue.
-            m_install_cv.wait(guard,
-                              [this, target, id]
-                              {
-                                  const auto current = m_by_target.find(target);
-                                  return current != m_by_target.end() && !current->second.pending.empty() &&
-                                         current->second.pending.front() == id;
-                              });
+            m_install_cv.wait(
+                guard,
+                [this, target, id]
+                {
+                    const auto current = m_by_target.find(target);
+                    return current != m_by_target.end() && !current->second.pending.empty() &&
+                           current->second.pending.front() == id;
+                }
+            );
             // Re-find under the still-held lock (a concurrent emplace/erase may have rehashed the map while we waited)
             // and measure the newer-live count at the instant the slot is owned.
             const auto current = m_by_target.find(target);
@@ -284,8 +288,11 @@ namespace DetourModKit
                 // than silently baking another handle's hooked slots into its own pristine snapshot.
                 return true;
             }
-            return std::any_of(m_vmt.begin(), m_vmt.end(),
-                               [vptr](const VmtEntry &entry) { return entry.base == vptr; });
+            return std::any_of(
+                m_vmt.begin(),
+                m_vmt.end(),
+                [vptr](const VmtEntry &entry) { return entry.base == vptr; }
+            );
         }
     } // namespace detail
 } // namespace DetourModKit

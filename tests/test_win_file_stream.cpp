@@ -23,9 +23,15 @@ namespace
 
     void resize_after_size_probe(const std::wstring &path)
     {
-        const HANDLE handle =
-            CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const HANDLE handle = CreateFileW(
+            path.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
         if (handle == INVALID_HANDLE_VALUE)
         {
             s_resize_after_probe_succeeded = false;
@@ -418,8 +424,15 @@ TEST_F(WinFileStreamTest, ConcurrentRead_WhileWriting)
     stream.flush();
 
     // FILE_SHARE_READ should allow concurrent reads
-    HANDLE h = CreateFileW(m_test_path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = CreateFileW(
+        m_test_path.wstring().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
     EXPECT_NE(h, INVALID_HANDLE_VALUE);
     if (h != INVALID_HANDLE_VALUE)
     {

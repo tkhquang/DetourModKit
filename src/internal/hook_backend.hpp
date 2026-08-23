@@ -97,15 +97,25 @@ namespace DetourModKit
             ~Impl() noexcept;
 #endif
 
-            Impl(safetyhook::InlineHook hook, std::string hook_name, std::uintptr_t hook_target, std::uint64_t ledger,
-                 HookState initial_state)
+            Impl(
+                safetyhook::InlineHook hook,
+                std::string hook_name,
+                std::uintptr_t hook_target,
+                std::uint64_t ledger,
+                HookState initial_state
+            )
                 : backend(std::move(hook)), status(initial_state), name(std::move(hook_name)), target(hook_target),
                   ledger_id(ledger), is_inline(true)
             {
             }
 
-            Impl(safetyhook::MidHook hook, std::string hook_name, std::uintptr_t hook_target, std::uint64_t ledger,
-                 HookState initial_state)
+            Impl(
+                safetyhook::MidHook hook,
+                std::string hook_name,
+                std::uintptr_t hook_target,
+                std::uint64_t ledger,
+                HookState initial_state
+            )
                 : backend(std::move(hook)), status(initial_state), name(std::move(hook_name)), target(hook_target),
                   ledger_id(ledger), is_inline(false)
             {
@@ -156,8 +166,13 @@ namespace DetourModKit
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
             std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
 
-            Impl(safetyhook::VmtHook hook, std::string hook_name, std::uintptr_t base, std::size_t methods,
-                 std::uint64_t ledger)
+            Impl(
+                safetyhook::VmtHook hook,
+                std::string hook_name,
+                std::uintptr_t base,
+                std::size_t methods,
+                std::uint64_t ledger
+            )
                 : backend(std::move(hook)), name(std::move(hook_name)), cloned_vptr_base(base), method_count(methods),
                   ledger_id(ledger)
             {
@@ -206,9 +221,12 @@ namespace DetourModKit
          * @param run_fn Function that runs inside the transaction.
          * @return The transaction outcome.
          */
-        [[nodiscard]] TrapTransactionOutcome
-        drive_backend_trap_transaction_for_test(void *from, void *to, std::size_t len,
-                                                const std::function<void()> &run_fn) noexcept;
+        [[nodiscard]] TrapTransactionOutcome drive_backend_trap_transaction_for_test(
+            void *from,
+            void *to,
+            std::size_t len,
+            const std::function<void()> &run_fn
+        ) noexcept;
 
         /// Arms one forward segment-protection change to report failure, or disarms it with nullptr.
         void set_backend_trap_change_failure_target_for_test(void *segment_address) noexcept;

@@ -116,8 +116,8 @@ namespace DetourModKit::config::detail
      * @param out Receives detached ownership on @ref WatchDrainState::Detached. It stays untouched otherwise. The
      *        disable generation advances with the detach.
      */
-    [[nodiscard]] WatchDrainState try_detach_watch_control(bool (*reloads_quiesced)() noexcept,
-                                                           WatchTeardown &out) noexcept;
+    [[nodiscard]] WatchDrainState
+    try_detach_watch_control(bool (*reloads_quiesced)() noexcept, WatchTeardown &out) noexcept;
 } // namespace DetourModKit::config::detail
 
 #endif // DETOURMODKIT_INTERNAL_CONFIG_WATCH_CONTROL_HPP

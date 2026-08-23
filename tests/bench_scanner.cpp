@@ -248,8 +248,12 @@ namespace
     /**
      * @return False when this scenario's pattern did not compile or the two anchors disagreed on the match.
      */
-    [[nodiscard]] bool run_scenario(const Scenario &scenario, std::span<const std::byte> buffer, std::size_t iterations,
-                                    std::size_t samples)
+    [[nodiscard]] bool run_scenario(
+        const Scenario &scenario,
+        std::span<const std::byte> buffer,
+        std::size_t iterations,
+        std::size_t samples
+    )
     {
         auto parsed = DetourModKit::detail::parse_aob(scenario.aob);
         if (!parsed.has_value())
@@ -266,38 +270,59 @@ namespace
         // Both must agree on the result (either both nullptr or both same address).
         if (warm_smart != warm_naive)
         {
-            std::fprintf(stderr, "[bench] mismatch on '%s': smart=%p naive=%p\n", scenario.name,
-                         static_cast<const void *>(warm_smart), static_cast<const void *>(warm_naive));
+            std::fprintf(
+                stderr,
+                "[bench] mismatch on '%s': smart=%p naive=%p\n",
+                scenario.name,
+                static_cast<const void *>(warm_smart),
+                static_cast<const void *>(warm_naive)
+            );
             return false;
         }
         s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm_smart), std::memory_order_relaxed);
 
-        const double us_smart =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const auto *m =
-                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), smart);
-                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
-                               });
+        const double us_smart = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const auto *m = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), smart);
+                s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+            }
+        );
 
-        const double us_naive =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const auto *m =
-                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), naive);
-                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
-                               });
+        const double us_naive = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const auto *m = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), naive);
+                s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+            }
+        );
 
         const double speedup = us_naive / us_smart;
         const double smart_throughput = 1.0e6 / us_smart;
         const double naive_throughput = 1.0e6 / us_naive;
 
-        std::printf("%-32s\t%-6s\t%9zu\t%12.3f\t%14.1f\t%9.2fx\n", scenario.name, "smart", iterations, us_smart,
-                    smart_throughput, 1.0);
-        std::printf("%-32s\t%-6s\t%9zu\t%12.3f\t%14.1f\t%9.2fx\n", scenario.name, "naive", iterations, us_naive,
-                    naive_throughput, 1.0 / speedup);
+        std::printf(
+            "%-32s\t%-6s\t%9zu\t%12.3f\t%14.1f\t%9.2fx\n",
+            scenario.name,
+            "smart",
+            iterations,
+            us_smart,
+            smart_throughput,
+            1.0
+        );
+        std::printf(
+            "%-32s\t%-6s\t%9zu\t%12.3f\t%14.1f\t%9.2fx\n",
+            scenario.name,
+            "naive",
+            iterations,
+            us_naive,
+            naive_throughput,
+            1.0 / speedup
+        );
         std::printf("%-32s\t%-6s\t%9zu\t%12s\t%14s\t%9.2fx\n", scenario.name, "ratio", iterations, "-", "-", speedup);
         return true;
     }
@@ -313,8 +338,13 @@ namespace
      * @return False when the planted sentinel signature did not compile or was not found. @p dmk_over_libc
      *         receives the scanner-over-libc throughput ratio, left untouched on failure.
      */
-    [[nodiscard]] bool run_prefilter_bench(std::size_t buffer_size, std::uint64_t seed, std::size_t iterations,
-                                           std::size_t samples, double &dmk_over_libc)
+    [[nodiscard]] bool run_prefilter_bench(
+        std::size_t buffer_size,
+        std::uint64_t seed,
+        std::size_t iterations,
+        std::size_t samples,
+        double &dmk_over_libc
+    )
     {
         constexpr std::uint8_t SENTINEL = 0x37;
         auto buffer = make_codelike_buffer(buffer_size, seed);
@@ -347,33 +377,40 @@ namespace
         }
         s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm), std::memory_order_relaxed);
 
-        const double us_scanner =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const auto *m =
-                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
-                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
-                               });
+        const double us_scanner = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const auto *m = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
+                s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+            }
+        );
 
-        const double us_libc =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const void *m = std::memchr(buffer.data(), SENTINEL, buffer.size());
-                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
-                               });
+        const double us_libc = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const void *m = std::memchr(buffer.data(), SENTINEL, buffer.size());
+                s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+            }
+        );
 
         const double bytes = static_cast<double>(buffer_size);
         const auto gib_per_s = [bytes](double us) { return bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0); };
 
-        std::printf("\nPrefilter sweep (dmk_memchr isolation, %zu MiB buffer, unique sentinel anchor)\n",
-                    buffer_size / (1024u * 1024u));
+        std::printf(
+            "\nPrefilter sweep (dmk_memchr isolation, %zu MiB buffer, unique sentinel anchor)\n",
+            buffer_size / (1024u * 1024u)
+        );
         std::printf("%-22s\t%12s\t%12s\n", "impl", "median_us", "GiB/s");
         std::printf("%-22s\t%12.3f\t%12.2f\n", "dmk_memchr (scanner)", us_scanner, gib_per_s(us_scanner));
         std::printf("%-22s\t%12.3f\t%12.2f\n", "libc memchr (ref)", us_libc, gib_per_s(us_libc));
-        std::printf("dmk/libc throughput ratio: %.2fx (>= 1.00x means no regression below libc)\n",
-                    us_libc / us_scanner);
+        std::printf(
+            "dmk/libc throughput ratio: %.2fx (>= 1.00x means no regression below libc)\n",
+            us_libc / us_scanner
+        );
         // 0.0 rather than a non-finite ratio on an unmeasurable denominator: a non-finite observed value is refused
         // for the whole capture, so it would cost this run every other gate it did prove.
         dmk_over_libc = us_scanner > 0.0 ? us_libc / us_scanner : 0.0;
@@ -412,8 +449,14 @@ namespace
      * @return False when the literal pattern did not compile, its declared no-match workload matched, or host
      *         provenance was malformed. @p gib_per_s receives the measured throughput.
      */
-    [[nodiscard]] bool run_verify_bench(std::size_t buffer_size, std::size_t pattern_len, std::size_t stride,
-                                        std::size_t iterations, std::size_t samples, double &gib_per_s)
+    [[nodiscard]] bool run_verify_bench(
+        std::size_t buffer_size,
+        std::size_t pattern_len,
+        std::size_t stride,
+        std::size_t iterations,
+        std::size_t samples,
+        double &gib_per_s
+    )
     {
         constexpr std::uint8_t MAJORITY = 0xAA;
         constexpr std::uint8_t BREAK = 0xBB;
@@ -455,19 +498,24 @@ namespace
         std::printf("#BUILD\t%s\n", DMK_BENCH_BUILD_ROLE);
         std::printf("#TIER\t%s\n", active_simd_tier_name());
 
-        const double us =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const auto *m =
-                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
-                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
-                               });
+        const double us = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const auto *m = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
+                s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+            }
+        );
 
         const double bytes = static_cast<double>(buffer_size);
         gib_per_s = bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0);
-        std::printf("\nVerify throughput (deep verify, %zu-byte literal pattern, break stride %zu, %zu MiB buffer)\n",
-                    pattern_len, stride, buffer_size / (1024u * 1024u));
+        std::printf(
+            "\nVerify throughput (deep verify, %zu-byte literal pattern, break stride %zu, %zu MiB buffer)\n",
+            pattern_len,
+            stride,
+            buffer_size / (1024u * 1024u)
+        );
         std::printf("%-22s\t%12s\t%12s\n", "tier", "median_us", "GiB/s");
         std::printf("%-22s\t%12.3f\t%12.2f\n", active_simd_tier_name(), us, gib_per_s);
         return true;
@@ -477,9 +525,14 @@ namespace
      * @return False when the backing page, any target pattern, or any serial/batch result did not come out exact.
      *         @p batch_speedup receives the batch-over-serial ratio, left untouched on failure.
      */
-    [[nodiscard]] bool run_resolver_batch_bench(std::size_t module_size, std::size_t target_count,
-                                                std::size_t iterations, std::size_t samples, std::size_t max_workers,
-                                                double &batch_speedup)
+    [[nodiscard]] bool run_resolver_batch_bench(
+        std::size_t module_size,
+        std::size_t target_count,
+        std::size_t iterations,
+        std::size_t samples,
+        std::size_t max_workers,
+        double &batch_speedup
+    )
     {
         using namespace DetourModKit;
 
@@ -551,43 +604,61 @@ namespace
             s_sink.fetch_add(warm_batch[i]->address.raw(), std::memory_order_relaxed);
         }
 
-        const double us_serial =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   for (const auto &request : requests)
-                                   {
-                                       const auto hit = scan::resolve(request);
-                                       s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
-                                   }
-                               });
+        const double us_serial = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                for (const auto &request : requests)
+                {
+                    const auto hit = scan::resolve(request);
+                    s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
+                }
+            }
+        );
 
-        const double us_batch =
-            median_us_per_iter(iterations, samples,
-                               [&]()
-                               {
-                                   const auto batch = scan::resolve_batch(std::span{requests}, max_workers);
-                                   if (batch)
-                                   {
-                                       // Index the inner vector rather than range-for over it: a range-for forces the
-                                       // GCC 15 libstdc++ <expected> equality-constraint to be evaluated for the bare
-                                       // expected element type, which self-recurses and fails to compile. Indexed
-                                       // access never drags operator== into overload resolution.
-                                       for (std::size_t ri = 0; ri < batch->size(); ++ri)
-                                       {
-                                           const auto &hit = (*batch)[ri];
-                                           s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
-                                       }
-                                   }
-                               });
+        const double us_batch = median_us_per_iter(
+            iterations,
+            samples,
+            [&]()
+            {
+                const auto batch = scan::resolve_batch(std::span{requests}, max_workers);
+                if (batch)
+                {
+                    // Index the inner vector rather than range-for over it: a range-for forces the
+                    // GCC 15 libstdc++ <expected> equality-constraint to be evaluated for the bare
+                    // expected element type, which self-recurses and fails to compile. Indexed
+                    // access never drags operator== into overload resolution.
+                    for (std::size_t ri = 0; ri < batch->size(); ++ri)
+                    {
+                        const auto &hit = (*batch)[ri];
+                        s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
+                    }
+                }
+            }
+        );
 
-        std::printf("\nStartup resolver batch (%zu module-scoped cascades, %zu MiB module, %zu workers)\n",
-                    target_count, module_size / (1024u * 1024u), max_workers);
+        std::printf(
+            "\nStartup resolver batch (%zu module-scoped cascades, %zu MiB module, %zu workers)\n",
+            target_count,
+            module_size / (1024u * 1024u),
+            max_workers
+        );
         std::printf("%-22s\t%12s\t%12s\t%12s\n", "mode", "median_us", "targets/s", "speedup");
-        std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "serial", us_serial,
-                    static_cast<double>(target_count) * 1.0e6 / us_serial, 1.0);
-        std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "batch", us_batch,
-                    static_cast<double>(target_count) * 1.0e6 / us_batch, us_serial / us_batch);
+        std::printf(
+            "%-22s\t%12.3f\t%12.1f\t%12.2f\n",
+            "serial",
+            us_serial,
+            static_cast<double>(target_count) * 1.0e6 / us_serial,
+            1.0
+        );
+        std::printf(
+            "%-22s\t%12.3f\t%12.1f\t%12.2f\n",
+            "batch",
+            us_batch,
+            static_cast<double>(target_count) * 1.0e6 / us_batch,
+            us_serial / us_batch
+        );
         // Same finite-value rule as the prefilter ratio above.
         batch_speedup = us_batch > 0.0 ? us_serial / us_batch : 0.0;
         return true;
@@ -612,8 +683,10 @@ int main(int argc, char **argv)
         constexpr std::size_t ICOUNT_PATTERN_LEN = 96;
         constexpr std::size_t ICOUNT_STRIDE = 64;
         double icount_gib_per_s = 0.0;
-        gates.fact("scanner.verify_workload_no_match",
-                   run_verify_bench(ICOUNT_BUFFER, ICOUNT_PATTERN_LEN, ICOUNT_STRIDE, 1, 1, icount_gib_per_s));
+        gates.fact(
+            "scanner.verify_workload_no_match",
+            run_verify_bench(ICOUNT_BUFFER, ICOUNT_PATTERN_LEN, ICOUNT_STRIDE, 1, 1, icount_gib_per_s)
+        );
         return gates.close();
     }
 
@@ -622,8 +695,11 @@ int main(int argc, char **argv)
     constexpr std::size_t SAMPLES = 11;
 
     std::printf("DetourModKit Scanner microbenchmark\n");
-    std::printf("Buffer: %zu bytes (code-like byte distribution, seed 0x%llx)\n", BUFFER_SIZE,
-                static_cast<unsigned long long>(SEED));
+    std::printf(
+        "Buffer: %zu bytes (code-like byte distribution, seed 0x%llx)\n",
+        BUFFER_SIZE,
+        static_cast<unsigned long long>(SEED)
+    );
     std::printf("SIMD tier: ");
     switch (DetourModKit::detail::active_simd_level())
     {
@@ -660,15 +736,30 @@ int main(int argc, char **argv)
         {"all_common_first_no_match", "48 8B 05 89 0F E8 90 CC"},
         {"rare_first_short_no_match", "37 6B C1 BA 5E 71"},
         {"long_mostly_wildcards", "48 8B 05 ?? ?? ?? ?? 48 89 ?? ?? ?? ?? 37 DE AD"},
-        {"verify_heavy_32B_match", "48 8B 05 37 DE AD BE EF 90 90 CC CC E8 ?? ?? ?? "
-                                   "?? ?? ?? ?? 48 89 5C 24 08 48 89 6C 24 10 48 89"},
+        {"verify_heavy_32B_match",
+         "48 8B 05 37 DE AD BE EF 90 90 CC CC E8 ?? ?? ?? "
+         "?? ?? ?? ?? 48 89 5C 24 08 48 89 6C 24 10 48 89"},
     }};
 
     // Header
-    std::printf("%-32s\t%-6s\t%9s\t%12s\t%14s\t%10s\n", "scenario", "anchor", "iters", "median_us", "scans/sec",
-                "speedup");
-    std::printf("%-32s\t%-6s\t%9s\t%12s\t%14s\t%10s\n", "--------", "------", "-----", "---------", "---------",
-                "-------");
+    std::printf(
+        "%-32s\t%-6s\t%9s\t%12s\t%14s\t%10s\n",
+        "scenario",
+        "anchor",
+        "iters",
+        "median_us",
+        "scans/sec",
+        "speedup"
+    );
+    std::printf(
+        "%-32s\t%-6s\t%9s\t%12s\t%14s\t%10s\n",
+        "--------",
+        "------",
+        "-----",
+        "---------",
+        "---------",
+        "-------"
+    );
 
     constexpr std::size_t ITERS = 200; // each iteration is a full 8 MiB scan
     bool anchors_agree = true;
@@ -684,8 +775,10 @@ int main(int argc, char **argv)
     constexpr std::size_t PREFILTER_BUFFER = 64u * 1024u * 1024u;
     constexpr std::size_t PREFILTER_ITERS = 20;
     double dmk_over_libc = 0.0;
-    gates.fact("scanner.prefilter_signature_resolved",
-               run_prefilter_bench(PREFILTER_BUFFER, SEED, PREFILTER_ITERS, SAMPLES, dmk_over_libc));
+    gates.fact(
+        "scanner.prefilter_signature_resolved",
+        run_prefilter_bench(PREFILTER_BUFFER, SEED, PREFILTER_ITERS, SAMPLES, dmk_over_libc)
+    );
     gates.at_least("scanner.prefilter_dmk_over_libc", dmk_over_libc, 1.0);
 
     // Verify-throughput isolation (AVX-512 throughput gate harness). Every byte is an anchor hit so verify dominates;
@@ -695,8 +788,10 @@ int main(int argc, char **argv)
     constexpr std::size_t VERIFY_STRIDE = 64;
     constexpr std::size_t VERIFY_ITERS = 10;
     double verify_gib_per_s = 0.0;
-    gates.fact("scanner.verify_workload_no_match", run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE,
-                                                                    VERIFY_ITERS, SAMPLES, verify_gib_per_s));
+    gates.fact(
+        "scanner.verify_workload_no_match",
+        run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES, verify_gib_per_s)
+    );
     gates.metric("scanner.verify_gib_per_s", verify_gib_per_s);
 
     // Startup-resolution layer benchmark. This times the consumer-facing ladder resolver instead of the raw
@@ -706,9 +801,17 @@ int main(int argc, char **argv)
     constexpr std::size_t RESOLVER_ITERS = 5;
     constexpr std::size_t RESOLVER_WORKERS = 4;
     double batch_speedup = 0.0;
-    gates.fact("scanner.resolver_batch_matches_serial",
-               run_resolver_batch_bench(RESOLVER_MODULE, RESOLVER_TARGETS, RESOLVER_ITERS, SAMPLES, RESOLVER_WORKERS,
-                                        batch_speedup));
+    gates.fact(
+        "scanner.resolver_batch_matches_serial",
+        run_resolver_batch_bench(
+            RESOLVER_MODULE,
+            RESOLVER_TARGETS,
+            RESOLVER_ITERS,
+            SAMPLES,
+            RESOLVER_WORKERS,
+            batch_speedup
+        )
+    );
     gates.at_least("scanner.resolver_batch_speedup", batch_speedup, 1.0);
 
     // Touch the sink so it can never be optimized away.

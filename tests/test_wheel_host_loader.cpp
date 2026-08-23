@@ -72,8 +72,8 @@ namespace
         g_capture_armable_override.store(-1);
     }
 
-    int32_t DMK_WHEELHOST_CALL stub_open(void *ctx, std::uint64_t owner, std::uint64_t generation,
-                                         WheelHostLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    stub_open(void *ctx, std::uint64_t owner, std::uint64_t generation, WheelHostLease *out_lease) noexcept
     {
         if (ctx != &g_stub_context || out_lease == nullptr)
         {
@@ -87,9 +87,11 @@ namespace
         if (g_rebind_input_on_open.load())
         {
             g_reentrant_rebind_succeeded.store(
-                input::Input::instance()
-                    .rebind("wheelhost_reentrant_rebind", {{{mouse_wheel(WheelCode::Down)}, {}}})
-                    .has_value());
+                input::Input::instance().rebind(
+                                            "wheelhost_reentrant_rebind",
+                                            {{{mouse_wheel(WheelCode::Down)}, {}}}
+                ).has_value()
+            );
         }
         g_last_owner.store(owner);
         g_last_generation.store(generation);
@@ -104,8 +106,13 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL stub_publish(void *ctx, WheelHostLease lease, std::uint32_t /*enabled*/,
-                                            std::uint32_t /*consume_mask*/, std::uint32_t /*ttl*/) noexcept
+    int32_t DMK_WHEELHOST_CALL stub_publish(
+        void *ctx,
+        WheelHostLease lease,
+        std::uint32_t /*enabled*/,
+        std::uint32_t /*consume_mask*/,
+        std::uint32_t /*ttl*/
+    ) noexcept
     {
         if (ctx != &g_stub_context || lease != g_open_lease.load())
         {
@@ -115,8 +122,8 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL stub_drain(void *ctx, WheelHostLease lease,
-                                          std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    stub_drain(void *ctx, WheelHostLease lease, std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         if (ctx != &g_stub_context || lease != g_open_lease.load() || out_counts == nullptr)
         {
@@ -130,8 +137,8 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL stub_close(void *ctx, WheelHostLease lease, std::uint64_t owner,
-                                          std::uint64_t generation) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    stub_close(void *ctx, WheelHostLease lease, std::uint64_t owner, std::uint64_t generation) noexcept
     {
         if (ctx != &g_stub_context || lease != g_open_lease.load() || owner != g_last_owner.load() ||
             generation != g_last_generation.load())
@@ -143,8 +150,12 @@ namespace
     }
 
     // Each snapshot field is settable. Tests can stage a mounted route with a pending transaction.
-    int32_t DMK_WHEELHOST_CALL stub_route_status(void *ctx, WheelHostLease lease, std::uint32_t status_capacity,
-                                                 WheelHostRouteStatus *out_status) noexcept
+    int32_t DMK_WHEELHOST_CALL stub_route_status(
+        void *ctx,
+        WheelHostLease lease,
+        std::uint32_t status_capacity,
+        WheelHostRouteStatus *out_status
+    ) noexcept
     {
         if (ctx != &g_stub_context || out_status == nullptr)
         {
@@ -224,12 +235,14 @@ namespace
 
     [[nodiscard]] Result<input::BindingGuard> stage_wheel_binding(const char *name)
     {
-        return input::register_combo(input::ComboBinding{
-            .name = name,
-            .trigger = input::Trigger::Press,
-            .combos = {{{mouse_wheel(WheelCode::Up)}, {}}},
-            .on_press = [] {},
-        });
+        return input::register_combo(
+            input::ComboBinding{
+                .name = name,
+                .trigger = input::Trigger::Press,
+                .combos = {{{mouse_wheel(WheelCode::Up)}, {}}},
+                .on_press = [] {},
+            }
+        );
     }
 } // namespace
 
@@ -701,9 +714,9 @@ TEST(WheelHostLoader, WheelSourceHealthTracksTheExternalRouteState)
     g_control_state.store(DMK_WHEELHOST_CONTROL_IDLE);
     g_capture_armable_override.store(0);
     const auto non_armable_deadline = std::chrono::steady_clock::now() + 3s;
-    while (
-        (g_route_status_calls.load() < non_armable_status_target || mgr.wheel_source_health() != Health::Retryable) &&
-        std::chrono::steady_clock::now() < non_armable_deadline)
+    while ((g_route_status_calls.load() < non_armable_status_target ||
+            mgr.wheel_source_health() != Health::Retryable) &&
+           std::chrono::steady_clock::now() < non_armable_deadline)
     {
         std::this_thread::sleep_for(5ms);
     }

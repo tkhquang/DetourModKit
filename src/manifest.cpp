@@ -43,24 +43,26 @@ namespace DetourModKit::manifest
 
         // The register token table mirrors hook::Gpr one for one. Both omit rsp and rip deliberately. A token maps to a
         // register and back without a second source of truth.
-        constexpr std::array<std::string_view, 15> GPR_TOKENS = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8",
-                                                                 "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+        constexpr std::array<std::string_view, 15> GPR_TOKENS =
+            {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
         static_assert(GPR_TOKENS.size() == static_cast<std::size_t>(hook::Gpr::R15) + 1);
-        static_assert(GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rax)] == "rax" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbx)] == "rbx" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rcx)] == "rcx" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdx)] == "rdx" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rsi)] == "rsi" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdi)] == "rdi" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbp)] == "rbp" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R8)] == "r8" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R9)] == "r9" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R10)] == "r10" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R11)] == "r11" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R12)] == "r12" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R13)] == "r13" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R14)] == "r14" &&
-                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R15)] == "r15");
+        static_assert(
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rax)] == "rax" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbx)] == "rbx" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rcx)] == "rcx" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdx)] == "rdx" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rsi)] == "rsi" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdi)] == "rdi" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbp)] == "rbp" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R8)] == "r8" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R9)] == "r9" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R10)] == "r10" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R11)] == "r11" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R12)] == "r12" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R13)] == "r13" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R14)] == "r14" &&
+            GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R15)] == "r15"
+        );
 
         [[nodiscard]] std::string to_lower(std::string_view text)
         {
@@ -598,9 +600,10 @@ namespace DetourModKit::manifest
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
-                    if (spec.displacement_at < 0 ||
-                        !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
-                                                            spec.instruction_length))
+                    if (spec.displacement_at < 0 || !scan::is_valid_rip_relative_layout(
+                                                        static_cast<std::size_t>(spec.displacement_at),
+                                                        spec.instruction_length
+                                                    ))
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -684,8 +687,8 @@ namespace DetourModKit::manifest
             return key == "schema" || key == "revision";
         }
 
-        [[nodiscard]] bool record_key_is_read(std::string_view key, anchor::AnchorKind kind,
-                                              BindingKind binding) noexcept
+        [[nodiscard]] bool
+        record_key_is_read(std::string_view key, anchor::AnchorKind kind, BindingKind binding) noexcept
         {
             if (key == "kind" || key == "module" || key == "binding" || key == "fingerprint" ||
                 key == "image_identity" || key == "winning_bytes")
@@ -872,8 +875,8 @@ namespace DetourModKit::manifest
             return {};
         }
 
-        [[nodiscard]] Result<SignatureRecord> parse_record(const ManifestIni &ini, const char *section,
-                                                           std::string label)
+        [[nodiscard]] Result<SignatureRecord>
+        parse_record(const ManifestIni &ini, const char *section, std::string label)
         {
             SignatureRecord record;
             record.label = std::move(label);
@@ -1197,8 +1200,11 @@ namespace DetourModKit::manifest
                 revision = static_cast<std::uint32_t>(*parsed_revision);
             }
             // Reject any unread header key before record traversal. An unknown `[manifest]` key fails closed.
-            DMK_TRY_VOID(reject_unread_keys(ini, "manifest",
-                                            [](std::string_view key) { return manifest_header_key_is_read(key); }));
+            DMK_TRY_VOID(reject_unread_keys(
+                ini,
+                "manifest",
+                [](std::string_view key) { return manifest_header_key_is_read(key); }
+            ));
 
             ManifestIni::TNamesDepend sections;
             ini.GetAllSections(sections);
@@ -1249,9 +1255,11 @@ namespace DetourModKit::manifest
                     return std::unexpected(record.error());
                 }
                 // Reject any key this record's kind and binding do not read (unknown, or evidence inert for the kind).
-                DMK_TRY_VOID(
-                    reject_unread_keys(ini, entry.pItem, [&](std::string_view key)
-                                       { return record_key_is_read(key, record->kind, record->binding.kind); }));
+                DMK_TRY_VOID(reject_unread_keys(
+                    ini,
+                    entry.pItem,
+                    [&](std::string_view key) { return record_key_is_read(key, record->kind, record->binding.kind); }
+                ));
 
                 // Probe rung sub-sections by name until the first gap. This preserves order despite store enumeration.
                 // Labels that contain dots still work.
@@ -1269,8 +1277,11 @@ namespace DetourModKit::manifest
                         return std::unexpected(rung.error());
                     }
                     // Reject any key this rung's mode does not read (unknown, or a decode key inert for the mode).
-                    DMK_TRY_VOID(reject_unread_keys(ini, rung_section.c_str(), [&](std::string_view key)
-                                                    { return rung_key_is_read(key, rung->mode); }));
+                    DMK_TRY_VOID(reject_unread_keys(
+                        ini,
+                        rung_section.c_str(),
+                        [&](std::string_view key) { return rung_key_is_read(key, rung->mode); }
+                    ));
                     record->ladder.push_back(std::move(*rung));
                 }
 
@@ -1367,8 +1378,10 @@ namespace DetourModKit::manifest
                     {
                         const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
                         if (spec.displacement_at < 0 ||
-                            !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
-                                                                spec.instruction_length) ||
+                            !scan::is_valid_rip_relative_layout(
+                                static_cast<std::size_t>(spec.displacement_at),
+                                spec.instruction_length
+                            ) ||
                             (pattern &&
                              !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at))))
                         {
@@ -1406,7 +1419,8 @@ namespace DetourModKit::manifest
                 }
 
                 DMK_TRY_VOID(
-                    builder.set(sec, "binding", std::string(binding_kind_to_string(record.binding.kind)).c_str()));
+                    builder.set(sec, "binding", std::string(binding_kind_to_string(record.binding.kind)).c_str())
+                );
                 switch (record.binding.kind)
                 {
                 case BindingKind::PointerChain:
@@ -1433,8 +1447,9 @@ namespace DetourModKit::manifest
                     break;
                 }
                 case BindingKind::MidHookRegister:
-                    DMK_TRY_VOID(builder.set(sec, "read_register",
-                                             std::string(gpr_token(record.binding.read_register)).c_str()));
+                    DMK_TRY_VOID(
+                        builder.set(sec, "read_register", std::string(gpr_token(record.binding.read_register)).c_str())
+                    );
                     if (record.binding.xmm_index != XMM_INDEX_UNUSED)
                     {
                         DMK_TRY_VOID(builder.set(sec, "xmm_index", std::to_string(record.binding.xmm_index).c_str()));
@@ -1450,17 +1465,24 @@ namespace DetourModKit::manifest
                 if (record.expected_fingerprint != 0)
                 {
                     DMK_TRY_VOID(
-                        builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str()));
+                        builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str())
+                    );
                 }
                 // A captured image identity round-trips as `timestamp:size_of_image:section_digest` in hex. An absent
                 // value keeps a schema-v1 manifest free of an image baseline.
                 if (record.expected_image_identity.present())
                 {
-                    DMK_TRY_VOID(builder.set(sec, "image_identity",
-                                             std::format("{:X}:{:X}:{:X}", record.expected_image_identity.timestamp,
-                                                         record.expected_image_identity.size_of_image,
-                                                         record.expected_image_identity.section_digest)
-                                                 .c_str()));
+                    DMK_TRY_VOID(builder.set(
+                        sec,
+                        "image_identity",
+                        std::format(
+                            "{:X}:{:X}:{:X}",
+                            record.expected_image_identity.timestamp,
+                            record.expected_image_identity.size_of_image,
+                            record.expected_image_identity.section_digest
+                        )
+                            .c_str()
+                    ));
                 }
                 // The captured matched span round-trips as lowercase hex. An absent value is the default for every
                 // non-byte rung and keeps the manifest free of a content baseline.
@@ -1482,23 +1504,30 @@ namespace DetourModKit::manifest
                     break;
                 case anchor::AnchorKind::CodeOperand:
                     DMK_TRY_VOID(
-                        builder.set(sec, "operand_kind", std::string(operand_kind_token(record.operand_kind)).c_str()));
+                        builder.set(sec, "operand_kind", std::string(operand_kind_token(record.operand_kind)).c_str())
+                    );
                     DMK_TRY_VOID(builder.set(sec, "operand_index", std::to_string(record.operand_index).c_str()));
                     DMK_TRY_VOID(builder.set(sec, "byte_width", std::to_string(record.byte_width).c_str()));
                     break;
                 case anchor::AnchorKind::StringXref:
                     DMK_TRY_VOID(builder.set(sec, "xref_text", record.xref_text.c_str()));
                     DMK_TRY_VOID(
-                        builder.set(sec, "xref_encoding", std::string(encoding_token(record.xref_encoding)).c_str()));
+                        builder.set(sec, "xref_encoding", std::string(encoding_token(record.xref_encoding)).c_str())
+                    );
                     DMK_TRY_VOID(
-                        builder.set(sec, "xref_return", std::string(xref_return_token(record.xref_return)).c_str()));
+                        builder.set(sec, "xref_return", std::string(xref_return_token(record.xref_return)).c_str())
+                    );
                     DMK_TRY_VOID(
-                        builder.set(sec, "xref_require_terminator", record.xref_require_terminator ? "true" : "false"));
+                        builder.set(sec, "xref_require_terminator", record.xref_require_terminator ? "true" : "false")
+                    );
                     DMK_TRY_VOID(builder.set(sec, "xref_broad_match", record.xref_broad_match ? "true" : "false"));
                     break;
                 case anchor::AnchorKind::Manual:
-                    DMK_TRY_VOID(builder.set(sec, "manual_value",
-                                             format_signed_hex(static_cast<long long>(record.manual_value)).c_str()));
+                    DMK_TRY_VOID(builder.set(
+                        sec,
+                        "manual_value",
+                        format_signed_hex(static_cast<long long>(record.manual_value)).c_str()
+                    ));
                     break;
                 case anchor::AnchorKind::RipGlobal:
                     if (record.pages != scan::Pages::Readable)
@@ -1535,30 +1564,46 @@ namespace DetourModKit::manifest
                         if (spec.walk_back != 0)
                         {
                             DMK_TRY_VOID(builder.set(
-                                rsec, "walk_back", format_signed_hex(static_cast<long long>(spec.walk_back)).c_str()));
+                                rsec,
+                                "walk_back",
+                                format_signed_hex(static_cast<long long>(spec.walk_back)).c_str()
+                            ));
                         }
                         break;
                     case scan::Mode::RipRelative:
                         DMK_TRY_VOID(builder.set(rsec, "pattern", spec.pattern.c_str()));
+                        DMK_TRY_VOID(builder.set(
+                            rsec,
+                            "displacement_at",
+                            format_signed_hex(static_cast<long long>(spec.displacement_at)).c_str()
+                        ));
                         DMK_TRY_VOID(
-                            builder.set(rsec, "displacement_at",
-                                        format_signed_hex(static_cast<long long>(spec.displacement_at)).c_str()));
-                        DMK_TRY_VOID(
-                            builder.set(rsec, "instruction_length", std::to_string(spec.instruction_length).c_str()));
+                            builder.set(rsec, "instruction_length", std::to_string(spec.instruction_length).c_str())
+                        );
                         break;
                     case scan::Mode::RttiVtable:
                         DMK_TRY_VOID(builder.set(rsec, "mangled", spec.mangled.c_str()));
                         break;
                     case scan::Mode::StringXref:
                         DMK_TRY_VOID(builder.set(rsec, "string_text", spec.string_text.c_str()));
-                        DMK_TRY_VOID(builder.set(rsec, "string_encoding",
-                                                 std::string(encoding_token(spec.string_encoding)).c_str()));
-                        DMK_TRY_VOID(builder.set(rsec, "string_return",
-                                                 std::string(xref_return_token(spec.string_return)).c_str()));
-                        DMK_TRY_VOID(builder.set(rsec, "string_require_terminator",
-                                                 spec.string_require_terminator ? "true" : "false"));
+                        DMK_TRY_VOID(builder.set(
+                            rsec,
+                            "string_encoding",
+                            std::string(encoding_token(spec.string_encoding)).c_str()
+                        ));
+                        DMK_TRY_VOID(builder.set(
+                            rsec,
+                            "string_return",
+                            std::string(xref_return_token(spec.string_return)).c_str()
+                        ));
+                        DMK_TRY_VOID(builder.set(
+                            rsec,
+                            "string_require_terminator",
+                            spec.string_require_terminator ? "true" : "false"
+                        ));
                         DMK_TRY_VOID(
-                            builder.set(rsec, "string_broad_match", spec.string_broad_match ? "true" : "false"));
+                            builder.set(rsec, "string_broad_match", spec.string_broad_match ? "true" : "false")
+                        );
                         break;
                     }
                 }
@@ -1577,7 +1622,8 @@ namespace DetourModKit::manifest
             }
             // Re-run the reader's grammar over the emitted bytes so identity and frame checks cannot diverge.
             DMK_TRY_VOID(
-                detail::validate_manifest_grammar(out, to_grammar_limits(limits), "manifest::serialize_checked"));
+                detail::validate_manifest_grammar(out, to_grammar_limits(limits), "manifest::serialize_checked")
+            );
             return out;
         }
     } // namespace

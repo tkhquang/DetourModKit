@@ -84,8 +84,8 @@ namespace DetourModKit
                 newer_holders.push_back(holder);
             }
 
-            [[nodiscard]] bool remove_holder(std::uint64_t transaction_id, DWORD *removed_target,
-                                             DWORD *desired_protection) noexcept
+            [[nodiscard]] bool
+            remove_holder(std::uint64_t transaction_id, DWORD *removed_target, DWORD *desired_protection) noexcept
             {
                 DWORD target = 0;
                 if (first_holder.transaction_id == transaction_id)
@@ -103,9 +103,12 @@ namespace DetourModKit
                 }
                 else
                 {
-                    const auto holder = std::find_if(newer_holders.begin(), newer_holders.end(),
-                                                     [transaction_id](const PageProtectionHolder &candidate) noexcept
-                                                     { return candidate.transaction_id == transaction_id; });
+                    const auto holder = std::find_if(
+                        newer_holders.begin(),
+                        newer_holders.end(),
+                        [transaction_id](const PageProtectionHolder &candidate) noexcept
+                        { return candidate.transaction_id == transaction_id; }
+                    );
                     if (holder == newer_holders.end())
                     {
                         return false;
@@ -184,9 +187,13 @@ namespace DetourModKit
             }
         }
 
-        [[nodiscard]] bool ledger_acquire_pages(std::uintptr_t page_lo, std::uintptr_t page_hi,
-                                                std::uint64_t transaction_id, DWORD target_protection,
-                                                DWORD current_original) noexcept
+        [[nodiscard]] bool ledger_acquire_pages(
+            std::uintptr_t page_lo,
+            std::uintptr_t page_hi,
+            std::uint64_t transaction_id,
+            DWORD target_protection,
+            DWORD current_original
+        ) noexcept
         {
             auto *const ledger = protection_ledger();
             if (ledger == nullptr)
@@ -230,8 +237,8 @@ namespace DetourModKit
         thread_local std::size_t s_seam_virtual_protect_call = 0;
 #endif
 
-        [[nodiscard]] bool change_page_protection(LPVOID address, SIZE_T bytes, DWORD protection,
-                                                  DWORD *previous) noexcept
+        [[nodiscard]] bool
+        change_page_protection(LPVOID address, SIZE_T bytes, DWORD protection, DWORD *previous) noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
             detail::note_protection_call_for_test();
@@ -247,8 +254,11 @@ namespace DetourModKit
 
         // Release each transaction holder and restore the newest live target, or the original protection when no
         // holder remains. Attempt every page so one failure cannot strand unrelated pages.
-        [[nodiscard]] bool restore_segments_locked(const detail::ProtectionSegment *segments, std::size_t count,
-                                                   std::uint32_t &os_error) noexcept
+        [[nodiscard]] bool restore_segments_locked(
+            const detail::ProtectionSegment *segments,
+            std::size_t count,
+            std::uint32_t &os_error
+        ) noexcept
         {
             auto *const ledger = protection_ledger();
             if (ledger == nullptr)
@@ -272,8 +282,12 @@ namespace DetourModKit
                         return;
                     }
                     DWORD previous = 0;
-                    if (!change_page_protection(reinterpret_cast<LPVOID>(run_begin), run_end - run_begin,
-                                                run_protection, &previous))
+                    if (!change_page_protection(
+                            reinterpret_cast<LPVOID>(run_begin),
+                            run_end - run_begin,
+                            run_protection,
+                            &previous
+                        ))
                     {
                         if (all_restored)
                         {
@@ -330,8 +344,11 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    bool detail::restore_across_regions(const ProtectionSegment *segments, std::size_t count,
-                                        std::uint32_t &os_error) noexcept
+    bool detail::restore_across_regions(
+        const ProtectionSegment *segments,
+        std::size_t count,
+        std::uint32_t &os_error
+    ) noexcept
     {
         ProtectionLedgerLock lock;
         return restore_segments_locked(segments, count, os_error);
@@ -371,10 +388,14 @@ namespace DetourModKit
         }
     }
 
-    detail::ProtectionChangeOutcome detail::protect_across_regions(std::uintptr_t address, std::size_t bytes,
-                                                                   std::uint32_t new_protection, ProtectionSegment *out,
-                                                                   std::size_t out_cap,
-                                                                   bool derive_writable_preserving_execute) noexcept
+    detail::ProtectionChangeOutcome detail::protect_across_regions(
+        std::uintptr_t address,
+        std::size_t bytes,
+        std::uint32_t new_protection,
+        ProtectionSegment *out,
+        std::size_t out_cap,
+        bool derive_writable_preserving_execute
+    ) noexcept
     {
         if (bytes == 0 || out == nullptr || out_cap == 0)
         {
@@ -463,8 +484,13 @@ namespace DetourModKit
         return {count, ProtectionChangeStatus::Ok, 0};
     }
 
-    detail::PatchStatus detail::patch_bytes(std::uintptr_t address, const void *source, std::size_t bytes,
-                                            std::uint32_t &os_error, bool flush_all_regions) noexcept
+    detail::PatchStatus detail::patch_bytes(
+        std::uintptr_t address,
+        const void *source,
+        std::size_t bytes,
+        std::uint32_t &os_error,
+        bool flush_all_regions
+    ) noexcept
     {
         os_error = 0;
 

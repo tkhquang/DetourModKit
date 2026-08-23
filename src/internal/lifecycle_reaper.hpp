@@ -53,8 +53,11 @@ namespace DetourModKit::detail
      *       It retains @p module_ref and records an intentional Worker leak.
      *       The function never joins its own thread.
      */
-    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref,
-                            diagnostics::ModulePinReason ref_reason) noexcept;
+    void reap_worker_thread(
+        std::unique_ptr<std::jthread> thread,
+        void *module_ref,
+        diagnostics::ModulePinReason ref_reason
+    ) noexcept;
 
     namespace reaper_detail
     {
@@ -70,8 +73,10 @@ namespace DetourModKit::detail
     template <typename Owner> void reap_owner(std::unique_ptr<Owner> owner) noexcept
     {
         Owner *const raw_owner = owner.release();
-        reaper_detail::reap_owner_erased(raw_owner, [](void *raw) noexcept
-                                         { std::default_delete<Owner>{}(static_cast<Owner *>(raw)); });
+        reaper_detail::reap_owner_erased(
+            raw_owner,
+            [](void *raw) noexcept { std::default_delete<Owner>{}(static_cast<Owner *>(raw)); }
+        );
     }
 } // namespace DetourModKit::detail
 

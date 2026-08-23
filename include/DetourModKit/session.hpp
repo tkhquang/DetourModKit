@@ -239,8 +239,8 @@ namespace DetourModKit
      *          A pre-publication failure destroys the callable and its captures on the current thread.
      * @note Setup/control-plane only: the off-DllMain attach entry point.
      */
-    [[nodiscard]] Result<void> bootstrap(const ModInfo &info,
-                                         std::move_only_function<Result<void>(Session &)> on_ready) noexcept;
+    [[nodiscard]] Result<void>
+    bootstrap(const ModInfo &info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept;
 
     /**
      * @brief DllMain DLL_PROCESS_DETACH entry point. Routes by @p reserved (DllMain's lpvReserved).
@@ -342,9 +342,10 @@ namespace DetourModKit
      *          spent, and a BindingGuard release racing it blocks untimed until they finish. Neither wait is bounded,
      *          so hold no lock, and own no join, that any of that code can wait on.
      */
-    [[nodiscard]] LogicDllUnloadStatus
-    prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
-                             std::chrono::milliseconds timeout = DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT) noexcept;
+    [[nodiscard]] LogicDllUnloadStatus prepare_logic_dll_unload(
+        std::span<const std::string_view> binding_names,
+        std::chrono::milliseconds timeout = DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT
+    ) noexcept;
 
     /**
      * @brief Retires every input binding and all config callbacks before Logic DLLs are unmapped.

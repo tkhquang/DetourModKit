@@ -110,8 +110,16 @@ namespace
             std::ofstream file(*directory / std::format(L"{}.loader.log", MOD_NAME), std::ios::app);
             SYSTEMTIME now = {};
             ::GetLocalTime(&now);
-            file << std::format("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}] {}\n", now.wYear, now.wMonth, now.wDay,
-                                now.wHour, now.wMinute, now.wSecond, line);
+            file << std::format(
+                "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}] {}\n",
+                now.wYear,
+                now.wMonth,
+                now.wDay,
+                now.wHour,
+                now.wMinute,
+                now.wSecond,
+                line
+            );
         }
         catch (...)
         {
@@ -209,9 +217,11 @@ namespace
         for (DWORD waited = 0; waited < UNMAP_TIMEOUT_MS; waited += UNMAP_POLL_MS)
         {
             HMODULE owner = nullptr;
-            if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                     reinterpret_cast<LPCWSTR>(address), &owner) == 0)
+            if (::GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(address),
+                    &owner
+                ) == 0)
             {
                 return true;
             }
@@ -339,8 +349,10 @@ namespace
         if (generation.init == nullptr || generation.shutdown == nullptr || generation.revision == nullptr)
         {
             const bool unmapped = release_generation(generation);
-            append_log(unmapped ? "The export resolution failed. The staged image unloaded."
-                                : "The export resolution failed. The staged image remains mapped.");
+            append_log(
+                unmapped ? "The export resolution failed. The staged image unloaded."
+                         : "The export resolution failed. The staged image remains mapped."
+            );
             return false;
         }
         const StagedReloadInitRequest request{
@@ -353,14 +365,18 @@ namespace
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
             const bool unmapped = release_generation(generation);
-            append_log(unmapped ? "Init failed. The staged image unloaded."
-                                : "Init failed. The staged image remains mapped.");
+            append_log(
+                unmapped ? "Init failed. The staged image unloaded." : "Init failed. The staged image remains mapped."
+            );
             return false;
         }
         s_current.emplace(std::move(generation));
         const char *revision = s_current->revision();
-        append_formatted_log("Generation {} is live. Revision: {}.", s_generation_counter,
-                             revision != nullptr ? std::string_view{revision} : std::string_view{"unknown"});
+        append_formatted_log(
+            "Generation {} is live. Revision: {}.",
+            s_generation_counter,
+            revision != nullptr ? std::string_view{revision} : std::string_view{"unknown"}
+        );
         return true;
     }
 
@@ -452,7 +468,11 @@ namespace
             // ABI v2 starts unmounted in target-wait state. The logic-side poller resolves the game UI thread and
             // drives the host retarget through the C table, so the loader needs no window wait of its own.
             const int32_t host_status = wheel_host_start(
-                0, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
+                0,
+                DMK_WHEELHOST_ABI_VERSION,
+                static_cast<std::uint32_t>(sizeof(s_wheel_host)),
+                &s_wheel_host
+            );
             if (host_status != DMK_WHEELHOST_OK)
             {
                 append_formatted_log("The resident wheel host failed to start: {}.", host_status);

@@ -65,8 +65,8 @@ namespace
 
     // Returns the severity of the first finding of the given kind, or nullopt when absent. An optional (rather than a
     // sentinel severity) so an assertion on an absent finding fails loudly instead of silently matching a fallback.
-    [[nodiscard]] std::optional<sh::Severity> severity_of(const std::vector<sh::Finding> &findings,
-                                                          sh::FindingKind kind)
+    [[nodiscard]] std::optional<sh::Severity>
+    severity_of(const std::vector<sh::Finding> &findings, sh::FindingKind kind)
     {
         for (const sh::Finding &f : findings)
         {
@@ -412,8 +412,10 @@ TEST(SigHealthCandidate, PatternEndingBeforeTheDisp32IsNotWarned)
     rip.instruction_length = 7;
     EXPECT_FALSE(has_finding(sh::analyze_candidate(rip).findings, sh::FindingKind::VolatileDisplacementBytes));
 
-    EXPECT_FALSE(has_finding(sh::analyze_candidate(direct_rung("48 8B 05 11 22 33 44")).findings,
-                             sh::FindingKind::VolatileDisplacementBytes));
+    EXPECT_FALSE(has_finding(
+        sh::analyze_candidate(direct_rung("48 8B 05 11 22 33 44")).findings,
+        sh::FindingKind::VolatileDisplacementBytes
+    ));
 }
 
 TEST(SigHealthCandidate, RecordAnalysisFoldsTheDisp32WarningIn)
@@ -718,11 +720,20 @@ TEST(SigHealthFormat, StringifiersNeverEmptyForNamedValues)
     EXPECT_FALSE(sh::to_string(sh::Severity::Warning).empty());
     EXPECT_FALSE(sh::to_string(sh::Severity::Critical).empty());
     for (auto kind :
-         {sh::FindingKind::NoFixedAnchor, sh::FindingKind::UncompilablePattern, sh::FindingKind::ShortPattern,
-          sh::FindingKind::ShortestAnchorRun, sh::FindingKind::CommonBytesOnly, sh::FindingKind::HighWildcardRatio,
-          sh::FindingKind::LowByteEntropy, sh::FindingKind::WeakSelectivity, sh::FindingKind::EmptyAnchorText,
-          sh::FindingKind::ShortAnchorText, sh::FindingKind::UnhealableManual, sh::FindingKind::NonSerializableKind,
-          sh::FindingKind::NoRobustRung, sh::FindingKind::UncompilableRecord,
+         {sh::FindingKind::NoFixedAnchor,
+          sh::FindingKind::UncompilablePattern,
+          sh::FindingKind::ShortPattern,
+          sh::FindingKind::ShortestAnchorRun,
+          sh::FindingKind::CommonBytesOnly,
+          sh::FindingKind::HighWildcardRatio,
+          sh::FindingKind::LowByteEntropy,
+          sh::FindingKind::WeakSelectivity,
+          sh::FindingKind::EmptyAnchorText,
+          sh::FindingKind::ShortAnchorText,
+          sh::FindingKind::UnhealableManual,
+          sh::FindingKind::NonSerializableKind,
+          sh::FindingKind::NoRobustRung,
+          sh::FindingKind::UncompilableRecord,
           sh::FindingKind::VolatileDisplacementBytes})
     {
         EXPECT_FALSE(sh::to_string(kind).empty());

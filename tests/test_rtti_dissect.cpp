@@ -608,7 +608,12 @@ TEST_F(RttiDissectTest, ScanBlock_CustomStrideLabelsInterleaved)
     // Layout: { vtable, filler, vtable, filler, vtable, filler }; a 16-byte
     // stride means only every other qword is a probed slot.
     std::array<std::uintptr_t, 6> block{
-        a.vtable(), 0xAAAAAAAAu, b.vtable(), 0xBBBBBBBBu, c.vtable(), 0xCCCCCCCCu,
+        a.vtable(),
+        0xAAAAAAAAu,
+        b.vtable(),
+        0xBBBBBBBBu,
+        c.vtable(),
+        0xCCCCCCCCu,
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
@@ -1073,55 +1078,69 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
     const std::uintptr_t base = st.base();
 
     // Low base.
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{0x100},
-        .expected_mangled = ".?AVBad@@",
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{0x100},
+            .expected_mangled = ".?AVBad@@",
+        })
+    );
 
     // Empty expected name.
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .expected_mangled = "",
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .expected_mangled = "",
+        })
+    );
 
     // Oversized expected name.
     const std::string huge(rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .expected_mangled = huge,
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .expected_mangled = huge,
+        })
+    );
 
     // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
     // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
     // let it through).
     const std::string at_cap(rtti::MAX_TYPE_NAME_LEN, 'X');
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .expected_mangled = at_cap,
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .expected_mangled = at_cap,
+        })
+    );
 
     // Window over the hard cap.
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-        .window = rtti::MAX_HEAL_WINDOW + 1,
-        .expected_mangled = ".?AVBad@@",
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+            .window = rtti::MAX_HEAL_WINDOW + 1,
+            .expected_mangled = ".?AVBad@@",
+        })
+    );
 
     // Unknown indirection enumerator.
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-        .expected_mangled = ".?AVBad@@",
-        .indirection = static_cast<rtti::Indirection>(99),
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+            .expected_mangled = ".?AVBad@@",
+            .indirection = static_cast<rtti::Indirection>(99),
+        })
+    );
 
     // nominal_offset drives the address out of the user-mode window.
-    expect_bad_descriptor(rtti::heal_landmark({
-        .base = Address{base},
-        .nominal_offset = -static_cast<std::ptrdiff_t>(base),
-        .expected_mangled = ".?AVBad@@",
-    }));
+    expect_bad_descriptor(
+        rtti::heal_landmark({
+            .base = Address{base},
+            .nominal_offset = -static_cast<std::ptrdiff_t>(base),
+            .expected_mangled = ".?AVBad@@",
+        })
+    );
 }
 
 TEST_F(RttiDissectTest, Heal_AllocatesNothing)
@@ -1640,8 +1659,9 @@ TEST(HealedOffsetGenerationTest, SameBaseReplacementRevokesAnAuthorizedOffset)
     ASSERT_NE(generation_b, generation_a);
 
     const dmk::Result<std::ptrdiff_t> revoked = slot.authorized(generation_b);
-    ASSERT_FALSE(revoked.has_value())
-        << "a healed offset resolved against an unmapped image still authorized a mutation";
+    ASSERT_FALSE(
+        revoked.has_value()
+    ) << "a healed offset resolved against an unmapped image still authorized a mutation";
     EXPECT_EQ(revoked.error().code, dmk::ErrorCode::OffsetNotConfirmed);
 
     // The slot itself is unchanged: it is the generation comparison that revokes, not a mutation of the snapshot.
@@ -1670,9 +1690,11 @@ namespace
     /** @brief Runs one heal group to completion against a fixture table and reports the heal outcome. */
     dmk::Result<rtti::HealHit> heal_fixture_once(const rtti::Landmark &lm, std::uintptr_t table, rtti::HealedSlot &slot)
     {
-        auto started = rtti::HealScheduler::start(rtti::HealConfig{
-            .interval_frames = 1,
-        });
+        auto started = rtti::HealScheduler::start(
+            rtti::HealConfig{
+                .interval_frames = 1,
+            }
+        );
         EXPECT_TRUE(started.has_value());
         if (!started)
         {
@@ -1684,7 +1706,8 @@ namespace
             {
                 outcome = run.heal_into("fixture", lm, Address{table}, slot);
                 return outcome.has_value();
-            });
+            }
+        );
         started->tick();
         return outcome;
     }

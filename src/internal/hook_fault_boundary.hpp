@@ -27,8 +27,11 @@ namespace DetourModKit
 {
     namespace detail
     {
-        static_assert(sizeof(void *) == 8, "BACKEND_MAX_STEAL_WINDOW is derived from the x86-64 backend layout: the "
-                                           "JmpFF fallback it accounts for does not exist on 32-bit.");
+        static_assert(
+            sizeof(void *) == 8,
+            "BACKEND_MAX_STEAL_WINDOW is derived from the x86-64 backend layout: the "
+            "JmpFF fallback it accounts for does not exist on 32-bit."
+        );
 
         /**
          * @brief Largest byte offset the backend may read from a target before the target is known to be safe.

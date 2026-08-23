@@ -304,8 +304,8 @@ namespace
                 std::array<char, 64> message{};
                 const int length = std::snprintf(message.data(), message.size(), "persistent_batch_oom_record_%zu", i);
                 if (length <= 0 || static_cast<std::size_t>(length) >= message.size() ||
-                    !logger->enqueue(LogLevel::Info,
-                                     std::string_view{message.data(), static_cast<std::size_t>(length)}))
+                    !logger
+                         ->enqueue(LogLevel::Info, std::string_view{message.data(), static_cast<std::size_t>(length)}))
                 {
                     std::fprintf(stderr, "FAIL[persistent-batch-oom]: enqueue %zu was refused\n", i);
                     result = 12;
@@ -323,8 +323,11 @@ namespace
             }
             else if (result == 0 && logger->dropped_count() != 0)
             {
-                std::fprintf(stderr, "FAIL[persistent-batch-oom]: dropped %zu record(s) under allocation failure\n",
-                             logger->dropped_count());
+                std::fprintf(
+                    stderr,
+                    "FAIL[persistent-batch-oom]: dropped %zu record(s) under allocation failure\n",
+                    logger->dropped_count()
+                );
                 result = 4;
             }
         }
@@ -332,27 +335,35 @@ namespace
 
         if (result == 0 && g_refused.load(std::memory_order_relaxed) == 0)
         {
-            std::fprintf(stderr, "FAIL[persistent-batch-oom]: the poison never refused an allocation, so the writer "
-                                 "never reached the zero-progress path\n");
+            std::fprintf(
+                stderr,
+                "FAIL[persistent-batch-oom]: the poison never refused an allocation, so the writer "
+                "never reached the zero-progress path\n"
+            );
             result = 5;
         }
         if (result == 0 && floor_drains.load(std::memory_order_relaxed) != MESSAGE_COUNT)
         {
             // Without this the case could pass vacuously: if the reservation ever succeeded, the ordinary batch path
             // would drain everything and the floor would never be exercised.
-            std::fprintf(stderr,
-                         "FAIL[persistent-batch-oom]: %zu of %zu records went through the one-record floor; the "
-                         "reservation was not refused for the whole run\n",
-                         floor_drains.load(std::memory_order_relaxed), MESSAGE_COUNT);
+            std::fprintf(
+                stderr,
+                "FAIL[persistent-batch-oom]: %zu of %zu records went through the one-record floor; the "
+                "reservation was not refused for the whole run\n",
+                floor_drains.load(std::memory_order_relaxed),
+                MESSAGE_COUNT
+            );
             result = 10;
         }
         if (result == 0)
         {
             if (!sink_has_exact_indexed_messages(log_path, "persistent_batch_oom_record", MESSAGE_COUNT))
             {
-                std::fprintf(stderr,
-                             "FAIL[persistent-batch-oom]: sink payloads do not exactly match the %zu queued records\n",
-                             MESSAGE_COUNT);
+                std::fprintf(
+                    stderr,
+                    "FAIL[persistent-batch-oom]: sink payloads do not exactly match the %zu queued records\n",
+                    MESSAGE_COUNT
+                );
                 result = 6;
             }
         }
@@ -361,9 +372,12 @@ namespace
         (void)std::filesystem::remove(log_path, ignored);
         if (result == 0)
         {
-            std::printf("PASS[persistent-batch-oom]: drained %zu records and joined the writer with every batch "
-                        "reservation refused (%zu refusals)\n",
-                        MESSAGE_COUNT, g_refused.load(std::memory_order_relaxed));
+            std::printf(
+                "PASS[persistent-batch-oom]: drained %zu records and joined the writer with every batch "
+                "reservation refused (%zu refusals)\n",
+                MESSAGE_COUNT,
+                g_refused.load(std::memory_order_relaxed)
+            );
         }
         return result;
     }
@@ -410,10 +424,12 @@ namespace
         }
         if (result == 0 && floor_drains.load(std::memory_order_relaxed) != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL[oversize-batch]: %zu record(s) fell back to the one-record floor, so the oversize "
-                         "batch_size was not clamped to the queue capacity\n",
-                         floor_drains.load(std::memory_order_relaxed));
+            std::fprintf(
+                stderr,
+                "FAIL[oversize-batch]: %zu record(s) fell back to the one-record floor, so the oversize "
+                "batch_size was not clamped to the queue capacity\n",
+                floor_drains.load(std::memory_order_relaxed)
+            );
             result = 11;
         }
 
@@ -421,8 +437,10 @@ namespace
         (void)std::filesystem::remove(log_path, ignored);
         if (result == 0)
         {
-            std::printf("PASS[oversize-batch]: an unbounded batch_size was clamped, drained through the batch path, "
-                        "and joined\n");
+            std::printf(
+                "PASS[oversize-batch]: an unbounded batch_size was clamped, drained through the batch path, "
+                "and joined\n"
+            );
         }
         return result;
     }

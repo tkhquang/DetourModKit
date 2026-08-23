@@ -79,8 +79,8 @@ namespace DetourModKit
             // Shannon entropy in bits over the distribution of fully-known byte values. A run of identical bytes has
             // near-zero entropy; a varied set approaches log2(distinct values). Computed over the fixed bytes only,
             // because nibble and wildcard positions carry no known value to distribute.
-            [[nodiscard]] double shannon_entropy_bits(const std::array<std::size_t, 256> &counts,
-                                                      std::size_t total) noexcept
+            [[nodiscard]] double
+            shannon_entropy_bits(const std::array<std::size_t, 256> &counts, std::size_t total) noexcept
             {
                 if (total == 0)
                 {
@@ -150,8 +150,12 @@ namespace DetourModKit
             // it is short (the linker pools identical literals), so a length floor applies to strings but not to type
             // names.
 
-            void grade_text_anchor(std::vector<Finding> &findings, std::size_t text_length, bool apply_length_floor,
-                                   const HealthPolicy &policy)
+            void grade_text_anchor(
+                std::vector<Finding> &findings,
+                std::size_t text_length,
+                bool apply_length_floor,
+                const HealthPolicy &policy
+            )
             {
                 if (text_length == 0)
                 {
@@ -629,12 +633,21 @@ namespace DetourModKit
                 out += std::format("{}: ", label);
             }
             out += std::format("{}\n", to_string(health.grade));
-            out += std::format("  bytes={} fixed={} nibble={} wildcard={} (wildcard {:.0f}%)\n", health.length,
-                               health.fixed_bytes, health.nibble_bytes, health.wildcard_bytes,
-                               health.wildcard_ratio * 100.0);
-            out +=
-                std::format("  atoms={} longest_atom={} entropy={:.1f} bits selectivity={:.1f} bits\n",
-                            health.atom_count, health.longest_atom, health.byte_entropy_bits, health.selectivity_bits);
+            out += std::format(
+                "  bytes={} fixed={} nibble={} wildcard={} (wildcard {:.0f}%)\n",
+                health.length,
+                health.fixed_bytes,
+                health.nibble_bytes,
+                health.wildcard_bytes,
+                health.wildcard_ratio * 100.0
+            );
+            out += std::format(
+                "  atoms={} longest_atom={} entropy={:.1f} bits selectivity={:.1f} bits\n",
+                health.atom_count,
+                health.longest_atom,
+                health.byte_entropy_bits,
+                health.selectivity_bits
+            );
             out += std::format("  expected_matches~={:.3g}\n", health.expected_matches);
             append_findings(out, health.findings);
             return out;
@@ -642,14 +655,22 @@ namespace DetourModKit
 
         std::string format_report(const RecordHealth &health)
         {
-            std::string out = std::format("[{}] kind={} grade={}\n", health.label, anchor_kind_name(health.kind),
-                                          to_string(health.grade));
+            std::string out = std::format(
+                "[{}] kind={} grade={}\n",
+                health.label,
+                anchor_kind_name(health.kind),
+                to_string(health.grade)
+            );
             if (!health.ladder.empty())
             {
-                out += std::format("  ladder: {} rungs, {} robust; strongest byte rung selectivity={:.1f} bits, "
-                                   "expected_matches~={:.3g}\n",
-                                   health.ladder.size(), health.robust_rungs, health.best_selectivity_bits,
-                                   health.best_expected_matches);
+                out += std::format(
+                    "  ladder: {} rungs, {} robust; strongest byte rung selectivity={:.1f} bits, "
+                    "expected_matches~={:.3g}\n",
+                    health.ladder.size(),
+                    health.robust_rungs,
+                    health.best_selectivity_bits,
+                    health.best_expected_matches
+                );
                 for (std::size_t index = 0; index < health.ladder.size(); ++index)
                 {
                     const CandidateHealth &rung = health.ladder[index];
@@ -667,9 +688,14 @@ namespace DetourModKit
 
         std::string format_report(const ManifestHealth &health)
         {
-            std::string out =
-                std::format("manifest health: {} ({} robust, {} fragile, {} unusable of {})\n", to_string(health.grade),
-                            health.robust, health.fragile, health.unusable, health.records.size());
+            std::string out = std::format(
+                "manifest health: {} ({} robust, {} fragile, {} unusable of {})\n",
+                to_string(health.grade),
+                health.robust,
+                health.fragile,
+                health.unusable,
+                health.records.size()
+            );
             for (const RecordHealth &record : health.records)
             {
                 out += format_report(record);

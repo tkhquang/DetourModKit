@@ -82,8 +82,11 @@ namespace DetourModKit
             // Resolve a byte-tier candidate's match to its final address: a Direct walk-back, or a RipRelative disp32
             // read. Both screen the result through the plausible-userspace floor (in the shared helpers), so a faulted
             // read or a crafted displacement is a miss, never a hit at a near-null or kernel-range address.
-            std::optional<std::uintptr_t> resolve_byte_candidate(std::uintptr_t match, const Candidate &candidate,
-                                                                 std::span<const std::byte> instruction) noexcept
+            std::optional<std::uintptr_t> resolve_byte_candidate(
+                std::uintptr_t match,
+                const Candidate &candidate,
+                std::span<const std::byte> instruction
+            ) noexcept
             {
                 if (const DirectPattern *direct = candidate.as_direct())
                 {
@@ -111,13 +114,20 @@ namespace DetourModKit
                         (void)DetourModKit::log().try_log(
                             LogLevel::Debug,
                             "scan::resolve: '{}' recovered {} via hooked-prologue reconstruction of candidate '{}'.",
-                            request.label, where, hit.winning_name);
+                            request.label,
+                            where,
+                            hit.winning_name
+                        );
                     }
                     else
                     {
-                        (void)DetourModKit::log().try_log(LogLevel::Debug,
-                                                          "scan::resolve: '{}' resolved {} via candidate '{}'.",
-                                                          request.label, where, hit.winning_name);
+                        (void)DetourModKit::log().try_log(
+                            LogLevel::Debug,
+                            "scan::resolve: '{}' resolved {} via candidate '{}'.",
+                            request.label,
+                            where,
+                            hit.winning_name
+                        );
                     }
                 }
                 catch (...)
@@ -130,9 +140,13 @@ namespace DetourModKit
             {
                 try
                 {
-                    (void)DetourModKit::log().try_log(LogLevel::Warning,
-                                                      "scan::resolve: '{}' matched no candidate across {} tried ({}).",
-                                                      request.label, request.ladder.size(), reason);
+                    (void)DetourModKit::log().try_log(
+                        LogLevel::Warning,
+                        "scan::resolve: '{}' matched no candidate across {} tried ({}).",
+                        request.label,
+                        request.ladder.size(),
+                        reason
+                    );
                 }
                 catch (...)
                 {
@@ -150,7 +164,9 @@ namespace DetourModKit
                         LogLevel::Warning,
                         "scan::resolve: '{}' recovered {} via hooked-prologue reconstruction, but its identity witness "
                         "disagreed (WarnOnly); the site may be a near-twin.",
-                        request.label, format::format_address(hit.address.raw()));
+                        request.label,
+                        format::format_address(hit.address.raw())
+                    );
                 }
                 catch (...)
                 {
@@ -287,7 +303,12 @@ namespace DetourModKit
                         };
                         Region reference_span{};
                         const Result<Address> site = detail::find_string_xref_with_exclusions(
-                            query, request.scope, &ladder_exclusions, request.exclusions, &reference_span);
+                            query,
+                            request.scope,
+                            &ladder_exclusions,
+                            request.exclusions,
+                            &reference_span
+                        );
                         if (site && range.contains(site->raw()) && accepts_resolved_address(request, *site))
                         {
                             Hit hit{*site, candidate.name(), Mode::StringXref};
@@ -330,15 +351,18 @@ namespace DetourModKit
                     const RipRelativePattern *rip = candidate.as_rip_relative();
                     const std::uint8_t instruction_snapshot_length =
                         rip != nullptr ? static_cast<std::uint8_t>(rip->instruction_length) : std::uint8_t{0};
-                    const detail::MatchResult found =
-                        detail::scan_module_pages(compiled, range, request.pages,
-                                                  detail::ScanQuery{
-                                                      .occurrence = 1,
-                                                      .count_beyond = request.require_unique,
-                                                      .exclusions = &ladder_exclusions,
-                                                      .capture_evidence = true,
-                                                      .instruction_snapshot_length = instruction_snapshot_length,
-                                                  });
+                    const detail::MatchResult found = detail::scan_module_pages(
+                        compiled,
+                        range,
+                        request.pages,
+                        detail::ScanQuery{
+                            .occurrence = 1,
+                            .count_beyond = request.require_unique,
+                            .exclusions = &ladder_exclusions,
+                            .capture_evidence = true,
+                            .instruction_snapshot_length = instruction_snapshot_length,
+                        }
+                    );
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
                     {
@@ -371,7 +395,10 @@ namespace DetourModKit
                         continue;
                     }
                     const std::optional<std::uintptr_t> resolved = resolve_byte_candidate(
-                        reinterpret_cast<std::uintptr_t>(found.match), candidate, found.instruction.span());
+                        reinterpret_cast<std::uintptr_t>(found.match),
+                        candidate,
+                        found.instruction.span()
+                    );
                     if (!resolved || !range.contains(*resolved) ||
                         !accepts_resolved_address(request, Address{*resolved}))
                     {
@@ -422,7 +449,10 @@ namespace DetourModKit
                 if (request.fallback_policy != FallbackPolicy::Off)
                 {
                     const detail::FallbackOutcome fallback = detail::resolve_prologue_fallback(
-                        request, std::span<const std::size_t>{order.data(), ordered_count}, range);
+                        request,
+                        std::span<const std::size_t>{order.data(), ordered_count},
+                        range
+                    );
                     if (fallback.hit && accepts_resolved_address(request, fallback.hit->address))
                     {
                         if (provenance != nullptr)
@@ -501,13 +531,14 @@ namespace DetourModKit
             return resolve_impl(request, nullptr);
         }
 
-        Result<std::vector<Result<Hit>>> resolve_batch(std::span<const ScanRequest> requests,
-                                                       std::size_t max_workers) noexcept
+        Result<std::vector<Result<Hit>>>
+        resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers) noexcept
         {
             try
             {
                 return detail::run_fork_join<ScanRequest, Result<Hit>>(
-                    requests, max_workers,
+                    requests,
+                    max_workers,
                     [](const ScanRequest &request) -> Result<Hit>
                     {
                         try
@@ -520,7 +551,8 @@ namespace DetourModKit
                         }
                     },
                     [](const ScanRequest &) noexcept -> Result<Hit>
-                    { return std::unexpected(Error{ErrorCode::NoMatch, "scan::resolve_batch"}); });
+                    { return std::unexpected(Error{ErrorCode::NoMatch, "scan::resolve_batch"}); }
+                );
             }
             catch (const std::bad_alloc &)
             {

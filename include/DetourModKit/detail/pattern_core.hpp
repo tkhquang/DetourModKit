@@ -76,8 +76,10 @@ namespace DetourModKit::detail
      *          so ordinary literal-anchored signatures finish before the cap.
      */
     inline constexpr std::size_t SEGMENT_MATCH_STEP_BUDGET = 1u << 16;
-    static_assert(SEGMENT_MATCH_STEP_BUDGET >= MAX_PATTERN_JUMPS * MAX_JUMP_SPAN,
-                  "The per-position work budget must exceed the linear per-position cost of a well-formed pattern.");
+    static_assert(
+        SEGMENT_MATCH_STEP_BUDGET >= MAX_PATTERN_JUMPS * MAX_JUMP_SPAN,
+        "The per-position work budget must exceed the linear per-position cost of a well-formed pattern."
+    );
 
     /**
      * @struct PatternJump
@@ -639,9 +641,13 @@ namespace DetourModKit::detail
      *          always agrees and a nibble mask compares only its fixed nibble. A run that would read past the window end
      *          cannot match.
      */
-    [[nodiscard]] constexpr bool run_matches_at(const PatternBuffer &buffer, std::span<const std::byte> window,
-                                                std::size_t window_pos, std::size_t body_begin,
-                                                std::size_t body_end) noexcept
+    [[nodiscard]] constexpr bool run_matches_at(
+        const PatternBuffer &buffer,
+        std::span<const std::byte> window,
+        std::size_t window_pos,
+        std::size_t body_begin,
+        std::size_t body_end
+    ) noexcept
     {
         const std::size_t run_length = body_end - body_begin;
         if (window_pos > window.size() || run_length > window.size() - window_pos)
@@ -671,9 +677,13 @@ namespace DetourModKit::detail
      *          fails closed. In practice each segment run fails fast on its first literal byte, so a real signature
      *          (few gaps, literal-anchored segments) prunes to near-linear and never approaches the budget.
      */
-    [[nodiscard]] constexpr bool try_segments_at(const PatternBuffer &buffer, std::span<const std::byte> window,
-                                                 std::size_t segment_index, std::size_t window_pos,
-                                                 std::size_t &steps) noexcept
+    [[nodiscard]] constexpr bool try_segments_at(
+        const PatternBuffer &buffer,
+        std::span<const std::byte> window,
+        std::size_t segment_index,
+        std::size_t window_pos,
+        std::size_t &steps
+    ) noexcept
     {
         if (++steps > SEGMENT_MATCH_STEP_BUDGET)
         {
@@ -720,8 +730,8 @@ namespace DetourModKit::detail
      *          whole length); a pattern with gaps runs the backtracking search (see try_segments_at for its cost
      *          profile). A window shorter than the pattern's minimum span can never match.
      */
-    [[nodiscard]] constexpr bool matches_buffer_at(const PatternBuffer &buffer,
-                                                   std::span<const std::byte> window) noexcept
+    [[nodiscard]] constexpr bool
+    matches_buffer_at(const PatternBuffer &buffer, std::span<const std::byte> window) noexcept
     {
         if (buffer.length == 0)
         {

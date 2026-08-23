@@ -43,9 +43,11 @@ namespace DetourModKit
         {
             // Applies the profile's candidate order through a local span because read_code_constant has no order
             // parameter. The local copy preserves the caller's static table.
-            [[nodiscard]] std::span<const scan::Candidate> profiled_candidates(const ScanProfile &profile,
-                                                                               std::span<const scan::Candidate> site,
-                                                                               std::vector<scan::Candidate> &ordered)
+            [[nodiscard]] std::span<const scan::Candidate> profiled_candidates(
+                const ScanProfile &profile,
+                std::span<const scan::Candidate> site,
+                std::vector<scan::Candidate> &ordered
+            )
             {
                 if (profile.candidate_order == scan::CandidateOrder::AsDeclared || site.size() < 2)
                 {
@@ -64,8 +66,12 @@ namespace DetourModKit
 
             // This agreement test fails closed. Unsigned subtraction converts a negative tolerance to a huge bound
             // that accepts almost any gap, so reject it first.
-            [[nodiscard]] bool quorum_values_agree(std::int64_t first, std::int64_t second, QuorumMatch match,
-                                                   std::int64_t tolerance) noexcept
+            [[nodiscard]] bool quorum_values_agree(
+                std::int64_t first,
+                std::int64_t second,
+                QuorumMatch match,
+                std::int64_t tolerance
+            ) noexcept
             {
                 if (match == QuorumMatch::ExactValue)
                 {
@@ -179,8 +185,12 @@ namespace DetourModKit
 
             // Counts votes that agree with a candidate cluster center. A negative WithinTolerance rejects even the
             // center against itself, so the quorum fails closed.
-            [[nodiscard]] std::size_t votes_agreeing_with(std::int64_t center, std::span<const std::int64_t> votes,
-                                                          QuorumMatch match, std::int64_t tolerance) noexcept
+            [[nodiscard]] std::size_t votes_agreeing_with(
+                std::int64_t center,
+                std::span<const std::int64_t> votes,
+                QuorumMatch match,
+                std::int64_t tolerance
+            ) noexcept
             {
                 std::size_t agree = 0;
                 for (const std::int64_t vote : votes)
@@ -394,8 +404,12 @@ namespace DetourModKit
                 }
                 if (memory_info.Type == MEM_IMAGE)
                 {
-                    return OwnerKey{allocation_base, allocation_base,
-                                    scan::image_identity(Region{Address{allocation_base}, 1}), OwnerBacking::Image};
+                    return OwnerKey{
+                        allocation_base,
+                        allocation_base,
+                        scan::image_identity(Region{Address{allocation_base}, 1}),
+                        OwnerBacking::Image
+                    };
                 }
                 if (memory_info.Type == MEM_PRIVATE)
                 {
@@ -449,8 +463,11 @@ namespace DetourModKit
             }
 
             /// Returns whether an explicit export module still resolves to its captured region and owner key.
-            [[nodiscard]] bool named_export_owner_current(const Anchor &anchor, Region expected_region,
-                                                          const OwnerKey &expected_owner) noexcept
+            [[nodiscard]] bool named_export_owner_current(
+                const Anchor &anchor,
+                Region expected_region,
+                const OwnerKey &expected_owner
+            ) noexcept
             {
                 if (anchor.kind != AnchorKind::ExportName || anchor.export_module.empty())
                 {
@@ -502,8 +519,11 @@ namespace DetourModKit
                 }
 #endif
                 MEMORY_BASIC_INFORMATION confirmed_info{};
-                if (::VirtualQuery(reinterpret_cast<const void *>(key.address), &confirmed_info,
-                                   sizeof(confirmed_info)) == 0 ||
+                if (::VirtualQuery(
+                        reinterpret_cast<const void *>(key.address),
+                        &confirmed_info,
+                        sizeof(confirmed_info)
+                    ) == 0 ||
                     confirmed_info.State != MEM_COMMIT || confirmed_info.Type != MEM_IMAGE ||
                     reinterpret_cast<std::uintptr_t>(confirmed_info.AllocationBase) != key.allocation_base)
                 {
@@ -540,8 +560,8 @@ namespace DetourModKit
              *          between two member resolves mixes image generations. Restoration before this check does not
              *          repair that vote.
              */
-            [[nodiscard]] bool evidence_images_coherent(const ResolutionOwnerKeys &local,
-                                                        std::span<const OwnerKey> members) noexcept
+            [[nodiscard]] bool
+            evidence_images_coherent(const ResolutionOwnerKeys &local, std::span<const OwnerKey> members) noexcept
             {
                 if (local.overflowed)
                 {
@@ -679,9 +699,14 @@ namespace DetourModKit
 
         namespace
         {
-            ResolvedAnchor resolve_with_profile_impl(const Anchor &anchor, const ScanProfile &profile, Region scope,
-                                                     PhysicalProvenance *provenance,
-                                                     ResolutionOwnerKeys *owner_keys_out, Region *winning_span_out)
+            ResolvedAnchor resolve_with_profile_impl(
+                const Anchor &anchor,
+                const ScanProfile &profile,
+                Region scope,
+                PhysicalProvenance *provenance,
+                ResolutionOwnerKeys *owner_keys_out,
+                Region *winning_span_out
+            )
             {
                 if (provenance != nullptr)
                 {
@@ -872,7 +897,10 @@ namespace DetourModKit
                     }
                     DetourModKit::detail::ExportResolution discovered_export;
                     const Result<Address> discovered = DetourModKit::detail::resolve_export_with_provenance(
-                        anchor.export_name, module, discovered_export);
+                        anchor.export_name,
+                        module,
+                        discovered_export
+                    );
                     if (discovered)
                     {
                         owner_keys.value = capture_value_owner(anchor, static_cast<std::int64_t>(discovered->raw()));
@@ -924,9 +952,12 @@ namespace DetourModKit
                         result.status = AnchorStatus::Failed;
                         break;
                     }
-                    const bool malformed_member =
-                        std::any_of(members.begin(), members.end(), [](const Anchor *member) noexcept
-                                    { return member == nullptr || member->kind == AnchorKind::Quorum; });
+                    const bool malformed_member = std::any_of(
+                        members.begin(),
+                        members.end(),
+                        [](const Anchor *member) noexcept
+                        { return member == nullptr || member->kind == AnchorKind::Quorum; }
+                    );
                     if (malformed_member)
                     {
                         result.status = AnchorStatus::Failed;
@@ -964,13 +995,22 @@ namespace DetourModKit
                         PhysicalProvenance member_provenance;
                         ResolutionOwnerKeys member_owner_keys;
                         const ResolvedAnchor resolved_member = resolve_with_profile_impl(
-                            *member, profile, scope, &member_provenance, &member_owner_keys, nullptr);
+                            *member,
+                            profile,
+                            scope,
+                            &member_provenance,
+                            &member_owner_keys,
+                            nullptr
+                        );
                         if (resolved_member.status == AnchorStatus::Resolved)
                         {
                             physical_dependency =
-                                physical_dependency || std::any_of(vote_provenance.begin(), vote_provenance.end(),
-                                                                   [&](const PhysicalProvenance &existing) noexcept
-                                                                   { return member_provenance.intersects(existing); });
+                                physical_dependency || std::any_of(
+                                                           vote_provenance.begin(),
+                                                           vote_provenance.end(),
+                                                           [&](const PhysicalProvenance &existing) noexcept
+                                                           { return member_provenance.intersects(existing); }
+                                                       );
                             votes.push_back(resolved_member.value);
                             vote_provenance.push_back(member_provenance);
                             // Only a member that casts a vote supplies evidence for corroboration.
@@ -1008,16 +1048,25 @@ namespace DetourModKit
                     // If two qualified centers disagree, separate clusters cleared N and no single value has
                     // corroboration. This also catches the non-transitive WithinTolerance overlap at 0/4/8 with 4.
                     const bool ambiguous = std::any_of(
-                        qualifying.begin(), qualifying.end(),
+                        qualifying.begin(),
+                        qualifying.end(),
                         [&](std::int64_t first) noexcept
                         {
-                            return std::any_of(qualifying.begin(), qualifying.end(),
-                                               [&](std::int64_t second) noexcept
-                                               {
-                                                   return !quorum_values_agree(first, second, anchor.quorum_match,
-                                                                               anchor.quorum_tolerance);
-                                               });
-                        });
+                            return std::any_of(
+                                qualifying.begin(),
+                                qualifying.end(),
+                                [&](std::int64_t second) noexcept
+                                {
+                                    return !quorum_values_agree(
+                                        first,
+                                        second,
+                                        anchor.quorum_match,
+                                        anchor.quorum_tolerance
+                                    );
+                                }
+                            );
+                        }
+                    );
                     if (ambiguous)
                     {
                         result.status = AnchorStatus::QuorumAmbiguous;
@@ -1133,14 +1182,20 @@ namespace DetourModKit
             return count;
         }
 
-        std::size_t resolve_all_parallel(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out, Region scope,
-                                         std::size_t max_workers)
+        std::size_t resolve_all_parallel(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            Region scope,
+            std::size_t max_workers
+        )
         {
             const std::size_t count = (anchors.size() < out.size()) ? anchors.size() : out.size();
             const std::vector<ResolvedAnchor> results = DetourModKit::detail::run_fork_join<Anchor, ResolvedAnchor>(
-                anchors.first(count), max_workers,
+                anchors.first(count),
+                max_workers,
                 [scope](const Anchor &anchor) -> ResolvedAnchor { return resolve(anchor, scope); },
-                [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); });
+                [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); }
+            );
 
             for (std::size_t i = 0; i < count; ++i)
             {
@@ -1149,8 +1204,12 @@ namespace DetourModKit
             return count;
         }
 
-        std::size_t resolve_all_with_profile(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
-                                             const ScanProfile &profile, Region scope)
+        std::size_t resolve_all_with_profile(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            const ScanProfile &profile,
+            Region scope
+        )
         {
             const std::size_t count = (anchors.size() < out.size()) ? anchors.size() : out.size();
             for (std::size_t i = 0; i < count; ++i)
@@ -1160,14 +1219,22 @@ namespace DetourModKit
             return count;
         }
 
-        std::size_t resolve_all_with_profile_parallel(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
-                                                      const ScanProfile &profile, Region scope, std::size_t max_workers)
+        std::size_t resolve_all_with_profile_parallel(
+            std::span<const Anchor> anchors,
+            std::span<ResolvedAnchor> out,
+            const ScanProfile &profile,
+            Region scope,
+            std::size_t max_workers
+        )
         {
             const std::size_t count = (anchors.size() < out.size()) ? anchors.size() : out.size();
             const std::vector<ResolvedAnchor> results = DetourModKit::detail::run_fork_join<Anchor, ResolvedAnchor>(
-                anchors.first(count), max_workers, [&profile, scope](const Anchor &anchor) -> ResolvedAnchor
+                anchors.first(count),
+                max_workers,
+                [&profile, scope](const Anchor &anchor) -> ResolvedAnchor
                 { return resolve_with_profile(anchor, profile, scope); },
-                [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); });
+                [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); }
+            );
 
             for (std::size_t i = 0; i < count; ++i)
             {

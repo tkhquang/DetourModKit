@@ -70,26 +70,44 @@ namespace DetourModKit
                     case ToggleWarningKind::None:
                         return;
                     case ToggleWarningKind::EnableRefused:
-                        (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_name,
-                                            m_target, sizeof(std::uintptr_t) * 2, witness_description(m_witness));
+                        (void)log().try_log(
+                            LogLevel::Warning,
+                            "hook: '{}' at 0x{:0{}X} refused enable: {}.",
+                            m_name,
+                            m_target,
+                            sizeof(std::uintptr_t) * 2,
+                            witness_description(m_witness)
+                        );
                         return;
                     case ToggleWarningKind::EnableReconciled:
                         (void)log().try_log(
                             LogLevel::Warning,
                             "hook: '{}' at 0x{:0{}X} has original bytes under an active state. This enable retries "
                             "the arm.",
-                            m_name, m_target, sizeof(std::uintptr_t) * 2);
+                            m_name,
+                            m_target,
+                            sizeof(std::uintptr_t) * 2
+                        );
                         return;
                     case ToggleWarningKind::DisableRefused:
-                        (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_name,
-                                            m_target, sizeof(std::uintptr_t) * 2, witness_description(m_witness));
+                        (void)log().try_log(
+                            LogLevel::Warning,
+                            "hook: '{}' at 0x{:0{}X} refused disable: {}.",
+                            m_name,
+                            m_target,
+                            sizeof(std::uintptr_t) * 2,
+                            witness_description(m_witness)
+                        );
                         return;
                     case ToggleWarningKind::DisableReconciled:
                         (void)log().try_log(
                             LogLevel::Warning,
                             "hook: '{}' at 0x{:0{}X} has owned bytes under a disabled state. This disable retries "
                             "the restore.",
-                            m_name, m_target, sizeof(std::uintptr_t) * 2);
+                            m_name,
+                            m_target,
+                            sizeof(std::uintptr_t) * 2
+                        );
                         return;
                     }
                 }
@@ -100,8 +118,11 @@ namespace DetourModKit
                 DeferredToggleWarning &operator=(DeferredToggleWarning &&) = delete;
 
                 /// Stores one warning and contains any name-copy failure.
-                void arm(ToggleWarningKind kind, const std::string &name, std::uintptr_t target,
-                         PatchWitness witness = PatchWitness::Indeterminate) noexcept
+                void
+                arm(ToggleWarningKind kind,
+                    const std::string &name,
+                    std::uintptr_t target,
+                    PatchWitness witness = PatchWitness::Indeterminate) noexcept
                 {
                     m_kind = kind;
                     m_target = target;
@@ -194,8 +215,9 @@ namespace DetourModKit
             void reconcile_published_state(ImplT &impl, GateT &gate, bool armed) noexcept
             {
                 write_toggle_state(impl, gate, armed);
-                (void)apply_backend(impl.backend,
-                                    [armed](auto &backend) noexcept { backend.reconcile_enabled(armed); });
+                (
+                    void
+                )apply_backend(impl.backend, [armed](auto &backend) noexcept { backend.reconcile_enabled(armed); });
             }
 
             /**
@@ -205,8 +227,13 @@ namespace DetourModKit
              *          can destroy the hook before emission ends.
              */
             template <class ImplT, class GateT>
-            void publish_toggle(ImplT &impl, GateT &gate, TargetSlot &slot,
-                                std::unique_lock<std::recursive_mutex> &guard, bool armed) noexcept
+            void publish_toggle(
+                ImplT &impl,
+                GateT &gate,
+                TargetSlot &slot,
+                std::unique_lock<std::recursive_mutex> &guard,
+                bool armed
+            ) noexcept
             {
                 write_toggle_state(impl, gate, armed);
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -214,15 +241,23 @@ namespace DetourModKit
                 {
                     const HookState expected = armed ? HookState::Active : HookState::Disabled;
                     const bool callable_matches = (gate.callable != nullptr) == (armed && impl.is_inline);
-                    probe(armed, guard.owns_lock(), impl.status.load(std::memory_order_relaxed) == expected,
-                          callable_matches);
+                    probe(
+                        armed,
+                        guard.owns_lock(),
+                        impl.status.load(std::memory_order_relaxed) == expected,
+                        callable_matches
+                    );
                 }
 #endif
                 const LifecycleSnapshot snapshot = snapshot_lifecycle(impl.name, impl.ledger_id, impl.is_inline);
                 slot.release();
                 guard.unlock();
-                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind,
-                               armed ? diagnostics::HookTransition::Enabled : diagnostics::HookTransition::Disabled);
+                emit_lifecycle(
+                    snapshot.name,
+                    snapshot.ledger_id,
+                    snapshot.kind,
+                    armed ? diagnostics::HookTransition::Enabled : diagnostics::HookTransition::Disabled
+                );
             }
         } // namespace
 
@@ -251,8 +286,11 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
-            if (!backend_value_or(m_impl->backend, false,
-                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
+            if (!backend_value_or(
+                    m_impl->backend,
+                    false,
+                    [](auto &backend) noexcept { return static_cast<bool>(backend); }
+                ))
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::enable"});
             }
@@ -294,10 +332,16 @@ namespace DetourModKit
                 m_impl->status.store(HookState::Enabling, std::memory_order_release);
             }
             // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
-            const bool backend_enabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                          { return try_backend_enable(backend); });
-            const bool patch_confirmed = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                          { return enable_patch_is_confirmed(backend); });
+            const bool backend_enabled = backend_value_or(
+                m_impl->backend,
+                false,
+                [](auto &backend) noexcept { return try_backend_enable(backend); }
+            );
+            const bool patch_confirmed = backend_value_or(
+                m_impl->backend,
+                false,
+                [](auto &backend) noexcept { return enable_patch_is_confirmed(backend); }
+            );
             if (backend_enabled && patch_confirmed)
             {
                 publish_toggle(*m_impl, *gate, slot, guard, true);
@@ -323,8 +367,9 @@ namespace DetourModKit
                 // The backend committed no mutation, or the target already returned to Original. This hook is disarmed.
                 if (after_failure == PatchWitness::Original)
                 {
-                    (void)apply_backend(m_impl->backend,
-                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
+                    (
+                        void
+                    )apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                 }
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
@@ -337,12 +382,16 @@ namespace DetourModKit
             if (const PatchWitness rollback_before = witness_of(m_impl->backend);
                 witness_permits_write(rollback_before))
             {
-                (void)backend_value_or(m_impl->backend, false,
-                                       [](auto &backend) noexcept { return try_backend_disable(backend); });
+                (void)backend_value_or(
+                    m_impl->backend,
+                    false,
+                    [](auto &backend) noexcept { return try_backend_disable(backend); }
+                );
                 if (witness_of(m_impl->backend) == PatchWitness::Original)
                 {
-                    (void)apply_backend(m_impl->backend,
-                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
+                    (
+                        void
+                    )apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                     m_impl->status.store(HookState::Disabled, std::memory_order_release);
                     return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
                 }
@@ -379,8 +428,11 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
-            if (!backend_value_or(m_impl->backend, false,
-                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
+            if (!backend_value_or(
+                    m_impl->backend,
+                    false,
+                    [](auto &backend) noexcept { return static_cast<bool>(backend); }
+                ))
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::disable"});
             }
@@ -421,8 +473,11 @@ namespace DetourModKit
             // Confirm the saved prologue is back before Disabled publication. The witness is taken whatever the
             // backend returns. An error can sit over restored bytes. A success without byte corroboration must not
             // publish Disabled.
-            const bool backend_disabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                           { return try_backend_disable(backend); });
+            const bool backend_disabled = backend_value_or(
+                m_impl->backend,
+                false,
+                [](auto &backend) noexcept { return try_backend_disable(backend); }
+            );
             const PatchWitness after = witness_of(m_impl->backend);
             if (after == PatchWitness::Original)
             {

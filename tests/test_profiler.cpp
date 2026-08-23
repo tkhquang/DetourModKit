@@ -149,7 +149,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_PayloadIsRaceFree)
                 {
                     profiler.record(kName, tick.QuadPart, tick.QuadPart + 10, static_cast<uint32_t>(p));
                 }
-            });
+            }
+        );
     }
 
     std::thread consumer(
@@ -170,7 +171,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_PayloadIsRaceFree)
                     EXPECT_EQ(json.back(), ']');
                 }
             }
-        });
+        }
+    );
 
     go.store(true, std::memory_order_release);
     for (auto &t : producers)
@@ -411,7 +413,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_NoDataRace)
                     QueryPerformanceCounter(&tick);
                     profiler.record("concurrent", tick.QuadPart, tick.QuadPart + 100, GetCurrentThreadId());
                 }
-            });
+            }
+        );
     }
 
     for (auto &w : workers)
@@ -440,7 +443,8 @@ TEST_F(ProfilerRecordTest, ConcurrentScopedProfile_NoDataRace)
                 {
                     ScopedProfile sp("concurrent_scope");
                 }
-            });
+            }
+        );
     }
 
     for (auto &w : workers)
@@ -470,7 +474,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
                     QueryPerformanceCounter(&tick);
                     profiler.record("concurrent_export", tick.QuadPart, tick.QuadPart + 100, GetCurrentThreadId());
                 }
-            });
+            }
+        );
     }
 
     // Reader thread: export while writers are active. Loop until the window closes AND at least one export has
@@ -492,7 +497,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
                 }
                 export_count.fetch_add(1, std::memory_order_relaxed);
             }
-        });
+        }
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     stop.store(true, std::memory_order_relaxed);
@@ -645,9 +651,11 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_PlainNameUnchanged)
 // sources, because the stored pointer is read asynchronously by the export path and must outlive the process. The
 // array-reference-only constructor enforces this.
 static_assert(std::is_constructible_v<ScopedProfile, const char (&)[5]>, "ScopedProfile must accept string literals");
-static_assert(!std::is_constructible_v<ScopedProfile, const char *>,
-              "ScopedProfile must reject decayed const char* (would permit "
-              "std::string::c_str() with non-static lifetime)");
+static_assert(
+    !std::is_constructible_v<ScopedProfile, const char *>,
+    "ScopedProfile must reject decayed const char* (would permit "
+    "std::string::c_str() with non-static lifetime)"
+);
 static_assert(!std::is_constructible_v<ScopedProfile, char *>, "ScopedProfile must reject mutable char*");
 
 TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
@@ -681,7 +689,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellForme
                     QueryPerformanceCounter(&tick);
                     profiler.record("wrap_race", tick.QuadPart, tick.QuadPart + 1, GetCurrentThreadId());
                 }
-            });
+            }
+        );
     }
 
     std::thread reader(
@@ -723,7 +732,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellForme
                     pos += k_name_marker.size();
                 }
             }
-        });
+        }
+    );
 
     // Run long enough for multiple full wraps (>= 3 * capacity samples).
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);

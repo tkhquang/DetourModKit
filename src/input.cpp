@@ -95,8 +95,10 @@ namespace DetourModKit
                 }
                 catch (...)
                 {
-                    (void)log().log_noexcept(LogLevel::Error,
-                                             "BindingGuard: release action threw; suppressed in noexcept teardown");
+                    (void)log().log_noexcept(
+                        LogLevel::Error,
+                        "BindingGuard: release action threw; suppressed in noexcept teardown"
+                    );
                 }
             }
         }
@@ -215,8 +217,11 @@ namespace DetourModKit
             class AdmissionCommitLease
             {
             public:
-                AdmissionCommitLease(std::atomic<bool> &drain_active, std::atomic<std::uint32_t> &inflight,
-                                     bool require_staging_admission = true) noexcept
+                AdmissionCommitLease(
+                    std::atomic<bool> &drain_active,
+                    std::atomic<std::uint32_t> &inflight,
+                    bool require_staging_admission = true
+                ) noexcept
                     : m_drain_active(drain_active), m_inflight(inflight)
                 {
                     if (m_drain_active.load(std::memory_order_seq_cst) || detail::input_callback_drain_pending() ||
@@ -255,11 +260,15 @@ namespace DetourModKit
                 bool m_engaged{false};
             };
 
-            [[nodiscard]] bool await_admission_commits(std::atomic<std::uint32_t> &inflight,
-                                                       std::chrono::steady_clock::time_point deadline) noexcept
+            [[nodiscard]] bool await_admission_commits(
+                std::atomic<std::uint32_t> &inflight,
+                std::chrono::steady_clock::time_point deadline
+            ) noexcept
             {
-                return detail::drain_until_zero([&inflight]() noexcept
-                                                { return inflight.load(std::memory_order_seq_cst); }, deadline);
+                return detail::drain_until_zero(
+                    [&inflight]() noexcept { return inflight.load(std::memory_order_seq_cst); },
+                    deadline
+                );
             }
         } // namespace
 
@@ -516,8 +525,11 @@ namespace DetourModKit
                 const ErrorCode code = m_impl ? ErrorCode::ShutdownInProgress : ErrorCode::OutOfMemory;
                 return std::unexpected(Error{code, "input::start"});
             }
-            AdmissionCommitLease start_admission{m_impl->m_callback_drain_active, m_impl->m_admission_commits_inflight,
-                                                 false};
+            AdmissionCommitLease start_admission{
+                m_impl->m_callback_drain_active,
+                m_impl->m_admission_commits_inflight,
+                false
+            };
             if (!start_admission.engaged())
             {
                 return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
@@ -576,8 +588,11 @@ namespace DetourModKit
                 if (settings.wheel_target_thread_id != 0)
                 {
                     // An explicit wheel target must belong to this process and be alive.
-                    const HANDLE target = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
-                                                     settings.wheel_target_thread_id);
+                    const HANDLE target = OpenThread(
+                        THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                        FALSE,
+                        settings.wheel_target_thread_id
+                    );
                     const bool target_valid = target != nullptr &&
                                               GetProcessIdOfThread(target) == GetCurrentProcessId() &&
                                               WaitForSingleObject(target, 0) != WAIT_OBJECT_0;
@@ -612,24 +627,34 @@ namespace DetourModKit
                         // Leave callback admission open, matching the other start() failure paths: the refusal is
                         // retryable once the loader supplies a valid host and the staged bindings remain.
                         log().error(
-                            "input::Input: required wheel host is missing or ABI-incompatible; refusing start.");
+                            "input::Input: required wheel host is missing or ABI-incompatible; refusing start."
+                        );
                         return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
                     }
                     else
                     {
-                        log().warning("input::Input: optional wheel host unavailable; using the local MessageHook "
-                                      "backend.");
+                        log().warning(
+                            "input::Input: optional wheel host unavailable; using the local MessageHook "
+                            "backend."
+                        );
                         resolved_backend = Input::WheelBackend::MessageHook;
                     }
                 }
 
                 Logger &logger = log();
-                logger.info("input::Input: Starting with {} binding(s), poll interval {}ms", m_impl->m_pending.size(),
-                            settings.poll_interval.count());
+                logger.info(
+                    "input::Input: Starting with {} binding(s), poll interval {}ms",
+                    m_impl->m_pending.size(),
+                    settings.poll_interval.count()
+                );
                 for (const auto &binding : m_impl->m_pending)
                 {
-                    logger.trace("input::Input: Registered {} binding \"{}\" with {} key(s)",
-                                 to_string(binding.trigger), binding.name, binding.keys.size());
+                    logger.trace(
+                        "input::Input: Registered {} binding \"{}\" with {} key(s)",
+                        to_string(binding.trigger),
+                        binding.name,
+                        binding.keys.size()
+                    );
                 }
 
                 // Seed the engine with a COPY of the staged bindings and clear them only after start() succeeds.
@@ -639,9 +664,16 @@ namespace DetourModKit
                 // empty-pending no-op above and silently loses the bindings. The copy is confined to this cold
                 // path.
                 auto poller = std::make_shared<detail::InputPoller>(
-                    m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                    settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
-                    settings.wheel_target_thread_id);
+                    m_impl->m_pending,
+                    settings.poll_interval,
+                    settings.require_focus,
+                    settings.gamepad_index,
+                    settings.trigger_threshold,
+                    settings.stick_threshold,
+                    resolved_backend,
+                    resolved_host,
+                    settings.wheel_target_thread_id
+                );
                 if (resolved_backend == Input::WheelBackend::ExternalHost)
                 {
                     const std::uint64_t candidate_revision = m_impl->m_start_revision;
@@ -670,14 +702,23 @@ namespace DetourModKit
                                 static_cast<std::uintptr_t>(signed_status < 0 ? -signed_status : signed_status);
                             return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
                         }
-                        log().warning("input::Input: optional wheel host rejected the lease; using the local "
-                                      "MessageHook backend.");
+                        log().warning(
+                            "input::Input: optional wheel host rejected the lease; using the local "
+                            "MessageHook backend."
+                        );
                         resolved_backend = Input::WheelBackend::MessageHook;
                         resolved_host = nullptr;
                         poller = std::make_shared<detail::InputPoller>(
-                            m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                            settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
-                            settings.wheel_target_thread_id);
+                            m_impl->m_pending,
+                            settings.poll_interval,
+                            settings.require_focus,
+                            settings.gamepad_index,
+                            settings.trigger_threshold,
+                            settings.stick_threshold,
+                            resolved_backend,
+                            resolved_host,
+                            settings.wheel_target_thread_id
+                        );
                     }
                 }
                 try
@@ -704,7 +745,8 @@ namespace DetourModKit
             catch (const std::system_error &e)
             {
                 return std::unexpected(
-                    Error{ErrorCode::SystemCallFailed, "input::start", static_cast<std::uintptr_t>(e.code().value())});
+                    Error{ErrorCode::SystemCallFailed, "input::start", static_cast<std::uintptr_t>(e.code().value())}
+                );
             }
             catch (...)
             {
@@ -724,8 +766,8 @@ namespace DetourModKit
             {
                 Impl *const impl = m_impl.get();
                 bool active = false;
-                if (!impl->m_vetoed_retained.compare_exchange_strong(active, true, std::memory_order_acq_rel,
-                                                                     std::memory_order_acquire))
+                if (!impl->m_vetoed_retained
+                         .compare_exchange_strong(active, true, std::memory_order_acq_rel, std::memory_order_acquire))
                 {
                     return;
                 }
@@ -886,8 +928,8 @@ namespace DetourModKit
                 return false;
             }
             bool vetoed = true;
-            return impl->m_vetoed_retained.compare_exchange_strong(vetoed, false, std::memory_order_acq_rel,
-                                                                   std::memory_order_acquire);
+            return impl->m_vetoed_retained
+                .compare_exchange_strong(vetoed, false, std::memory_order_acq_rel, std::memory_order_acquire);
         }
 
         bool Input::adopt_intercept_owner_for_test() noexcept
@@ -956,8 +998,8 @@ namespace DetourModKit
                     if (indices.empty())
                     {
                         lock.unlock();
-                        (void)log().try_log(LogLevel::Debug, "input::Input: rebind(\"{}\") ignored: name not found",
-                                            name);
+                        (void)log()
+                            .try_log(LogLevel::Debug, "input::Input: rebind(\"{}\") ignored: name not found", name);
                         return std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
                     }
 
@@ -1172,7 +1214,9 @@ namespace DetourModKit
                 else
                 {
                     removed_pending = static_cast<std::size_t>(std::ranges::count_if(
-                        m_impl->m_pending, [name](const detail::InputBinding &b) { return b.name == name; }));
+                        m_impl->m_pending,
+                        [name](const detail::InputBinding &b) { return b.name == name; }
+                    ));
                     if (removed_pending != 0)
                     {
                         // Before mutation, reserve both batches so allocation failure preserves the staged set.
@@ -1189,8 +1233,10 @@ namespace DetourModKit
             }
             catch (...)
             {
-                (void)log().try_log(LogLevel::Error,
-                                    "input::Input: out of memory in remove_bindings_by_name. Bindings unchanged");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "input::Input: out of memory in remove_bindings_by_name. Bindings unchanged"
+                );
                 return 0;
             }
 
@@ -1231,8 +1277,11 @@ namespace DetourModKit
             }
         }
 
-        bool Input::retire_gates_for_unload(std::span<const std::string_view> binding_names, bool every_binding,
-                                            std::chrono::steady_clock::time_point deadline) noexcept
+        bool Input::retire_gates_for_unload(
+            std::span<const std::string_view> binding_names,
+            bool every_binding,
+            std::chrono::steady_clock::time_point deadline
+        ) noexcept
         {
             if (is_inert())
             {
@@ -1255,8 +1304,10 @@ namespace DetourModKit
                         for (const detail::InputBinding &staged : m_impl->m_pending)
                         {
                             const bool selected =
-                                every_binding || std::ranges::any_of(binding_names, [&staged](std::string_view name)
-                                                                     { return staged.name == name; });
+                                every_binding || std::ranges::any_of(
+                                                     binding_names,
+                                                     [&staged](std::string_view name) { return staged.name == name; }
+                                                 );
                             if (selected && staged.gate)
                             {
                                 pending_gates.push_back(staged.gate);
@@ -1307,8 +1358,10 @@ namespace DetourModKit
             return collected;
         }
 
-        CallbackDrainStatus Input::prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
-                                                            std::chrono::milliseconds timeout) noexcept
+        CallbackDrainStatus Input::prepare_logic_dll_unload(
+            std::span<const std::string_view> binding_names,
+            std::chrono::milliseconds timeout
+        ) noexcept
         {
             if (detail::current_thread_in_delivery())
             {
@@ -1348,9 +1401,10 @@ namespace DetourModKit
                     bool pending_match = false;
                     {
                         std::lock_guard lock(m_impl->m_mutex);
-                        pending_match =
-                            std::ranges::any_of(m_impl->m_pending, [name](const detail::InputBinding &binding)
-                                                { return binding.name == name; });
+                        pending_match = std::ranges::any_of(
+                            m_impl->m_pending,
+                            [name](const detail::InputBinding &binding) { return binding.name == name; }
+                        );
                         live_poller = m_impl->m_poller;
                     }
                     if (pending_match || (live_poller && live_poller->has_bindings_by_name(name)))

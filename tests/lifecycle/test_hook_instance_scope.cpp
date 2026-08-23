@@ -56,11 +56,13 @@ namespace
             return false;
         }
         kit.ledger_address = reinterpret_cast<LedgerAddressFn>(
-            reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_ledger_address")));
+            reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_ledger_address"))
+        );
         kit.install =
             reinterpret_cast<InstallFn>(reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_install")));
         kit.target_hooked = reinterpret_cast<TargetHookedFn>(
-            reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_target_hooked")));
+            reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_target_hooked"))
+        );
         kit.release =
             reinterpret_cast<ReleaseFn>(reinterpret_cast<void *>(GetProcAddress(kit.module, "dmk_kit_release")));
 
@@ -154,14 +156,19 @@ namespace
         }
         if (ledger_a == ledger_b)
         {
-            std::fprintf(stderr,
-                         "FAIL[distinct]: both kits report ledger %p; two statically linked instances must own two "
-                         "ledgers\n",
-                         reinterpret_cast<void *>(ledger_a));
+            std::fprintf(
+                stderr,
+                "FAIL[distinct]: both kits report ledger %p; two statically linked instances must own two "
+                "ledgers\n",
+                reinterpret_cast<void *>(ledger_a)
+            );
             return 1;
         }
-        std::printf("PASS[distinct]: kit_a ledger %p, kit_b ledger %p\n", reinterpret_cast<void *>(ledger_a),
-                    reinterpret_cast<void *>(ledger_b));
+        std::printf(
+            "PASS[distinct]: kit_a ledger %p, kit_b ledger %p\n",
+            reinterpret_cast<void *>(ledger_a),
+            reinterpret_cast<void *>(ledger_b)
+        );
         return 0;
     }
 
@@ -189,10 +196,13 @@ namespace
         const int second = fixture.a.install(fixture.target, 1, 0);
         if (second != ALREADY_HOOKED_BY_THIS_KIT)
         {
-            std::fprintf(stderr,
-                         "FAIL[same-kit]: kit_a's strict install returned 0x%04X; the ledger must refuse an exact "
-                         "same-kit duplicate with TargetAlreadyHookedByThisKit (0x%04X)\n",
-                         second, ALREADY_HOOKED_BY_THIS_KIT);
+            std::fprintf(
+                stderr,
+                "FAIL[same-kit]: kit_a's strict install returned 0x%04X; the ledger must refuse an exact "
+                "same-kit duplicate with TargetAlreadyHookedByThisKit (0x%04X)\n",
+                second,
+                ALREADY_HOOKED_BY_THIS_KIT
+            );
             return 1;
         }
         std::printf("PASS[same-kit]: one kit's ledger refused its own duplicate on a pristine prologue\n");
@@ -225,19 +235,23 @@ namespace
         }
         if (fixture.b.target_hooked(fixture.target) != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL[cross-kit]: kit_b's ledger already tracks a target only kit_a hooked; the two kits are "
-                         "sharing one ledger\n");
+            std::fprintf(
+                stderr,
+                "FAIL[cross-kit]: kit_b's ledger already tracks a target only kit_a hooked; the two kits are "
+                "sharing one ledger\n"
+            );
             return 1;
         }
 
         const int second = fixture.b.install(fixture.target, 1, 0);
         if (second != 0)
         {
-            std::fprintf(stderr,
-                         "FAIL[cross-kit]: kit_b's strict install returned 0x%04X; a separately linked kit's ledger "
-                         "must not see kit_a's hook\n",
-                         second);
+            std::fprintf(
+                stderr,
+                "FAIL[cross-kit]: kit_b's strict install returned 0x%04X; a separately linked kit's ledger "
+                "must not see kit_a's hook\n",
+                second
+            );
             return 1;
         }
         std::printf("PASS[cross-kit]: the strict install one kit refuses succeeds from a separately linked kit\n");
@@ -265,10 +279,13 @@ namespace
         const int second = fixture.b.install(fixture.target, 1, 0);
         if (second != ALREADY_HOOKED_BY_ANOTHER_MODULE)
         {
-            std::fprintf(stderr,
-                         "FAIL[armed]: kit_b's strict install returned 0x%04X; the foreign-JMP decode must refuse an "
-                         "armed foreign hook with TargetAlreadyHookedByAnotherModule (0x%04X)\n",
-                         second, ALREADY_HOOKED_BY_ANOTHER_MODULE);
+            std::fprintf(
+                stderr,
+                "FAIL[armed]: kit_b's strict install returned 0x%04X; the foreign-JMP decode must refuse an "
+                "armed foreign hook with TargetAlreadyHookedByAnotherModule (0x%04X)\n",
+                second,
+                ALREADY_HOOKED_BY_ANOTHER_MODULE
+            );
             return 1;
         }
         std::printf("PASS[armed]: the strict flag and the cross-instance prologue decode are both live\n");
@@ -306,9 +323,14 @@ namespace
 
         if (same_kit != ALREADY_HOOKED_BY_THIS_KIT || foreign != ALREADY_HOOKED_BY_ANOTHER_MODULE)
         {
-            std::fprintf(stderr,
-                         "FAIL[codes]: same-kit returned 0x%04X (want 0x%04X), foreign returned 0x%04X (want 0x%04X)\n",
-                         same_kit, ALREADY_HOOKED_BY_THIS_KIT, foreign, ALREADY_HOOKED_BY_ANOTHER_MODULE);
+            std::fprintf(
+                stderr,
+                "FAIL[codes]: same-kit returned 0x%04X (want 0x%04X), foreign returned 0x%04X (want 0x%04X)\n",
+                same_kit,
+                ALREADY_HOOKED_BY_THIS_KIT,
+                foreign,
+                ALREADY_HOOKED_BY_ANOTHER_MODULE
+            );
             return 1;
         }
         std::printf("PASS[codes]: same-kit 0x%04X and foreign-prologue 0x%04X are distinct\n", same_kit, foreign);

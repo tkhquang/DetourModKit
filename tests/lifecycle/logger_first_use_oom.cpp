@@ -115,7 +115,8 @@ namespace
                     instances[i] = &logger;
                     (void)logger.log(LogLevel::Info, "concurrent_post_oom");
                     completed.fetch_add(1, std::memory_order_release);
-                });
+                }
+            );
         }
 
         while (ready.load(std::memory_order_acquire) != THREAD_COUNT)

@@ -77,7 +77,9 @@ int main()
     }
 
     config::bind_int(
-        "S", "V", "v",
+        "S",
+        "V",
+        "v",
         [&](int)
         {
             if (!armed.load(std::memory_order_acquire))
@@ -95,7 +97,8 @@ int main()
             config::clear();
             cleared.store(true, std::memory_order_release);
         },
-        0);
+        0
+    );
 
     config::load(ini_path.string());
 

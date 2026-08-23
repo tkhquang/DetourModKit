@@ -60,8 +60,11 @@ namespace DetourModKit
          * @return The recovery outcome: a Hit when a shape uniquely recovered an executable target, plus the
          *         applicability diagnostics. May allocate while rebuilding patterns, so it is not noexcept.
          */
-        [[nodiscard]] FallbackOutcome resolve_prologue_fallback(const scan::ScanRequest &request,
-                                                                std::span<const std::size_t> order, ModuleSpan range);
+        [[nodiscard]] FallbackOutcome resolve_prologue_fallback(
+            const scan::ScanRequest &request,
+            std::span<const std::size_t> order,
+            ModuleSpan range
+        );
     } // namespace detail
 } // namespace DetourModKit
 

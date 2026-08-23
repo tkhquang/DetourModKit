@@ -77,27 +77,31 @@ namespace
         detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
 
         {
-            auto registered = manager.register_combo(
-                make_hold_binding("abba_abandoned", KEY_A,
-                                  [&](bool active)
-                                  {
-                                      if (!active)
-                                      {
-                                          return;
-                                      }
-                                      parked.store(true, std::memory_order_release);
-                                      while (!partner_entered.load(std::memory_order_acquire))
-                                      {
-                                          std::this_thread::yield();
-                                      }
-                                      // Read from inside the poll thread, after a window a correct rundown cannot use:
-                                      // it is blocked joining this body, so its probe must still be installed. The race
-                                      // with a clear is the defect.
-                                      std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
-                                      seam_live_in_callback.store(static_cast<bool>(detail::g_input_key_state_probe),
-                                                                  std::memory_order_release);
-                                      callback_finished.store(true, std::memory_order_release);
-                                  }));
+            auto registered = manager.register_combo(make_hold_binding(
+                "abba_abandoned",
+                KEY_A,
+                [&](bool active)
+                {
+                    if (!active)
+                    {
+                        return;
+                    }
+                    parked.store(true, std::memory_order_release);
+                    while (!partner_entered.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::yield();
+                    }
+                    // Read from inside the poll thread, after a window a correct rundown cannot use:
+                    // it is blocked joining this body, so its probe must still be installed. The race
+                    // with a clear is the defect.
+                    std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                    seam_live_in_callback.store(
+                        static_cast<bool>(detail::g_input_key_state_probe),
+                        std::memory_order_release
+                    );
+                    callback_finished.store(true, std::memory_order_release);
+                }
+            ));
             if (!registered)
             {
                 std::puts("FAIL: could not register the abandoned parked binding");
@@ -105,10 +109,12 @@ namespace
             }
             input::BindingGuard guard = std::move(*registered);
 
-            if (!manager.start(input::Input::Settings{
-                    .poll_interval = std::chrono::milliseconds{1},
-                    .require_focus = false,
-                }))
+            if (!manager.start(
+                    input::Input::Settings{
+                        .poll_interval = std::chrono::milliseconds{1},
+                        .require_focus = false,
+                    }
+                ))
             {
                 std::puts("FAIL: could not start the abandoned parked engine");
                 return 10;
@@ -191,8 +197,10 @@ namespace
     void observe_inactive_after_take(void *context) noexcept
     {
         auto &probe = *static_cast<InlineDisposalProbe *>(context);
-        probe.saw_inactive_after_take.store(probe.enabled != nullptr && !probe.enabled->load(std::memory_order_acquire),
-                                            std::memory_order_release);
+        probe.saw_inactive_after_take.store(
+            probe.enabled != nullptr && !probe.enabled->load(std::memory_order_acquire),
+            std::memory_order_release
+        );
     }
 
     /**
@@ -208,8 +216,10 @@ namespace
             {
                 return;
             }
-            probe->saw_inactive.store(gate->enabled && !gate->enabled->load(std::memory_order_acquire),
-                                      std::memory_order_release);
+            probe->saw_inactive.store(
+                gate->enabled && !gate->enabled->load(std::memory_order_acquire),
+                std::memory_order_release
+            );
             probe->disposals.fetch_add(1, std::memory_order_relaxed);
             gate->release();
         }
@@ -251,9 +261,11 @@ namespace
     int run_press_retire_disposal_case()
     {
         detail::PressGate press_gate;
-        if (!retire_disposes_reentrantly(press_gate,
-                                         [&press_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::PressGate>> keep)
-                                         { press_gate.on_press = [keep = std::move(keep)] {}; }))
+        if (!retire_disposes_reentrantly(
+                press_gate,
+                [&press_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::PressGate>> keep)
+                { press_gate.on_press = [keep = std::move(keep)] {}; }
+            ))
         {
             std::puts("FAIL: PressGate retirement did not finish re-entrant callable disposal");
             return 6;
@@ -274,9 +286,11 @@ namespace
     int run_hold_retire_disposal_case()
     {
         detail::HoldGate hold_gate;
-        if (!retire_disposes_reentrantly(hold_gate,
-                                         [&hold_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::HoldGate>> keep)
-                                         { hold_gate.on_state_change = [keep = std::move(keep)](bool) {}; }))
+        if (!retire_disposes_reentrantly(
+                hold_gate,
+                [&hold_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::HoldGate>> keep)
+                { hold_gate.on_state_change = [keep = std::move(keep)](bool) {}; }
+            ))
         {
             std::puts("FAIL: HoldGate retirement did not finish re-entrant callable disposal");
             return 7;
@@ -318,8 +332,12 @@ namespace
 
     template <typename Gate> struct MeetAndReleasePeerOnDisposal
     {
-        MeetAndReleasePeerOnDisposal(Gate *peer_gate, std::atomic<bool> *mine, const std::atomic<bool> *theirs,
-                                     std::atomic<int> *edges) noexcept
+        MeetAndReleasePeerOnDisposal(
+            Gate *peer_gate,
+            std::atomic<bool> *mine,
+            const std::atomic<bool> *theirs,
+            std::atomic<int> *edges
+        ) noexcept
             : peer(peer_gate), inside(mine), other(theirs), disposals(edges)
         {
         }
@@ -347,8 +365,10 @@ namespace
     // consumer code, then release the peer's gate from in there.
     template <typename Teardown> void run_cross_gate_side(std::atomic<bool> &store_refused, Teardown teardown) noexcept
     {
-        store_refused.store(DetourModKit::detail::set_delivery_scope_store_failure_for_test(true),
-                            std::memory_order_release);
+        store_refused.store(
+            DetourModKit::detail::set_delivery_scope_store_failure_for_test(true),
+            std::memory_order_release
+        );
         teardown();
         (void)DetourModKit::detail::set_delivery_scope_store_failure_for_test(false);
     }
@@ -360,8 +380,11 @@ namespace
         detail::HoldGate gate_b;
 
         // The inner lambda outlives this call, so it captures pointers by value rather than the parameter references.
-        const auto arm = [](detail::HoldGate &gate, detail::HoldGate *peer, std::atomic<bool> *mine,
-                            const std::atomic<bool> *theirs, std::atomic<int> *edges)
+        const auto arm = [](detail::HoldGate &gate,
+                            detail::HoldGate *peer,
+                            std::atomic<bool> *mine,
+                            const std::atomic<bool> *theirs,
+                            std::atomic<int> *edges)
         {
             gate.active_entries = 1;
             gate.forwarded_active = true;
@@ -419,15 +442,21 @@ namespace
         std::thread thread_a(
             [&]
             {
-                run_cross_gate_side(racers.a_store_refused,
-                                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); });
-            });
+                run_cross_gate_side(
+                    racers.a_store_refused,
+                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); }
+                );
+            }
+        );
         std::thread thread_b(
             [&]
             {
-                run_cross_gate_side(racers.b_store_refused,
-                                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); });
-            });
+                run_cross_gate_side(
+                    racers.b_store_refused,
+                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); }
+                );
+            }
+        );
         thread_a.join();
         thread_b.join();
 
@@ -490,15 +519,21 @@ namespace
         std::thread thread_a(
             [&]
             {
-                run_cross_gate_side(racers.a_store_refused,
-                                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); });
-            });
+                run_cross_gate_side(
+                    racers.a_store_refused,
+                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); }
+                );
+            }
+        );
         std::thread thread_b(
             [&]
             {
-                run_cross_gate_side(racers.b_store_refused,
-                                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); });
-            });
+                run_cross_gate_side(
+                    racers.b_store_refused,
+                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); }
+                );
+            }
+        );
         thread_a.join();
         thread_b.join();
 
@@ -607,23 +642,25 @@ int main(int argc, char **argv)
                                                   b_in_callback.store(true, std::memory_order_release);
                                               }};
 
-        auto result_a =
-            manager.register_combo(make_hold_binding("abba_a", KEY_A,
-                                                     [&](bool active)
-                                                     {
-                                                         if (active)
-                                                         {
-                                                             a_true.fetch_add(1, std::memory_order_relaxed);
-                                                             return;
-                                                         }
-                                                         a_false.fetch_add(1, std::memory_order_relaxed);
-                                                         a_in_callback.store(true, std::memory_order_release);
-                                                         while (!b_in_callback.load(std::memory_order_acquire))
-                                                         {
-                                                             std::this_thread::yield();
-                                                         }
-                                                         guard_b.release();
-                                                     }));
+        auto result_a = manager.register_combo(make_hold_binding(
+            "abba_a",
+            KEY_A,
+            [&](bool active)
+            {
+                if (active)
+                {
+                    a_true.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                a_false.fetch_add(1, std::memory_order_relaxed);
+                a_in_callback.store(true, std::memory_order_release);
+                while (!b_in_callback.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                guard_b.release();
+            }
+        ));
         if (!result_a)
         {
             std::puts("FAIL: registration A");
@@ -644,23 +681,25 @@ int main(int argc, char **argv)
         }
         else
         {
-            result_b =
-                manager.register_combo(make_hold_binding("abba_b", KEY_B,
-                                                         [&](bool active)
-                                                         {
-                                                             if (active)
-                                                             {
-                                                                 b_true.fetch_add(1, std::memory_order_relaxed);
-                                                                 return;
-                                                             }
-                                                             b_false.fetch_add(1, std::memory_order_relaxed);
-                                                             b_in_callback.store(true, std::memory_order_release);
-                                                             while (!a_in_callback.load(std::memory_order_acquire))
-                                                             {
-                                                                 std::this_thread::yield();
-                                                             }
-                                                             guard_a.release();
-                                                         }));
+            result_b = manager.register_combo(make_hold_binding(
+                "abba_b",
+                KEY_B,
+                [&](bool active)
+                {
+                    if (active)
+                    {
+                        b_true.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                    b_false.fetch_add(1, std::memory_order_relaxed);
+                    b_in_callback.store(true, std::memory_order_release);
+                    while (!a_in_callback.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::yield();
+                    }
+                    guard_a.release();
+                }
+            ));
         }
         if (!result_b)
         {
@@ -676,10 +715,12 @@ int main(int argc, char **argv)
 
         if (!manager.is_running())
         {
-            const auto started = manager.start(input::Input::Settings{
-                .poll_interval = std::chrono::milliseconds{1},
-                .require_focus = false,
-            });
+            const auto started = manager.start(
+                input::Input::Settings{
+                    .poll_interval = std::chrono::milliseconds{1},
+                    .require_focus = false,
+                }
+            );
             if (!started)
             {
                 std::puts("FAIL: start");

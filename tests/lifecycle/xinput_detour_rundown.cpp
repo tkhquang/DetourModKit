@@ -221,8 +221,10 @@ namespace
             {
                 std::this_thread::yield();
             }
-            s_ex_arm_route_reached.store(DetourModKit::detail::xinput_route_entry_reached_for_test(),
-                                         std::memory_order_release);
+            s_ex_arm_route_reached.store(
+                DetourModKit::detail::xinput_route_entry_reached_for_test(),
+                std::memory_order_release
+            );
         }
         (void)overwrite_prologue_span(s_arm_race_target, s_arm_race_original.data());
     }
@@ -263,7 +265,8 @@ namespace
     // Foreign.
     constexpr std::array<std::uint8_t, ARM_RACE_SPAN> FOREIGN_PROLOGUE_PATCH{
         0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
-        0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+        0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC
+    };
 
     [[nodiscard]] const wchar_t *find_loadable_xinput() noexcept
     {
@@ -327,7 +330,8 @@ namespace
                 state.dwPacketNumber = 0xFFFFFFFFu;
                 call_result = get_state(7, &state);
                 call_packet = state.dwPacketNumber;
-            });
+            }
+        );
 
         const ULONGLONG deadline = GetTickCount64() + 5000;
         while (!DetourModKit::detail::xinput_route_entry_reached_for_test() && GetTickCount64() < deadline)
@@ -386,9 +390,12 @@ namespace
         if (!s_body_entered.load(std::memory_order_acquire) || call_result != ERROR_DEVICE_NOT_CONNECTED ||
             call_packet != 7)
         {
-            std::fprintf(stderr,
-                         "FAIL: retained degraded caller did not resume through the proxy (result %lu packet %lu)\n",
-                         static_cast<unsigned long>(call_result), static_cast<unsigned long>(call_packet));
+            std::fprintf(
+                stderr,
+                "FAIL: retained degraded caller did not resume through the proxy (result %lu packet %lu)\n",
+                static_cast<unsigned long>(call_result),
+                static_cast<unsigned long>(call_packet)
+            );
             return 115;
         }
 
@@ -420,9 +427,14 @@ namespace
         const auto coverage = xinput_pair_coverage_for_test();
         if (!coverage.primary || !coverage.ex || !xinput_installed() || xinput_module_refs_held() != 2)
         {
-            std::fprintf(stderr, "FAIL: process-exit premise primary=%d ex=%d installed=%d refs=%d\n",
-                         coverage.primary ? 1 : 0, coverage.ex ? 1 : 0, xinput_installed() ? 1 : 0,
-                         xinput_module_refs_held());
+            std::fprintf(
+                stderr,
+                "FAIL: process-exit premise primary=%d ex=%d installed=%d refs=%d\n",
+                coverage.primary ? 1 : 0,
+                coverage.ex ? 1 : 0,
+                xinput_installed() ? 1 : 0,
+                xinput_module_refs_held()
+            );
             return 199;
         }
 
@@ -508,7 +520,8 @@ namespace
             {
                 XINPUT_STATE state{};
                 (void)get_state(0, &state);
-            });
+            }
+        );
         while (!s_parked.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
@@ -551,11 +564,13 @@ namespace
         const std::string_view attribution{s_retention_attribution.data(), attribution_length};
         char expected_attribution[256]{};
         const int expected_length = std::snprintf(
-            expected_attribution, sizeof(expected_attribution),
+            expected_attribution,
+            sizeof(expected_attribution),
             "XInput retention attribution: XInputGetState target 0x%016llX (our patch is still installed). "
             "XInputGetStateEx target 0x%016llX (our patch is still installed).",
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(get_state)),
-            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(get_state_ex)));
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(get_state_ex))
+        );
         if (expected_length <= 0 || static_cast<std::size_t>(expected_length) >= sizeof(expected_attribution) ||
             attribution != std::string_view{expected_attribution, static_cast<std::size_t>(expected_length)})
         {
@@ -577,8 +592,11 @@ namespace
         const DWORD result = get_state(0, &state);
         if (result != ERROR_SUCCESS && result != ERROR_DEVICE_NOT_CONNECTED)
         {
-            std::fprintf(stderr, "FAIL: the retained detour returned an illegal status (result %lu)\n",
-                         static_cast<unsigned long>(result));
+            std::fprintf(
+                stderr,
+                "FAIL: the retained detour returned an illegal status (result %lu)\n",
+                static_cast<unsigned long>(result)
+            );
             return 5;
         }
 
@@ -634,7 +652,8 @@ namespace
                 return 9;
             }
             if (DetourModKit::diagnostics::module_pin_count(
-                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) != 1 ||
+                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive
+                ) != 1 ||
                 DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
                     1)
             {
@@ -653,7 +672,8 @@ namespace
                 return 12;
             }
             if (DetourModKit::diagnostics::module_pin_count(
-                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) != 0 ||
+                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive
+                ) != 0 ||
                 DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
                     0)
             {
@@ -952,9 +972,12 @@ namespace
             std::memcmp(target, s_arm_race_original.data(), ARM_RACE_SPAN) == 0 ||
             std::memcmp(ex_target, ex_original.data(), ARM_RACE_SPAN) == 0)
         {
-            std::fprintf(stderr,
-                         "FAIL: retained recovery did not patch and publish both existing pair members (%d, %d)\n",
-                         static_cast<int>(recovered.primary), static_cast<int>(recovered.ex));
+            std::fprintf(
+                stderr,
+                "FAIL: retained recovery did not patch and publish both existing pair members (%d, %d)\n",
+                static_cast<int>(recovered.primary),
+                static_cast<int>(recovered.ex)
+            );
             return 60;
         }
         XINPUT_STATE primary_state{};
@@ -1233,8 +1256,11 @@ namespace
         }
         if (!xinput_pair_degraded_for_test() || xinput_trampoline() == nullptr)
         {
-            std::fprintf(stderr, "FAIL: a retained pair awaiting ordinal-100 recovery is not an owned degraded pair "
-                                 "the poller can still read raw state through\n");
+            std::fprintf(
+                stderr,
+                "FAIL: a retained pair awaiting ordinal-100 recovery is not an owned degraded pair "
+                "the poller can still read raw state through\n"
+            );
             return 139;
         }
 
@@ -1406,8 +1432,11 @@ namespace
         if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary ||
             layer_masks_bound_index())
         {
-            std::fprintf(stderr, "FAIL: a foreign primary patch was accepted as exact complete coverage (primary=%d)\n",
-                         static_cast<int>(degraded.primary));
+            std::fprintf(
+                stderr,
+                "FAIL: a foreign primary patch was accepted as exact complete coverage (primary=%d)\n",
+                static_cast<int>(degraded.primary)
+            );
             return 61;
         }
 
@@ -1519,8 +1548,12 @@ namespace
         if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary || !degraded.ex ||
             layer_masks_bound_index())
         {
-            std::fprintf(stderr, "FAIL: the foreign primary was accepted as exact local-pair coverage (%d, %d)\n",
-                         static_cast<int>(degraded.primary), static_cast<int>(degraded.ex));
+            std::fprintf(
+                stderr,
+                "FAIL: the foreign primary was accepted as exact local-pair coverage (%d, %d)\n",
+                static_cast<int>(degraded.primary),
+                static_cast<int>(degraded.ex)
+            );
             return 81;
         }
 
@@ -1617,7 +1650,8 @@ namespace
                 state.dwPacketNumber = 0xFFFFFFFFu;
                 admitted_result.store(get_state_ex(7, &state), std::memory_order_release);
                 admitted_packet.store(state.dwPacketNumber, std::memory_order_release);
-            });
+            }
+        );
         set_xinput_arm_seam(&restore_ex_prologue_in_arm_window);
         const bool installed = install_xinput(0);
         set_xinput_arm_seam(nullptr);
@@ -1744,8 +1778,11 @@ namespace
             const std::uint64_t delay_ms = expire_xinput_recovery_delay_for_test();
             if (delay_ms > recovery_max_delay_ms)
             {
-                std::fprintf(stderr, "FAIL: the XInput recovery delay exceeded its 2,000 ms cap (%llu ms)\n",
-                             static_cast<unsigned long long>(delay_ms));
+                std::fprintf(
+                    stderr,
+                    "FAIL: the XInput recovery delay exceeded its 2,000 ms cap (%llu ms)\n",
+                    static_cast<unsigned long long>(delay_ms)
+                );
                 return 142;
             }
             s_arm_race_runs.store(1, std::memory_order_relaxed);
@@ -1758,8 +1795,11 @@ namespace
         const std::uint64_t capped_delay_ms = expire_xinput_recovery_delay_for_test();
         if (capped_delay_ms != recovery_max_delay_ms)
         {
-            std::fprintf(stderr, "FAIL: the XInput recovery delay did not settle at its 2,000 ms cap (%llu ms)\n",
-                         static_cast<unsigned long long>(capped_delay_ms));
+            std::fprintf(
+                stderr,
+                "FAIL: the XInput recovery delay did not settle at its 2,000 ms cap (%llu ms)\n",
+                static_cast<unsigned long long>(capped_delay_ms)
+            );
             return 144;
         }
         set_xinput_arm_seam(nullptr);
@@ -1885,15 +1925,22 @@ namespace
         }
         if (installed || xinput_installed())
         {
-            std::fprintf(stderr, "FAIL: a primary restored during the ordinal-100 arm was published as complete "
-                                 "coverage\n");
+            std::fprintf(
+                stderr,
+                "FAIL: a primary restored during the ordinal-100 arm was published as complete "
+                "coverage\n"
+            );
             return 152;
         }
         const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
         if (degraded.primary || !degraded.ex)
         {
-            std::fprintf(stderr, "FAIL: the degraded pair named the wrong missing member (primary=%d ex=%d)\n",
-                         static_cast<int>(degraded.primary), static_cast<int>(degraded.ex));
+            std::fprintf(
+                stderr,
+                "FAIL: the degraded pair named the wrong missing member (primary=%d ex=%d)\n",
+                static_cast<int>(degraded.primary),
+                static_cast<int>(degraded.ex)
+            );
             return 153;
         }
         if (!xinput_pair_degraded_for_test())
@@ -1914,8 +1961,10 @@ namespace
         // Both chains stay published: a caller admitted through either route before the loss still has to forward.
         if (xinput_trampoline() == nullptr || DetourModKit::detail::xinput_ex_trampoline() == nullptr)
         {
-            std::fprintf(stderr,
-                         "FAIL: a degraded pair dropped a forwarding chain an admitted caller can still need\n");
+            std::fprintf(
+                stderr,
+                "FAIL: a degraded pair dropped a forwarding chain an admitted caller can still need\n"
+            );
             return 157;
         }
 
@@ -2199,8 +2248,11 @@ namespace
         int status = 0;
         std::array<std::uint8_t, ARM_RACE_SPAN> published_patch{};
         {
-            DetourModKit::detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2},
-                                                     /*require_focus=*/false);
+            DetourModKit::detail::InputPoller poller(
+                std::move(bindings),
+                std::chrono::milliseconds{2},
+                /*require_focus=*/false
+            );
             poller.start();
             if (!wait_for_poll_thread([] { return xinput_installed(); }))
             {
@@ -2367,13 +2419,21 @@ namespace
     [[nodiscard]] std::expected<safetyhook::InlineHook, safetyhook::InlineHook::Error> make_routed_hook(void *detour)
     {
         return safetyhook::InlineHook::create(
-            safetyhook::Allocator::global(), reinterpret_cast<void *>(&routed_unwind_target), detour,
-            static_cast<safetyhook::InlineHook::Flags>(safetyhook::InlineHook::StartDisabled |
-                                                       safetyhook::InlineHook::RoutedExternal));
+            safetyhook::Allocator::global(),
+            reinterpret_cast<void *>(&routed_unwind_target),
+            detour,
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
     }
 
-    [[nodiscard]] bool virtually_unwind_flag_region(std::uint8_t *region, std::size_t region_size,
-                                                    std::size_t expected_restores, bool returns) noexcept
+    [[nodiscard]] bool virtually_unwind_flag_region(
+        std::uint8_t *region,
+        std::size_t region_size,
+        std::size_t expected_restores,
+        bool returns
+    ) noexcept
     {
         if (region[0] != 0x53 || region[1] != 0x9C)
         {
@@ -2423,8 +2483,16 @@ namespace
             }
             PVOID handler_data = nullptr;
             DWORD64 establisher = 0;
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context, &handler_data, &establisher,
-                             nullptr);
+            RtlVirtualUnwind(
+                UNW_FLAG_NHANDLER,
+                image_base,
+                context.Rip,
+                entry,
+                &context,
+                &handler_data,
+                &establisher,
+                nullptr
+            );
             return true;
         };
 
@@ -2526,8 +2594,16 @@ namespace
             }
             PVOID handler_data = nullptr;
             DWORD64 establisher = 0;
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context, &handler_data, &establisher,
-                             nullptr);
+            RtlVirtualUnwind(
+                UNW_FLAG_NHANDLER,
+                image_base,
+                context.Rip,
+                entry,
+                &context,
+                &handler_data,
+                &establisher,
+                nullptr
+            );
             return true;
         };
 
@@ -2589,16 +2665,23 @@ namespace
         const bool exit_unwinds = virtually_unwind_flag_region(exit_thunk, 64, 1, true);
         if (!gateway_unwinds || !wrapper_unwinds || !exit_unwinds)
         {
-            std::fprintf(stderr, "FAIL: generated unwind records failed gateway=%d wrapper=%d exit=%d\n",
-                         gateway_unwinds, wrapper_unwinds, exit_unwinds);
+            std::fprintf(
+                stderr,
+                "FAIL: generated unwind records failed gateway=%d wrapper=%d exit=%d\n",
+                gateway_unwinds,
+                wrapper_unwinds,
+                exit_unwinds
+            );
             return 118;
         }
 
         s_gateway_base.store(reinterpret_cast<std::uintptr_t>(gateway), std::memory_order_release);
         s_gateway_limit.store(reinterpret_cast<std::uintptr_t>(gateway) + 512, std::memory_order_release);
         s_driver_low.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_unwind_case), std::memory_order_release);
-        s_driver_high.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_unwind_case) + 4096,
-                            std::memory_order_release);
+        s_driver_high.store(
+            reinterpret_cast<std::uintptr_t>(&run_wrapper_unwind_case) + 4096,
+            std::memory_order_release
+        );
 
         if (auto enabled = hook.enable(); !enabled)
         {
@@ -2641,11 +2724,15 @@ namespace
             return 120;
         }
         safetyhook::InlineHook hook = std::move(*created);
-        s_gateway_base.store(reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0)),
-                             std::memory_order_release);
+        s_gateway_base.store(
+            reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0)),
+            std::memory_order_release
+        );
         s_gateway_limit.store(s_gateway_base.load(std::memory_order_acquire) + 512, std::memory_order_release);
-        s_driver_low.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_native_exception_case),
-                           std::memory_order_release);
+        s_driver_low.store(
+            reinterpret_cast<std::uintptr_t>(&run_wrapper_native_exception_case),
+            std::memory_order_release
+        );
         s_driver_high.store(s_driver_low.load(std::memory_order_acquire) + 4096, std::memory_order_release);
         if (auto enabled = hook.enable(); !enabled)
         {
@@ -2726,8 +2813,11 @@ namespace
             for (int index = 0; index < 3; ++index)
             {
                 DWORD64 image_base = 0;
-                if (RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(recovered->route_region_for_test(index)),
-                                           &image_base, nullptr) == nullptr)
+                if (RtlLookupFunctionEntry(
+                        reinterpret_cast<DWORD64>(recovered->route_region_for_test(index)),
+                        &image_base,
+                        nullptr
+                    ) == nullptr)
                 {
                     std::fprintf(stderr, "FAIL: recovered route %d was not registered before destruction\n", index);
                     return 135;
@@ -2810,8 +2900,10 @@ namespace
         const auto before = safetyhook::route_retention_stats();
         // Below one worst-case chain, so the very first reservation cannot fit. The refusal has to happen while the
         // hook is still uncreated: after publication the chain is permanent and refusing is no longer an option.
-        safetyhook::set_route_retention_capacity(before.logical_charged + before.logical_reserved,
-                                                 before.committed_capacity);
+        safetyhook::set_route_retention_capacity(
+            before.logical_charged + before.logical_reserved,
+            before.committed_capacity
+        );
         safetyhook::g_unwind_unregistration_failure.store(true, std::memory_order_release);
         auto refused = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
         const bool unregistration_was_not_reached =
@@ -2851,8 +2943,10 @@ namespace
             return 154;
         }
 
-        safetyhook::set_route_retention_capacity(before.logical_capacity,
-                                                 before.committed_charged + before.committed_reserved);
+        safetyhook::set_route_retention_capacity(
+            before.logical_capacity,
+            before.committed_charged + before.committed_reserved
+        );
         auto committed_refused = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
         safetyhook::set_route_retention_capacity(before.logical_capacity, before.committed_capacity);
         if (committed_refused ||
@@ -2943,7 +3037,8 @@ namespace
         const auto get_state =
             reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
         const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(
-            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL))));
+            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)))
+        );
         if (get_state == nullptr)
         {
             std::fprintf(stderr, "FAIL: XInputGetState is not exported\n");
@@ -2954,8 +3049,10 @@ namespace
         // Room for exactly one worst-case chain. A per-hook reservation would admit the primary and then refuse its Ex
         // partner, which is the primary-only coverage the pair transaction exists to prevent.
         const auto one_chain = safetyhook::route_chain_worst_case().logical;
-        safetyhook::set_route_retention_capacity(before.logical_charged + before.logical_reserved + one_chain,
-                                                 before.committed_capacity);
+        safetyhook::set_route_retention_capacity(
+            before.logical_charged + before.logical_reserved + one_chain,
+            before.committed_capacity
+        );
         const bool installed = install_xinput(0);
         safetyhook::set_route_retention_capacity(before.logical_capacity, before.committed_capacity);
 
@@ -3064,8 +3161,8 @@ namespace
 
         // max_distance 0 admits only the retained address itself, so a refusal here is the assertion: the arena did not
         // hand the registered gateway back for reuse.
-        auto reused = safetyhook::Allocator::global()->allocate_near({reinterpret_cast<std::uint8_t *>(gateway)},
-                                                                     gateway_bytes, 0);
+        auto reused = safetyhook::Allocator::global()
+                          ->allocate_near({reinterpret_cast<std::uint8_t *>(gateway)}, gateway_bytes, 0);
         if (reused && reused->address() == gateway)
         {
             std::fprintf(stderr, "FAIL: refused unregistration returned the registered gateway to allocator reuse\n");
@@ -3128,8 +3225,10 @@ namespace
         }
         safetyhook::InlineHook hook = std::move(*created);
         const auto actual = hook.route_retention_for_test();
-        safetyhook::g_trap_restore_failure_override.store(reinterpret_cast<std::uint8_t *>(&routed_unwind_target),
-                                                          std::memory_order_release);
+        safetyhook::g_trap_restore_failure_override.store(
+            reinterpret_cast<std::uint8_t *>(&routed_unwind_target),
+            std::memory_order_release
+        );
         const auto enabled = hook.enable();
         safetyhook::g_trap_restore_failure_override.store(nullptr, std::memory_order_release);
         if (enabled || !hook.enabled() || enabled.error().type != safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT)
@@ -3210,8 +3309,12 @@ namespace
             std::fprintf(stderr, "FAIL: could not prepare the oversized caller allocator block\n");
             return 196;
         }
-        auto created = safetyhook::MidHook::create(caller_allocator, reinterpret_cast<void *>(&routed_unwind_target),
-                                                   &routed_mid_detour, safetyhook::MidHook::StartDisabled);
+        auto created = safetyhook::MidHook::create(
+            caller_allocator,
+            reinterpret_cast<void *>(&routed_unwind_target),
+            &routed_mid_detour,
+            safetyhook::MidHook::StartDisabled
+        );
         if (!created)
         {
             std::fprintf(stderr, "FAIL: could not create the MID accounting route\n");
@@ -3250,16 +3353,19 @@ int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|process-exit-storage|"
-                             "clean-release-oom|reference-balance|"
-                             "first-install-oom|first-install-oom-create|enable-before|enable-after|disable-before|"
-                             "disable-after|disable-ex-before|disable-primary-before|pair-compensation-inverted|"
-                             "newer-layer|newer-layer-ex|arm-inversion|ex-arm-inversion|wrapper-unwind|"
-                             "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
-                             "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
-                             "route-restore-failure|route-allocator-reclamation|"
-                             "mid-route-accounting|xinput-pair-capacity|fresh-primary-loss|"
-                             "installed-primary-loss|permanent-primary-loss|poller-maintains-pair>\n");
+        std::fprintf(
+            stderr,
+            "usage: xinput_detour_rundown <timeout|pre-body-route|process-exit-storage|"
+            "clean-release-oom|reference-balance|"
+            "first-install-oom|first-install-oom-create|enable-before|enable-after|disable-before|"
+            "disable-after|disable-ex-before|disable-primary-before|pair-compensation-inverted|"
+            "newer-layer|newer-layer-ex|arm-inversion|ex-arm-inversion|wrapper-unwind|"
+            "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
+            "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
+            "route-restore-failure|route-allocator-reclamation|"
+            "mid-route-accounting|xinput-pair-capacity|fresh-primary-loss|"
+            "installed-primary-loss|permanent-primary-loss|poller-maintains-pair>\n"
+        );
         return 1;
     }
 

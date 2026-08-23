@@ -26,8 +26,10 @@ namespace DetourModKit::detail
         inline constexpr std::uint64_t ACTIVE_MASK = 0xFFFFFFFFULL;
 
         // Loader-lock teardown requires updates that cannot allocate or enter a lock-backed atomic implementation.
-        static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
-                      "the hook population tally must be lock-free to stay callable under the loader lock");
+        static_assert(
+            std::atomic<std::uint64_t>::is_always_lock_free,
+            "the hook population tally must be lock-free to stay callable under the loader lock"
+        );
 
         // constinit makes any future dynamic initialization a compile-time error.
         inline constinit std::atomic<std::uint64_t> s_counts{0};
@@ -83,8 +85,10 @@ namespace DetourModKit::detail
      */
     namespace lifecycle_observability
     {
-        static_assert(std::atomic<std::size_t>::is_always_lock_free,
-                      "lifecycle observability must stay lock-free on teardown paths");
+        static_assert(
+            std::atomic<std::size_t>::is_always_lock_free,
+            "lifecycle observability must stay lock-free on teardown paths"
+        );
 
         inline constinit std::atomic<std::size_t> s_reaper_started{0};
         inline constinit std::atomic<std::size_t> s_permanent_pins{0};
@@ -117,8 +121,10 @@ namespace DetourModKit::detail
         /// Mirrors ModulePinReason::Count. diagnostics.cpp static_asserts that the two values stay equal.
         inline constexpr std::size_t MODULE_PIN_REASON_COUNT = 11;
 
-        static_assert(std::atomic<std::size_t>::is_always_lock_free,
-                      "module pin observability must stay lock-free on teardown paths");
+        static_assert(
+            std::atomic<std::size_t>::is_always_lock_free,
+            "module pin observability must stay lock-free on teardown paths"
+        );
 
         inline constinit std::array<std::atomic<std::size_t>, MODULE_PIN_REASON_COUNT> s_outstanding{};
 

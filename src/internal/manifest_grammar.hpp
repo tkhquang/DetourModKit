@@ -44,8 +44,8 @@ namespace DetourModKit::manifest::detail
      *          strips a leading BOM and stops parsing at the first NUL), so both fail closed; the checked serializer
      *          can emit neither.
      */
-    [[nodiscard]] Result<void> validate_manifest_grammar(std::string_view text, const GrammarLimits &limits,
-                                                         const char *context);
+    [[nodiscard]] Result<void>
+    validate_manifest_grammar(std::string_view text, const GrammarLimits &limits, const char *context);
 } // namespace DetourModKit::manifest::detail
 
 #endif // DETOURMODKIT_INTERNAL_MANIFEST_GRAMMAR_HPP

@@ -88,8 +88,11 @@ namespace DetourModKit
         [[nodiscard]] std::uint64_t current_image_stamp(std::uintptr_t module_base) noexcept;
     } // namespace
 
-    bool rtti::detail::resolve_col_site(std::uintptr_t vtable, const DetourModKit::detail::ModuleSpan &mod_range,
-                                        ColSite &out) noexcept
+    bool rtti::detail::resolve_col_site(
+        std::uintptr_t vtable,
+        const DetourModKit::detail::ModuleSpan &mod_range,
+        ColSite &out
+    ) noexcept
     {
         if (vtable < MIN_VALID_PTR)
             return false;
@@ -106,7 +109,8 @@ namespace DetourModKit
         // vtable; a COL pointer escaping the module range is the signature of a forged or relocated structure and
         // aborts the walk.
         const auto col_ptr_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(
-            static_cast<std::uintptr_t>(vtable + COL_OFFSET_FROM_VTABLE));
+            static_cast<std::uintptr_t>(vtable + COL_OFFSET_FROM_VTABLE)
+        );
         if (!col_ptr_opt || !mod_range.contains(*col_ptr_opt))
             return false;
         const std::uintptr_t col_addr = *col_ptr_opt;
@@ -168,8 +172,8 @@ namespace DetourModKit
         return resolve_col_site(vtable, mod_range, out);
     }
 
-    std::size_t rtti::detail::read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len,
-                                            std::uintptr_t module_end) noexcept
+    std::size_t
+    rtti::detail::read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len, std::uintptr_t module_end) noexcept
     {
         if (!out || out_len == 0)
             return 0;
@@ -401,8 +405,13 @@ namespace DetourModKit
         m_writer.clear(std::memory_order_release);
     }
 
-    std::optional<Address> rtti::find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
-                                                       std::atomic<Address> *vtable_cache, std::size_t stride) noexcept
+    std::optional<Address> rtti::find_in_pointer_table(
+        Address table,
+        std::size_t slot_count,
+        std::string_view expected,
+        std::atomic<Address> *vtable_cache,
+        std::size_t stride
+    ) noexcept
     {
         if (table.raw() < detail::MIN_VALID_PTR || slot_count == 0 || expected.empty())
             return std::nullopt;
@@ -474,8 +483,13 @@ namespace DetourModKit
         return scan(Address{});
     }
 
-    std::optional<Address> rtti::find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
-                                                       PointerTableCache &cache, std::size_t stride) noexcept
+    std::optional<Address> rtti::find_in_pointer_table(
+        Address table,
+        std::size_t slot_count,
+        std::string_view expected,
+        PointerTableCache &cache,
+        std::size_t stride
+    ) noexcept
     {
         struct CacheSnapshot
         {
@@ -494,8 +508,11 @@ namespace DetourModKit
                 if ((sequence & 1U) != 0U)
                     continue;
                 const CacheSnapshot snapshot{
-                    cache.m_vtable.load(std::memory_order_relaxed), cache.m_image_base.load(std::memory_order_relaxed),
-                    cache.m_generation.load(std::memory_order_relaxed), cache.m_epoch.load(std::memory_order_relaxed)};
+                    cache.m_vtable.load(std::memory_order_relaxed),
+                    cache.m_image_base.load(std::memory_order_relaxed),
+                    cache.m_generation.load(std::memory_order_relaxed),
+                    cache.m_epoch.load(std::memory_order_relaxed)
+                };
                 std::atomic_thread_fence(std::memory_order_acquire);
                 if (cache.m_seq.load(std::memory_order_relaxed) == sequence)
                     return snapshot;
@@ -634,8 +651,12 @@ namespace DetourModKit
          *         qualifying section did not fit @p out; it is left @ref rtti::Traversal::Complete otherwise (including
          *         the 0-return, where the caller's whole-image fallback determines its own completeness).
          */
-        std::size_t collect_rtti_scan_ranges(DetourModKit::detail::ModuleSpan mod, ScanRange *out, std::size_t cap,
-                                             rtti::Traversal &completeness) noexcept
+        std::size_t collect_rtti_scan_ranges(
+            DetourModKit::detail::ModuleSpan mod,
+            ScanRange *out,
+            std::size_t cap,
+            rtti::Traversal &completeness
+        ) noexcept
         {
             const auto dos = DetourModKit::detail::guarded_read<IMAGE_DOS_HEADER>(mod.base);
             if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
@@ -733,8 +754,8 @@ namespace DetourModKit
          * @param module_end Exclusive end of the name's owning module; the compare fails closed rather than reading to
          *        or past it, so an edge-of-module name buffer cannot over-read into an adjacent mapped image.
          */
-        [[nodiscard]] bool name_equals(std::uintptr_t name_addr, std::string_view mangled,
-                                       std::uintptr_t module_end) noexcept
+        [[nodiscard]] bool
+        name_equals(std::uintptr_t name_addr, std::string_view mangled, std::uintptr_t module_end) noexcept
         {
             char buf[rtti::MAX_TYPE_NAME_LEN + 1];
             const std::size_t need = mangled.size() + 1;
@@ -760,9 +781,17 @@ namespace DetourModKit
          * @param owning The vtables' OWNING-MODULE span, used to validate each candidate (see the resolve_col_site
          *        call below). May be an invalid span, in which case each candidate resolves its own module.
          */
-        void sweep_range_for_name(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
-                                  std::uintptr_t begin, std::uintptr_t end, std::string_view mangled, VtMatch *out,
-                                  std::size_t cap, std::size_t &count, bool &page_unreadable) noexcept
+        void sweep_range_for_name(
+            DetourModKit::detail::ModuleSpan mod,
+            DetourModKit::detail::ModuleSpan owning,
+            std::uintptr_t begin,
+            std::uintptr_t end,
+            std::string_view mangled,
+            VtMatch *out,
+            std::size_t cap,
+            std::size_t &count,
+            bool &page_unreadable
+        ) noexcept
         {
             // A range above UINTPTR_MAX - 7 contains no complete aligned qword. Reject it before alignment.
             if (begin > UINTPTR_MAX - 7)
@@ -847,8 +876,13 @@ namespace DetourModKit
          *          whole module image rather than reporting a confident-but-wrong "not found" for a packed or merged
          *          binary.
          */
-        std::size_t scan_vtables_for_name(DetourModKit::detail::ModuleSpan mod, std::string_view mangled, VtMatch *out,
-                                          std::size_t cap, rtti::Traversal &completeness) noexcept
+        std::size_t scan_vtables_for_name(
+            DetourModKit::detail::ModuleSpan mod,
+            std::string_view mangled,
+            VtMatch *out,
+            std::size_t cap,
+            rtti::Traversal &completeness
+        ) noexcept
         {
             if (!mod.valid() || mangled.empty() || mangled.size() >= rtti::MAX_TYPE_NAME_LEN)
             {
@@ -882,8 +916,17 @@ namespace DetourModKit
             {
                 for (std::size_t i = 0; i < range_count && count < cap; ++i)
                 {
-                    sweep_range_for_name(mod, owning, ranges[i].begin, ranges[i].end, mangled, out, cap, count,
-                                         page_unreadable);
+                    sweep_range_for_name(
+                        mod,
+                        owning,
+                        ranges[i].begin,
+                        ranges[i].end,
+                        mangled,
+                        out,
+                        cap,
+                        count,
+                        page_unreadable
+                    );
                 }
             }
 
@@ -911,8 +954,13 @@ namespace DetourModKit
          * @param owning The vtables' OWNING-MODULE span used for validation; may be invalid, in which case each
          *        candidate resolves its own module (mirrors @ref sweep_range_for_name).
          */
-        bool sweep_range_for_first_col(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
-                                       std::uintptr_t begin, std::uintptr_t end, bool &page_unreadable) noexcept
+        bool sweep_range_for_first_col(
+            DetourModKit::detail::ModuleSpan mod,
+            DetourModKit::detail::ModuleSpan owning,
+            std::uintptr_t begin,
+            std::uintptr_t end,
+            bool &page_unreadable
+        ) noexcept
         {
             if (begin > UINTPTR_MAX - 7)
                 return false;
@@ -1012,8 +1060,13 @@ namespace DetourModKit
     {
         VtMatch matches[MAX_REVERSE_MATCHES];
         rtti::Traversal completeness = rtti::Traversal::Complete;
-        const std::size_t match_count = scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled,
-                                                              matches, MAX_REVERSE_MATCHES, completeness);
+        const std::size_t match_count = scan_vtables_for_name(
+            DetourModKit::detail::module_span(range),
+            mangled,
+            matches,
+            MAX_REVERSE_MATCHES,
+            completeness
+        );
 
         // A unique or absent verdict is the inverse of vtable_is_type and is trustworthy only across a COMPLETE sweep.
         // An Incomplete sweep (a faulted section header or an unreadable page) or a Saturated one (the section-range or
@@ -1041,16 +1094,21 @@ namespace DetourModKit
         return Address{*primary};
     }
 
-    rtti::VtablesResult rtti::vtables_for_type_checked(std::string_view mangled, Address *out, std::size_t out_cap,
-                                                       Region range) noexcept
+    rtti::VtablesResult
+    rtti::vtables_for_type_checked(std::string_view mangled, Address *out, std::size_t out_cap, Region range) noexcept
     {
         if (!out)
             out_cap = 0;
 
         VtMatch matches[MAX_REVERSE_MATCHES];
         rtti::Traversal completeness = rtti::Traversal::Complete;
-        const std::size_t match_count = scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled,
-                                                              matches, MAX_REVERSE_MATCHES, completeness);
+        const std::size_t match_count = scan_vtables_for_name(
+            DetourModKit::detail::module_span(range),
+            mangled,
+            matches,
+            MAX_REVERSE_MATCHES,
+            completeness
+        );
 
         // Ascending COL.offset so the primary (offset 0) sorts first. The match count is tiny (one per base
         // sub-object), so an in-place insertion sort is both adequate and allocation-free.
@@ -1072,8 +1130,8 @@ namespace DetourModKit
         return VtablesResult{match_count, completeness};
     }
 
-    std::size_t rtti::vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
-                                       Region range) noexcept
+    std::size_t
+    rtti::vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap, Region range) noexcept
     {
         // Best-effort count-only face over the checked form: it discards the completeness, so a caller that must
         // distinguish an authoritative absence from a truncated sweep uses vtables_for_type_checked instead.

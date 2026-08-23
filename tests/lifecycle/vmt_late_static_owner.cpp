@@ -112,9 +112,11 @@ namespace
             const std::size_t leaks_after = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
             if (leaks_after != leaks_before)
             {
-                std::fprintf(stderr,
-                             "FAIL: late VMT teardown booked %zu intentional leak(s), expected a clean restore\n",
-                             leaks_after - leaks_before);
+                std::fprintf(
+                    stderr,
+                    "FAIL: late VMT teardown booked %zu intentional leak(s), expected a clean restore\n",
+                    leaks_after - leaks_before
+                );
                 std::fflush(stderr);
                 std::_Exit(8);
             }
@@ -124,8 +126,10 @@ namespace
                 std::fflush(stderr);
                 std::_Exit(9);
             }
-            std::fputs("OK: late VMT teardown took the gate, restored the vptr, and emitted the removal event.\n",
-                       stdout);
+            std::fputs(
+                "OK: late VMT teardown took the gate, restored the vptr, and emitted the removal event.\n",
+                stdout
+            );
             std::fflush(stdout);
         }
 
@@ -169,14 +173,17 @@ int main()
         return 2;
     }
 
-    s_owner.set_subscription(diagnostics::hook_lifecycle().subscribe(
-        [](const diagnostics::HookLifecycleEvent &event)
-        {
-            if (event.transition == diagnostics::HookTransition::Removed)
+    s_owner.set_subscription(
+        diagnostics::hook_lifecycle().subscribe(
+            [](const diagnostics::HookLifecycleEvent &event)
             {
-                s_removed_delivered = true;
+                if (event.transition == diagnostics::HookTransition::Removed)
+                {
+                    s_removed_delivered = true;
+                }
             }
-        }));
+        )
+    );
 
     // This first VMT operation is what constructs the process object gate, after s_owner registered.
     Result<hook::VmtHook> created = hook::vmt_for("LateVmtOwner", object);

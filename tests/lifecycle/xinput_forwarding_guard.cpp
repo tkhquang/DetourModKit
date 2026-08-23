@@ -130,8 +130,12 @@ namespace
         uninstall(owner);
         if (rc == 0 && (xinput_installed() || xinput_module_refs_held() != 0))
         {
-            std::fprintf(stderr, "FAIL: teardown left state (installed=%d refs=%d)\n",
-                         static_cast<int>(xinput_installed()), xinput_module_refs_held());
+            std::fprintf(
+                stderr,
+                "FAIL: teardown left state (installed=%d refs=%d)\n",
+                static_cast<int>(xinput_installed()),
+                xinput_module_refs_held()
+            );
             rc = 11;
         }
         clear_override_and_free(proxy);
@@ -311,8 +315,12 @@ namespace
         uninstall(owner);
         if (rc == 0 && (xinput_installed() || xinput_trampoline() != nullptr || xinput_module_refs_held() != 0))
         {
-            std::fprintf(stderr, "FAIL: teardown left state (installed=%d refs=%d)\n",
-                         static_cast<int>(xinput_installed()), xinput_module_refs_held());
+            std::fprintf(
+                stderr,
+                "FAIL: teardown left state (installed=%d refs=%d)\n",
+                static_cast<int>(xinput_installed()),
+                xinput_module_refs_held()
+            );
             rc = 32;
         }
         clear_override_and_free(proxy);

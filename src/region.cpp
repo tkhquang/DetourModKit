@@ -26,8 +26,11 @@ namespace DetourModKit
         // returns that consumer module rather than the process EXE. FROM_ADDRESS plus UNCHANGED_REFCOUNT looks the
         // handle up without taking a reference, matching the transient-scope contract every Region factory keeps.
         HMODULE owning_module = nullptr;
-        if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                  reinterpret_cast<LPCWSTR>(&Region::own), &owning_module) ||
+        if (!::GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&Region::own),
+                &owning_module
+            ) ||
             owning_module == nullptr)
         {
             return Region{};

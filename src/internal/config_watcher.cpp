@@ -92,8 +92,13 @@ namespace DetourModKit
                 {
                     return true;
                 }
-                return ::CompareStringOrdinal(lhs.data(), static_cast<int>(lhs.size()), rhs.data(),
-                                              static_cast<int>(rhs.size()), TRUE) == CSTR_EQUAL;
+                return ::CompareStringOrdinal(
+                           lhs.data(),
+                           static_cast<int>(lhs.size()),
+                           rhs.data(),
+                           static_cast<int>(rhs.size()),
+                           TRUE
+                       ) == CSTR_EQUAL;
             }
 
             struct OwnedHandle
@@ -231,8 +236,10 @@ namespace DetourModKit
             // Each invocation allocates its own cell, so prior leaked Impls are never overwritten; the leak is bounded
             // to one cell per husking call and the detached worker's raw pointers into Impl members stay valid until it
             // exits or the process tears down.
-            static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
-                          "Leak cell must be nothrow-move-constructible to keep the noexcept husk paths honest.");
+            static_assert(
+                std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
+                "Leak cell must be nothrow-move-constructible to keep the noexcept husk paths honest."
+            );
 
             if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(impl)))
             {
@@ -245,8 +252,11 @@ namespace DetourModKit
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
         }
 
-        ConfigWatcher::ConfigWatcher(std::string_view ini_path, std::chrono::milliseconds debounce_window,
-                                     std::function<void()> on_reload)
+        ConfigWatcher::ConfigWatcher(
+            std::string_view ini_path,
+            std::chrono::milliseconds debounce_window,
+            std::function<void()> on_reload
+        )
             : m_impl(std::make_unique<Impl>(ini_path, debounce_window, std::move(on_reload)))
         {
         }
@@ -410,9 +420,15 @@ namespace DetourModKit
             auto *worker_exited_slot = &m_impl->worker_exited;
             auto *stop_requested_slot = &m_impl->stop_requested;
 
-            auto worker_body = [directory = std::move(directory), filename = std::move(filename), debounce_ms,
-                                callback = std::move(callback), label = std::move(label), open_result, worker_id_slot,
-                                worker_exited_slot, stop_requested_slot](const std::stop_token &st) -> void
+            auto worker_body = [directory = std::move(directory),
+                                filename = std::move(filename),
+                                debounce_ms,
+                                callback = std::move(callback),
+                                label = std::move(label),
+                                open_result,
+                                worker_id_slot,
+                                worker_exited_slot,
+                                stop_requested_slot](const std::stop_token &st) -> void
             {
                 const WorkerExitGuard worker_exit_guard{*worker_exited_slot};
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
@@ -497,9 +513,17 @@ namespace DetourModKit
                 std::vector<BYTE> &buffer = io->buffer;
                 OVERLAPPED &overlapped = io->overlapped;
 
-                dir_handle = OwnedHandle(::CreateFileW(
-                    directory.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+                dir_handle = OwnedHandle(
+                    ::CreateFileW(
+                        directory.c_str(),
+                        FILE_LIST_DIRECTORY,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr,
+                        OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                        nullptr
+                    )
+                );
 
                 if (!dir_handle.valid())
                 {
@@ -548,13 +572,16 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
-                        (void)log().try_log(LogLevel::Error, "ConfigWatcher '{}': reload callback threw: {}", label,
-                                            e.what());
+                        (void)log()
+                            .try_log(LogLevel::Error, "ConfigWatcher '{}': reload callback threw: {}", label, e.what());
                     }
                     catch (...)
                     {
-                        (void)log().try_log(LogLevel::Error,
-                                            "ConfigWatcher '{}': reload callback threw a non-std exception.", label);
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': reload callback threw a non-std exception.",
+                            label
+                        );
                     }
                 };
 
@@ -579,14 +606,23 @@ namespace DetourModKit
                 {
                     ::ResetEvent(event_handle.h);
                     DWORD bytes_returned = 0;
-                    const BOOL ok =
-                        ::ReadDirectoryChangesW(dir_handle.h, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                                FALSE, // no recursion
-                                                NOTIFY_FILTER, &bytes_returned, &overlapped, nullptr);
+                    const BOOL ok = ::ReadDirectoryChangesW(
+                        dir_handle.h,
+                        buffer.data(),
+                        static_cast<DWORD>(buffer.size()),
+                        FALSE, // no recursion
+                        NOTIFY_FILTER,
+                        &bytes_returned,
+                        &overlapped,
+                        nullptr
+                    );
                     if (!ok)
                     {
-                        log().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).", label,
-                                    ::GetLastError());
+                        log().error(
+                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                            label,
+                            ::GetLastError()
+                        );
                         return false;
                     }
                     return true;
@@ -630,10 +666,12 @@ namespace DetourModKit
                             // Directory handle closed or I/O cancelled externally (e.g. the watched parent
                             // directory was removed or renamed). We cannot recover a handle to a vanished directory
                             // here; surface the event at warning level so users notice.
-                            log().warning("ConfigWatcher '{}': directory handle "
-                                          "invalidated (parent removed/renamed); "
-                                          "watcher thread exiting.",
-                                          label);
+                            log().warning(
+                                "ConfigWatcher '{}': directory handle "
+                                "invalidated (parent removed/renamed); "
+                                "watcher thread exiting.",
+                                label
+                            );
                             break;
                         }
 
@@ -644,10 +682,12 @@ namespace DetourModKit
                             // coalesced match, re-issue the read, and let debounce deduplicate.
                             if (!overflow_logged)
                             {
-                                log().debug("ConfigWatcher '{}': notification "
-                                            "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
-                                            "coalescing dropped events.",
-                                            label);
+                                log().debug(
+                                    "ConfigWatcher '{}': notification "
+                                    "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
+                                    "coalescing dropped events.",
+                                    label
+                                );
                                 overflow_logged = true;
                             }
                             pending = true;
@@ -676,10 +716,12 @@ namespace DetourModKit
                         // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
                         if (!overflow_logged)
                         {
-                            log().debug("ConfigWatcher '{}': notification buffer "
-                                        "overflowed (zero-byte completion); "
-                                        "coalescing dropped events.",
-                                        label);
+                            log().debug(
+                                "ConfigWatcher '{}': notification buffer "
+                                "overflowed (zero-byte completion); "
+                                "coalescing dropped events.",
+                                label
+                            );
                             overflow_logged = true;
                         }
                         matched = true;
@@ -812,10 +854,12 @@ namespace DetourModKit
 
                 if (!drained)
                 {
-                    log().warning("ConfigWatcher '{}': pending directory notification did "
-                                  "not drain after cancel + handle close; leaking the watch "
-                                  "buffer to stay memory-safe.",
-                                  label);
+                    log().warning(
+                        "ConfigWatcher '{}': pending directory notification did "
+                        "not drain after cancel + handle close; leaking the watch "
+                        "buffer to stay memory-safe.",
+                        label
+                    );
                     (void)io.release();
                 }
 
@@ -868,8 +912,10 @@ namespace DetourModKit
                 }
                 else
                 {
-                    log().warning("ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
-                                  m_impl->ini_path_utf8);
+                    log().warning(
+                        "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
+                        m_impl->ini_path_utf8
+                    );
                     started = false;
                     handshake_timed_out = true;
                 }

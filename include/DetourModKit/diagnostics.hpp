@@ -332,8 +332,10 @@ namespace DetourModKit
          * @return The aggregated snapshot.
          * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
          */
-        [[nodiscard]] Snapshot collect(std::span<const rtti::DriftEntry> drift_report = {},
-                                       std::span<const anchor::ResolvedAnchor> anchor_report = {});
+        [[nodiscard]] Snapshot collect(
+            std::span<const rtti::DriftEntry> drift_report = {},
+            std::span<const anchor::ResolvedAnchor> anchor_report = {}
+        );
     } // namespace diagnostics
 } // namespace DetourModKit
 

@@ -256,8 +256,8 @@ namespace DetourModKit
          * @return The resolved InputCode, or std::nullopt if the tag is unknown or the value is not a valid
          *         non-negative hex int.
          */
-        std::optional<InputCode> parse_source_tagged_hex(std::string_view source_token,
-                                                         std::string_view hex_token) noexcept
+        std::optional<InputCode>
+        parse_source_tagged_hex(std::string_view source_token, std::string_view hex_token) noexcept
         {
             InputSource source = InputSource::Keyboard;
             if (icompare(source_token, "Keyboard") == 0)
@@ -317,8 +317,11 @@ namespace DetourModKit
                 {
                     indices[i] = i;
                 }
-                std::sort(indices, indices + count,
-                          [](size_t a, size_t b) { return icompare(NAME_TABLE[a].name, NAME_TABLE[b].name) < 0; });
+                std::sort(
+                    indices,
+                    indices + count,
+                    [](size_t a, size_t b) { return icompare(NAME_TABLE[a].name, NAME_TABLE[b].name) < 0; }
+                );
             }
         };
 

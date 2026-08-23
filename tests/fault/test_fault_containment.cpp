@@ -110,8 +110,14 @@ namespace
     {
     public:
         SplitInstructionPages() noexcept
-            : m_base(static_cast<std::byte *>(
-                  ::VirtualAlloc(nullptr, 2 * dmk_test::PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)))
+            : m_base(
+                  static_cast<std::byte *>(::VirtualAlloc(
+                      nullptr,
+                      2 * dmk_test::PAGE_BYTES,
+                      MEM_RESERVE | MEM_COMMIT,
+                      PAGE_EXECUTE_READWRITE
+                  ))
+              )
         {
         }
 
@@ -156,8 +162,13 @@ namespace
             (void)*probe;
             return false;
         }
-        __except (DetourModKit::detail::guarded_range_fault_filter(GetExceptionInformation(), target,
-                                                                   target + sizeof(std::uint32_t)))
+        __except (
+            DetourModKit::detail::guarded_range_fault_filter(
+                GetExceptionInformation(),
+                target,
+                target + sizeof(std::uint32_t)
+            )
+        )
         {
             return true;
         }
@@ -200,7 +211,8 @@ TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
     instruction[1] = std::byte{0x05};
     const auto instruction_address = reinterpret_cast<std::uintptr_t>(instruction);
     const auto displacement = static_cast<std::int32_t>(
-        reinterpret_cast<std::uintptr_t>(pages.bytes() + target_offset) - (instruction_address + 10));
+        reinterpret_cast<std::uintptr_t>(pages.bytes() + target_offset) - (instruction_address + 10)
+    );
     std::memcpy(instruction + 2, &displacement, sizeof(displacement));
     instruction[6] = std::byte{0x78};
     instruction[7] = std::byte{0x56};
@@ -209,13 +221,16 @@ TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
     ASSERT_TRUE(pages.protect_tail());
 
     const scan::Candidate ladder[] = {
-        scan::Candidate::rip_relative("boundary-tail", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .label = "boundary-tail",
-        .scope = pages.range(),
-        .pages = scan::Pages::Executable,
-    });
+        scan::Candidate::rip_relative("boundary-tail", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .label = "boundary-tail",
+            .scope = pages.range(),
+            .pages = scan::Pages::Executable,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::IncompleteScan);
@@ -247,8 +262,12 @@ TEST(FaultContainment, GuardedRegionStaysArmedAcrossANestedGuardedRead)
     const bool contained = nested_access_guarded(page.addr(), readable, &inner_read_ok);
 #else
     NestedAccessContext ctx{page.addr(), readable, false};
-    const bool contained = !DetourModKit::detail::run_guarded_region(ctx.target, ctx.target + sizeof(std::uint32_t),
-                                                                     &nested_access_body, &ctx);
+    const bool contained = !DetourModKit::detail::run_guarded_region(
+        ctx.target,
+        ctx.target + sizeof(std::uint32_t),
+        &nested_access_body,
+        &ctx
+    );
     const bool inner_read_ok = ctx.inner_read_ok;
 #endif
 

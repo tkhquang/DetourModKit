@@ -185,8 +185,18 @@ namespace
 
     void print_row(const char *workload, std::size_t slots, const Measurement &m, long long tick_ns) noexcept
     {
-        std::printf("%s\t%zu\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%lld\n", workload, slots, m.iterations, m.mean_ns,
-                    m.p50, m.p99, m.p999, m.max, tick_ns);
+        std::printf(
+            "%s\t%zu\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%lld\n",
+            workload,
+            slots,
+            m.iterations,
+            m.mean_ns,
+            m.p50,
+            m.p99,
+            m.p999,
+            m.max,
+            tick_ns
+        );
     }
 } // namespace
 
@@ -234,17 +244,21 @@ int main()
     const Address table_base{reinterpret_cast<std::uintptr_t>(s_table.data())};
     const Address expected_first_slot{s_table[0]};
 
-    const Measurement miss =
-        measure(TABLE_WARMUP, TABLE_ITERATIONS,
-                [&] { return !rtti::find_in_pointer_table(table_base, SLOT_COUNT, ABSENT_NAME, nullptr).has_value(); });
+    const Measurement miss = measure(
+        TABLE_WARMUP,
+        TABLE_ITERATIONS,
+        [&] { return !rtti::find_in_pointer_table(table_base, SLOT_COUNT, ABSENT_NAME, nullptr).has_value(); }
+    );
 
-    const Measurement hit = measure(TABLE_WARMUP, TABLE_ITERATIONS,
-                                    [&]
-                                    {
-                                        const auto found =
-                                            rtti::find_in_pointer_table(table_base, SLOT_COUNT, SLOT_NAME, nullptr);
-                                        return found.has_value() && *found == expected_first_slot;
-                                    });
+    const Measurement hit = measure(
+        TABLE_WARMUP,
+        TABLE_ITERATIONS,
+        [&]
+        {
+            const auto found = rtti::find_in_pointer_table(table_base, SLOT_COUNT, SLOT_NAME, nullptr);
+            return found.has_value() && *found == expected_first_slot;
+        }
+    );
 
     std::printf("workload\tslots\titerations\tmean_ns\tp50_ns\tp99_ns\tp999_ns\tmax_ns\tclock_tick_ns\n");
     print_row("type_identity_matches_warm", 1, warm, tick_ns);

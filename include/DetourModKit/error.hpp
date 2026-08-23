@@ -619,8 +619,14 @@ namespace DetourModKit
         // Keep the distinctive code name whole and lead with the subsystem so the line stays both human-readable and
         // greppable by category. An empty/absent label is rendered as "?" rather than a blank gap.
         const char *label = (where != nullptr && where[0] != '\0') ? where : "?";
-        return std::format("[{}] {} @ {} (detail=0x{:X}, extra={})", to_string(category(code)), to_string(code), label,
-                           detail, extra);
+        return std::format(
+            "[{}] {} @ {} (detail=0x{:X}, extra={})",
+            to_string(category(code)),
+            to_string(code),
+            label,
+            detail,
+            extra
+        );
     }
 
 } // namespace DetourModKit

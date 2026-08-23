@@ -208,6 +208,9 @@ A `.cpp` must live beside the kind of header it implements. A TU for an installe
 - Braces must use Allman style. `InsertBraces` remains unset, so a guard clause can omit braces. Every multi-line or non-obvious body must have braces.
 - Add a trailing comma to every top-level designated-initializer list, regardless of its field count. clang-format keeps the break. Put each field on its own line at the block indent. A rename then does not re-flow the block. Keep a designated-initializer list inside another field value compact and omit its own trailing comma. clang-format breaks after the `=` when that nested list expands.
 - Put each element of a multi-element braced sequence list on its own line. Add a trailing comma after the final element to preserve the break. The alternatives then line up for comparison. Keep a one-element list on one line. This rule covers container elements. Aggregate fields follow the designated-initializer rule above.
+- Keep each function call, declaration, or definition on one line when its list fits within 120 columns.
+- If its argument or parameter list wraps, put one item on each line.
+- Put the right parenthesis of each wrapped list on its own line.
 - Use 4 spaces for indentation. Do not use tabs.
 - Apply these namespace rules:
 - Put all public API in `namespace DetourModKit`.

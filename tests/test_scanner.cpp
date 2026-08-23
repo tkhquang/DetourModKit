@@ -34,13 +34,13 @@ namespace
     // Thin shape adapters so the engine white-box tests below drive one fixed call shape: the page-gated whole-process
     // scans return a MatchResult (the .match pointer plus an incomplete-scan flag), and the prologue gate takes an
     // Address. Pure shape adapters with no behaviour of their own.
-    [[nodiscard]] inline const std::byte *scan_exec(const detail::EnginePattern &pattern,
-                                                    std::size_t occurrence = 1) noexcept
+    [[nodiscard]] inline const std::byte *
+    scan_exec(const detail::EnginePattern &pattern, std::size_t occurrence = 1) noexcept
     {
         return detail::scan_executable_regions(pattern, detail::ScanQuery{occurrence}).match;
     }
-    [[nodiscard]] inline const std::byte *scan_read(const detail::EnginePattern &pattern,
-                                                    std::size_t occurrence = 1) noexcept
+    [[nodiscard]] inline const std::byte *
+    scan_read(const detail::EnginePattern &pattern, std::size_t occurrence = 1) noexcept
     {
         return detail::scan_readable_regions(pattern, detail::ScanQuery{occurrence}).match;
     }
@@ -50,17 +50,23 @@ namespace
     }
     // resolve_rip_relative / find_and_resolve_rip_relative take an Address / Region; these adapters let the tests drive
     // them from a raw pointer (+ length) by building the Address / Region scope types in one place.
-    [[nodiscard]] inline Result<Address> resolve_rip(const std::byte *instruction, std::size_t displacement_offset,
-                                                     std::size_t instruction_length) noexcept
+    [[nodiscard]] inline Result<Address>
+    resolve_rip(const std::byte *instruction, std::size_t displacement_offset, std::size_t instruction_length) noexcept
     {
         return scan::resolve_rip_relative(Address{instruction}, displacement_offset, instruction_length);
     }
-    [[nodiscard]] inline Result<Address> find_and_resolve_rip(const std::byte *search_start, std::size_t search_length,
-                                                              std::span<const std::byte> opcode_prefix,
-                                                              std::size_t instruction_length) noexcept
+    [[nodiscard]] inline Result<Address> find_and_resolve_rip(
+        const std::byte *search_start,
+        std::size_t search_length,
+        std::span<const std::byte> opcode_prefix,
+        std::size_t instruction_length
+    ) noexcept
     {
-        return scan::find_and_resolve_rip_relative(Region{Address{search_start}, search_length}, opcode_prefix,
-                                                   instruction_length);
+        return scan::find_and_resolve_rip_relative(
+            Region{Address{search_start}, search_length},
+            opcode_prefix,
+            instruction_length
+        );
     }
 } // namespace
 
@@ -302,8 +308,10 @@ TEST(ScannerJumpsTest, MultiGapExhaustiveBacktrackingTerminates)
 // so the correct answer is a clean no-match.
 TEST(ScannerJumpsTest, MultiGapWorkBudgetCapsPathologicalBacktracking)
 {
-    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
-                                     "[0-255] FF");
+    const auto p = detail::parse_aob(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+        "[0-255] FF"
+    );
     ASSERT_TRUE(p.has_value());
     ASSERT_EQ(p->jumps.size(), 8u); // MAX_PATTERN_JUMPS: the widest gap count the grammar admits.
 
@@ -325,8 +333,10 @@ TEST(ScannerJumpsTest, MultiGapWorkBudgetCapsPathologicalBacktracking)
 // tree straight past the per-position budget.
 TEST(ScannerJumpsTest, BudgetExhaustionIsSignalledOnRawMatch)
 {
-    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
-                                     "[0-255] FF");
+    const auto p = detail::parse_aob(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+        "[0-255] FF"
+    );
     ASSERT_TRUE(p.has_value());
 
     std::vector<std::byte> region(3072, std::byte{0x00});
@@ -398,8 +408,10 @@ TEST(ScannerJumpsTest, ExactPerPositionBudgetAllowsLaterMatch)
 // (find_pattern_raw -> scan_region_for_match -> scan_region_guarded -> scan_regions_filtered -> MatchResult).
 TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
 {
-    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
-                                     "[0-255] FF");
+    const auto p = detail::parse_aob(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+        "[0-255] FF"
+    );
     ASSERT_TRUE(p.has_value());
 
     void *base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -410,12 +422,17 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
     bytes[2600] = 0xA5; // later anchor, beyond the first anchor's maximum reach
     bytes[2608] = 0xFF; // a genuine later match through the all-minimum gap placement
 
-    const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
-                                   reinterpret_cast<std::uintptr_t>(base) + 0x1000};
-    const detail::MatchResult result = detail::scan_module_readable(*p, range,
-                                                                    detail::ScanQuery{
-                                                                        .occurrence = 1,
-                                                                    });
+    const detail::ModuleSpan range{
+        reinterpret_cast<std::uintptr_t>(base),
+        reinterpret_cast<std::uintptr_t>(base) + 0x1000
+    };
+    const detail::MatchResult result = detail::scan_module_readable(
+        *p,
+        range,
+        detail::ScanQuery{
+            .occurrence = 1,
+        }
+    );
     EXPECT_EQ(result.match, reinterpret_cast<const std::byte *>(bytes + 2600));
     // Budget exhaustion surfaces alongside the later match, never as a confident hit, and it is reported on its own
     // channel: a caller can tell an over-broad pattern from a concurrent unmap of the scanned range.
@@ -424,7 +441,8 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
     EXPECT_TRUE(result.truncated());
 
     const auto public_pattern = scan::Pattern::compile(
-        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF"
+    );
     ASSERT_TRUE(public_pattern.has_value());
     const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x1000};
     const auto public_result = scan::scan(*public_pattern, scope, 1, scan::Pages::Readable);
@@ -439,7 +457,8 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
 TEST(ScannerJumpsTest, UncheckedScanFailsClosedOnBudgetExhaustion)
 {
     const auto pattern = scan::Pattern::compile(
-        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF"
+    );
     ASSERT_TRUE(pattern.has_value());
 
     std::vector<std::byte> region(4096, std::byte{0x00});
@@ -1129,8 +1148,15 @@ TEST(ScannerTest, find_pattern_nibble_scalar_tail)
 
 TEST(ScannerTest, find_pattern_wildcard_before_start)
 {
-    std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00},
-                                   std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
+    std::vector<std::byte> data = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05}
+    };
 
     auto pattern = detail::parse_aob("?? 48 8B");
     ASSERT_TRUE(pattern.has_value());
@@ -1177,8 +1203,15 @@ TEST(ScannerTest, find_pattern_overlapping_matches)
 
 TEST(ScannerTest, find_pattern_wildcard_middle_multiple_candidates)
 {
-    std::vector<std::byte> data = {std::byte{0x48}, std::byte{0xAA}, std::byte{0x05}, std::byte{0x00},
-                                   std::byte{0x48}, std::byte{0xBB}, std::byte{0x05}};
+    std::vector<std::byte> data = {
+        std::byte{0x48},
+        std::byte{0xAA},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x48},
+        std::byte{0xBB},
+        std::byte{0x05}
+    };
 
     auto pattern = detail::parse_aob("48 ?? 05");
     ASSERT_TRUE(pattern.has_value());
@@ -1205,8 +1238,18 @@ TEST(ScannerTest, find_pattern_memchr_boundary)
 
 TEST(ScannerTest, find_pattern_long_wildcard_prefix)
 {
-    std::vector<std::byte> data = {std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}, std::byte{0x55},
-                                   std::byte{0x48}, std::byte{0x8B}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> data = {
+        std::byte{0x11},
+        std::byte{0x22},
+        std::byte{0x33},
+        std::byte{0x44},
+        std::byte{0x55},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto pattern = detail::parse_aob("?? ?? ?? ?? ?? 48 8B");
     ASSERT_TRUE(pattern.has_value());
@@ -1522,8 +1565,15 @@ TEST(ScannerTest, find_pattern_nth_occurrence_with_overlap)
 
 TEST(ScannerTest, find_pattern_const_correctness)
 {
-    const std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x00}, std::byte{0x48}, std::byte{0x8B},
-                                         std::byte{0x05}, std::byte{0x00}, std::byte{0x00}};
+    const std::vector<std::byte> data = {
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
@@ -1600,8 +1650,15 @@ protected:
 TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
 {
     // MOV RAX, [RIP+0x12345678]  =>  48 8B 05 78 56 34 12
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x78},
-                                   std::byte{0x56}, std::byte{0x34}, std::byte{0x12}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x78},
+        std::byte{0x56},
+        std::byte{0x34},
+        std::byte{0x12}
+    };
 
     auto result = resolve_rip(code.data(), 3, 7);
 
@@ -1613,8 +1670,15 @@ TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
 TEST_F(ScannerRipTest, resolve_rip_relative_negative_displacement)
 {
     // MOV RAX, [RIP-0x10]  =>  48 8B 05 F0 FF FF FF
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0xF0},
-                                   std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0xF0},
+        std::byte{0xFF},
+        std::byte{0xFF},
+        std::byte{0xFF}
+    };
 
     auto result = resolve_rip(code.data(), 3, 7);
 
@@ -1626,8 +1690,15 @@ TEST_F(ScannerRipTest, resolve_rip_relative_negative_displacement)
 
 TEST_F(ScannerRipTest, resolve_rip_relative_zero_displacement)
 {
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00},
-                                   std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = resolve_rip(code.data(), 3, 7);
 
@@ -1718,10 +1789,20 @@ TEST_F(ScannerRipTest, resolve_rip_relative_implausible_target_rejected)
 TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
 {
     // Padding + MOV RAX, [RIP+0x00000020]
-    std::vector<std::byte> code = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, // NOP padding
-                                   std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, // MOV RAX, [RIP+disp32]
-                                   std::byte{0x20}, std::byte{0x00}, std::byte{0x00},
-                                   std::byte{0x00}, std::byte{0x90}, std::byte{0x90}};
+    std::vector<std::byte> code = {
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90}, // NOP padding
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05}, // MOV RAX, [RIP+disp32]
+        std::byte{0x20},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x90},
+        std::byte{0x90}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -1733,8 +1814,15 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
 TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
 {
     // LEA RAX, [RIP+0x100]
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}, std::byte{0x00},
-                                   std::byte{0x01}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8D},
+        std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_LEA_RAX_RIP, 7);
 
@@ -1745,9 +1833,15 @@ TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
 
 TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
 {
-    std::vector<std::byte> code = {std::byte{0x55}, // PUSH RBP
-                                   std::byte{0xE8}, // CALL rel32
-                                   std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x90}};
+    std::vector<std::byte> code = {
+        std::byte{0x55}, // PUSH RBP
+        std::byte{0xE8}, // CALL rel32
+        std::byte{0xFF},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x90}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
@@ -1770,8 +1864,17 @@ TEST_F(ScannerRipTest, find_and_resolve_jmp_rel32)
 TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
 {
     // Region large enough for prefix + disp32 but contains no matching prefix
-    std::vector<std::byte> code = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
-                                   std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+    std::vector<std::byte> code = {
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -1801,9 +1904,22 @@ TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
 TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
 {
     // Two MOV RAX, [RIP+disp32] with different displacements
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x10}, std::byte{0x00},
-                                   std::byte{0x00}, std::byte{0x00}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
-                                   std::byte{0x20}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x10},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x20},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -1859,8 +1975,12 @@ TEST_F(ScannerRipTest, find_and_resolve_skips_implausible_decoy_and_finds_genuin
     const std::int32_t genuine_disp = 0x10;
     std::memcpy(bytes + genuine_off + 3, &genuine_disp, sizeof(genuine_disp));
 
-    const auto result = find_and_resolve_rip(reinterpret_cast<const std::byte *>(region.get()), si.dwPageSize,
-                                             scan::PREFIX_MOV_RAX_RIP, 7);
+    const auto result = find_and_resolve_rip(
+        reinterpret_cast<const std::byte *>(region.get()),
+        si.dwPageSize,
+        scan::PREFIX_MOV_RAX_RIP,
+        7
+    );
 
     // The decoy resolved implausibly and was skipped; the genuine site at +16 resolves to base + 16 + 7 + 0x10.
     ASSERT_TRUE(result.has_value());
@@ -1870,10 +1990,22 @@ TEST_F(ScannerRipTest, find_and_resolve_skips_implausible_decoy_and_finds_genuin
 TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
 {
     // 48 8B followed by wrong third byte, then the real prefix
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}, // MOV RCX, not RAX
-                                   std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
-                                   std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, // MOV RAX
-                                   std::byte{0x30}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x0D}, // MOV RCX, not RAX
+        std::byte{0xFF},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05}, // MOV RAX
+        std::byte{0x30},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -1885,8 +2017,16 @@ TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
 TEST_F(ScannerRipTest, resolve_rip_relative_custom_instruction_form)
 {
     // MOVSS XMM0, [RIP+disp32] => F3 0F 10 05 <disp32>  (prefix_len=4, instr_len=8)
-    std::vector<std::byte> code = {std::byte{0xF3}, std::byte{0x0F}, std::byte{0x10}, std::byte{0x05},
-                                   std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0xF3},
+        std::byte{0x0F},
+        std::byte{0x10},
+        std::byte{0x05},
+        std::byte{0x40},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = resolve_rip(code.data(), 4, 8);
 
@@ -1925,8 +2065,16 @@ TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
 {
     // Prefix starts at the last valid position
-    std::vector<std::byte> code = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0xE8},
-                                   std::byte{0x0A}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0x90},
+        std::byte{0xE8},
+        std::byte{0x0A},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
@@ -1937,8 +2085,15 @@ TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
 
 TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
 {
-    std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}, std::byte{0x50},
-                                   std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    std::vector<std::byte> code = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x0D},
+        std::byte{0x50},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00}
+    };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RCX_RIP, 7);
 
@@ -1958,10 +2113,24 @@ TEST(ScannerExecRegionTest, FindsPatternInExecutableMemory)
     std::memset(bytes, 0xCC, 4096);
 
     // 16-byte pattern unlikely to appear elsewhere in process memory
-    const std::byte sig[] = {std::byte{0x7A}, std::byte{0x3F}, std::byte{0xE1}, std::byte{0x9C},
-                             std::byte{0x42}, std::byte{0xB8}, std::byte{0x05}, std::byte{0xD7},
-                             std::byte{0x6E}, std::byte{0xA3}, std::byte{0x11}, std::byte{0x8F},
-                             std::byte{0x54}, std::byte{0xC6}, std::byte{0x29}, std::byte{0x70}};
+    const std::byte sig[] = {
+        std::byte{0x7A},
+        std::byte{0x3F},
+        std::byte{0xE1},
+        std::byte{0x9C},
+        std::byte{0x42},
+        std::byte{0xB8},
+        std::byte{0x05},
+        std::byte{0xD7},
+        std::byte{0x6E},
+        std::byte{0xA3},
+        std::byte{0x11},
+        std::byte{0x8F},
+        std::byte{0x54},
+        std::byte{0xC6},
+        std::byte{0x29},
+        std::byte{0x70}
+    };
     std::memcpy(&bytes[256], sig, sizeof(sig));
 
     auto pattern = detail::parse_aob("7A 3F E1 9C 42 B8 05 D7 6E A3 11 8F 54 C6 29 70");
@@ -2009,10 +2178,24 @@ TEST(ScannerExecRegionTest, NthOccurrence)
     std::memset(bytes, 0x00, 4096);
 
     // 16-byte unique pattern placed at two offsets within our page
-    const std::byte sig[] = {std::byte{0xB1}, std::byte{0x4D}, std::byte{0xF8}, std::byte{0xA2},
-                             std::byte{0x63}, std::byte{0xC9}, std::byte{0x07}, std::byte{0xE5},
-                             std::byte{0x3A}, std::byte{0x96}, std::byte{0x1B}, std::byte{0xD4},
-                             std::byte{0x58}, std::byte{0x0E}, std::byte{0x7C}, std::byte{0x2F}};
+    const std::byte sig[] = {
+        std::byte{0xB1},
+        std::byte{0x4D},
+        std::byte{0xF8},
+        std::byte{0xA2},
+        std::byte{0x63},
+        std::byte{0xC9},
+        std::byte{0x07},
+        std::byte{0xE5},
+        std::byte{0x3A},
+        std::byte{0x96},
+        std::byte{0x1B},
+        std::byte{0xD4},
+        std::byte{0x58},
+        std::byte{0x0E},
+        std::byte{0x7C},
+        std::byte{0x2F}
+    };
     std::memcpy(&bytes[100], sig, sizeof(sig));
     std::memcpy(&bytes[500], sig, sizeof(sig));
 
@@ -2047,10 +2230,24 @@ TEST(ScannerExecRegionTest, SkipsNonExecutableMemory)
     auto *bytes = reinterpret_cast<std::byte *>(rw_mem);
     std::memset(bytes, 0x00, 4096);
 
-    const std::byte sig[] = {std::byte{0xF0}, std::byte{0x0D}, std::byte{0xCA}, std::byte{0xFE},
-                             std::byte{0x91}, std::byte{0x3E}, std::byte{0x7B}, std::byte{0xA5},
-                             std::byte{0xD2}, std::byte{0x48}, std::byte{0x16}, std::byte{0xC3},
-                             std::byte{0x6A}, std::byte{0xEF}, std::byte{0x04}, std::byte{0x87}};
+    const std::byte sig[] = {
+        std::byte{0xF0},
+        std::byte{0x0D},
+        std::byte{0xCA},
+        std::byte{0xFE},
+        std::byte{0x91},
+        std::byte{0x3E},
+        std::byte{0x7B},
+        std::byte{0xA5},
+        std::byte{0xD2},
+        std::byte{0x48},
+        std::byte{0x16},
+        std::byte{0xC3},
+        std::byte{0x6A},
+        std::byte{0xEF},
+        std::byte{0x04},
+        std::byte{0x87}
+    };
     std::memcpy(&bytes[0], sig, sizeof(sig));
 
     auto pattern = detail::parse_aob("F0 0D CA FE 91 3E 7B A5 D2 48 16 C3 6A EF 04 87");
@@ -2108,8 +2305,16 @@ TEST(ScannerExecRegionTest, OffsetStillAppliedExactlyOnce)
 
     // Distinctive 8-byte pattern at offset 300 with `|` marker after byte 3.
     constexpr size_t region_offset = 300;
-    const std::byte sig[] = {std::byte{0x71}, std::byte{0xE3}, std::byte{0x9A}, std::byte{0x4D},
-                             std::byte{0x06}, std::byte{0xBF}, std::byte{0x52}, std::byte{0x18}};
+    const std::byte sig[] = {
+        std::byte{0x71},
+        std::byte{0xE3},
+        std::byte{0x9A},
+        std::byte{0x4D},
+        std::byte{0x06},
+        std::byte{0xBF},
+        std::byte{0x52},
+        std::byte{0x18}
+    };
     std::memcpy(&bytes[region_offset], sig, sizeof(sig));
 
     auto pattern = detail::parse_aob("71 E3 9A | 4D 06 BF 52 18");
@@ -2138,10 +2343,24 @@ TEST(ScannerExecRegionTest, SkipsGuardPages)
     auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
     std::memset(bytes, 0x00, 4096);
 
-    const std::byte sig[] = {std::byte{0xC7}, std::byte{0x3B}, std::byte{0xA0}, std::byte{0xD9},
-                             std::byte{0x14}, std::byte{0x6F}, std::byte{0xE2}, std::byte{0x85},
-                             std::byte{0x4C}, std::byte{0x01}, std::byte{0x7D}, std::byte{0xF3},
-                             std::byte{0xA8}, std::byte{0x56}, std::byte{0x2E}, std::byte{0xBB}};
+    const std::byte sig[] = {
+        std::byte{0xC7},
+        std::byte{0x3B},
+        std::byte{0xA0},
+        std::byte{0xD9},
+        std::byte{0x14},
+        std::byte{0x6F},
+        std::byte{0xE2},
+        std::byte{0x85},
+        std::byte{0x4C},
+        std::byte{0x01},
+        std::byte{0x7D},
+        std::byte{0xF3},
+        std::byte{0xA8},
+        std::byte{0x56},
+        std::byte{0x2E},
+        std::byte{0xBB}
+    };
     std::memcpy(&bytes[0], sig, sizeof(sig));
 
     DWORD old_protect;
@@ -2448,8 +2667,16 @@ TEST(ScannerTest, find_pattern_common_byte_anchoring)
 TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 {
     // Pattern made entirely of common opcodes (high frequency scores)
-    const std::byte data[] = {std::byte{0x00}, std::byte{0x00}, std::byte{0xCC}, std::byte{0x90},
-                              std::byte{0xFF}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x00}};
+    const std::byte data[] = {
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0xCC},
+        std::byte{0x90},
+        std::byte{0xFF},
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x00}
+    };
 
     const auto pattern = detail::parse_aob("CC 90 FF 48 8B");
     ASSERT_TRUE(pattern.has_value());
@@ -3254,8 +3481,8 @@ TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
 // A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped ladder has a real
 // in-host target to resolve. volatile const keeps the linker from folding the bytes or discarding them as unused (the
 // fixture DLL uses the same idiom for its stable AOB markers).
-static volatile const unsigned char s_host_marker[16] = {0x5A, 0xC3, 0x91, 0x44, 0xE2, 0x7B, 0x10, 0x8F,
-                                                         0x36, 0xBD, 0x09, 0xA1, 0xCE, 0x52, 0x74, 0xF0};
+static volatile const unsigned char s_host_marker[16] =
+    {0x5A, 0xC3, 0x91, 0x44, 0xE2, 0x7B, 0x10, 0x8F, 0x36, 0xBD, 0x09, 0xA1, 0xCE, 0x52, 0x74, 0xF0};
 
 // A signature that straddles the boundary between two adjacent accepted executable regions must be found. Two committed
 // pages allocated as one span but given different executable protections (RWX then RX) are reported by VirtualQuery as
@@ -3277,8 +3504,8 @@ TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
     std::memset(base, 0xCC, page * 2);
 
     // A rare 16-byte signature straddling the page boundary: 8 bytes end the first page, 8 begin the second.
-    const std::uint8_t sig[16] = {0x3E, 0x9D, 0x71, 0xC4, 0x06, 0xBA, 0x58, 0xEF,
-                                  0x12, 0xA7, 0x4F, 0x83, 0xDC, 0x6B, 0x90, 0x25};
+    const std::uint8_t sig[16] =
+        {0x3E, 0x9D, 0x71, 0xC4, 0x06, 0xBA, 0x58, 0xEF, 0x12, 0xA7, 0x4F, 0x83, 0xDC, 0x6B, 0x90, 0x25};
     std::uint8_t *const plant = base + page - 8; // last 8 bytes of page 1, first 8 of page 2
     std::memcpy(plant, sig, sizeof(sig));
 
@@ -3369,8 +3596,10 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     auto pattern = detail::parse_aob("DE AD BE EF CA FE");
     ASSERT_TRUE(pattern.has_value());
 
-    const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
-                                   reinterpret_cast<std::uintptr_t>(base) + size};
+    const detail::ModuleSpan range{
+        reinterpret_cast<std::uintptr_t>(base),
+        reinterpret_cast<std::uintptr_t>(base) + size
+    };
 
     // Positive control: the refactored scan body still finds a planted needle at the right address.
     const std::uint8_t needle[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
@@ -3395,7 +3624,8 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
             {
                 event_payload_ok = false;
             }
-        });
+        }
+    );
 
     const std::uintptr_t middle = reinterpret_cast<std::uintptr_t>(base) + (pages / 2) * page;
     std::jthread toggler(
@@ -3406,7 +3636,8 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
                 VirtualFree(reinterpret_cast<void *>(middle), page, MEM_DECOMMIT);
                 VirtualAlloc(reinterpret_cast<void *>(middle), page, MEM_COMMIT, PAGE_READWRITE);
             }
-        });
+        }
+    );
 
     for (int i = 0; i < 5000; ++i)
     {

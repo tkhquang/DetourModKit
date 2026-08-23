@@ -108,9 +108,17 @@ namespace
         std::printf("# trace %s (%zu events)\n", case_name, events.size());
         for (const Event &e : events)
         {
-            std::printf("#   %4d %-8s tid=%5lu hwnd=%p msg=0x%04X delta=%+d %s %s\n", e.seq, src_name(e.src),
-                        static_cast<unsigned long>(e.tid), static_cast<void *>(e.hwnd), e.msg, e.delta,
-                        e.removal == PM_REMOVE ? "REMOVE" : (e.removal == PM_NOREMOVE ? "NOREMOVE" : "-"), e.note);
+            std::printf(
+                "#   %4d %-8s tid=%5lu hwnd=%p msg=0x%04X delta=%+d %s %s\n",
+                e.seq,
+                src_name(e.src),
+                static_cast<unsigned long>(e.tid),
+                static_cast<void *>(e.hwnd),
+                e.msg,
+                e.delta,
+                e.removal == PM_REMOVE ? "REMOVE" : (e.removal == PM_NOREMOVE ? "NOREMOVE" : "-"),
+                e.note
+            );
         }
     }
 
@@ -276,8 +284,14 @@ namespace
             m->message = original.msg;
             m->wParam = original.wp;
             m->lParam = original.lp;
-            log_event(Src::NewerHook, m->hwnd, original.msg, static_cast<short>(HIWORD(original.wp)),
-                      static_cast<UINT>(wp), "rewrote-after-return");
+            log_event(
+                Src::NewerHook,
+                m->hwnd,
+                original.msg,
+                static_cast<short>(HIWORD(original.wp)),
+                static_cast<UINT>(wp),
+                "rewrote-after-return"
+            );
         }
         return r;
     }
@@ -292,8 +306,13 @@ namespace
         // Record what arrives here. After a resident consume this must already read WM_NULL.
         if (is_wheel(m->message) || m->message == WM_NULL)
         {
-            log_event(Src::OlderHook, m->hwnd, m->message, is_wheel(m->message) ? wheel_delta_of(*m) : 0,
-                      static_cast<UINT>(wp));
+            log_event(
+                Src::OlderHook,
+                m->hwnd,
+                m->message,
+                is_wheel(m->message) ? wheel_delta_of(*m) : 0,
+                static_cast<UINT>(wp)
+            );
         }
         if (m->message == WM_NULL && wp == PM_REMOVE && g_older_rewrites_back.load() && t_saved.msg != 0)
         {
@@ -394,8 +413,20 @@ namespace
 
     HWND make_window(Pump *pump, const wchar_t *title, DWORD style, HWND parent_or_owner)
     {
-        const HWND hwnd = CreateWindowExW(0, ensure_window_class(), title, style, 0, 0, 320, 240, parent_or_owner,
-                                          nullptr, GetModuleHandleW(nullptr), nullptr);
+        const HWND hwnd = CreateWindowExW(
+            0,
+            ensure_window_class(),
+            title,
+            style,
+            0,
+            0,
+            320,
+            240,
+            parent_or_owner,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
         if (hwnd != nullptr)
         {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pump));
@@ -488,8 +519,11 @@ namespace
                     }
                 }
             }
-            std::printf("# %s: filtered phase retrieved %d message(s)\n",
-                        pump->script == Script::FilterKeys ? "filter-keys" : "filter-wheel", filtered_hits);
+            std::printf(
+                "# %s: filtered phase retrieved %d message(s)\n",
+                pump->script == Script::FilterKeys ? "filter-keys" : "filter-wheel",
+                filtered_hits
+            );
             // Deterministic phase-boundary snapshot: the orchestrator reads this instead of racing a sleep
             // against the unfiltered drain below.
             g_filtered_phase_up_count.store(g_plane.counts[0].load());
@@ -549,8 +583,10 @@ namespace
         }
         if (waited != WAIT_OBJECT_0)
         {
-            std::printf("# finish_pump: pump tid=%lu did not exit in 15 s, detaching\n",
-                        static_cast<unsigned long>(pump->tid));
+            std::printf(
+                "# finish_pump: pump tid=%lu did not exit in 15 s, detaching\n",
+                static_cast<unsigned long>(pump->tid)
+            );
             pump->thread.detach();
             return; // leak the Pump and its events deliberately, the process is about to report anyway
         }
@@ -563,8 +599,12 @@ namespace
 
     void post_wheel(HWND hwnd, bool horizontal, int delta)
     {
-        PostMessageW(hwnd, horizontal ? WM_MOUSEHWHEEL : WM_MOUSEWHEEL,
-                     MAKEWPARAM(0, static_cast<WORD>(static_cast<short>(delta))), 0);
+        PostMessageW(
+            hwnd,
+            horizontal ? WM_MOUSEHWHEEL : WM_MOUSEWHEEL,
+            MAKEWPARAM(0, static_cast<WORD>(static_cast<short>(delta))),
+            0
+        );
     }
 
     HHOOK hook_thread(HOOKPROC proc, DWORD tid)
@@ -622,15 +662,23 @@ namespace
         post_wheel(pump->root, true, 120);
         post_wheel(pump->root, true, -120);
         check(quiesce(pump), "case1: pump quiesced");
-        check(counts(0) == 3 && counts(1) == 1 && counts(3) == 2 && counts(2) == 1,
-              "case1: four-direction counts Up=3 Down=1 Right=2 Left=1");
+        check(
+            counts(0) == 3 && counts(1) == 1 && counts(3) == 2 && counts(2) == 1,
+            "case1: four-direction counts Up=3 Down=1 Right=2 Left=1"
+        );
         const std::vector<Event> events = snapshot_log();
-        check(count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, PM_REMOVE) == 4,
-              "case1: hook saw each vertical message exactly once with PM_REMOVE");
-        check(count_events(events, Src::ResidentHook, WM_MOUSEHWHEEL, PM_REMOVE) == 3,
-              "case1: hook saw each horizontal message exactly once with PM_REMOVE");
-        check(count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 4,
-              "case1: consume off, the window procedure still received the vertical wheel messages");
+        check(
+            count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, PM_REMOVE) == 4,
+            "case1: hook saw each vertical message exactly once with PM_REMOVE"
+        );
+        check(
+            count_events(events, Src::ResidentHook, WM_MOUSEHWHEEL, PM_REMOVE) == 3,
+            "case1: hook saw each horizontal message exactly once with PM_REMOVE"
+        );
+        check(
+            count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 4,
+            "case1: consume off, the window procedure still received the vertical wheel messages"
+        );
         UnhookWindowsHookEx(hook);
         finish_pump(pump);
         dump_log("case1");
@@ -656,8 +704,10 @@ namespace
         check(quiesce(pump), "case2: pump quiesced");
         check(counts(0) == 2 && counts(1) == 1, "case2: vertical folds Up=2 Down=1 from partial deltas");
         check(counts(3) == 1 && counts(2) == 1, "case2: horizontal folds Right=1 Left=1 from partial deltas");
-        check(g_plane.remainder_v.load() == 0 && g_plane.remainder_h.load() == 0,
-              "case2: both remainders returned to zero");
+        check(
+            g_plane.remainder_v.load() == 0 && g_plane.remainder_h.load() == 0,
+            "case2: both remainders returned to zero"
+        );
         UnhookWindowsHookEx(hook);
         finish_pump(pump);
         dump_log("case2");
@@ -717,12 +767,16 @@ namespace
             PostMessageW(pump->root, WM_KEYUP, 'A', 0);
             SetEvent(pump->go);
             check(quiesce(pump), "case4a: pump quiesced");
-            check(g_filtered_phase_up_count.load() == 0,
-                  "case4a: key-range filtered peeks did not count the queued wheel");
+            check(
+                g_filtered_phase_up_count.load() == 0,
+                "case4a: key-range filtered peeks did not count the queued wheel"
+            );
             check(counts(0) == 1, "case4a: the unfiltered drain then counted the wheel exactly once");
             const std::vector<Event> events = snapshot_log();
-            check(count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, PM_REMOVE) == 1,
-                  "case4a: hook saw exactly one wheel removal overall");
+            check(
+                count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, PM_REMOVE) == 1,
+                "case4a: hook saw exactly one wheel removal overall"
+            );
             UnhookWindowsHookEx(hook);
             finish_pump(pump);
             dump_log("case4a");
@@ -782,13 +836,17 @@ namespace
                 }
             }
         }
-        check(seen_root == 1 && seen_child == 1 && seen_popup == 1 && seen_unrelated == 1,
-              "case5: the thread hook observed queue delivery to all four windows");
+        check(
+            seen_root == 1 && seen_child == 1 && seen_popup == 1 && seen_unrelated == 1,
+            "case5: the thread hook observed queue delivery to all four windows"
+        );
         const bool child_roots_to_root = GetAncestor(pump->child, GA_ROOT) == pump->root;
         const bool popup_is_own_root = GetAncestor(pump->popup, GA_ROOT) == pump->popup;
         const bool unrelated_is_own_root = GetAncestor(pump->unrelated, GA_ROOT) == pump->unrelated;
-        check(child_roots_to_root && popup_is_own_root && unrelated_is_own_root,
-              "case5: GA_ROOT maps child->root, popup->popup, unrelated->unrelated for the filter policy");
+        check(
+            child_roots_to_root && popup_is_own_root && unrelated_is_own_root,
+            "case5: GA_ROOT maps child->root, popup->popup, unrelated->unrelated for the filter policy"
+        );
         UnhookWindowsHookEx(hook);
         finish_pump(pump);
         dump_log("case5");
@@ -809,19 +867,25 @@ namespace
         const int hook_hits_posted = count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, PM_REMOVE);
         const int wndproc_wheel_hits = count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent);
         check(hook_hits_posted == 1, "case6: the posted child wheel produced exactly one hook removal event");
-        std::printf("# case6: wndproc wheel observations after one posted child wheel: %d "
-                    "(a second observation is DefWindowProc parent propagation, invisible to the hook)\n",
-                    wndproc_wheel_hits);
+        std::printf(
+            "# case6: wndproc wheel observations after one posted child wheel: %d "
+            "(a second observation is DefWindowProc parent propagation, invisible to the hook)\n",
+            wndproc_wheel_hits
+        );
 
         // In-thread SendMessage: direct call, never retrieved, the hook must not fire.
         clear_log();
         PostMessageW(pump->root, WM_APP_SEND_WHEEL_TO_CHILD, 0, 0);
         check(quiesce(pump), "case6: pump quiesced after the in-thread SendMessage command");
         events = snapshot_log();
-        check(count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, kNotAHookEvent) == 0,
-              "case6: an in-thread SendMessage wheel never reached the WH_GETMESSAGE hook");
-        check(count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 1,
-              "case6: the same SendMessage wheel did reach the window procedure");
+        check(
+            count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, kNotAHookEvent) == 0,
+            "case6: an in-thread SendMessage wheel never reached the WH_GETMESSAGE hook"
+        );
+        check(
+            count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 1,
+            "case6: the same SendMessage wheel did reach the window procedure"
+        );
 
         // Cross-thread SendMessage: delivered during message-wait processing, still not a retrieval.
         clear_log();
@@ -831,10 +895,14 @@ namespace
         check(sent != 0, "case6: the cross-thread SendMessage completed");
         check(quiesce(pump), "case6: pump quiesced after the cross-thread SendMessage");
         events = snapshot_log();
-        check(count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, kNotAHookEvent) == 0,
-              "case6: a cross-thread SendMessage wheel never reached the WH_GETMESSAGE hook");
-        check(count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 1,
-              "case6: the same cross-thread wheel did reach the window procedure");
+        check(
+            count_events(events, Src::ResidentHook, WM_MOUSEWHEEL, kNotAHookEvent) == 0,
+            "case6: a cross-thread SendMessage wheel never reached the WH_GETMESSAGE hook"
+        );
+        check(
+            count_events(events, Src::WndProc, WM_MOUSEWHEEL, kNotAHookEvent) >= 1,
+            "case6: the same cross-thread wheel did reach the window procedure"
+        );
         UnhookWindowsHookEx(hook);
         finish_pump(pump);
         dump_log("case6-final-phase");
@@ -889,11 +957,15 @@ namespace
                 pump_wheel_seq = e.seq;
             }
         }
-        check(newer_seq >= 0 && resident_seq > newer_seq && older_seq > resident_seq,
-              "case7a: chain order is newest first: newer -> resident -> older");
+        check(
+            newer_seq >= 0 && resident_seq > newer_seq && older_seq > resident_seq,
+            "case7a: chain order is newest first: newer -> resident -> older"
+        );
         check(older_saw_null, "case7a: the older hook received WM_NULL after the resident consume");
-        check(pump_null_seq >= 0 && pump_wheel_seq < 0,
-              "case7a: the re-assert defeated the older rewrite, the pump retrieved WM_NULL");
+        check(
+            pump_null_seq >= 0 && pump_wheel_seq < 0,
+            "case7a: the re-assert defeated the older rewrite, the pump retrieved WM_NULL"
+        );
         check(counts(0) == 1, "case7a: the consumed wheel still counted once");
         dump_log("case7a");
 
@@ -914,8 +986,10 @@ namespace
                 pump_saw_wheel = true;
             }
         }
-        check(pump_saw_wheel,
-              "case7b: a newer hook rewrote the message after the resident returned, the consume is best effort");
+        check(
+            pump_saw_wheel,
+            "case7b: a newer hook rewrote the message after the resident returned, the consume is best effort"
+        );
         UnhookWindowsHookEx(newer);
         UnhookWindowsHookEx(resident);
         UnhookWindowsHookEx(older);
@@ -970,8 +1044,11 @@ namespace
         finish_pump(p2); // thread 2 exits while `hook` is still installed on it
         const BOOL unhook_after_exit = UnhookWindowsHookEx(hook);
         const DWORD unhook_error = unhook_after_exit != 0 ? 0 : GetLastError();
-        std::printf("# case9c: UnhookWindowsHookEx after target-thread exit returned %ld (GetLastError=%lu)\n",
-                    static_cast<long>(unhook_after_exit), static_cast<unsigned long>(unhook_error));
+        std::printf(
+            "# case9c: UnhookWindowsHookEx after target-thread exit returned %ld (GetLastError=%lu)\n",
+            static_cast<long>(unhook_after_exit),
+            static_cast<unsigned long>(unhook_error)
+        );
         check(true, "case9c: unhook after target-thread exit recorded (cleanup only, result above)");
         const BOOL post_to_dead = PostMessageW(dead_root, WM_MOUSEWHEEL, MAKEWPARAM(0, 120), 0);
         check(post_to_dead == 0, "case9c: posting to the dead thread's window fails closed");
@@ -988,8 +1065,8 @@ int main()
             Sleep(180000);
             std::printf("# WATCHDOG: spike exceeded 180 s, aborting\n");
             ExitProcess(3);
-        })
-        .detach();
+        }
+    ).detach();
 
     // Host identity for the analysis record.
     using RtlGetVersionFn = LONG(WINAPI *)(PRTL_OSVERSIONINFOW);
@@ -1003,8 +1080,12 @@ int main()
             fn(&osv);
         }
     }
-    std::printf("# wheel_hook_spike: Windows %lu.%lu build %lu\n", osv.dwMajorVersion, osv.dwMinorVersion,
-                osv.dwBuildNumber);
+    std::printf(
+        "# wheel_hook_spike: Windows %lu.%lu build %lu\n",
+        osv.dwMajorVersion,
+        osv.dwMinorVersion,
+        osv.dwBuildNumber
+    );
 #if defined(_MSC_VER) && !defined(__GNUC__)
     std::printf("# toolchain: MSVC %d\n", _MSC_VER);
 #elif defined(__GNUC__)
@@ -1025,7 +1106,11 @@ int main()
     skip("case8: requires the game with gameoverlayrenderer64 present");
 
     std::printf("1..%d\n", g_test_index);
-    std::printf("# result: %s (%d checks, %d failures)\n", g_failures == 0 ? "GREEN (deterministic gates)" : "RED",
-                g_test_index, g_failures);
+    std::printf(
+        "# result: %s (%d checks, %d failures)\n",
+        g_failures == 0 ? "GREEN (deterministic gates)" : "RED",
+        g_test_index,
+        g_failures
+    );
     return g_failures == 0 ? 0 : 1;
 }

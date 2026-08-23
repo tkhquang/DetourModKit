@@ -47,8 +47,10 @@ namespace
         {
             const std::size_t observed_bindings = Input::instance().binding_count();
             s_observed_bindings.store(observed_bindings, std::memory_order_relaxed);
-            s_reentered_inside_reshape.store(s_inside_reshape.load(std::memory_order_acquire),
-                                             std::memory_order_relaxed);
+            s_reentered_inside_reshape.store(
+                s_inside_reshape.load(std::memory_order_acquire),
+                std::memory_order_relaxed
+            );
             s_retirement_thread.store(DetourModKit::detail::current_native_thread_id(), std::memory_order_relaxed);
             s_reentered.store(true, std::memory_order_release);
         }
@@ -56,12 +58,14 @@ namespace
 
     [[nodiscard]] BindingGuard register_probe(std::shared_ptr<ReenterOnDestroy> capture, int vk)
     {
-        auto registration = Input::instance().register_combo(ComboBinding{
-            .name = std::string{PROBE_NAME},
-            .trigger = Trigger::Press,
-            .combos = {KeyCombo{{keyboard_key(vk)}, {}}},
-            .on_press = [keep = std::move(capture)]() noexcept {},
-        });
+        auto registration = Input::instance().register_combo(
+            ComboBinding{
+                .name = std::string{PROBE_NAME},
+                .trigger = Trigger::Press,
+                .combos = {KeyCombo{{keyboard_key(vk)}, {}}},
+                .on_press = [keep = std::move(capture)]() noexcept {},
+            }
+        );
         return registration.has_value() ? std::move(*registration) : BindingGuard{};
     }
 
@@ -69,8 +73,12 @@ namespace
      * @brief Leaves one reshape entry as the sole owner of a consumer callable.
      * @details BindingGuard::release() drops the guard's gate reference without entry removal.
      */
-    [[nodiscard]] bool stage_sole_owner(BindingGuard &guard, std::shared_ptr<ReenterOnDestroy> capture, int vk,
-                                        const std::weak_ptr<ReenterOnDestroy> &observer)
+    [[nodiscard]] bool stage_sole_owner(
+        BindingGuard &guard,
+        std::shared_ptr<ReenterOnDestroy> capture,
+        int vk,
+        const std::weak_ptr<ReenterOnDestroy> &observer
+    )
     {
         guard = register_probe(std::move(capture), vk);
         if (!guard.is_active())
@@ -93,8 +101,8 @@ namespace
      *          calling thread runs nothing else between the two flag stores. A lock-held destruction deadlocks
      *          instead of reporting.
      */
-    [[nodiscard]] int report(const char *token, const std::weak_ptr<ReenterOnDestroy> &observer,
-                             std::size_t expected_bindings)
+    [[nodiscard]] int
+    report(const char *token, const std::weak_ptr<ReenterOnDestroy> &observer, std::size_t expected_bindings)
     {
         if (!observer.expired())
         {
@@ -119,8 +127,11 @@ namespace
         const std::size_t observed_bindings = s_observed_bindings.load(std::memory_order_relaxed);
         if (observed_bindings != expected_bindings)
         {
-            std::printf("FAIL: the reentrant query saw %zu binding(s), expected %zu\n", observed_bindings,
-                        expected_bindings);
+            std::printf(
+                "FAIL: the reentrant query saw %zu binding(s), expected %zu\n",
+                observed_bindings,
+                expected_bindings
+            );
             return 6;
         }
         std::puts(token);

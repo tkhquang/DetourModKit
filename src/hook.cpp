@@ -103,8 +103,10 @@ namespace DetourModKit::detail
     // unit forwards the seam because only it names the backend.
     void set_backend_reprotect_failure_target(void *target) noexcept
     {
-        safetyhook::g_trap_restore_failure_override.store(static_cast<std::uint8_t *>(target),
-                                                          std::memory_order_release);
+        safetyhook::g_trap_restore_failure_override.store(
+            static_cast<std::uint8_t *>(target),
+            std::memory_order_release
+        );
     }
 
     // Arms a backend bad_alloc after transaction setup but before its mutation callback, or immediately after that
@@ -113,19 +115,24 @@ namespace DetourModKit::detail
     {
         if (target == nullptr)
         {
-            safetyhook::g_trap_exception_stage_override.store(safetyhook::TrapExceptionStage::NONE,
-                                                              std::memory_order_release);
+            safetyhook::g_trap_exception_stage_override.store(
+                safetyhook::TrapExceptionStage::NONE,
+                std::memory_order_release
+            );
             safetyhook::g_trap_exception_target_override.store(nullptr, std::memory_order_relaxed);
             return;
         }
 
         g_backend_toggle_exception_catches.store(0, std::memory_order_relaxed);
-        safetyhook::g_trap_exception_target_override.store(static_cast<std::uint8_t *>(target),
-                                                           std::memory_order_relaxed);
-        safetyhook::g_trap_exception_stage_override.store(after_mutation
-                                                              ? safetyhook::TrapExceptionStage::AFTER_MUTATION
-                                                              : safetyhook::TrapExceptionStage::BEFORE_MUTATION,
-                                                          std::memory_order_release);
+        safetyhook::g_trap_exception_target_override.store(
+            static_cast<std::uint8_t *>(target),
+            std::memory_order_relaxed
+        );
+        safetyhook::g_trap_exception_stage_override.store(
+            after_mutation ? safetyhook::TrapExceptionStage::AFTER_MUTATION
+                           : safetyhook::TrapExceptionStage::BEFORE_MUTATION,
+            std::memory_order_release
+        );
     }
 
     /// Reports how many managed backend exceptions the current test arm reached and contained.
@@ -158,14 +165,22 @@ namespace DetourModKit::detail
         safetyhook::retire_trap_runtime_for_test();
     }
 
-    TrapTransactionOutcome drive_backend_trap_transaction_for_test(void *from, void *to, std::size_t len,
-                                                                   const std::function<void()> &run_fn) noexcept
+    TrapTransactionOutcome drive_backend_trap_transaction_for_test(
+        void *from,
+        void *to,
+        std::size_t len,
+        const std::function<void()> &run_fn
+    ) noexcept
     {
         try
         {
             safetyhook::reset_trap_restore_trace_for_test();
             const std::expected<void, safetyhook::OsError> result = safetyhook::trap_threads(
-                static_cast<std::uint8_t *>(from), static_cast<std::uint8_t *>(to), len, run_fn);
+                static_cast<std::uint8_t *>(from),
+                static_cast<std::uint8_t *>(to),
+                len,
+                run_fn
+            );
             return result ? TrapTransactionOutcome::Restored : TrapTransactionOutcome::ReportedFailure;
         }
         catch (...)
@@ -176,14 +191,18 @@ namespace DetourModKit::detail
 
     void set_backend_trap_change_failure_target_for_test(void *segment_address) noexcept
     {
-        safetyhook::g_trap_change_failure_override.store(static_cast<std::uint8_t *>(segment_address),
-                                                         std::memory_order_release);
+        safetyhook::g_trap_change_failure_override.store(
+            static_cast<std::uint8_t *>(segment_address),
+            std::memory_order_release
+        );
     }
 
     void set_backend_trap_segment_restore_failure_target_for_test(void *segment_address) noexcept
     {
-        safetyhook::g_trap_segment_restore_failure_override.store(static_cast<std::uint8_t *>(segment_address),
-                                                                  std::memory_order_release);
+        safetyhook::g_trap_segment_restore_failure_override.store(
+            static_cast<std::uint8_t *>(segment_address),
+            std::memory_order_release
+        );
     }
 
     std::size_t backend_trap_restore_trace_size_for_test() noexcept
@@ -327,15 +346,19 @@ namespace DetourModKit
 
             HMODULE target_module = nullptr;
             HMODULE dest_module = nullptr;
-            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    reinterpret_cast<LPCWSTR>(target_address), &target_module))
+            if (!GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(target_address),
+                    &target_module
+                ))
             {
                 target_module = nullptr;
             }
-            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    reinterpret_cast<LPCWSTR>(destination), &dest_module))
+            if (!GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(destination),
+                    &dest_module
+                ))
             {
                 dest_module = nullptr;
             }
@@ -401,32 +424,53 @@ namespace DetourModKit
             switch (err.type)
             {
             case safetyhook::InlineHook::Error::BAD_ALLOCATION:
-                return std::format("InlineHook backend error ({}): bad allocation (allocator error {})", type_int,
-                                   static_cast<int>(err.allocator_error));
+                return std::format(
+                    "InlineHook backend error ({}): bad allocation (allocator error {})",
+                    type_int,
+                    static_cast<int>(err.allocator_error)
+                );
             case safetyhook::InlineHook::Error::FAILED_TO_DECODE_INSTRUCTION:
-                return std::format("InlineHook backend error ({}): failed to decode instruction at {}", type_int,
-                                   ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): failed to decode instruction at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::SHORT_JUMP_IN_TRAMPOLINE:
                 return std::format("InlineHook backend error ({}): short jump in trampoline at {}", type_int, ip_str);
             case safetyhook::InlineHook::Error::IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE:
-                return std::format("InlineHook backend error ({}): IP-relative instruction out of range at {}",
-                                   type_int, ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): IP-relative instruction out of range at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE:
-                return std::format("InlineHook backend error ({}): unsupported instruction in trampoline at {}",
-                                   type_int, ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): unsupported instruction in trampoline at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT:
                 return std::format("InlineHook backend error ({}): failed to unprotect memory at {}", type_int, ip_str);
             case safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE:
-                return std::format("InlineHook backend error ({}): prologue too short for the hook at {}", type_int,
-                                   ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): prologue too short for the hook at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::FAILED_TO_REGISTER_UNWIND:
-                return std::format("InlineHook backend error ({}): the platform refused unwind metadata for the routed "
-                                   "wrapper at {}",
-                                   type_int, ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): the platform refused unwind metadata for the routed "
+                    "wrapper at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::ROUTE_RETENTION_EXHAUSTED:
-                return std::format("InlineHook backend error ({}): the routed retention ceiling refused the permanent "
-                                   "chain for {}",
-                                   type_int, ip_str);
+                return std::format(
+                    "InlineHook backend error ({}): the routed retention ceiling refused the permanent "
+                    "chain for {}",
+                    type_int,
+                    ip_str
+                );
             default:
                 return std::format("InlineHook backend error ({}): unknown error type", type_int);
             }
@@ -438,11 +482,17 @@ namespace DetourModKit
             switch (err.type)
             {
             case safetyhook::MidHook::Error::BAD_ALLOCATION:
-                return std::format("MidHook backend error ({}): bad allocation (allocator error {})", type_int,
-                                   static_cast<int>(err.allocator_error));
+                return std::format(
+                    "MidHook backend error ({}): bad allocation (allocator error {})",
+                    type_int,
+                    static_cast<int>(err.allocator_error)
+                );
             case safetyhook::MidHook::Error::BAD_INLINE_HOOK:
-                return std::format("MidHook backend error ({}): bad underlying inline hook. {}", type_int,
-                                   backend_error_string(err.inline_hook_error));
+                return std::format(
+                    "MidHook backend error ({}): bad underlying inline hook. {}",
+                    type_int,
+                    backend_error_string(err.inline_hook_error)
+                );
             default:
                 return std::format("MidHook backend error ({}): unknown error type", type_int);
             }
@@ -509,9 +559,11 @@ namespace DetourModKit
             {
                 HMODULE slot_module = nullptr;
                 HMODULE jmp_module = nullptr;
-                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                       reinterpret_cast<LPCWSTR>(slot_value), &slot_module) == 0)
+                if (GetModuleHandleExW(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        reinterpret_cast<LPCWSTR>(slot_value),
+                        &slot_module
+                    ) == 0)
                 {
                     return false;
                 }
@@ -521,9 +573,11 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                       reinterpret_cast<LPCWSTR>(*jmp_target), &jmp_module) == 0)
+                if (GetModuleHandleExW(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        reinterpret_cast<LPCWSTR>(*jmp_target),
+                        &jmp_module
+                    ) == 0)
                 {
                     return false;
                 }
@@ -638,8 +692,11 @@ namespace DetourModKit
             // then restore the captured pointers into its detached clone before publication.
             std::vector<std::uintptr_t> backend_snapshot = snapshot;
             const std::uintptr_t executable_marker = reinterpret_cast<std::uintptr_t>(&vmt_snapshot_executable_marker);
-            std::fill_n(backend_snapshot.begin() + static_cast<std::ptrdiff_t>(header_count), cloned_slots,
-                        executable_marker);
+            std::fill_n(
+                backend_snapshot.begin() + static_cast<std::ptrdiff_t>(header_count),
+                cloned_slots,
+                executable_marker
+            );
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *probe = DetourModKit::detail::g_vmt_before_backend_clone_probe)
             {
@@ -655,16 +712,19 @@ namespace DetourModKit
 
             safetyhook::VmtHook backend = std::move(created.value());
             const std::uintptr_t cloned_vptr_base = reinterpret_cast<std::uintptr_t>(surrogate_vptr);
-            std::copy_n(snapshot.data() + header_count, cloned_slots,
-                        reinterpret_cast<std::uintptr_t *>(cloned_vptr_base));
+            std::copy_n(
+                snapshot.data() + header_count,
+                cloned_slots,
+                reinterpret_cast<std::uintptr_t *>(cloned_vptr_base)
+            );
             // Erase the stack surrogate from the backend before it leaves scope. Real host objects are published and
             // restored only through DMK's guarded swaps, so the backend never retains a foreign object pointer.
             backend.remove(static_cast<void *>(&surrogate_vptr));
             return DetachedVmtBackend{std::move(backend), cloned_vptr_base, cloned_slots};
         }
 
-        [[nodiscard]] bool publish_vmt_object_word(void *object, std::uintptr_t expected,
-                                                   std::uintptr_t replacement) noexcept
+        [[nodiscard]] bool
+        publish_vmt_object_word(void *object, std::uintptr_t expected, std::uintptr_t replacement) noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *probe = DetourModKit::detail::g_vmt_before_publish_probe)
@@ -672,8 +732,11 @@ namespace DetourModKit
                 probe(object);
             }
 #endif
-            return detail::guarded_compare_exchange_word(reinterpret_cast<std::uintptr_t>(object), expected,
-                                                         replacement);
+            return detail::guarded_compare_exchange_word(
+                reinterpret_cast<std::uintptr_t>(object),
+                expected,
+                replacement
+            );
         }
 
         /// Resolves a hook Target to an absolute address, through scan::resolve for a deferred OwnedScanRequest.
@@ -723,8 +786,12 @@ namespace DetourModKit
          *          follow creation order. On success, the caller owns the returned ledger id. Commit it before handle
          *          publication, or roll it back through HookLedger::release_hook.
          */
-        Result<PreflightResult> preflight_target(const hook::Target &target, const hook::Options &options,
-                                                 std::string_view name, const char *where) noexcept
+        Result<PreflightResult> preflight_target(
+            const hook::Target &target,
+            const hook::Options &options,
+            std::string_view name,
+            const char *where
+        ) noexcept
         {
             Result<std::uintptr_t> resolved = resolve_target(target);
             if (!resolved)
@@ -743,12 +810,22 @@ namespace DetourModKit
             const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
             if (window.verdict != detail::TargetWindowVerdict::Ok)
             {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' refused target 0x{:0{}X}: {}.", name, address,
-                                    sizeof(std::uintptr_t) * 2, detail::target_window_description(window.verdict));
-                return std::unexpected(Error{window.verdict == detail::TargetWindowVerdict::Unreadable
-                                                 ? ErrorCode::ReadFaulted
-                                                 : ErrorCode::TargetPrologueUnsafe,
-                                             where, window.detail});
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: '{}' refused target 0x{:0{}X}: {}.",
+                    name,
+                    address,
+                    sizeof(std::uintptr_t) * 2,
+                    detail::target_window_description(window.verdict)
+                );
+                return std::unexpected(
+                    Error{
+                        window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
+                                                                                  : ErrorCode::TargetPrologueUnsafe,
+                        where,
+                        window.detail
+                    }
+                );
             }
 
             // try_reserve_hook folds the same-kit duplicate check and the id record into one locked step, so a
@@ -768,10 +845,14 @@ namespace DetourModKit
             if (reservation.preexisting)
             {
                 // If this install layers on a same-kit hook, warn and continue.
-                (void)log().try_log(LogLevel::Warning,
-                                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. Destroy "
-                                    "layered hooks newest-first.",
-                                    name, address, sizeof(std::uintptr_t) * 2);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. Destroy "
+                    "layered hooks newest-first.",
+                    name,
+                    address,
+                    sizeof(std::uintptr_t) * 2
+                );
             }
             else
             {
@@ -784,11 +865,16 @@ namespace DetourModKit
                         (void)detail::HookLedger::instance().release_hook(address, reservation.id);
                         return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByAnotherModule, where, address});
                     }
-                    (void)log().try_log(LogLevel::Warning,
-                                        "hook: '{}' detects another module's inline hook at target 0x{:0{}X} "
-                                        "(JMP -> 0x{:0{}X}). The new hook layers on top.",
-                                        name, address, sizeof(std::uintptr_t) * 2, prehook.jmp_destination,
-                                        sizeof(std::uintptr_t) * 2);
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook: '{}' detects another module's inline hook at target 0x{:0{}X} "
+                        "(JMP -> 0x{:0{}X}). The new hook layers on top.",
+                        name,
+                        address,
+                        sizeof(std::uintptr_t) * 2,
+                        prehook.jmp_destination,
+                        sizeof(std::uintptr_t) * 2
+                    );
                 }
             }
 
@@ -807,10 +893,15 @@ namespace DetourModKit
                     (void)detail::HookLedger::instance().release_hook(address, reservation.id);
                     return std::unexpected(Error{ErrorCode::TargetPrologueUnsafe, where, address});
                 }
-                (void)log().try_log(LogLevel::Warning,
-                                    "hook: '{}' target 0x{:0{}X} begins with {}. Installation continues under the "
-                                    "Relocate prologue policy.",
-                                    name, address, sizeof(std::uintptr_t) * 2, prologue_risk_description(risk));
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: '{}' target 0x{:0{}X} begins with {}. Installation continues under the "
+                    "Relocate prologue policy.",
+                    name,
+                    address,
+                    sizeof(std::uintptr_t) * 2,
+                    prologue_risk_description(risk)
+                );
             }
             return PreflightResult{address, reservation.id};
         }
@@ -888,10 +979,14 @@ namespace DetourModKit
             return DetourModKit::detail::drain_until_zero(
                 [&backend]() noexcept
                 {
-                    return backend_value_or(backend, std::size_t{1},
-                                            [](const auto &one) noexcept { return one.route_entries(); });
+                    return backend_value_or(
+                        backend,
+                        std::size_t{1},
+                        [](const auto &one) noexcept { return one.route_entries(); }
+                    );
                 },
-                std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT);
+                std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT
+            );
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -911,8 +1006,8 @@ namespace DetourModKit
          * @warning This check narrows the window but does not close it (see hook_fault_boundary.hpp). It provides error
          *          attribution, not a safety property.
          */
-        std::optional<Error> revalidate_before_patch(std::uintptr_t target, std::uint64_t ledger_id,
-                                                     const char *where) noexcept
+        std::optional<Error>
+        revalidate_before_patch(std::uintptr_t target, std::uint64_t ledger_id, const char *where) noexcept
         {
             const detail::TargetWindowResult window = detail::validate_backend_steal_window(target);
             if (window.verdict == detail::TargetWindowVerdict::Ok)
@@ -920,9 +1015,12 @@ namespace DetourModKit
                 return std::nullopt;
             }
             (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-            return Error{window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
-                                                                                   : ErrorCode::TargetPrologueUnsafe,
-                         where, window.detail};
+            return Error{
+                window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
+                                                                          : ErrorCode::TargetPrologueUnsafe,
+                where,
+                window.detail
+            };
         }
     } // namespace
 
@@ -940,8 +1038,9 @@ namespace DetourModKit
             // One allocator hold exists per linked DMK instance. It occupies static storage and is never released. A
             // plain function-local static registers a destructor. A later Hook destructor can otherwise free its
             // trampoline into a destroyed allocator arena.
-            alignas(std::shared_ptr<safetyhook::Allocator>) static unsigned char
-                storage[sizeof(std::shared_ptr<safetyhook::Allocator>)];
+            alignas(
+                std::shared_ptr<safetyhook::Allocator>
+            ) static unsigned char storage[sizeof(std::shared_ptr<safetyhook::Allocator>)];
             static const std::shared_ptr<safetyhook::Allocator> *const allocator = ::new (static_cast<void *>(storage))
                 std::shared_ptr<safetyhook::Allocator>(safetyhook::Allocator::global());
             return *allocator;
@@ -1064,11 +1163,20 @@ namespace DetourModKit
                     "hook: '{}' at 0x{:0{}X} destroyed while {} newer hook(s) remain layered on the same target; "
                     "leaked the older backend to avoid a trampoline use-after-free. Tear layered hooks down "
                     "newest-first (hold them in a HookStack).",
-                    name, target, sizeof(std::uintptr_t) * 2, newer);
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{
-                                   .remains_live = true,
-                               });
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    newer
+                );
+                emit_lifecycle(
+                    name,
+                    ledger_id,
+                    kind,
+                    diagnostics::HookTransition::Removed,
+                    RemovalPopulationState{
+                        .remains_live = true,
+                    }
+                );
                 return;
             }
 
@@ -1092,11 +1200,20 @@ namespace DetourModKit
                     LogLevel::Warning,
                     "hook: '{}' at 0x{:0{}X} could not restore its target's prologue during teardown ({}); leaked the "
                     "backend to keep the possibly reachable trampoline mapped. The target remains tracked as hooked.",
-                    name, target, sizeof(std::uintptr_t) * 2, witness_description(restore));
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{
-                                   .remains_live = true,
-                               });
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    witness_description(restore)
+                );
+                emit_lifecycle(
+                    name,
+                    ledger_id,
+                    kind,
+                    diagnostics::HookTransition::Removed,
+                    RemovalPopulationState{
+                        .remains_live = true,
+                    }
+                );
                 return;
             }
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
@@ -1130,11 +1247,20 @@ namespace DetourModKit
                     "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread can still be inside its {}. "
                     "The target was restored, but the backend is pinned so that thread can return through its stub. "
                     "The callback will not be entered again, and the adapter is not reclaimed.",
-                    name, target, sizeof(std::uintptr_t) * 2, blocked_stage);
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{
-                                   .was_active = was_active,
-                               });
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    blocked_stage
+                );
+                emit_lifecycle(
+                    name,
+                    ledger_id,
+                    kind,
+                    diagnostics::HookTransition::Removed,
+                    RemovalPopulationState{
+                        .was_active = was_active,
+                    }
+                );
                 return;
             }
 
@@ -1151,11 +1277,19 @@ namespace DetourModKit
                     "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread can still be inside its adapter "
                     "body past its bounded drain. The target was restored, but the backend and adapter slot are "
                     "pinned so that thread can return through its stub.",
-                    name, target, sizeof(std::uintptr_t) * 2);
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{
-                                   .was_active = was_active,
-                               });
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2
+                );
+                emit_lifecycle(
+                    name,
+                    ledger_id,
+                    kind,
+                    diagnostics::HookTransition::Removed,
+                    RemovalPopulationState{
+                        .was_active = was_active,
+                    }
+                );
                 return;
             }
 
@@ -1169,10 +1303,15 @@ namespace DetourModKit
             }
             (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
-            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                           RemovalPopulationState{
-                               .was_active = was_active,
-                           });
+            emit_lifecycle(
+                name,
+                ledger_id,
+                kind,
+                diagnostics::HookTransition::Removed,
+                RemovalPopulationState{
+                    .was_active = was_active,
+                }
+            );
         }
 
         Hook::operator bool() const noexcept
@@ -1200,8 +1339,11 @@ namespace DetourModKit
             // Both the published state and the reconciled backend view must agree. The gate serializes this read
             // with every backend flag update.
             return m_impl->status.load(std::memory_order_acquire) == HookState::Active &&
-                   backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                    { return static_cast<bool>(backend) && backend.enabled(); });
+                   backend_value_or(
+                       m_impl->backend,
+                       false,
+                       [](auto &backend) noexcept { return static_cast<bool>(backend) && backend.enabled(); }
+                   );
         }
 
         void *Hook::original_address() const noexcept
@@ -1306,12 +1448,20 @@ namespace DetourModKit
                     // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
                     // steps below publish the caller state. No fault boundary wraps this code. See
                     // hook_fault_boundary.hpp.
-                    auto created = safetyhook::InlineHook::create(allocator, reinterpret_cast<void *>(target), detour,
-                                                                  safetyhook::InlineHook::StartDisabled);
+                    auto created = safetyhook::InlineHook::create(
+                        allocator,
+                        reinterpret_cast<void *>(target),
+                        detour,
+                        safetyhook::InlineHook::StartDisabled
+                    );
                     if (!created)
                     {
-                        log().error("hook::inline_at: backend create failed for '{}' at {}: {}", request.name,
-                                    format::format_address(target), backend_error_string(created.error()));
+                        log().error(
+                            "hook::inline_at: backend create failed for '{}' at {}: {}",
+                            request.name,
+                            format::format_address(target),
+                            backend_error_string(created.error())
+                        );
                         (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
@@ -1319,8 +1469,13 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
 #endif
-                    auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                             ledger_id, HookState::Disabled);
+                    auto impl = std::make_unique<Hook::Impl>(
+                        std::move(backend_hook),
+                        std::move(request.name),
+                        target,
+                        ledger_id,
+                        HookState::Disabled
+                    );
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
 #endif
@@ -1336,13 +1491,20 @@ namespace DetourModKit
                         (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                         return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
                     }
-                    log().info("hook::inline_at: created inline hook '{}' at {} (disabled).", created_name,
-                               format::format_address(target));
+                    log().info(
+                        "hook::inline_at: created inline hook '{}' at {} (disabled).",
+                        created_name,
+                        format::format_address(target)
+                    );
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
-                    emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Inline,
-                                   diagnostics::HookTransition::Created);
+                    emit_lifecycle(
+                        created_name,
+                        ledger_id,
+                        diagnostics::HookKind::Inline,
+                        diagnostics::HookTransition::Created
+                    );
                     // Hand the module reference to the Impl only after completion of every fallible setup step.
                     impl->self_ref = self_ref.release();
                     return Hook(std::move(impl), std::move(gate));
@@ -1432,13 +1594,20 @@ namespace DetourModKit
             {
                 // This is the StartDisabled install transaction. See inline_at_raw and hook_fault_boundary.hpp. The
                 // destination is the pool slot_index adapter, a real void(safetyhook::Context&).
-                auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
-                                                           DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
-                                                           safetyhook::MidHook::StartDisabled);
+                auto created = safetyhook::MidHook::create(
+                    allocator,
+                    reinterpret_cast<void *>(target),
+                    DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
+                    safetyhook::MidHook::StartDisabled
+                );
                 if (!created)
                 {
-                    log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
-                                format::format_address(target), backend_error_string(created.error()));
+                    log().error(
+                        "hook::mid_at: backend create failed for '{}' at {}: {}",
+                        request.name,
+                        format::format_address(target),
+                        backend_error_string(created.error())
+                    );
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
@@ -1446,8 +1615,13 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
 #endif
-                auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                         ledger_id, HookState::Disabled);
+                auto impl = std::make_unique<Hook::Impl>(
+                    std::move(backend_hook),
+                    std::move(request.name),
+                    target,
+                    ledger_id,
+                    HookState::Disabled
+                );
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
 #endif
@@ -1462,13 +1636,20 @@ namespace DetourModKit
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                     return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::mid_at", target});
                 }
-                log().info("hook::mid_at: created mid hook '{}' at {} (disabled).", created_name,
-                           format::format_address(target));
+                log().info(
+                    "hook::mid_at: created mid hook '{}' at {} (disabled).",
+                    created_name,
+                    format::format_address(target)
+                );
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
-                emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Mid,
-                               diagnostics::HookTransition::Created);
+                emit_lifecycle(
+                    created_name,
+                    ledger_id,
+                    diagnostics::HookKind::Mid,
+                    diagnostics::HookTransition::Created
+                );
                 // Hand the module reference and adapter slot to the Impl. Teardown owns both after this point.
                 impl->self_ref = self_ref.release();
                 impl->mid_slot = slot_guard.release();
@@ -1528,12 +1709,15 @@ namespace DetourModKit
                     // The OwnedScanRequest copy preserves the caller table entries for install_all. Each row's Options
                     // value carries its install policy.
                     Target target = spec.m_target;
-                    Result<Hook> installed =
-                        std::holds_alternative<InlineDetour>(spec.m_detour)
-                            ? detail::inline_at_raw(InlineRequest{spec.m_name, std::move(target), spec.m_options},
-                                                    std::get<InlineDetour>(spec.m_detour).fn)
-                            : mid_at(MidRequest{spec.m_name, std::move(target), spec.m_options},
-                                     std::get<MidHookFn>(spec.m_detour));
+                    Result<Hook> installed = std::holds_alternative<InlineDetour>(spec.m_detour)
+                                                 ? detail::inline_at_raw(
+                                                       InlineRequest{spec.m_name, std::move(target), spec.m_options},
+                                                       std::get<InlineDetour>(spec.m_detour).fn
+                                                   )
+                                                 : mid_at(
+                                                       MidRequest{spec.m_name, std::move(target), spec.m_options},
+                                                       std::get<MidHookFn>(spec.m_detour)
+                                                   );
 
                     if (!installed && spec.m_severity == Severity::Mandatory)
                     {
@@ -1618,7 +1802,8 @@ namespace DetourModKit
                 for (const auto &binding : m_impl->object_bindings)
                 {
                     const DetourModKit::detail::ObjectWordResult word = DetourModKit::detail::validate_vmt_object_word(
-                        reinterpret_cast<std::uintptr_t>(binding.object));
+                        reinterpret_cast<std::uintptr_t>(binding.object)
+                    );
                     if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Unreadable &&
                         word.vptr == binding.original_vptr)
                     {
@@ -1646,12 +1831,16 @@ namespace DetourModKit
                         probe();
                     }
 #endif
-                    (void)log().try_log(LogLevel::Warning,
-                                        "hook::~VmtHook: VMT hook '{}' destroyed while {} of its {} object(s) could "
-                                        "not be provably restored to their original vtable; leaked this clone to "
-                                        "avoid a vtable use-after-free. Destroy VMT hooks newest-first to restore "
-                                        "the original table.",
-                                        std::string_view{name}, unrestorable, object_count);
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook::~VmtHook: VMT hook '{}' destroyed while {} of its {} object(s) could "
+                        "not be provably restored to their original vtable; leaked this clone to "
+                        "avoid a vtable use-after-free. Destroy VMT hooks newest-first to restore "
+                        "the original table.",
+                        std::string_view{name},
+                        unrestorable,
+                        object_count
+                    );
                     return;
                 }
                 self_ref = static_cast<HMODULE>(m_impl->self_ref);
@@ -1662,10 +1851,15 @@ namespace DetourModKit
             DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
             // A VMT hook is live from creation and has no enable/disable transition, so it is always counted armed.
-            emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed,
-                           RemovalPopulationState{
-                               .was_active = true,
-                           });
+            emit_lifecycle(
+                name,
+                ledger_id,
+                diagnostics::HookKind::Vmt,
+                diagnostics::HookTransition::Removed,
+                RemovalPopulationState{
+                    .was_active = true,
+                }
+            );
         }
 
         VmtHook::operator bool() const noexcept
@@ -1714,8 +1908,11 @@ namespace DetourModKit
             const std::uintptr_t current_vptr = word.vptr;
             // Locate this object's restoration binding before any policy branch. Teardown restores from the
             // binding. Refusal is the only outcome that keeps every recorded original true.
-            const auto binding = std::find_if(m_impl->object_bindings.begin(), m_impl->object_bindings.end(),
-                                              [object](const auto &entry) -> bool { return entry.object == object; });
+            const auto binding = std::find_if(
+                m_impl->object_bindings.begin(),
+                m_impl->object_bindings.end(),
+                [object](const auto &entry) -> bool { return entry.object == object; }
+            );
             const bool already_tracked = binding != m_impl->object_bindings.end();
             if (current_vptr == m_impl->cloned_vptr_base)
             {
@@ -1767,8 +1964,12 @@ namespace DetourModKit
                     "hook::vmt_apply: VMT hook '{}' targets object 0x{:0{}X} with vptr 0x{:0{}X}. Another DMK VMT "
                     "hook owns that clone. That clone's hooked slots become this hook's "
                     "original. Set VmtOptions::fail_if_already_hooked to refuse instead.",
-                    std::string_view{m_impl->name}, reinterpret_cast<std::uintptr_t>(object),
-                    sizeof(std::uintptr_t) * 2, current_vptr, sizeof(std::uintptr_t) * 2);
+                    std::string_view{m_impl->name},
+                    reinterpret_cast<std::uintptr_t>(object),
+                    sizeof(std::uintptr_t) * 2,
+                    current_vptr,
+                    sizeof(std::uintptr_t) * 2
+                );
             }
             // Reserve the restoration binding before publication. Capacity growth after publication can throw with
             // the object already on the clone but absent from the state that teardown needs.
@@ -1786,7 +1987,8 @@ namespace DetourModKit
             if (!publish_vmt_object_word(object, current_vptr, m_impl->cloned_vptr_base))
             {
                 return std::unexpected(
-                    Error{ErrorCode::InvalidObject, "hook::vmt_apply", reinterpret_cast<std::uintptr_t>(object)});
+                    Error{ErrorCode::InvalidObject, "hook::vmt_apply", reinterpret_cast<std::uintptr_t>(object)}
+                );
             }
             if (!already_tracked)
             {
@@ -1820,8 +2022,11 @@ namespace DetourModKit
             }
             // The exclusive write prevents a race between unapply and an original() snapshot reader during transition.
             std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
-            const auto binding = std::find_if(m_impl->object_bindings.begin(), m_impl->object_bindings.end(),
-                                              [object](const auto &entry) -> bool { return entry.object == object; });
+            const auto binding = std::find_if(
+                m_impl->object_bindings.begin(),
+                m_impl->object_bindings.end(),
+                [object](const auto &entry) -> bool { return entry.object == object; }
+            );
             if (binding == m_impl->object_bindings.end())
             {
                 return {};
@@ -1902,8 +2107,11 @@ namespace DetourModKit
             // a failure.
             try
             {
-                log().info("hook::hook_method: hooked method index {} on VMT hook '{}'.", index,
-                           std::string_view{m_impl->name});
+                log().info(
+                    "hook::hook_method: hooked method index {} on VMT hook '{}'.",
+                    index,
+                    std::string_view{m_impl->name}
+                );
             }
             catch (...)
             {
@@ -1955,8 +2163,11 @@ namespace DetourModKit
             // This post-commit log is best-effort. Contain a format bad_alloc.
             try
             {
-                log().info("hook::remove_method: removed method index {} from VMT hook '{}'.", index,
-                           std::string_view{m_impl->name});
+                log().info(
+                    "hook::remove_method: removed method index {} from VMT hook '{}'.",
+                    index,
+                    std::string_view{m_impl->name}
+                );
             }
             catch (...)
             {
@@ -2045,14 +2256,19 @@ namespace DetourModKit
                     "hook::vmt_for: VMT hook '{}' targets object 0x{:0{}X} with vptr 0x{:0{}X}. Another DMK VMT hook "
                     "owns that clone. That clone's hooked slots become this hook's "
                     "original. Set VmtOptions::fail_if_already_hooked to refuse instead.",
-                    std::string_view{name}, reinterpret_cast<std::uintptr_t>(object), sizeof(std::uintptr_t) * 2,
-                    current_vptr, sizeof(std::uintptr_t) * 2);
+                    std::string_view{name},
+                    reinterpret_cast<std::uintptr_t>(object),
+                    sizeof(std::uintptr_t) * 2,
+                    current_vptr,
+                    sizeof(std::uintptr_t) * 2
+                );
             }
             const std::optional<std::size_t> slot_budget = count_vmt_method_slots(current_vptr);
             if (!slot_budget)
             {
                 return std::unexpected(
-                    Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+                    Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)}
+                );
             }
             // An engaged zero found no callable slot. The clone is unusable by construction.
             if (*slot_budget == 0)
@@ -2073,8 +2289,13 @@ namespace DetourModKit
                     return std::unexpected(cloned.error());
                 }
                 const std::uintptr_t cloned_vptr_base = cloned->cloned_vptr_base;
-                auto impl = std::make_unique<VmtHook::Impl>(std::move(cloned->backend), std::move(name),
-                                                            cloned_vptr_base, cloned->method_count, 0);
+                auto impl = std::make_unique<VmtHook::Impl>(
+                    std::move(cloned->backend),
+                    std::move(name),
+                    cloned_vptr_base,
+                    cloned->method_count,
+                    0
+                );
                 impl->object_bindings.push_back({object, current_vptr});
                 const std::string_view created_name = impl->name;
                 const std::optional<std::uint64_t> recorded =
@@ -2090,7 +2311,8 @@ namespace DetourModKit
                 {
                     DetourModKit::detail::HookLedger::instance().release_vmt(*recorded);
                     return std::unexpected(
-                        Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+                        Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)}
+                    );
                 }
                 // Release the gate BEFORE the log and lifecycle event: subscriber code must not run under the
                 // process-wide VMT mutex (CP.22), because a reentrant subscriber self-deadlocks.
@@ -2098,14 +2320,21 @@ namespace DetourModKit
                 // This post-commit log is best-effort. Contain a format bad_alloc (see hook_method_raw).
                 try
                 {
-                    log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
-                               format::format_address(reinterpret_cast<std::uintptr_t>(object)));
+                    log().info(
+                        "hook::vmt_for: created VMT hook '{}' on object {}.",
+                        created_name,
+                        format::format_address(reinterpret_cast<std::uintptr_t>(object))
+                    );
                 }
                 catch (...)
                 {
                 }
-                emit_lifecycle(created_name, *recorded, diagnostics::HookKind::Vmt,
-                               diagnostics::HookTransition::Created);
+                emit_lifecycle(
+                    created_name,
+                    *recorded,
+                    diagnostics::HookKind::Vmt,
+                    diagnostics::HookTransition::Created
+                );
                 // Hand the module reference to the Impl only after completion of every fallible setup step.
                 impl->self_ref = self_ref.release();
                 return VmtHook(std::move(impl));

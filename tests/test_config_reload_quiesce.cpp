@@ -97,7 +97,9 @@ namespace
         std::atomic<bool> release_gate{false};
 
         config::bind_int(
-            "S", "V", "v",
+            "S",
+            "V",
+            "v",
             [&](int val)
             {
                 applied.store(val, std::memory_order_release);
@@ -110,7 +112,8 @@ namespace
                     }
                 }
             },
-            0);
+            0
+        );
 
         config::load(m_ini.string());
         ASSERT_EQ(applied.load(std::memory_order_acquire), 1);
@@ -187,7 +190,9 @@ namespace
         // Setters apply in registration order, so the first-registered setter runs first and parks the pass in flight;
         // the second-registered setter is the one the mid-pass abort must skip.
         config::bind_int(
-            "S", "V", "v",
+            "S",
+            "V",
+            "v",
             [&](int val)
             {
                 applied_first.store(val, std::memory_order_release);
@@ -200,7 +205,8 @@ namespace
                     }
                 }
             },
-            0);
+            0
+        );
         config::bind_int("S", "W", "w", [&](int val) { applied_second.store(val, std::memory_order_release); }, 0);
 
         write_ini("[S]\nV=1\nW=1\n");
@@ -209,7 +215,8 @@ namespace
         ASSERT_EQ(applied_second.load(std::memory_order_acquire), 1);
         ASSERT_EQ(
             config::enable_auto_reload(30ms, [&](bool) { on_reload_calls.fetch_add(1, std::memory_order_acq_rel); }),
-            config::AutoReloadStatus::Started);
+            config::AutoReloadStatus::Started
+        );
 
         // Change BOTH values so each setter has a deferred apply queued; the first parks the pass between its two
         // setters.

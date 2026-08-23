@@ -150,8 +150,11 @@ namespace
     // these: is_plausible_ptr is the window screen; unchecked::read is the raw read. This shim reproduces the v3 gated
     // behavior (0 when source or result is implausible) so the boundary-rejection cases keep asserting through it,
     // while the happy paths exercise the same unchecked::read the production hot path uses.
-    inline std::uintptr_t screened_unchecked_ptr(std::uintptr_t base, std::ptrdiff_t off,
-                                                 std::uintptr_t min_valid = memory::USERSPACE_PTR_MIN) noexcept
+    inline std::uintptr_t screened_unchecked_ptr(
+        std::uintptr_t base,
+        std::ptrdiff_t off,
+        std::uintptr_t min_valid = memory::USERSPACE_PTR_MIN
+    ) noexcept
     {
         const std::uintptr_t source = base + static_cast<std::uintptr_t>(off);
         // v3 read_ptr_unchecked source gate: the floor is EXCLUSIVE (one address more conservative than
@@ -360,8 +363,15 @@ TEST_F(MemoryTest, IsMemoryWritable_ZeroSize)
 TEST_F(MemoryTest, write_bytes)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
-    std::vector<std::byte> source = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x12},
-                                     std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
+    std::vector<std::byte> source = {
+        std::byte{0x48},
+        std::byte{0x8B},
+        std::byte{0x05},
+        std::byte{0x12},
+        std::byte{0x34},
+        std::byte{0x56},
+        std::byte{0x78}
+    };
 
     auto result = memory::write_bytes(Address{target.data()}, std::span<const std::byte>{source});
     EXPECT_TRUE(result.has_value());
@@ -401,8 +411,10 @@ TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
 
-    auto result = memory::write_bytes(Address{target.data()},
-                                      std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 10});
+    auto result = memory::write_bytes(
+        Address{target.data()},
+        std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 10}
+    );
     EXPECT_FALSE(result.has_value());
 }
 
@@ -990,7 +1002,8 @@ TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
                     (void)is_readable(interior, 64);
                     reader_count.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     // Writer thread: repeatedly invalidates the region, churning the lock-serialized insert/erase path in
@@ -1008,7 +1021,8 @@ TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
                 invalidate_range(mem, 64);
             }
             stop.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     writer.join();
     for (auto &r : readers)
@@ -1086,7 +1100,8 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
                         success_count.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-            });
+            }
+        );
     }
 
     for (auto &t : threads)
@@ -1160,7 +1175,8 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
                         success_count.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-            });
+            }
+        );
     }
 
     for (auto &t : threads)
@@ -1416,7 +1432,8 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
                     // After shutdown, is_readable falls back to direct VirtualQuery
                     (void)is_readable(mem, 64);
                 }
-            });
+            }
+        );
     }
 
     // Wait until all readers are actively reading
@@ -1649,7 +1666,8 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
                 (void)is_readable(mem, 4);
             }
             reader_done.store(true);
-        });
+        }
+    );
 
     // Wait for reader to start
     while (!reader_started.load())
@@ -1700,7 +1718,8 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
                     (void)is_readable(mem, 4);
                 }
                 finished.fetch_add(1, std::memory_order_acq_rel);
-            });
+            }
+        );
     }
     // Wait until every reader is live and hammering, so shutdown overlaps in-flight reads on many stripes.
     while (started.load(std::memory_order_acquire) < READER_THREADS)
@@ -2400,7 +2419,8 @@ TEST_F(MemoryTest, ModuleRange_ConstexprValid)
 {
     static_assert(Region{Address{static_cast<std::uintptr_t>(0x10000)}, 0x10000}.size != 0);
     static_assert(Region{Address{static_cast<std::uintptr_t>(0x1000)}, 0x1000}.contains(
-        Address{static_cast<std::uintptr_t>(0x1500)}));
+        Address{static_cast<std::uintptr_t>(0x1500)}
+    ));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_NullReturnsNullopt)
@@ -2871,7 +2891,8 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
                             all_correct.store(false, std::memory_order_relaxed);
                     }
                 }
-            });
+            }
+        );
     }
     for (auto &th : threads)
         th.join();
@@ -2922,7 +2943,8 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
                         seen_fault.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-            });
+            }
+        );
     }
 
     // Wait until both guarded-read paths are actually live (one good-path read, one faulting-path read) before racing
@@ -3004,7 +3026,8 @@ TEST_F(MemoryTest, UnarmedThreadFaultIsPassedThroughNotClaimed)
             volatile uint32_t *const p = reinterpret_cast<volatile uint32_t *>(page);
             // Faults once; the consumer handler makes the page readable and retries the instruction.
             observed.store(*p, std::memory_order_release);
-        });
+        }
+    );
     worker.join();
 
     RemoveVectoredExceptionHandler(consumer);
@@ -3043,7 +3066,8 @@ TEST_F(MemoryTest, SehWriteBytes_RoundTripsToHeap)
     const std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
     EXPECT_TRUE(
-        memory::write_bytes(Address{buffer.get()}, std::span<const std::byte>{source, sizeof(source)}).has_value());
+        memory::write_bytes(Address{buffer.get()}, std::span<const std::byte>{source, sizeof(source)}).has_value()
+    );
 
     for (size_t i = 0; i < sizeof(source); ++i)
     {
@@ -3059,9 +3083,13 @@ TEST_F(MemoryTest, SehWriteBytes_ZeroBytesIsNoOpSuccess)
     const uint64_t source = 0x0;
 
     // Zero-byte write is a no-op success that leaves the target unchanged.
-    EXPECT_TRUE(memory::write_bytes(Address{reinterpret_cast<uintptr_t>(&target)},
-                                    std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), 0})
-                    .has_value());
+    EXPECT_TRUE(
+        memory::write_bytes(
+            Address{reinterpret_cast<uintptr_t>(&target)},
+            std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), 0}
+        )
+            .has_value()
+    );
     EXPECT_EQ(target, 0xFEEDFACEull);
 }
 
@@ -3071,9 +3099,12 @@ TEST_F(MemoryTest, SehWriteBytes_NullSourceReturnsFalse)
 
     // nullptr source is rejected without a write.
     EXPECT_FALSE(
-        memory::write_bytes(Address{reinterpret_cast<uintptr_t>(&target)},
-                            std::span<const std::byte>{static_cast<const std::byte *>(nullptr), sizeof(target)})
-            .has_value());
+        memory::write_bytes(
+            Address{reinterpret_cast<uintptr_t>(&target)},
+            std::span<const std::byte>{static_cast<const std::byte *>(nullptr), sizeof(target)}
+        )
+            .has_value()
+    );
     EXPECT_EQ(target, 0xFEEDFACEull);
 }
 
@@ -3083,9 +3114,12 @@ TEST_F(MemoryTest, SehWriteBytes_LowAddressReturnsFalse)
 
     // An address below 0x10000 (the Windows reserved low range) is rejected without a write and must not crash.
     EXPECT_FALSE(
-        memory::write_bytes(Address{static_cast<uintptr_t>(0x100)},
-                            std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)})
-            .has_value());
+        memory::write_bytes(
+            Address{static_cast<uintptr_t>(0x100)},
+            std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+        )
+            .has_value()
+    );
 }
 
 // BEHAVIOR FLIP (v3 -> v4): v4 write_bytes auto-unprotects, so a write into a committed PAGE_READONLY page now SUCCEEDS
@@ -3106,7 +3140,9 @@ TEST_F(MemoryTest, WriteBytes_ReadOnlyPageUnprotectsAndSucceeds)
     const uint32_t source = 0xDEADBEEFu;
     // The guarded write takes the slow path: change protection to writable, copy, restore. It SUCCEEDS.
     auto result = memory::write_bytes(
-        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{page},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     EXPECT_TRUE(result.has_value());
 
     // The byte image changed to the new value.
@@ -3127,7 +3163,9 @@ TEST_F(MemoryTest, WriteBytes_NoAccessPageUnprotectsAndSucceeds)
 
     const uint32_t source = 0xDEADBEEFu;
     auto result = memory::write_bytes(
-        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{page},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     EXPECT_TRUE(result.has_value());
 
     // Read the bytes back (the page is writable post-restore-to-NOACCESS only on the page itself, so verify via a
@@ -3149,7 +3187,9 @@ TEST_F(MemoryTest, WriteInPlace_WritableTargetSucceeds)
 
     const uint32_t source = 0xDEADBEEFu;
     auto result = memory::write_in_place(
-        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{page},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     EXPECT_TRUE(result.has_value());
     EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), source);
 
@@ -3171,7 +3211,9 @@ TEST_F(MemoryTest, WriteInPlace_ReadOnlyPageFailsClosedWithoutUnprotecting)
 
     const uint32_t source = 0xDEADBEEFu;
     auto result = memory::write_in_place(
-        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{page},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::WriteFaulted);
 
@@ -3191,7 +3233,9 @@ TEST_F(MemoryTest, WriteInPlace_NoAccessPageFailsClosed)
 
     const uint32_t source = 0xDEADBEEFu;
     auto result = memory::write_in_place(
-        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{page},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::WriteFaulted);
 
@@ -3211,7 +3255,9 @@ TEST_F(MemoryTest, WriteInPlace_NullTargetReturnsError)
 {
     const uint32_t source = 0;
     auto result = memory::write_in_place(
-        Address{}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+        Address{},
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)}
+    );
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::NullTargetAddress);
 }
@@ -3219,8 +3265,10 @@ TEST_F(MemoryTest, WriteInPlace_NullTargetReturnsError)
 TEST_F(MemoryTest, WriteInPlace_NullSourceReturnsError)
 {
     uint32_t target = 0;
-    auto result = memory::write_in_place(Address{&target},
-                                         std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 4});
+    auto result = memory::write_in_place(
+        Address{&target},
+        std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 4}
+    );
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::NullSourceBytes);
 }
@@ -3397,8 +3445,10 @@ TEST_F(MemoryTest, WriteInPlace_SizeTooLarge)
 {
     std::array<std::byte, 16> target{};
     const std::byte source_byte{0xAB};
-    const auto result = memory::write_in_place(Address{target.data()},
-                                               std::span<const std::byte>{&source_byte, memory::MAX_WRITE_SIZE + 1});
+    const auto result = memory::write_in_place(
+        Address{target.data()},
+        std::span<const std::byte>{&source_byte, memory::MAX_WRITE_SIZE + 1}
+    );
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ErrorCode::SizeTooLarge);
 }
@@ -3436,8 +3486,12 @@ namespace
     };
 
     template <typename Operation>
-    void expect_overlap_rejected_without_access(OverlapArena &arena, const char *where, std::uintptr_t target,
-                                                Operation operation)
+    void expect_overlap_rejected_without_access(
+        OverlapArena &arena,
+        const char *where,
+        std::uintptr_t target,
+        Operation operation
+    )
     {
         const auto before = arena.bytes;
         const GuardedAccessObservationScope observation_scope;
@@ -3463,16 +3517,25 @@ TEST_F(MemoryTest, Overlap_ReadInto_RejectsAliasAndBothPartials)
     OverlapArena arena;
     // Exact alias.
     expect_overlap_rejected_without_access(
-        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::read_into",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(0), 8}); }
+    );
     // Destination begins inside the source range.
     expect_overlap_rejected_without_access(
-        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(4), 8}); });
+        arena,
+        "memory::read_into",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(4), 8}); }
+    );
     // Source begins inside the destination range.
     expect_overlap_rejected_without_access(
-        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(4)),
-        [&] { return memory::read_into(Address{arena.at(4)}, std::span<std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::read_into",
+        reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::read_into(Address{arena.at(4)}, std::span<std::byte>{arena.at(0), 8}); }
+    );
     // Half-open adjacency is disjoint and must succeed.
     arena.bytes[0] = std::byte{0x5A};
     auto disjoint = memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(8), 8});
@@ -3484,14 +3547,23 @@ TEST_F(MemoryTest, Overlap_WriteBytes_RejectsAliasAndBothPartials)
 {
     OverlapArena arena;
     expect_overlap_rejected_without_access(
-        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::write_bytes",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+        arena,
+        "memory::write_bytes",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(4)),
-        [&] { return memory::write_bytes(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::write_bytes",
+        reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::write_bytes(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     arena.bytes[8] = std::byte{0x77};
     auto disjoint = memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
     ASSERT_TRUE(disjoint.has_value());
@@ -3502,14 +3574,23 @@ TEST_F(MemoryTest, Overlap_WriteInPlace_RejectsAliasAndBothPartials)
 {
     OverlapArena arena;
     expect_overlap_rejected_without_access(
-        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::write_in_place",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+        arena,
+        "memory::write_in_place",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(4)),
-        [&] { return memory::write_in_place(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::write_in_place",
+        reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::write_in_place(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     arena.bytes[8] = std::byte{0x33};
     auto disjoint = memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
     ASSERT_TRUE(disjoint.has_value());
@@ -3520,14 +3601,23 @@ TEST_F(MemoryTest, Overlap_PatchCode_RejectsAliasAndBothPartials)
 {
     OverlapArena arena;
     expect_overlap_rejected_without_access(
-        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::patch_code",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(0)),
-        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+        arena,
+        "memory::patch_code",
+        reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); }
+    );
     expect_overlap_rejected_without_access(
-        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(4)),
-        [&] { return memory::patch_code(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+        arena,
+        "memory::patch_code",
+        reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::patch_code(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); }
+    );
     arena.bytes[8] = std::byte{0xC3};
     auto disjoint = memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
     ASSERT_TRUE(disjoint.has_value());
@@ -3701,7 +3791,8 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
                     }
                     reads.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     // A failed init must NOT longjmp out of the test via ASSERT_* while the reader threads are still running: that
@@ -3771,19 +3862,27 @@ namespace
     template <class Arg>
     concept WriteInPlaceExplicitCallable =
         requires(Address a, std::span<std::byte> v) { memory::write_in_place<Arg>(a, v); };
-    static_assert(!WriteInPlaceExplicitCallable<const std::span<std::byte>>,
-                  "write_in_place<const std::span<std::byte>> must be ill-formed via remove_cvref_t normalization");
+    static_assert(
+        !WriteInPlaceExplicitCallable<const std::span<std::byte>>,
+        "write_in_place<const std::span<std::byte>> must be ill-formed via remove_cvref_t normalization"
+    );
 
     // A cv/ref-qualified view type (reachable only through an explicit template argument, since argument deduction
     // never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the unqualified
     // specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>: these assert both
     // halves of that reasoning so a future edit that drops the normalization is caught here.
-    static_assert(!detail::is_non_owning_view_v<const std::span<std::byte>>,
-                  "the bare trait does not see through const, so the constraint must normalize the type");
-    static_assert(detail::is_non_owning_view_v<std::remove_cvref_t<const std::span<std::byte>>>,
-                  "the normalization the constraints apply recognizes a const byte span");
-    static_assert(detail::is_non_owning_view_v<std::remove_cvref_t<std::span<int> &>>,
-                  "the normalization also strips a reference qualifier and matches any element type");
+    static_assert(
+        !detail::is_non_owning_view_v<const std::span<std::byte>>,
+        "the bare trait does not see through const, so the constraint must normalize the type"
+    );
+    static_assert(
+        detail::is_non_owning_view_v<std::remove_cvref_t<const std::span<std::byte>>>,
+        "the normalization the constraints apply recognizes a const byte span"
+    );
+    static_assert(
+        detail::is_non_owning_view_v<std::remove_cvref_t<std::span<int> &>>,
+        "the normalization also strips a reference qualifier and matches any element type"
+    );
     static_assert(detail::is_non_owning_view_v<std::string_view>, "a string_view is a non-owning view");
     static_assert(!detail::is_non_owning_view_v<int>, "a scalar is not a non-owning view");
 } // namespace
@@ -3877,8 +3976,14 @@ TEST_F(MemoryTest, GuardedReadReportsFaultingAddress)
 
     std::array<std::byte, 8> output{};
     volatile std::uintptr_t fault_address = 0;
-    EXPECT_FALSE(detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(memory_base + page_size - 4),
-                                            output.data(), output.size(), &fault_address));
+    EXPECT_FALSE(
+        detail::guarded_read_bytes(
+            reinterpret_cast<std::uintptr_t>(memory_base + page_size - 4),
+            output.data(),
+            output.size(),
+            &fault_address
+        )
+    );
     EXPECT_EQ(fault_address, guard_page);
 
     const Result<void> public_read =
@@ -3948,7 +4053,8 @@ TEST_F(MemoryTest, ReadIntoRejectedSpansReportTheRequestedStart)
     const std::uintptr_t over_ceiling_address = memory::USERSPACE_PTR_MAX - 2;
     volatile std::uintptr_t over_ceiling_fault_probe = untouched_fault_sentinel;
     EXPECT_FALSE(
-        detail::guarded_read_bytes(over_ceiling_address, output.data(), output.size(), &over_ceiling_fault_probe));
+        detail::guarded_read_bytes(over_ceiling_address, output.data(), output.size(), &over_ceiling_fault_probe)
+    );
     EXPECT_EQ(static_cast<std::uintptr_t>(over_ceiling_fault_probe), untouched_fault_sentinel);
     const Result<void> over_ceiling_read =
         memory::read_into(Address{over_ceiling_address}, std::span<std::byte>{output});
@@ -3987,7 +4093,8 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentCallersJoinExactlyOnceNoTerminate)
                     std::this_thread::yield();
                 }
                 memory::shutdown_cache();
-            });
+            }
+        );
     }
     while (ready.load(std::memory_order_relaxed) < THREAD_COUNT)
     {
@@ -4030,7 +4137,8 @@ TEST(MemoryCacheLifecycleProof, ConcurrentInitShutdownNeverLeavesJoinableGenerat
                     std::this_thread::yield();
                 for (int n = 0; n < ITERATIONS; ++n)
                     (void)memory::init_cache(32, 5000);
-            });
+            }
+        );
     }
     for (int i = 0; i < SHUTDOWNERS; ++i)
     {
@@ -4042,7 +4150,8 @@ TEST(MemoryCacheLifecycleProof, ConcurrentInitShutdownNeverLeavesJoinableGenerat
                     std::this_thread::yield();
                 for (int n = 0; n < ITERATIONS; ++n)
                     memory::shutdown_cache();
-            });
+            }
+        );
     }
     for (int i = 0; i < READERS; ++i)
     {
@@ -4054,7 +4163,8 @@ TEST(MemoryCacheLifecycleProof, ConcurrentInitShutdownNeverLeavesJoinableGenerat
                     std::this_thread::yield();
                 for (int n = 0; n < ITERATIONS; ++n)
                     (void)memory::is_readable(Region{Address{&probe}, sizeof(probe)});
-            });
+            }
+        );
     }
 
     while (ready.load(std::memory_order_relaxed) < total_workers)
@@ -4087,8 +4197,12 @@ namespace DetourModKit::detail
     extern void (*g_memory_cache_leader_publish_window_test_hook)();
     void memory_cache_abandon_for_test() noexcept;
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept;
-    void memory_cache_shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
-                                                 std::size_t &ranges) noexcept;
+    void memory_cache_shard_index_sizes_for_test(
+        Address address,
+        std::size_t &entries,
+        std::size_t &fifo,
+        std::size_t &ranges
+    ) noexcept;
     extern void (*g_module_loaded_after_reference_test_hook)() noexcept;
     extern HMODULE g_module_loaded_reference_candidate_test_override;
 } // namespace DetourModKit::detail
@@ -4124,7 +4238,8 @@ namespace
                 const bool ok = memory::init_cache(32, 5000);
                 s_seam_init_ok.store(ok, std::memory_order_release);
                 s_seam_init_finished.store(true, std::memory_order_release);
-            });
+            }
+        );
         while (!s_seam_init_at_lifecycle_lock.load(std::memory_order_acquire))
             std::this_thread::yield();
         EXPECT_FALSE(s_seam_init_finished.load(std::memory_order_acquire))
@@ -4301,9 +4416,12 @@ TEST(MemoryCacheLifecycleProof, ContendedInvalidationAdvancesContentGeneration)
     std::thread lock_holder(
         []()
         {
-            DetourModKit::detail::memory_cache_hold_shared_shard_lock_for_test(Address{s_contended_invalidation_page},
-                                                                               &wait_with_shared_shard_lock);
-        });
+            DetourModKit::detail::memory_cache_hold_shared_shard_lock_for_test(
+                Address{s_contended_invalidation_page},
+                &wait_with_shared_shard_lock
+            );
+        }
+    );
 
     while (!s_contended_shard_locked.load(std::memory_order_acquire))
         std::this_thread::yield();
@@ -4372,10 +4490,14 @@ TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
 // MultiByteToWideChar uses a signed byte count; 0xFFFFFFFF would become its NUL-terminated sentinel if narrowed.
 TEST_F(MemoryTest, ModuleNameLengthSeamRejectsOverIntMax)
 {
-    static_assert(DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX)),
-                  "INT_MAX is the largest byte count the Win32 converter accepts");
-    static_assert(!DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX) + 1U),
-                  "INT_MAX + 1 must fail the length seam");
+    static_assert(
+        DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX)),
+        "INT_MAX is the largest byte count the Win32 converter accepts"
+    );
+    static_assert(
+        !DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX) + 1U),
+        "INT_MAX + 1 must fail the length seam"
+    );
 
     // The raw pointer/count seam rejects before constructing a view or accessing the deliberately small buffer.
     static constexpr char SMALL_NAME[] = "kernel32.dll";
@@ -4399,7 +4521,8 @@ TEST_F(MemoryTest, ModuleNameWidenRejectsNamesWin32WouldTruncateOrReplace)
 {
     static constexpr char EMBEDDED_NUL[] = "kernel32.dll\0ignored";
     EXPECT_TRUE(
-        DetourModKit::detail::widen_module_name(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}).empty());
+        DetourModKit::detail::widen_module_name(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}).empty()
+    );
     EXPECT_FALSE(memory::is_module_loaded(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}));
     EXPECT_EQ(Region::module_named(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}).size, 0u);
 
@@ -4519,28 +4642,40 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 namespace
 {
     // Raw typed reads must exclude bool because most byte patterns are not valid bool representations.
-    static_assert(!representation_read::GuardedReadable<bool>,
-                  "memory::read<bool> must be ill-formed; decode via read_bool");
+    static_assert(
+        !representation_read::GuardedReadable<bool>,
+        "memory::read<bool> must be ill-formed; decode via read_bool"
+    );
     static_assert(!representation_read::UncheckedReadable<bool>, "memory::unchecked::read<bool> must be ill-formed");
     static_assert(!representation_read::EngineReadable<bool>, "detail::guarded_read<bool> must be ill-formed");
     static_assert(!representation_read::GuardedReadable<bool[4]>, "memory::read<bool[4]> must be ill-formed");
     static_assert(!detail::is_representation_safe_v<bool>);
-    static_assert(representation_read::GuardedReadable<int> && representation_read::UncheckedReadable<int> &&
-                  representation_read::EngineReadable<int>);
+    static_assert(
+        representation_read::GuardedReadable<int> && representation_read::UncheckedReadable<int> &&
+        representation_read::EngineReadable<int>
+    );
     static_assert(representation_read::GuardedReadable<unsigned char> && representation_read::GuardedReadable<float>);
     static_assert(representation_read::GuardedReadable<void *> && representation_read::GuardedReadable<std::uintptr_t>);
-    static_assert(representation_read::GuardedReadable<representation_read::FixedEnum> &&
-                  representation_read::GuardedReadable<std::byte>);
+    static_assert(
+        representation_read::GuardedReadable<representation_read::FixedEnum> &&
+        representation_read::GuardedReadable<std::byte>
+    );
     static_assert(representation_read::GuardedReadable<std::array<std::byte, 8>>);
-    static_assert(representation_read::GuardedReadable<representation_read::Vec3i> &&
-                  representation_read::UncheckedReadable<representation_read::Vec3i> &&
-                  representation_read::EngineReadable<representation_read::Vec3i>);
-    static_assert(!representation_read::GuardedReadable<representation_read::Padded> &&
-                  !representation_read::UncheckedReadable<representation_read::Padded> &&
-                  !representation_read::EngineReadable<representation_read::Padded>);
-    static_assert(!representation_read::GuardedReadable<representation_read::BoolCarrier> &&
-                  !representation_read::UncheckedReadable<representation_read::BoolCarrier> &&
-                  !representation_read::EngineReadable<representation_read::BoolCarrier>);
+    static_assert(
+        representation_read::GuardedReadable<representation_read::Vec3i> &&
+        representation_read::UncheckedReadable<representation_read::Vec3i> &&
+        representation_read::EngineReadable<representation_read::Vec3i>
+    );
+    static_assert(
+        !representation_read::GuardedReadable<representation_read::Padded> &&
+        !representation_read::UncheckedReadable<representation_read::Padded> &&
+        !representation_read::EngineReadable<representation_read::Padded>
+    );
+    static_assert(
+        !representation_read::GuardedReadable<representation_read::BoolCarrier> &&
+        !representation_read::UncheckedReadable<representation_read::BoolCarrier> &&
+        !representation_read::EngineReadable<representation_read::BoolCarrier>
+    );
 
     // read_bool validates the byte before forming the bool.
     TEST_F(MemoryTest, MemoryRepresentationProof_InvalidForeignBoolNeverConstructsT)
@@ -4743,7 +4878,8 @@ namespace
                             failures.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
-                });
+                }
+            );
         }
         go.store(true, std::memory_order_release);
         for (std::thread &thread : threads)
@@ -5207,7 +5343,8 @@ namespace
         const auto partial_write_over = [&](DWORD head_protection) noexcept
         {
             std::byte *const base = static_cast<std::byte *>(
-                VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+                VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            );
             EXPECT_NE(base, nullptr);
             std::memset(base, 0xCC, page_size * 2);
 
@@ -5777,8 +5914,10 @@ namespace
         EXPECT_TRUE(memory::is_module_loaded(shouted_name, true));
         EXPECT_FALSE(memory::is_module_loaded(shouted_name, false))
             << "a different spelling of a present module is still an exact-case miss";
-        EXPECT_NE(memory::module_of(Address{::GetModuleHandleW(fixture.basename().c_str())}).size,
-                  static_cast<std::size_t>(0));
+        EXPECT_NE(
+            memory::module_of(Address{::GetModuleHandleW(fixture.basename().c_str())}).size,
+            static_cast<std::size_t>(0)
+        );
     }
 
     TEST_F(MemoryTest, IsModuleLoadedExactCaseRetainsModuleReference)

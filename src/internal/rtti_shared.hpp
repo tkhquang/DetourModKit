@@ -161,9 +161,11 @@ namespace DetourModKit
              * @return true on a fully validated walk; false for every failure mode the single-argument overload
              *         rejects, plus a @p vtable outside @p mod_range.
              */
-            [[nodiscard]] bool resolve_col_site(std::uintptr_t vtable,
-                                                const DetourModKit::detail::ModuleSpan &mod_range,
-                                                ColSite &out) noexcept;
+            [[nodiscard]] bool resolve_col_site(
+                std::uintptr_t vtable,
+                const DetourModKit::detail::ModuleSpan &mod_range,
+                ColSite &out
+            ) noexcept;
 
             /**
              * @brief Page-bounded, module-bounded NUL-terminated copy from @p addr into @p out.
@@ -186,8 +188,8 @@ namespace DetourModKit
              * @return Number of bytes written excluding the NUL terminator, or
              *         0 on any partial-read failure.
              */
-            [[nodiscard]] std::size_t read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len,
-                                                    std::uintptr_t module_end) noexcept;
+            [[nodiscard]] std::size_t
+            read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len, std::uintptr_t module_end) noexcept;
         } // namespace detail
     } // namespace rtti
 } // namespace DetourModKit

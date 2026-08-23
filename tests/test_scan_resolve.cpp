@@ -78,7 +78,8 @@ namespace
         explicit ExecutableBuffer(std::size_t size) : m_size(size)
         {
             m_base = static_cast<std::byte *>(
-                ::VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                ::VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
             if (m_base != nullptr)
             {
                 std::memset(m_base, 0xCC, size);
@@ -230,9 +231,12 @@ namespace
         sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 0, 1); // signature (x64)
         sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 4, 0); // offset in complete object
         sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 8, 0); // cd_offset
-        sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 12,
-                                static_cast<std::uint32_t>(buf_rva + SR_TD_OFFSET)); // p_type_descriptor
-        sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 16, 0);                         // p_class_descriptor
+        sr_write<std::uint32_t>(
+            buf,
+            SR_COL_OFFSET + 12,
+            static_cast<std::uint32_t>(buf_rva + SR_TD_OFFSET)
+        );                                                   // p_type_descriptor
+        sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 16, 0); // p_class_descriptor
         sr_write<std::uint32_t>(buf, SR_COL_OFFSET + 20,
                                 static_cast<std::uint32_t>(buf_rva + SR_COL_OFFSET)); // p_self
 
@@ -257,8 +261,8 @@ namespace
     // A distinctive sixteen-byte marker compiled into the test executable's own image so a Region::host() resolve has a
     // real in-image target. volatile + odr-used (a test reads its address) so the linker keeps it and the compiler does
     // not fold the bytes away.
-    volatile const unsigned char g_host_scan_marker[16] = {0x7A, 0x6B, 0x68, 0x71, 0x44, 0x4D, 0x4B, 0x48,
-                                                           0x6F, 0x73, 0x74, 0x4D, 0x61, 0x72, 0x6B, 0x21};
+    volatile const unsigned char g_host_scan_marker[16] =
+        {0x7A, 0x6B, 0x68, 0x71, 0x44, 0x4D, 0x4B, 0x48, 0x6F, 0x73, 0x74, 0x4D, 0x61, 0x72, 0x6B, 0x21};
 } // namespace
 
 TEST(ScanResolve, DirectResolvesAtMatchSite)
@@ -267,10 +271,12 @@ TEST(ScanResolve, DirectResolvesAtMatchSite)
     buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
 
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x100));
@@ -285,10 +291,12 @@ TEST(ScanResolve, DirectWalkBackOffsetsTheResult)
 
     // A negative walk-back resolves to a point before the match site.
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"), -0x10)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x100) - 0x10);
@@ -306,11 +314,14 @@ TEST(ScanResolve, RipRelativeResolvesThroughDisplacement)
     buffer.put_disp32(match + 3, displacement);
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("global", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::rip_relative("global", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
@@ -328,11 +339,14 @@ TEST(ScanResolve, RipRelativeSnapshotMayExtendPastMatchedDisplacement)
     buffer.put(instruction + 6, {0x78, 0x56, 0x34, 0x12});
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("store", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::rip_relative("store", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
     EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
@@ -356,11 +370,14 @@ TEST(ScanResolve, RipRelativeSnapshotClampedAtScopeEndFailsClosed)
     const Region scope{Address{buffer.address_of(0)}, scope_size};
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("clamped", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = scope,
-    });
+        Candidate::rip_relative("clamped", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = scope,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -378,11 +395,14 @@ TEST(ScanResolve, RipRelativeSnapshotStartsAtOffsetMarkerAfterGap)
     buffer.put_disp32(instruction + 3, displacement);
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("marked", scan::Pattern::literal("DE AD [2] | 48 8B 05 ?? ?? ?? ??"), 3, 7)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::rip_relative("marked", scan::Pattern::literal("DE AD [2] | 48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
     EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
@@ -400,10 +420,12 @@ TEST(ScanResolve, RequireUniqueFallsThroughAmbiguousToUniqueCandidate)
         Candidate::direct("ambiguous", scan::Pattern::literal("DE AD BE EF")),
         Candidate::direct("unique", scan::Pattern::literal("CA FE BA BE")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x280));
@@ -417,10 +439,12 @@ TEST(ScanResolve, RequireUniqueSoleAmbiguousReturnsNoMatch)
     buffer.put(0x180, {0xDE, 0xAD, 0xBE, 0xEF});
 
     const std::array<Candidate, 1> ladder = {Candidate::direct("ambiguous", scan::Pattern::literal("DE AD BE EF"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -433,11 +457,13 @@ TEST(ScanResolve, RequireUniqueFalseAcceptsFirstAmbiguousMatch)
     buffer.put(0x180, {0xDE, 0xAD, 0xBE, 0xEF});
 
     const std::array<Candidate, 1> ladder = {Candidate::direct("loose", scan::Pattern::literal("DE AD BE EF"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .require_unique = false,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .require_unique = false,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x080));
@@ -451,10 +477,12 @@ TEST(ScanResolve, ScopeExcludesMatchOutsideTheRange)
     // Narrow the scope to the first half of the buffer, where the signature is absent.
     const Region narrow = Region{Address{buffer.data()}, 0x200};
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = narrow,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = narrow,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -463,10 +491,12 @@ TEST(ScanResolve, ScopeExcludesMatchOutsideTheRange)
 TEST(ScanResolve, EmptyLadderReturnsEmptyCandidates)
 {
     const std::span<const Candidate> empty;
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = empty,
-        .scope = Region::host(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = empty,
+            .scope = Region::host(),
+        }
+    );
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::EmptyCandidates);
 }
@@ -478,10 +508,12 @@ TEST(ScanResolve, EmptyScopeReturnsInvalidRange)
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
 
     // A default Region is empty (the fail-closed result of an unresolvable scope), which must report InvalidRange.
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = Region{},
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = Region{},
+        }
+    );
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::InvalidRange);
 }
@@ -495,35 +527,52 @@ TEST(ScanResolve, RipRelativeFactoryEnforcesDisplacementInvariant)
     EXPECT_NO_THROW((void)Candidate::rip_relative("ok", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7));
 
     // disp32 overruns the instruction end: 5 + 4 > 7.
-    EXPECT_THROW((void)Candidate::rip_relative("overrun", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 5, 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("overrun", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 5, 7),
+        std::invalid_argument
+    );
     // A negative displacement-field offset cannot describe an instruction layout.
-    EXPECT_THROW((void)Candidate::rip_relative("negative", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), -1, 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("negative", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), -1, 7),
+        std::invalid_argument
+    );
     // An all-zero mis-set (0 + 4 > 0) is rejected.
-    EXPECT_THROW((void)Candidate::rip_relative("zero", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 0, 0),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("zero", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 0, 0),
+        std::invalid_argument
+    );
     // x86-64 instructions are at most 15 bytes long.
-    EXPECT_THROW((void)Candidate::rip_relative("too-long", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 16),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("too-long", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 16),
+        std::invalid_argument
+    );
 
     // The matched span must witness every byte of the disp32 used to authorize the target.
-    EXPECT_THROW((void)Candidate::rip_relative("short", scan::Pattern::literal("48 8B 05"), 3, 7),
-                 std::invalid_argument);
-    EXPECT_THROW((void)Candidate::rip_relative("partial-disp", scan::Pattern::literal("48 8B 05 ??"), 3, 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("short", scan::Pattern::literal("48 8B 05"), 3, 7),
+        std::invalid_argument
+    );
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("partial-disp", scan::Pattern::literal("48 8B 05 ??"), 3, 7),
+        std::invalid_argument
+    );
     // A bounded gap before the result marker does not shorten the instruction-shaped suffix.
     EXPECT_NO_THROW(
-        (void)Candidate::rip_relative("marked", scan::Pattern::literal("DE [1-3] | 48 8B 05 ?? ?? ?? ??"), 3, 7));
+        (void)Candidate::rip_relative("marked", scan::Pattern::literal("DE [1-3] | 48 8B 05 ?? ?? ?? ??"), 3, 7)
+    );
     // A gap ending at the result marker is before the instruction and cannot make a short suffix cover its disp32.
-    EXPECT_THROW((void)Candidate::rip_relative("gap-before-marker", scan::Pattern::literal("DE [4] | 48 8B 05"), 3, 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("gap-before-marker", scan::Pattern::literal("DE [4] | 48 8B 05"), 3, 7),
+        std::invalid_argument
+    );
     // A gap AFTER the result marker widens the suffix, but only by the bytes every match is guaranteed to consume.
     // A variable gap whose lower bound leaves the disp32 outside the shortest match is refused; the same shape with a
     // fixed gap that always covers it constructs. The pair pins the lower bound: scoring the gap by its maximum would
     // admit the first, and dropping the gap from the suffix entirely would reject the second.
-    EXPECT_THROW((void)Candidate::rip_relative("loose-gap", scan::Pattern::literal("48 8B 05 [1-64] 90"), 3, 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)Candidate::rip_relative("loose-gap", scan::Pattern::literal("48 8B 05 [1-64] 90"), 3, 7),
+        std::invalid_argument
+    );
     EXPECT_NO_THROW((void)Candidate::rip_relative("fixed-gap", scan::Pattern::literal("48 8B 05 [4] 90"), 3, 7));
 
     // The invariant is scoped to RipRelative: a Direct candidate with an arbitrary signed walk_back still constructs.
@@ -586,10 +635,12 @@ TEST(ScanResolve, RttiVtableMissFallsThroughToByteCandidate)
         Candidate::rtti_vtable("bogus", ".?AVDefinitelyNotARealType@@"),
         Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->winning_name, "marker");
@@ -601,11 +652,14 @@ TEST(ScanResolve, StringXrefMissReturnsNoMatchNotInvalid)
     // A sole string-xref candidate whose literal is absent fails closed as NoMatch: a non-byte candidate that misses
     // is a clean miss, not an error.
     const std::array<Candidate, 1> ladder = {
-        Candidate::string_xref("missing", "this literal does not exist in the buffer scope")};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::string_xref("missing", "this literal does not exist in the buffer scope")
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -654,8 +708,10 @@ TEST(ScanResolve, CandidateOrderChangesTheWinner)
     // (high-nibble-only, so it carries no fully-known byte to anchor on). The unanchored candidate is declared first,
     // so AsDeclared and UniqueFirst try a different candidate first and produce a different winner.
     buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF}); // anchored target
-    buffer.put(0x200,
-               {0x10, 0x20, 0x30, 0x40}); // unanchored target (high nibbles 1,2,3,4; the 0xCC fill never collides)
+    buffer.put(
+        0x200,
+        {0x10, 0x20, 0x30, 0x40}
+    ); // unanchored target (high nibbles 1,2,3,4; the 0xCC fill never collides)
 
     const std::array<Candidate, 2> ladder = {
         Candidate::direct("unanchored", scan::Pattern::literal("1? 2? 3? 4?")),
@@ -663,21 +719,25 @@ TEST(ScanResolve, CandidateOrderChangesTheWinner)
     };
 
     // AsDeclared tries the unanchored candidate (declared first), so it wins.
-    const auto as_declared = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .order = scan::CandidateOrder::AsDeclared,
-    });
+    const auto as_declared = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .order = scan::CandidateOrder::AsDeclared,
+        }
+    );
     ASSERT_TRUE(as_declared.has_value());
     EXPECT_EQ(as_declared->winning_name, "unanchored");
     EXPECT_EQ(as_declared->address.raw(), buffer.address_of(0x200));
 
     // UniqueFirst promotes the anchored byte pattern ahead of the unanchored one, flipping the winner.
-    const auto unique_first = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .order = scan::CandidateOrder::UniqueFirst,
-    });
+    const auto unique_first = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .order = scan::CandidateOrder::UniqueFirst,
+        }
+    );
     ASSERT_TRUE(unique_first.has_value());
     EXPECT_EQ(unique_first->winning_name, "anchored");
     EXPECT_EQ(unique_first->address.raw(), buffer.address_of(0x100));
@@ -689,26 +749,32 @@ TEST(ScanResolve, InvalidEnumValuesCannotNormalizePermissively)
     buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
 
-    const auto valid = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto valid = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
     ASSERT_TRUE(valid.has_value());
     EXPECT_EQ(valid->address.raw(), buffer.address_of(0x100));
 
-    const auto bad_order = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .order = static_cast<scan::CandidateOrder>(0xFF),
-    });
+    const auto bad_order = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .order = static_cast<scan::CandidateOrder>(0xFF),
+        }
+    );
     ASSERT_FALSE(bad_order.has_value());
     EXPECT_EQ(bad_order.error().code, ErrorCode::InvalidArg);
 
-    const auto bad_fallback = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = static_cast<scan::FallbackPolicy>(0xFF),
-    });
+    const auto bad_fallback = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = static_cast<scan::FallbackPolicy>(0xFF),
+        }
+    );
     ASSERT_FALSE(bad_fallback.has_value());
     EXPECT_EQ(bad_fallback.error().code, ErrorCode::InvalidArg);
 
@@ -720,10 +786,12 @@ TEST(ScanResolve, InvalidEnumValuesCannotNormalizePermissively)
         Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
         Candidate::string_xref("invalid-encoding", invalid_xref),
     };
-    const auto bad_encoding = scan::resolve(scan::ScanRequest{
-        .ladder = bad_encoding_ladder,
-        .scope = buffer.region(),
-    });
+    const auto bad_encoding = scan::resolve(
+        scan::ScanRequest{
+            .ladder = bad_encoding_ladder,
+            .scope = buffer.region(),
+        }
+    );
     ASSERT_FALSE(bad_encoding.has_value());
     EXPECT_EQ(bad_encoding.error().code, ErrorCode::InvalidArg);
 
@@ -733,20 +801,24 @@ TEST(ScanResolve, InvalidEnumValuesCannotNormalizePermissively)
         Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
         Candidate::string_xref("invalid-return", invalid_xref),
     };
-    const auto bad_return = scan::resolve(scan::ScanRequest{
-        .ladder = bad_return_ladder,
-        .scope = buffer.region(),
-    });
+    const auto bad_return = scan::resolve(
+        scan::ScanRequest{
+            .ladder = bad_return_ladder,
+            .scope = buffer.region(),
+        }
+    );
     ASSERT_FALSE(bad_return.has_value());
     EXPECT_EQ(bad_return.error().code, ErrorCode::InvalidArg);
 
     // A malformed request outranks an empty one: the policy-enum checks run before the EmptyCandidates verdict, so an
     // empty ladder cannot downgrade an invalid enum to a routine missing-candidates miss.
-    const auto empty_invalid = scan::resolve(scan::ScanRequest{
-        .ladder = {},
-        .scope = buffer.region(),
-        .order = static_cast<scan::CandidateOrder>(0xFF),
-    });
+    const auto empty_invalid = scan::resolve(
+        scan::ScanRequest{
+            .ladder = {},
+            .scope = buffer.region(),
+            .order = static_cast<scan::CandidateOrder>(0xFF),
+        }
+    );
     ASSERT_FALSE(empty_invalid.has_value());
     EXPECT_EQ(empty_invalid.error().code, ErrorCode::InvalidArg);
 
@@ -831,7 +903,8 @@ TEST(ScanResolve, ResolveBatchReturnsPerRequestResultsInOrder)
     const std::array<Candidate, 1> first_ladder = {Candidate::direct("first", scan::Pattern::literal("DE AD BE EF"))};
     const std::array<Candidate, 1> second_ladder = {Candidate::direct("second", scan::Pattern::literal("CA FE BA BE"))};
     const std::array<Candidate, 1> missing_ladder = {
-        Candidate::direct("missing", scan::Pattern::literal("01 02 03 04"))};
+        Candidate::direct("missing", scan::Pattern::literal("01 02 03 04"))
+    };
 
     const std::array<scan::ScanRequest, 3> requests = {
         scan::ScanRequest{
@@ -884,7 +957,8 @@ TEST(ScanResolve, ExecutablePagesExcludeDataMatchThatReadableResolves)
     ReadableBuffer data(0x400); // A heap page: committed and readable, but NOT executable (a data-section stand-in).
     data.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("data-sig", scan::Pattern::literal("DE AD BE EF 11 22"))};
+        Candidate::direct("data-sig", scan::Pattern::literal("DE AD BE EF 11 22"))
+    };
 
     // Readable accepts data pages, so the data-section match resolves at its planted address.
     const scan::ScanRequest readable_request{
@@ -918,7 +992,8 @@ TEST(ScanResolve, ExecutablePagesResolveGenuineCodeMatch)
     ASSERT_TRUE(code.valid());
     code.put(0x080, {0x0F, 0x1F, 0x44, 0x00, 0x00, 0x90}); // A distinctive byte run against the 0xCC fill.
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("code-sig", scan::Pattern::literal("0F 1F 44 00 00 90"))};
+        Candidate::direct("code-sig", scan::Pattern::literal("0F 1F 44 00 00 90"))
+    };
 
     const scan::ScanRequest executable_request{
         .ladder = ladder,
@@ -935,8 +1010,10 @@ TEST(ScanResolve, ExecutablePagesResolveGenuineCodeMatch)
 // missing enumerator at compile time; these checks additionally pin the callback-safe noexcept contract and the
 // "Unknown" out-of-range fallback for a value read from possibly corrupted memory. The static_asserts prove the map is
 // usable in a constant expression.
-static_assert(noexcept(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared)),
-              "candidate_order_to_string must be noexcept: it is a callback-safe pure value map.");
+static_assert(
+    noexcept(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared)),
+    "candidate_order_to_string must be noexcept: it is a callback-safe pure value map."
+);
 static_assert(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared) == "AsDeclared");
 static_assert(scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst) == "UniqueFirst");
 static_assert(scan::candidate_order_to_string(static_cast<scan::CandidateOrder>(0xFF)) == "Unknown");
@@ -946,8 +1023,10 @@ TEST(ScanResolve, CandidateOrderToStringIsTotalAndDistinct)
     // Every declared enumerator maps to its own non-empty name.
     EXPECT_EQ(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared), "AsDeclared");
     EXPECT_EQ(scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst), "UniqueFirst");
-    EXPECT_NE(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared),
-              scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst));
+    EXPECT_NE(
+        scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared),
+        scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst)
+    );
 
     // An out-of-range value (e.g. a byte read from corrupted state cast to the enum) degrades to a stable sentinel
     // rather than returning a dangling or empty view.
@@ -988,12 +1067,15 @@ TEST(ScanResolve, PrologueFallbackRecoversAnE9HookedFunction)
     // The candidate's signature is the UNHOOKED prologue (five original bytes) plus the tail. The five leading bytes do
     // not match the E9 now present, so the direct pass misses and the fallback must rebuild the prologue as the JMP.
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1018,7 +1100,8 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityRejectsAWitnessMismatch)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // A witness that always rejects the recovered site models a near-twin: structural recovery still finds the unique
     // hooked match, but the site is not the intended function. RequireIdentity must fail closed with a distinct code
@@ -1028,12 +1111,14 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityRejectsAWitnessMismatch)
         .predicate = +[](std::int64_t, const void *) noexcept { return false; },
         .context = nullptr,
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::RequireIdentity,
-        .fallback_witness = witness,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+            .fallback_witness = witness,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
@@ -1049,7 +1134,8 @@ TEST(ScanResolve, BorrowCodeTargetStrictPinsRequireIdentityAndGatesTheWitness)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // borrow_code_target_strict pins FallbackPolicy::RequireIdentity and takes the witness as a MANDATORY argument, so
     // a caller cannot request the strict fallback without one (which would silently fail closed on every recovery). A
@@ -1089,16 +1175,19 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityWithoutWitnessFailsClosed)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // RequireIdentity with no witness has nothing to confirm the recovered site with, so it must refuse it. This
     // mirrors anchor::Anchor::require_validator rejecting a resolvable anchor that carries no validator: the strict
     // policy never trusts an unverifiable recovery.
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::RequireIdentity,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
@@ -1114,7 +1203,8 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityAcceptsAConfirmingWitness)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // A realistic witness corroborates the recovered address against an independently known landmark (here the true
     // function address, passed through context). It confirms the site, so RequireIdentity recovers exactly as the
@@ -1125,12 +1215,14 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityAcceptsAConfirmingWitness)
                      { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t *>(ctx); },
         .context = &expected,
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::RequireIdentity,
-        .fallback_witness = witness,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+            .fallback_witness = witness,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1165,7 +1257,8 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityKeepsTryingUntilAWitnessConfirm
     // intended function.
     const std::array<Candidate, 2> ladder = {
         Candidate::direct("twin", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD")),
-        Candidate::direct("intended", scan::Pattern::literal("55 48 89 E5 90 A1 B2 C3 D4 E5 F6 17 28 39 4A 5B 6C"))};
+        Candidate::direct("intended", scan::Pattern::literal("55 48 89 E5 90 A1 B2 C3 D4 E5 F6 17 28 39 4A 5B 6C"))
+    };
 
     // The witness confirms only the intended function's address (passed through context), so it rejects the twin.
     const std::uintptr_t expected = buffer.address_of(intended);
@@ -1174,12 +1267,14 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityKeepsTryingUntilAWitnessConfirm
                      { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t *>(ctx); },
         .context = &expected,
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::RequireIdentity,
-        .fallback_witness = witness,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+            .fallback_witness = witness,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(intended));
@@ -1196,7 +1291,8 @@ TEST(ScanResolve, PrologueFallbackWarnOnlyRecoversDespiteAWitnessMismatch)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // WarnOnly surfaces a witness disagreement as a log line but does not veto the recovery, so a rejecting witness
     // must leave the resolved address unchanged. This is the observe-before-enforce mode: a consumer wires the witness
@@ -1205,12 +1301,14 @@ TEST(ScanResolve, PrologueFallbackWarnOnlyRecoversDespiteAWitnessMismatch)
         .predicate = +[](std::int64_t, const void *) noexcept { return false; },
         .context = nullptr,
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-        .fallback_witness = witness,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+            .fallback_witness = witness,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1227,14 +1325,17 @@ TEST(ScanResolve, PrologueFallbackOffAttemptsNoRecovery)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // The default Off policy attempts no prologue reconstruction, so a function only reachable through the fallback
     // (its direct prologue is overwritten by the E9) stays a clean miss rather than resolving to its hooked site.
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -1246,12 +1347,15 @@ TEST(ScanResolve, PrologueFallbackShortTailIsNotApplicable)
     // A Direct candidate that misses directly and whose literal tail (after the five prologue bytes) is only nine
     // literals, below the ten-literal floor, so no shape is applicable.
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("short", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("short", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -1265,12 +1369,15 @@ TEST(ScanResolve, PrologueFallbackRejectsBoundedJumpPattern)
     // jump-bearing tail still resolves through the normal direct scan when it is present.
     ReadableBuffer buffer(0x400);
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("jumpy", scan::Pattern::literal("55 48 89 E5 90 [1-2] 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("jumpy", scan::Pattern::literal("55 48 89 E5 90 [1-2] 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -1294,12 +1401,15 @@ TEST(ScanResolve, PrologueFallbackRecoversFf25IndirectPrologue)
     // Candidate = the unhooked six-byte prologue + the twelve-byte tail. The leading bytes no longer match the FF 25
     // now present, so the direct pass misses and the fallback rebuilds the prologue as the indirect-JMP shape.
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1319,14 +1429,20 @@ TEST(ScanResolve, PrologueFallbackRecoversFf25Abs64InlineTarget)
     buffer.put_ff25_abs64(function, buffer.address_of(trampoline));
     buffer.put(function + 14, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
 
-    const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 90 90 90 90 90 90 90 90 11 22 33 44 "
-                                                           "55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+    const std::array<Candidate, 1> ladder = {Candidate::direct(
+        "hooked",
+        scan::Pattern::literal(
+            "55 48 89 E5 90 90 90 90 90 90 90 90 90 90 11 22 33 44 "
+            "55 66 77 88 99 AA BB DD"
+        )
+    )};
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1347,14 +1463,20 @@ TEST(ScanResolve, PrologueFallbackRecoversMovRaxJmpRax)
 
     // Leading byte 0x55 differs from the planted 0x48, so the direct pass misses and the fallback rebuilds the prologue
     // as the mov-rax/jmp-rax shape.
-    const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 90 90 90 90 90 90 11 22 33 44 55 66 "
-                                                           "77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+    const std::array<Candidate, 1> ladder = {Candidate::direct(
+        "hooked",
+        scan::Pattern::literal(
+            "55 48 89 E5 90 90 90 90 90 90 90 90 11 22 33 44 55 66 "
+            "77 88 99 AA BB DD"
+        )
+    )};
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1374,12 +1496,15 @@ TEST(ScanResolve, PrologueFallbackHonorsAnchorOffsetMarker)
     // The signature carries a `|` result marker seven bytes in. The direct pass would return (match + 7); the fallback
     // must honor the same marker, so the recovered address is function + 7, not the bare match site.
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 | 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 | 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function + 7));
@@ -1400,12 +1525,15 @@ TEST(ScanResolve, PrologueFallbackRejectsDataOnlyDestination)
     buffer.put(function + 6, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -1429,12 +1557,15 @@ TEST(ScanResolve, PrologueFallbackAllowsTrampolineOutsideScope)
     scope.put(function + 6, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = scope.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = scope.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), scope.address_of(function));
@@ -1459,12 +1590,15 @@ TEST(ScanResolve, PrologueFallbackRejectsAmbiguousRebuiltPattern)
     buffer.put(second + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackAmbiguous);
@@ -1490,12 +1624,16 @@ TEST(ScanResolve, PrologueFallbackUsesInstructionRoundedStolenSpan)
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
 
     const std::array<Candidate, 1> ladder = {Candidate::direct(
-        "hooked", scan::Pattern::literal("55 48 89 E5 48 83 EC 20 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        "hooked",
+        scan::Pattern::literal("55 48 89 E5 48 83 EC 20 11 22 33 44 55 66 77 88 99 AA BB DD")
+    )};
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1503,11 +1641,13 @@ TEST(ScanResolve, PrologueFallbackUsesInstructionRoundedStolenSpan)
 
     // Some installers write only the five-byte jump and leave the rest of the straddled instruction in place.
     buffer.put(function + 5, {0x83, 0xEC, 0x20});
-    const auto orphaned_tail = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+    const auto orphaned_tail = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
     ASSERT_TRUE(orphaned_tail.has_value());
     EXPECT_EQ(orphaned_tail->address.raw(), buffer.address_of(function));
 }
@@ -1526,14 +1666,20 @@ TEST(ScanResolve, PrologueFallbackRoundsFf25StolenSpan)
     buffer.put(function + 17, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
 
-    const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 48 83 EC 20 48 89 5C 24 08 48 83 EC 20 "
-                                                           "11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+    const std::array<Candidate, 1> ladder = {Candidate::direct(
+        "hooked",
+        scan::Pattern::literal(
+            "55 48 89 E5 48 83 EC 20 48 89 5C 24 08 48 83 EC 20 "
+            "11 22 33 44 55 66 77 88 99 AA BB DD"
+        )
+    )};
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -1548,12 +1694,16 @@ TEST(ScanResolve, PrologueFallbackUndecodableLeadingSpanIsNotApplicable)
     // A wildcard at the fourth prologue byte truncates the mov before it decodes, so the five-byte span cannot be
     // instruction-rounded. The literal tail is well over the floor, so only the undecodable leading span is at issue.
     const std::array<Candidate, 1> ladder = {Candidate::direct(
-        "wildcard-prologue", scan::Pattern::literal("55 48 89 ?? 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        "wildcard-prologue",
+        scan::Pattern::literal("55 48 89 ?? 90 11 22 33 44 55 66 77 88 99 AA BB DD")
+    )};
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -1576,11 +1726,14 @@ TEST(ScanResolve, RipRelativeRejectsInstructionDrift)
     buffer.put_disp32(match + 3, 0x10);
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("drift", scan::Pattern::literal("48 89 ?? ?? ?? ?? ??"), 3, 7)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::rip_relative("drift", scan::Pattern::literal("48 89 ?? ?? ?? ?? ??"), 3, 7)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -1602,11 +1755,14 @@ TEST(ScanResolve, RipRelativeSemanticDecodeStopsAtTheInstructionBoundary)
     ASSERT_TRUE(buffer.protect(PAGE_SIZE, PAGE_SIZE, PAGE_NOACCESS));
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("boundary", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::rip_relative("boundary", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
@@ -1632,12 +1788,15 @@ TEST(ScanResolve, PrologueFallbackNineByteTailIsNotApplicable)
     // applicable and the resolver reports the distinct PrologueFallbackNotApplicable rather than a plain miss. Pins the
     // reject side of the floor (the recovery tests above pin the accept side at twelve).
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("nine", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-        .fallback_policy = scan::FallbackPolicy::WarnOnly,
-    });
+        Candidate::direct("nine", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99"))
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+            .fallback_policy = scan::FallbackPolicy::WarnOnly,
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -1657,10 +1816,12 @@ TEST(ScanResolve, DirectImplausibleWalkBackFallsThroughToCleanCandidate)
         Candidate::direct("implausible", scan::Pattern::literal("DE AD BE EF"), implausible_walk_back),
         Candidate::direct("clean", scan::Pattern::literal("CA FE BA BE")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x200));
@@ -1677,11 +1838,14 @@ TEST(ScanResolve, DirectImplausibleWalkBackSoleCandidateReturnsNoMatch)
     const auto implausible_walk_back =
         static_cast<std::ptrdiff_t>(0x8000) - static_cast<std::ptrdiff_t>(buffer.address_of(0x100));
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("implausible", scan::Pattern::literal("DE AD BE EF"), implausible_walk_back)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+        Candidate::direct("implausible", scan::Pattern::literal("DE AD BE EF"), implausible_walk_back)
+    };
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -1701,10 +1865,12 @@ TEST(ScanResolve, StringXrefResolvesReferenceInScope)
     buffer.put_lea_rip(reference, literal);
 
     const std::array<Candidate, 1> ladder = {Candidate::string_xref("xref", "DmkUniqueAnchor")};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(reference));
@@ -1725,10 +1891,12 @@ TEST(ScanResolve, StringXrefAmbiguousFallsThroughToByteCandidate)
         Candidate::string_xref("pooled", "DmkAnchorLiteral"),
         Candidate::direct("fallback", scan::Pattern::literal("CA FE BA BE")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x300));
@@ -1741,10 +1909,12 @@ TEST(ScanResolve, SoleMissingRttiVtableReturnsNoMatch)
     // A sole RttiVtable candidate whose mangled name resolves to nothing fails closed as NoMatch: a non-byte candidate
     // that misses is a clean miss, and there is no byte tier to fall through to.
     const std::array<Candidate, 1> ladder = {Candidate::rtti_vtable("absent", ".?AVDefinitelyNotARealType@@")};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -1769,10 +1939,12 @@ TEST_F(ScanResolveRttiVtable, ResolvesPrimaryVtableInScope)
     ASSERT_NE(expected, 0u);
 
     const std::array<Candidate, 1> ladder = {Candidate::rtti_vtable("type", ".?AVScanResolveType@@")};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = sr_pool_region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = sr_pool_region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), expected);
@@ -1793,10 +1965,12 @@ TEST(ScanResolve, DirectResolvedOutOfRangeFallsThroughToNextCandidate)
         Candidate::direct("out-of-range", scan::Pattern::literal("DE AD BE EF"), 0x300),
         Candidate::direct("in-range", scan::Pattern::literal("CA FE BA BE")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x100));
@@ -1811,8 +1985,9 @@ TEST(ScanResolve, RipRelativeResolvedOutOfRangeFallsThroughToNextCandidate)
     buffer.put(0x100, {0x48, 0x8B, 0x05});
     const std::size_t match = 0x100;
     const std::size_t out_of_range_target = 0x800;
-    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(out_of_range_target) -
-                                                        (static_cast<std::int64_t>(match) + 7));
+    const auto displacement = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(out_of_range_target) - (static_cast<std::int64_t>(match) + 7)
+    );
     buffer.put_disp32(match + 3, displacement);
     buffer.put(0x200, {0xCA, 0xFE, 0xBA, 0xBE});
 
@@ -1820,10 +1995,12 @@ TEST(ScanResolve, RipRelativeResolvedOutOfRangeFallsThroughToNextCandidate)
         Candidate::rip_relative("out-of-range", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7),
         Candidate::direct("in-range", scan::Pattern::literal("CA FE BA BE")),
     };
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = buffer.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = buffer.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x200));
@@ -1840,10 +2017,12 @@ TEST(ScanResolve, NoCrossScopeBleedReturnsInScopeCopy)
     decoy.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
 
     const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = in_scope.region(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = in_scope.region(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), in_scope.address_of(0x100));
@@ -1876,10 +2055,12 @@ TEST(ScanResolve, ResolvesMarkerInHostImageScope)
     ASSERT_TRUE(pattern.has_value());
 
     const std::array<Candidate, 1> ladder = {Candidate::direct("host-marker", *pattern)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = Region::host(),
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = Region::host(),
+        }
+    );
 
     ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
     EXPECT_EQ(hit->address.raw(), expected);
@@ -1960,7 +2141,8 @@ TEST(ScanResolve, BorrowCodeTargetForwardsRequireIdentityAndWitness)
     buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
     buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))
+    };
 
     // borrow_code_target must forward the RequireIdentity policy AND the witness into the request, not merely set its
     // own WarnOnly default. A rejecting witness proves the whole preset path fails closed end-to-end: a mis-forward
@@ -1969,8 +2151,9 @@ TEST(ScanResolve, BorrowCodeTargetForwardsRequireIdentityAndWitness)
         .predicate = +[](std::int64_t, const void *) noexcept { return false; },
         .context = nullptr,
     };
-    const auto hit = scan::resolve(scan::borrow_code_target(ladder, "hook-target", buffer.region(),
-                                                            scan::FallbackPolicy::RequireIdentity, witness));
+    const auto hit = scan::resolve(
+        scan::borrow_code_target(ladder, "hook-target", buffer.region(), scan::FallbackPolicy::RequireIdentity, witness)
+    );
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
@@ -1988,7 +2171,8 @@ TEST(ScanResolve, BorrowCodeTargetResolvesCodeAndExcludesDataMatch)
     }
     code.put(0x80, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
     const std::array<Candidate, 1> ladder = {
-        Candidate::direct("code-sig", scan::Pattern::literal("DE AD BE EF 11 22"))};
+        Candidate::direct("code-sig", scan::Pattern::literal("DE AD BE EF 11 22"))
+    };
 
     const auto code_hit = scan::resolve(scan::borrow_code_target(ladder, "code", code.region()));
     ASSERT_TRUE(code_hit.has_value()) << code_hit.error().message();
@@ -2026,7 +2210,8 @@ TEST(ScanResolve, BorrowCodeTargetRejectsCodeMatchThatResolvesToData)
     image.put(data_offset, {0x11, 0x22, 0x33, 0x44});
 
     const std::array<Candidate, 1> ladder = {
-        Candidate::rip_relative("code-to-data", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+        Candidate::rip_relative("code-to-data", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)
+    };
     const scan::ScanRequest byte_filtered{
         .ladder = ladder,
         .label = "code-to-data",

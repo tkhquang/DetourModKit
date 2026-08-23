@@ -178,8 +178,13 @@ namespace
         }
         if (!declared_workload_complete(count, reserved))
         {
-            std::fprintf(stderr, "[bench] grow_vad: reserved %zu of %zu requested regions (%lu)\n", reserved, count,
-                         GetLastError());
+            std::fprintf(
+                stderr,
+                "[bench] grow_vad: reserved %zu of %zu requested regions (%lu)\n",
+                reserved,
+                count,
+                GetLastError()
+            );
             gates.abort_setup("memory.vad_regions_reserved");
         }
     }
@@ -226,8 +231,13 @@ namespace
         }
         if (!declared_workload_complete(pages, pool.size()))
         {
-            std::fprintf(stderr, "[bench] make_churn_pool: committed %zu of %zu requested pages (%lu)\n", pool.size(),
-                         pages, GetLastError());
+            std::fprintf(
+                stderr,
+                "[bench] make_churn_pool: committed %zu of %zu requested pages (%lu)\n",
+                pool.size(),
+                pages,
+                GetLastError()
+            );
             gates.abort_setup(gate);
         }
         gates.fact(gate, true);
@@ -265,9 +275,11 @@ namespace
                         const auto e = Clock::now();
                         sink(r ? 1u : 0u);
                         lat.push_back(
-                            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count()));
+                            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count())
+                        );
                     }
-                });
+                }
+            );
         }
 
         go.store(true, std::memory_order_release);
@@ -312,7 +324,8 @@ namespace
                             idx = 0;
                     }
                     sink(local);
-                });
+                }
+            );
         }
 
         // Start timing only once every worker is spun up and waiting, so the window is the parallel work rather than
@@ -351,8 +364,13 @@ namespace
         double p50, p95, p99, max, mean;
     };
 
-    ProbeStats run_probe(const std::vector<void *> &pool, std::size_t probes, std::size_t k_reads,
-                         std::size_t reads_per_obj, bool gated)
+    ProbeStats run_probe(
+        const std::vector<void *> &pool,
+        std::size_t probes,
+        std::size_t k_reads,
+        std::size_t reads_per_obj,
+        bool gated
+    )
     {
         std::vector<double> lat;
         lat.reserve(probes);
@@ -420,11 +438,12 @@ int main()
     std::byte src[8];
     std::memcpy(src, page, 8);
 
-    std::printf("DetourModKit Memory microbenchmark (toolchain: %s)\n",
+    std::printf(
+        "DetourModKit Memory microbenchmark (toolchain: %s)\n",
 #ifdef _MSC_VER
-                "MSVC (seh_* use __try/__except)"
+        "MSVC (seh_* use __try/__except)"
 #else
-                "non-MSVC (seh_* use the vectored-handler fault guard)"
+        "non-MSVC (seh_* use the vectored-handler fault guard)"
 #endif
     );
     std::printf("DEFAULT_CACHE_EXPIRY_MS = %u\n\n", static_cast<unsigned>(Mem::DEFAULT_CACHE_EXPIRY_MS));
@@ -432,12 +451,15 @@ int main()
     // Phase 1: cache OFF -> validators take the direct-VirtualQuery branch.
     Mem::shutdown_cache(); // ensure uninitialized
     std::printf("[1] Validation MISS / uncached (cache off -> VirtualQuery branch)\n");
-    const double ns_qry = median_ns_per_call(ITERS, SAMPLES,
-                                             [&]()
-                                             {
-                                                 MEMORY_BASIC_INFORMATION mbi;
-                                                 sink(VirtualQuery(page, &mbi, sizeof(mbi)));
-                                             });
+    const double ns_qry = median_ns_per_call(
+        ITERS,
+        SAMPLES,
+        [&]()
+        {
+            MEMORY_BASIC_INFORMATION mbi;
+            sink(VirtualQuery(page, &mbi, sizeof(mbi)));
+        }
+    );
     report("raw VirtualQuery", ns_qry);
     const double ns_isr_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_readable(page, 8) ? 1u : 0u); });
     report("is_readable MISS", ns_isr_miss);
@@ -467,19 +489,27 @@ int main()
     const double ns_unchecked =
         median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::unchecked::read<std::uint64_t>(Address{addr})); });
     report("unchecked::read<u64>", ns_unchecked);
-    const double ns_sehread = median_ns_per_call(ITERS, SAMPLES,
-                                                 [&]()
-                                                 {
-                                                     auto v = Mem::read<std::uint64_t>(Address{addr});
-                                                     sink(v ? *v : 0u);
-                                                 });
+    const double ns_sehread = median_ns_per_call(
+        ITERS,
+        SAMPLES,
+        [&]()
+        {
+            auto v = Mem::read<std::uint64_t>(Address{addr});
+            sink(v ? *v : 0u);
+        }
+    );
     report("read<u64> (guarded)", ns_sehread);
     const double ns_dstore = median_ns_per_call(
-        ITERS, SAMPLES,
-        [&]() { *reinterpret_cast<volatile std::uint64_t *>(page) = s_sink.load(std::memory_order_relaxed); });
+        ITERS,
+        SAMPLES,
+        [&]() { *reinterpret_cast<volatile std::uint64_t *>(page) = s_sink.load(std::memory_order_relaxed); }
+    );
     report("direct volatile store", ns_dstore);
     const double ns_wbytes = median_ns_per_call(
-        WRITE_ITERS, SAMPLES, [&]() { (void)Mem::write_bytes(Address{page}, std::span<const std::byte>{src, 8}); });
+        WRITE_ITERS,
+        SAMPLES,
+        [&]() { (void)Mem::write_bytes(Address{page}, std::span<const std::byte>{src, 8}); }
+    );
     report("write_bytes(8)", ns_wbytes);
 
     std::printf("\n  cache stats: %s\n", Mem::get_cache_stats().c_str());
@@ -495,12 +525,15 @@ int main()
             grow_vad(gates, target - grown);
             grown = target;
         }
-        const double ns = median_ns_per_call(ITERS, SAMPLES,
-                                             [&]()
-                                             {
-                                                 MEMORY_BASIC_INFORMATION mbi;
-                                                 sink(VirtualQuery(page, &mbi, sizeof(mbi)));
-                                             });
+        const double ns = median_ns_per_call(
+            ITERS,
+            SAMPLES,
+            [&]()
+            {
+                MEMORY_BASIC_INFORMATION mbi;
+                sink(VirtualQuery(page, &mbi, sizeof(mbi)));
+            }
+        );
         std::printf("  +%6zu reserved regions   %10.2f ns/call\n", grown, ns);
     }
     gates.fact("memory.vad_regions_reserved", true);
@@ -513,8 +546,14 @@ int main()
     for (unsigned threads : {1u, 2u, 4u})
     {
         auto r = run_contention(pool, threads, 50000);
-        std::printf("  %u thread(s):  p50 %8.0f ns   p95 %8.0f ns   p99 %9.0f ns   max %10.0f ns\n", threads, r.p50_ns,
-                    r.p95_ns, r.p99_ns, r.max_ns);
+        std::printf(
+            "  %u thread(s):  p50 %8.0f ns   p95 %8.0f ns   p99 %9.0f ns   max %10.0f ns\n",
+            threads,
+            r.p50_ns,
+            r.p95_ns,
+            r.p99_ns,
+            r.max_ns
+        );
     }
 
     // Phase 6: REALISTIC probe cost + tail. A probe = K dependent reads across a few distinct objects. GATED =
@@ -524,16 +563,34 @@ int main()
     constexpr std::size_t K_READS = 8;       // fields per probe (~5-8 typical)
     constexpr std::size_t READS_PER_OBJ = 3; // ~3 distinct objects per probe
     constexpr std::size_t PROBES = 30000;
-    std::printf("\n[6] Per-probe cost: %zu reads across ~%zu distinct (cache-missing) objects\n", K_READS,
-                (K_READS + READS_PER_OBJ - 1) / READS_PER_OBJ);
+    std::printf(
+        "\n[6] Per-probe cost: %zu reads across ~%zu distinct (cache-missing) objects\n",
+        K_READS,
+        (K_READS + READS_PER_OBJ - 1) / READS_PER_OBJ
+    );
     const ProbeStats gated = run_probe(pool, PROBES, K_READS, READS_PER_OBJ, true);
     const ProbeStats direct = run_probe(pool, PROBES, K_READS, READS_PER_OBJ, false);
-    std::printf("  GATED  (is_readable+read): p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
-                gated.p50, gated.p95, gated.p99, gated.max, gated.mean);
-    std::printf("  DIRECT (raw read)        : p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
-                direct.p50, direct.p95, direct.p99, direct.max, direct.mean);
-    std::printf("  gated/direct mean ratio  : %.1fx   (added by the per-read gate: %.0f ns/probe)\n",
-                direct.mean > 0 ? gated.mean / direct.mean : 0.0, gated.mean - direct.mean);
+    std::printf(
+        "  GATED  (is_readable+read): p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
+        gated.p50,
+        gated.p95,
+        gated.p99,
+        gated.max,
+        gated.mean
+    );
+    std::printf(
+        "  DIRECT (raw read)        : p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
+        direct.p50,
+        direct.p95,
+        direct.p99,
+        direct.max,
+        direct.mean
+    );
+    std::printf(
+        "  gated/direct mean ratio  : %.1fx   (added by the per-read gate: %.0f ns/probe)\n",
+        direct.mean > 0 ? gated.mean / direct.mean : 0.0,
+        gated.mean - direct.mean
+    );
     std::printf("  cache stats after probes : %s\n", Mem::get_cache_stats().c_str());
 
     // Phase 7: per-frame budget. A per-bind / apply hook fires P probes in a frame (one per material instance /
@@ -546,12 +603,22 @@ int main()
     {
         const double g_ms = static_cast<double>(P) * gated.mean / 1.0e6;
         const double d_ms = static_cast<double>(P) * direct.mean / 1.0e6;
-        std::printf("  %-12zu %13.4f %8.2f%% %13.4f %8.2f%%\n", P, g_ms, 100.0 * g_ms / 16.667, d_ms,
-                    100.0 * d_ms / 16.667);
+        std::printf(
+            "  %-12zu %13.4f %8.2f%% %13.4f %8.2f%%\n",
+            P,
+            g_ms,
+            100.0 * g_ms / 16.667,
+            d_ms,
+            100.0 * d_ms / 16.667
+        );
     }
-    std::printf("  (worst single GATED probe this run: %.0f ns = %.4f ms -> a one-probe frame\n"
-                "   can spike %.2f%% of budget from the tail alone)\n",
-                gated.max, gated.max / 1.0e6, 100.0 * (gated.max / 1.0e6) / 16.667);
+    std::printf(
+        "  (worst single GATED probe this run: %.0f ns = %.4f ms -> a one-probe frame\n"
+        "   can spike %.2f%% of budget from the tail alone)\n",
+        gated.max,
+        gated.max / 1.0e6,
+        100.0 * (gated.max / 1.0e6) / 16.667
+    );
 
     // Contrast: the light case is a handful of validations per frame on a few
     // stable (cached) addresses. With warm hits that is sub-microsecond per frame, which is why a low-frequency
@@ -583,49 +650,57 @@ int main()
         }
         gates.fact("memory.chain_walk_resolves_leaf", leaf_exact);
     }
-    const double ns_gated_walk =
-        median_ns_per_call(ITERS, SAMPLES,
-                           [&]()
-                           {
-                               std::uintptr_t cur = chain_base;
-                               bool ok = true;
-                               for (std::size_t i = 0; i + 1 < CHAIN_CELLS; ++i)
-                               {
-                                   if (!is_readable(reinterpret_cast<void *>(cur), sizeof(std::uintptr_t)))
-                                   {
-                                       ok = false;
-                                       break;
-                                   }
-                                   cur = *reinterpret_cast<volatile std::uintptr_t *>(cur);
-                               }
-                               std::uint64_t v = 0;
-                               if (ok && is_readable(reinterpret_cast<void *>(cur), sizeof(std::uint64_t)))
-                                   v = *reinterpret_cast<volatile std::uint64_t *>(cur);
-                               sink(v);
-                           });
+    const double ns_gated_walk = median_ns_per_call(
+        ITERS,
+        SAMPLES,
+        [&]()
+        {
+            std::uintptr_t cur = chain_base;
+            bool ok = true;
+            for (std::size_t i = 0; i + 1 < CHAIN_CELLS; ++i)
+            {
+                if (!is_readable(reinterpret_cast<void *>(cur), sizeof(std::uintptr_t)))
+                {
+                    ok = false;
+                    break;
+                }
+                cur = *reinterpret_cast<volatile std::uintptr_t *>(cur);
+            }
+            std::uint64_t v = 0;
+            if (ok && is_readable(reinterpret_cast<void *>(cur), sizeof(std::uint64_t)))
+                v = *reinterpret_cast<volatile std::uint64_t *>(cur);
+            sink(v);
+        }
+    );
     report("gated link walk", ns_gated_walk);
-    const double ns_resolve_chain = median_ns_per_call(ITERS, SAMPLES,
-                                                       [&]()
-                                                       {
-                                                           const auto a = Mem::walk(Address{chain_base}, chain_span);
-                                                           sink(a ? a->raw() : 0u);
-                                                       });
+    const double ns_resolve_chain = median_ns_per_call(
+        ITERS,
+        SAMPLES,
+        [&]()
+        {
+            const auto a = Mem::walk(Address{chain_base}, chain_span);
+            sink(a ? a->raw() : 0u);
+        }
+    );
     report("walk (resolve chain)", ns_resolve_chain);
-    const double ns_read_chain = median_ns_per_call(ITERS, SAMPLES,
-                                                    [&]()
-                                                    {
-                                                        // walk resolves the leaf address under one fault guard; the
-                                                        // guarded read then loads the value. Together they are the v4
-                                                        // equivalent of the old single read-chain primitive.
-                                                        const auto a = Mem::walk(Address{chain_base}, chain_span);
-                                                        std::uint64_t v = 0;
-                                                        if (a)
-                                                        {
-                                                            const auto leaf = Mem::read<std::uint64_t>(*a);
-                                                            v = leaf ? *leaf : 0u;
-                                                        }
-                                                        sink(v);
-                                                    });
+    const double ns_read_chain = median_ns_per_call(
+        ITERS,
+        SAMPLES,
+        [&]()
+        {
+            // walk resolves the leaf address under one fault guard; the
+            // guarded read then loads the value. Together they are the v4
+            // equivalent of the old single read-chain primitive.
+            const auto a = Mem::walk(Address{chain_base}, chain_span);
+            std::uint64_t v = 0;
+            if (a)
+            {
+                const auto leaf = Mem::read<std::uint64_t>(*a);
+                v = leaf ? *leaf : 0u;
+            }
+            sink(v);
+        }
+    );
     report("walk + read<u64>", ns_read_chain);
     std::printf("  gated/(walk+read) ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
 
@@ -686,24 +761,29 @@ int main()
 
         std::printf("\n[10] Interior addresses of one 64 MiB region (cache on, entries warm)\n");
         std::size_t interior_cursor = 0;
-        ns_interior_hit = median_ns_per_call(ITERS, SAMPLES,
-                                             [&]()
-                                             {
-                                                 const std::uintptr_t address = interior_addresses[interior_cursor];
-                                                 interior_cursor = (interior_cursor + 1) % INTERIOR_ADDRESSES;
-                                                 sink(is_readable(reinterpret_cast<void *>(address), 8) ? 1u : 0u);
-                                             });
+        ns_interior_hit = median_ns_per_call(
+            ITERS,
+            SAMPLES,
+            [&]()
+            {
+                const std::uintptr_t address = interior_addresses[interior_cursor];
+                interior_cursor = (interior_cursor + 1) % INTERIOR_ADDRESSES;
+                sink(is_readable(reinterpret_cast<void *>(address), 8) ? 1u : 0u);
+            }
+        );
         report("interior HIT (range idx)", ns_interior_hit);
         ns_first_page_hit =
             median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_readable(interior_region, 8) ? 1u : 0u); });
         report("first-page HIT (hash)", ns_first_page_hit);
         const double ns_interior_query = median_ns_per_call(
-            ITERS, SAMPLES,
+            ITERS,
+            SAMPLES,
             [&]()
             {
                 MEMORY_BASIC_INFORMATION mbi;
                 sink(VirtualQuery(reinterpret_cast<void *>(interior_addresses[7]), &mbi, sizeof(mbi)));
-            });
+            }
+        );
         report("interior raw VirtualQuery", ns_interior_query);
     }
 
@@ -713,12 +793,15 @@ int main()
     {
         std::printf("\n[11] Invalidation (patch-path cycle vs idempotent floor)\n");
         const Region page_region{Address{page}, 4096};
-        const double ns_cycle = median_ns_per_call(ITERS, SAMPLES,
-                                                   [&]()
-                                                   {
-                                                       sink(is_readable(page, 8) ? 1u : 0u);
-                                                       Mem::invalidate_range(page_region);
-                                                   });
+        const double ns_cycle = median_ns_per_call(
+            ITERS,
+            SAMPLES,
+            [&]()
+            {
+                sink(is_readable(page, 8) ? 1u : 0u);
+                Mem::invalidate_range(page_region);
+            }
+        );
         report("query+invalidate cycle", ns_cycle);
         Mem::invalidate_range(page_region);
         const double ns_idempotent = median_ns_per_call(ITERS, SAMPLES, [&]() { Mem::invalidate_range(page_region); });
@@ -747,9 +830,11 @@ int main()
         const std::uint64_t live_after_init = dmk_alloc::live_bytes();
         const std::uint64_t calls_after_init = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
         init_bytes = live_after_init - live_before_init;
-        std::printf("  init_cache (defaults): %llu allocations, %llu live bytes\n",
-                    static_cast<unsigned long long>(calls_after_init - calls_before_init),
-                    static_cast<unsigned long long>(init_bytes));
+        std::printf(
+            "  init_cache (defaults): %llu allocations, %llu live bytes\n",
+            static_cast<unsigned long long>(calls_after_init - calls_before_init),
+            static_cast<unsigned long long>(init_bytes)
+        );
 
         // Warm fill: every entry the default capacity can hold (the churn pool re-used from phase 5).
         constexpr std::size_t WARM_FILL = 256;
@@ -758,9 +843,12 @@ int main()
             sink(is_readable(pool[i], 8) ? 1u : 0u);
         }
         const std::uint64_t live_after_fill = dmk_alloc::live_bytes();
-        std::printf("  after %zu-entry warm fill: +%llu bytes (%.1f bytes/entry)\n", WARM_FILL,
-                    static_cast<unsigned long long>(live_after_fill - live_after_init),
-                    static_cast<double>(live_after_fill - live_after_init) / static_cast<double>(WARM_FILL));
+        std::printf(
+            "  after %zu-entry warm fill: +%llu bytes (%.1f bytes/entry)\n",
+            WARM_FILL,
+            static_cast<unsigned long long>(live_after_fill - live_after_init),
+            static_cast<double>(live_after_fill - live_after_init) / static_cast<double>(WARM_FILL)
+        );
 
         // Churn steady state: two passes over 4096 distinct pages against the 256-entry capacity, so almost
         // every op is an eviction + insert.
@@ -779,8 +867,10 @@ int main()
             static_cast<double>(calls_after_churn - calls_before_churn) / static_cast<double>(churn_ops);
         retained_bytes = dmk_alloc::live_bytes() - live_before_init;
         std::printf("  churn steady state: %.3f allocations/op over %zu ops\n", churn_allocs_per_op, churn_ops);
-        std::printf("  retained while running (init + full entries): %llu bytes\n",
-                    static_cast<unsigned long long>(retained_bytes));
+        std::printf(
+            "  retained while running (init + full entries): %llu bytes\n",
+            static_cast<unsigned long long>(retained_bytes)
+        );
 
         Mem::shutdown_cache();
         leak_bytes = static_cast<std::int64_t>(dmk_alloc::live_bytes()) - static_cast<std::int64_t>(live_before_init);
@@ -818,11 +908,16 @@ int main()
     gates.at_least("memory.is_readable_miss_over_hit", ns_isr_hit > 0.0 ? ns_isr_miss / ns_isr_hit : 0.0, 1.0);
     // The interior containment-index hit must also beat the uncached syscall, or the cache is costing what it
     // exists to save on deep-region queries (the A3 comparison's second axis).
-    gates.at_least("memory.is_readable_miss_over_interior_hit",
-                   ns_interior_hit > 0.0 ? ns_isr_miss / ns_interior_hit : 0.0, 1.0);
+    gates.at_least(
+        "memory.is_readable_miss_over_interior_hit",
+        ns_interior_hit > 0.0 ? ns_isr_miss / ns_interior_hit : 0.0,
+        1.0
+    );
     gates.metric("memory.probe_gated_over_direct", direct.mean > 0 ? gated.mean / direct.mean : 0.0);
-    gates.metric("memory.interior_hit_over_first_page_hit",
-                 ns_first_page_hit > 0.0 ? ns_interior_hit / ns_first_page_hit : 0.0);
+    gates.metric(
+        "memory.interior_hit_over_first_page_hit",
+        ns_first_page_hit > 0.0 ? ns_interior_hit / ns_first_page_hit : 0.0
+    );
     gates.metric("memory.cache_init_bytes", static_cast<double>(init_bytes));
     gates.metric("memory.cache_retained_bytes_running", static_cast<double>(retained_bytes));
     gates.metric("memory.cache_churn_allocs_per_op", churn_allocs_per_op);

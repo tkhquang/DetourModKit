@@ -128,7 +128,8 @@ namespace
                 .name = std::move(name),
                 .target = Address{reinterpret_cast<std::uintptr_t>(target)},
             },
-            detour);
+            detour
+        );
         if (!hook.has_value())
         {
             return hook;
@@ -758,7 +759,8 @@ TEST_F(MidHookRundownTest, TeardownWaitsForAnInFlightCallbackToLeave)
         {
             hook.reset(); // must block in the drain while the callback is parked
             teardown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     // The callback is still parked, so the drain must still be waiting. This is the assertion the drain exists for.
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -805,7 +807,8 @@ namespace
             {
                 hook.reset();
                 teardown_returned.store(true, std::memory_order_release);
-            });
+            }
+        );
 
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         EXPECT_FALSE(teardown_returned.load(std::memory_order_acquire))
@@ -865,7 +868,8 @@ TEST_F(MidHookRundownTest, TeardownReturnsWhenTheBackendRouteCannotBeDrained)
         {
             hook.reset();
             teardown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const auto teardown_deadline = started + std::chrono::seconds(10);
     while (!teardown_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < teardown_deadline)
     {
@@ -911,8 +915,10 @@ TEST_F(MidHookRundownTest, SelfDestroyWithAnUnrecordableEntryPinsInsteadOfWaitin
     s_untracked_self_destroy_hook = std::make_unique<Hook>(std::move(*result));
 
     const std::uint64_t hits_before = DetourModKit::detail::g_mid_entry_store_failure_hits.load();
-    DetourModKit::detail::g_mid_entry_store_failure_thread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()),
-                                                                 std::memory_order_release);
+    DetourModKit::detail::g_mid_entry_store_failure_thread.store(
+        static_cast<std::uint32_t>(::GetCurrentThreadId()),
+        std::memory_order_release
+    );
     (void)call_unfolded(&untracked_self_destroy_site, 5);
     DetourModKit::detail::g_mid_entry_store_failure_thread.store(0, std::memory_order_release);
 
@@ -942,8 +948,10 @@ TEST_F(MidHookRundownTest, TransientUnrecordableEntryBalancesBeforeTrackedReuse)
         ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
         Hook hook = std::move(*result);
 
-        DetourModKit::detail::g_mid_entry_store_failure_thread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()),
-                                                                     std::memory_order_release);
+        DetourModKit::detail::g_mid_entry_store_failure_thread.store(
+            static_cast<std::uint32_t>(::GetCurrentThreadId()),
+            std::memory_order_release
+        );
         EXPECT_EQ(call_unfolded(&rundown_site, 3), 3);
         DetourModKit::detail::g_mid_entry_store_failure_thread.store(0, std::memory_order_release);
         EXPECT_EQ(DetourModKit::detail::g_mid_entry_store_failure_hits.load(), hits_before + 1)
@@ -954,9 +962,10 @@ TEST_F(MidHookRundownTest, TransientUnrecordableEntryBalancesBeforeTrackedReuse)
             << "the disarmed seam remained sticky on the ordinary call";
         EXPECT_EQ(s_entered.load(), 2) << "both deliveries must reach the callback";
     }
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-              leaks_before)
-        << "a completed untracked entry left a stale balance that pinned clean teardown";
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        leaks_before
+    ) << "a completed untracked entry left a stale balance that pinned clean teardown";
 }
 
 // The positive control for the case above: with the store working, an ordinary entry is recorded, the pool recovers,
@@ -1025,7 +1034,8 @@ TEST_F(MidHookRundownTest, PinnedTeardownWaitsForAnInFlightCallbackToLeave)
         {
             hook.reset();
             teardown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_FALSE(teardown_returned.load(std::memory_order_acquire))
@@ -1066,7 +1076,8 @@ TEST_F(MidHookRundownTest, LateEntrantCannotCommitACallbackAfterRundownReturns)
             {
                 std::this_thread::yield();
             }
-        });
+        }
+    );
 
     std::thread caller([] { (void)call_unfolded(&late_entrant_site, 4); });
     while (!s_precommit_parked.load(std::memory_order_acquire))
@@ -1151,7 +1162,8 @@ TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
                 .name = "MidPool",
                 .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])},
             },
-            &inert_detour);
+            &inert_detour
+        );
         if (!hook.has_value())
         {
             refusal = hook.error();
@@ -1193,7 +1205,8 @@ TEST(MidHookCapacityTest, DrainedTeardownRecyclesItsAdapter)
                 .name = "MidRecycle",
                 .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])},
             },
-            &inert_detour);
+            &inert_detour
+        );
         ASSERT_TRUE(hook.has_value()) << "install " << i << " failed, so a prior teardown did not recycle its adapter: "
                                       << hook.error().message();
         // Destroyed at end of iteration: tombstone, restore, drain, release.

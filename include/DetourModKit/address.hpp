@@ -113,9 +113,11 @@ namespace DetourModKit
             // and dereferencing would be undefined behaviour. memcpy of a fixed 4 bytes is the well-defined unaligned
             // load and the compiler folds it to a single (unaligned) mov on x86-64.
             std::int32_t displacement = 0;
-            std::memcpy(&displacement,
-                        reinterpret_cast<const void *>(m_value + static_cast<std::uintptr_t>(displacement_at)),
-                        sizeof(displacement));
+            std::memcpy(
+                &displacement,
+                reinterpret_cast<const void *>(m_value + static_cast<std::uintptr_t>(displacement_at)),
+                sizeof(displacement)
+            );
             const std::uintptr_t next_instruction = m_value + static_cast<std::uintptr_t>(instruction_length);
             return Address{next_instruction + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(displacement))};
         }
@@ -160,8 +162,10 @@ namespace DetourModKit
     // An Address must be a drop-in, zero-cost replacement for a raw pointer everywhere it is passed or stored; if it
     // ever grew past a machine pointer the "free to pass by value" assumption and the reinterpret_cast round-trips
     // would both break. Pin it at compile time.
-    static_assert(sizeof(Address) == sizeof(void *) && alignof(Address) == alignof(void *),
-                  "Address must be exactly a machine pointer in size and alignment.");
+    static_assert(
+        sizeof(Address) == sizeof(void *) && alignof(Address) == alignof(void *),
+        "Address must be exactly a machine pointer in size and alignment."
+    );
     static_assert(std::is_trivially_copyable_v<Address>, "Address must stay trivially copyable.");
 
 } // namespace DetourModKit

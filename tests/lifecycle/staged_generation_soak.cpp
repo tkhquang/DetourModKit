@@ -32,9 +32,12 @@
 #include <process.h>
 #include <windows.h>
 
-extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(uint32_t *mounted_hooks, uint32_t *thread_handles,
-                                                            uint32_t *active_leases,
-                                                            uint64_t *mount_generation) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
+    uint32_t *mounted_hooks,
+    uint32_t *thread_handles,
+    uint32_t *active_leases,
+    uint64_t *mount_generation
+) noexcept;
 
 namespace
 {
@@ -64,8 +67,12 @@ namespace
     [[nodiscard]] WheelHostSnapshot read_wheel_host_snapshot() noexcept
     {
         WheelHostSnapshot snapshot{};
-        wheel_host_test_snapshot(&snapshot.mounted_hooks, &snapshot.thread_handles, &snapshot.active_leases,
-                                 &snapshot.mount_generation);
+        wheel_host_test_snapshot(
+            &snapshot.mounted_hooks,
+            &snapshot.thread_handles,
+            &snapshot.active_leases,
+            &snapshot.mount_generation
+        );
         return snapshot;
     }
 
@@ -128,9 +135,20 @@ namespace
     [[nodiscard]] HWND make_test_window() noexcept
     {
         ensure_window_class_registered();
-        const HWND window =
-            CreateWindowExW(0, TEST_WINDOW_CLASS, L"DMK Staged Gen", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                            200, 150, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        const HWND window = CreateWindowExW(
+            0,
+            TEST_WINDOW_CLASS,
+            L"DMK Staged Gen",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            200,
+            150,
+            nullptr,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
         if (window != nullptr)
         {
             ShowWindow(window, SW_SHOWNA);
@@ -162,9 +180,11 @@ namespace
     [[nodiscard]] bool module_owns(const void *address) noexcept
     {
         HMODULE owner = nullptr;
-        const BOOL ok =
-            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                 reinterpret_cast<LPCWSTR>(address), &owner);
+        const BOOL ok = ::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address),
+            &owner
+        );
         return ok != FALSE && owner != nullptr;
     }
 
@@ -310,8 +330,12 @@ namespace
         }
         const DWORD ui_thread_id = ::GetWindowThreadProcessId(window, nullptr);
         WheelHostTable wheel_host{};
-        if (wheel_host_start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(wheel_host)),
-                             &wheel_host) != DMK_WHEELHOST_OK)
+        if (wheel_host_start(
+                ui_thread_id,
+                DMK_WHEELHOST_ABI_VERSION,
+                static_cast<std::uint32_t>(sizeof(wheel_host)),
+                &wheel_host
+            ) != DMK_WHEELHOST_OK)
         {
             return fail("soak", "the resident wheel host did not start");
         }
@@ -482,8 +506,10 @@ namespace
             return second_result;
         }
 
-        std::fprintf(stderr,
-                     "OK: each local generation booked one permanent message-hook keepalive and stayed mapped\n");
+        std::fprintf(
+            stderr,
+            "OK: each local generation booked one permanent message-hook keepalive and stayed mapped\n"
+        );
         return 0;
     }
 
@@ -501,24 +527,28 @@ namespace
         }
         const std::uint32_t wheel_thread = static_cast<std::uint32_t>(::GetWindowThreadProcessId(window, nullptr));
 
-        Result<input::BindingGuard> wheel = input::register_combo(input::ComboBinding{
-            .name = "callsite.wheel",
-            .trigger = input::Trigger::Press,
-            .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
-            .consume = true,
-            .on_press = [] {},
-        });
+        Result<input::BindingGuard> wheel = input::register_combo(
+            input::ComboBinding{
+                .name = "callsite.wheel",
+                .trigger = input::Trigger::Press,
+                .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
+                .consume = true,
+                .on_press = [] {},
+            }
+        );
         if (!wheel)
         {
             return fail("uninstall-call-site", "wheel binding registration failed");
         }
         input::BindingGuard guard = std::move(*wheel);
 
-        if (!input::Input::instance().start(input::Input::Settings{
-                .poll_interval = 2ms,
-                .require_focus = false,
-                .wheel_target_thread_id = wheel_thread,
-            }))
+        if (!input::Input::instance().start(
+                input::Input::Settings{
+                    .poll_interval = 2ms,
+                    .require_focus = false,
+                    .wheel_target_thread_id = wheel_thread,
+                }
+            ))
         {
             return fail("uninstall-call-site", "input engine did not start");
         }
@@ -581,8 +611,9 @@ namespace
         }
 
         generation.arm_park();
-        if (generation.wait_parked(static_cast<std::uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(PARK_BUDGET).count())) == 0)
+        if (generation.wait_parked(
+                static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(PARK_BUDGET).count())
+            ) == 0)
         {
             return fail(scenario, "the binding callback never parked inside DetourModKit");
         }
@@ -621,8 +652,11 @@ namespace
         }
         remove_unmapped_staged_file_best_effort(generation);
 
-        std::fprintf(stderr, release_before_retry ? "OK: the refused reload succeeded after callback release\n"
-                                                  : "OK: a parked callback refused reload and then drained safely\n");
+        std::fprintf(
+            stderr,
+            release_before_retry ? "OK: the refused reload succeeded after callback release\n"
+                                 : "OK: a parked callback refused reload and then drained safely\n"
+        );
         return 0;
     }
 
@@ -921,9 +955,11 @@ int main(int argc, char **argv)
         return run_foreign_xinput();
     }
 
-    std::fprintf(stderr,
-                 "usage: %s soak|local-wheel-retention|uninstall-call-site|parked-callback|drain-retry|"
-                 "partial-init|foreign-xinput\n",
-                 argc > 0 ? argv[0] : "staged_generation_soak");
+    std::fprintf(
+        stderr,
+        "usage: %s soak|local-wheel-retention|uninstall-call-site|parked-callback|drain-retry|"
+        "partial-init|foreign-xinput\n",
+        argc > 0 ? argv[0] : "staged_generation_soak"
+    );
     return SETUP_FAILURE;
 }

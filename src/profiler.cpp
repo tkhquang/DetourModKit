@@ -57,8 +57,12 @@ namespace DetourModKit
                     if (static_cast<unsigned char>(c) < 0x20)
                     {
                         char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x",
-                                      static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                        std::snprintf(
+                            buf,
+                            sizeof(buf),
+                            "\\u%04x",
+                            static_cast<unsigned int>(static_cast<unsigned char>(c))
+                        );
                         out += buf;
                     }
                     else
@@ -111,8 +115,13 @@ namespace DetourModKit
         {
             return;
         }
-        m_ring.publish(claim, name, start_ticks, detail::ticks_to_microseconds(start_ticks, end_ticks, m_qpc_frequency),
-                       thread_id);
+        m_ring.publish(
+            claim,
+            name,
+            start_ticks,
+            detail::ticks_to_microseconds(start_ticks, end_ticks, m_qpc_frequency),
+            thread_id
+        );
     }
 
     // Caller must ensure no concurrent record() calls are in flight. There is no runtime guard because an atomic
@@ -150,9 +159,15 @@ namespace DetourModKit
                 // Chrome Trace Event Format: "X" = complete event (has duration). The name is escaped so a caller's
                 // quotes or backslashes still produce valid JSON.
                 const double ts = static_cast<double>(start_ticks) * ticks_to_us;
-                json += std::format(R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
-                                    escape_json_string(name), ts, duration_us, thread_id);
-            });
+                json += std::format(
+                    R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
+                    escape_json_string(name),
+                    ts,
+                    duration_us,
+                    thread_id
+                );
+            }
+        );
 
         if (first)
         {

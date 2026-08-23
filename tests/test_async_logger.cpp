@@ -277,10 +277,12 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
             {
                 for (int j = 0; j < messages_per_thread; ++j)
                 {
-                    (void)logger->enqueue(LogLevel::Info,
-                                          "Thread " + std::to_string(i) + " message " + std::to_string(j));
+                    (
+                        void
+                    )logger->enqueue(LogLevel::Info, "Thread " + std::to_string(i) + " message " + std::to_string(j));
                 }
-            });
+            }
+        );
     }
 
     for (auto &t : threads)
@@ -842,7 +844,8 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
                 (void)logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i));
             }
             done.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     std::thread flusher(
         [&]()
@@ -852,7 +855,8 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
                 logger->flush();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-        });
+        }
+    );
 
     producer.join();
     flusher.join();
@@ -891,7 +895,8 @@ TEST(DynamicMPMCQueueTest, MultiThreaded)
                     }
                     total_produced.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     std::vector<std::thread> consumers;
@@ -912,7 +917,8 @@ TEST(DynamicMPMCQueueTest, MultiThreaded)
                         std::this_thread::yield();
                     }
                 }
-            });
+            }
+        );
     }
 
     for (auto &t : producers)
@@ -1448,7 +1454,8 @@ TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
                         total_enqueued.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
-            });
+            }
+        );
     }
 
     for (auto &th : threads)
@@ -1544,7 +1551,8 @@ TEST(StringPoolTest, ConcurrentAllocateDeallocate)
                         pool.deallocate(s);
                     }
                 }
-            });
+            }
+        );
     }
 
     for (auto &th : threads)
@@ -1617,8 +1625,10 @@ TEST(LogMessageTest, OverflowConstructionIsNoThrow)
 {
     // The overflow ctor reaches into the StringPool; it must be no-throw so it is safe to build inside the noexcept
     // AsyncLogger::enqueue().
-    static_assert(std::is_nothrow_constructible_v<LogMessage, LogLevel, std::string_view>,
-                  "LogMessage(LogLevel, string_view) must be noexcept for the noexcept enqueue path");
+    static_assert(
+        std::is_nothrow_constructible_v<LogMessage, LogLevel, std::string_view>,
+        "LogMessage(LogLevel, string_view) must be noexcept for the noexcept enqueue path"
+    );
 
     std::string big(LogMessage::MAX_INLINE_SIZE + 4096, 'Q');
     LogMessage msg(LogLevel::Warning, big);
@@ -1991,8 +2001,11 @@ namespace
     class AsyncLoggerGateRelease final
     {
     public:
-        AsyncLoggerGateRelease(std::atomic<bool> *writer_gate, std::atomic<bool> *producer_gate,
-                               std::atomic<bool> *block_gate = nullptr) noexcept
+        AsyncLoggerGateRelease(
+            std::atomic<bool> *writer_gate,
+            std::atomic<bool> *producer_gate,
+            std::atomic<bool> *block_gate = nullptr
+        ) noexcept
             : m_writer_gate(writer_gate), m_producer_gate(producer_gate), m_block_gate(block_gate)
         {
         }
@@ -2104,7 +2117,8 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
     std::atomic<bool> producer_result{false};
     producer = std::jthread(
         [&logger, &producer_result]() noexcept -> void
-        { producer_result.store(logger->enqueue(LogLevel::Info, "ABANDON_CONCURRENT"), std::memory_order_release); });
+        { producer_result.store(logger->enqueue(LogLevel::Info, "ABANDON_CONCURRENT"), std::memory_order_release); }
+    );
 
     const auto producer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
@@ -2121,7 +2135,8 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
         {
             flush_result.store(logger->flush_with_timeout(std::chrono::seconds{5}), std::memory_order_release);
             flush_finished.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const auto flush_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!DetourModKit::detail::g_async_logger_flush_waiting.load(std::memory_order_acquire) &&
@@ -2377,7 +2392,8 @@ TEST_F(AsyncLoggerTest, DropProducerNeverWaitsOnFlushMutex)
         {
             (void)logger.enqueue(LogLevel::Info, "no_control_plane_mutex");
             produced.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const auto produce_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
     while (!produced.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < produce_deadline)
@@ -2501,7 +2517,8 @@ TEST_F(AsyncLoggerTest, StoppingWriterWokenByFinalProducerExit)
             const std::string big(MAX_POOLED_STRING_SIZE + 1, 'X');
             dmk_test::AllocFailScope oom{0};
             producer_result.store(logger->enqueue(LogLevel::Info, big), std::memory_order_release);
-        });
+        }
+    );
 
     const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
@@ -2604,7 +2621,8 @@ TEST_F(AsyncLoggerTest, BlockPolicy_AdmittedProducerDrainsDuringStop)
     DetourModKit::detail::g_async_logger_producer_gate.store(&producer_gate, std::memory_order_release);
     producer = std::jthread(
         [&logger, &producer_result]() noexcept -> void
-        { producer_result.store(logger->enqueue(LogLevel::Info, "BLOCK_STOP_2|"), std::memory_order_release); });
+        { producer_result.store(logger->enqueue(LogLevel::Info, "BLOCK_STOP_2|"), std::memory_order_release); }
+    );
 
     const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
@@ -2699,10 +2717,12 @@ TEST_F(AsyncLoggerTest, BlockPolicy_DeadlineHoldsDuringStop)
         {
             producer_result.store(logger->enqueue(LogLevel::Info, "deadline_2"), std::memory_order_release);
             const auto finish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       std::chrono::steady_clock::now().time_since_epoch()
+            )
                                        .count();
             producer_finish_ns.store(finish_ns, std::memory_order_release);
-        });
+        }
+    );
 
     const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
@@ -2731,8 +2751,9 @@ TEST_F(AsyncLoggerTest, BlockPolicy_DeadlineHoldsDuringStop)
     // boundary and require the producer to honor the deadline it establishes immediately after this gate.
     block_gate.store(false, std::memory_order_release);
     producer.join();
-    const auto blocked_elapsed = std::chrono::nanoseconds{producer_finish_ns.load(std::memory_order_acquire) -
-                                                          block_start_ns.load(std::memory_order_acquire)};
+    const auto blocked_elapsed = std::chrono::nanoseconds{
+        producer_finish_ns.load(std::memory_order_acquire) - block_start_ns.load(std::memory_order_acquire)
+    };
 
     EXPECT_FALSE(producer_result.load(std::memory_order_acquire));
     EXPECT_GE(blocked_elapsed, std::chrono::milliseconds{300})

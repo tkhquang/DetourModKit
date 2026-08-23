@@ -70,8 +70,12 @@ namespace DetourModKit
          *          A record carrying no faulting address, or a guard-page fault whose fence cannot be restored, is
          *          never claimed. Declared MSVC-only because MinGW has no frame-based SEH.
          */
-        long guarded_range_fault_filter(::_EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
-                                        volatile std::uintptr_t *fault_address = nullptr) noexcept;
+        long guarded_range_fault_filter(
+            ::_EXCEPTION_POINTERS *info,
+            std::uintptr_t lo,
+            std::uintptr_t hi,
+            volatile std::uintptr_t *fault_address = nullptr
+        ) noexcept;
 #endif
 
 #if !defined(_MSC_VER) && defined(_WIN64)
@@ -95,8 +99,8 @@ namespace DetourModKit
          * @return true if @p fn completed without a guarded read fault; false if a fault inside [lo, hi) was swallowed,
          *         in which case @p fn did not run to completion.
          */
-        [[nodiscard]] bool run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept,
-                                              void *ctx) noexcept;
+        [[nodiscard]] bool
+        run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept;
 #endif
     } // namespace detail
 } // namespace DetourModKit

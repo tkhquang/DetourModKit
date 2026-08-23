@@ -40,9 +40,10 @@ namespace DetourModKit
          *          second fault the proof's oracle would not expect. The read is volatile so no optimizer may drop the
          *          dereference that is the entire point of the seam.
          */
-        inline void
-        fire_scan_fault_seam_for_test(std::atomic<std::uintptr_t> &slot,
-                                      std::atomic<ScanFaultPreparationForTest> *preparation = nullptr) noexcept
+        inline void fire_scan_fault_seam_for_test(
+            std::atomic<std::uintptr_t> &slot,
+            std::atomic<ScanFaultPreparationForTest> *preparation = nullptr
+        ) noexcept
         {
             const std::uintptr_t address = slot.exchange(0, std::memory_order_acq_rel);
             if (address == 0)
