@@ -330,13 +330,15 @@ namespace DetourModKit
                     const RipRelativePattern *rip = candidate.as_rip_relative();
                     const std::uint8_t instruction_snapshot_length =
                         rip != nullptr ? static_cast<std::uint8_t>(rip->instruction_length) : std::uint8_t{0};
-                    const detail::MatchResult found = detail::scan_module_pages(
-                        compiled, range, request.pages,
-                        detail::ScanQuery{.occurrence = 1,
-                                          .count_beyond = request.require_unique,
-                                          .exclusions = &ladder_exclusions,
-                                          .capture_evidence = true,
-                                          .instruction_snapshot_length = instruction_snapshot_length});
+                    const detail::MatchResult found =
+                        detail::scan_module_pages(compiled, range, request.pages,
+                                                  detail::ScanQuery{
+                                                      .occurrence = 1,
+                                                      .count_beyond = request.require_unique,
+                                                      .exclusions = &ladder_exclusions,
+                                                      .capture_evidence = true,
+                                                      .instruction_snapshot_length = instruction_snapshot_length,
+                                                  });
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
                     {

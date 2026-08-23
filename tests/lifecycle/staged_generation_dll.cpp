@@ -213,7 +213,9 @@ extern "C"
             s_external_wheel = options->wheel_host != nullptr;
 
             Result<Session> started = Session::start(ModInfo{
-                .name = "STAGED_GEN", .log_file = options->log_file != nullptr ? options->log_file : "staged_gen.log"});
+                .name = "STAGED_GEN",
+                .log_file = options->log_file != nullptr ? options->log_file : "staged_gen.log",
+            });
             if (!started)
             {
                 return 0;
@@ -230,10 +232,12 @@ extern "C"
                 roll_back_generation();
                 return 0;
             }
-            Result<hook::Hook> installed =
-                hook::inline_at(hook::InlineRequest{.name = "staged_gen_hook",
-                                                    .target = Address{reinterpret_cast<std::uintptr_t>(target)}},
-                                &compute_damage_detour);
+            Result<hook::Hook> installed = hook::inline_at(
+                hook::InlineRequest{
+                    .name = "staged_gen_hook",
+                    .target = Address{reinterpret_cast<std::uintptr_t>(target)},
+                },
+                &compute_damage_detour);
             if (!installed)
             {
                 roll_back_generation();
@@ -260,24 +264,26 @@ extern "C"
 
             if (options->enable_probe_binding != 0)
             {
-                Result<input::BindingGuard> probe = input::register_combo(
-                    input::ComboBinding{.name = "staged.probe",
-                                        .trigger = input::Trigger::Press,
-                                        .combos = {{.keys = {keyboard_key(PROBE_VK)}, .modifiers = {}}},
-                                        .on_press = []() noexcept
-                                        {
-                                            if (!s_park_armed.load(std::memory_order_acquire))
-                                            {
-                                                return;
-                                            }
-                                            s_park_entered.store(true, std::memory_order_release);
-                                            const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
-                                            while (!s_park_release.load(std::memory_order_acquire) &&
-                                                   std::chrono::steady_clock::now() < deadline)
-                                            {
-                                                ::Sleep(1);
-                                            }
-                                        }});
+                Result<input::BindingGuard> probe = input::register_combo(input::ComboBinding{
+                    .name = "staged.probe",
+                    .trigger = input::Trigger::Press,
+                    .combos = {{.keys = {keyboard_key(PROBE_VK)}, .modifiers = {}}},
+                    .on_press =
+                        []() noexcept
+                    {
+                        if (!s_park_armed.load(std::memory_order_acquire))
+                        {
+                            return;
+                        }
+                        s_park_entered.store(true, std::memory_order_release);
+                        const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
+                        while (!s_park_release.load(std::memory_order_acquire) &&
+                               std::chrono::steady_clock::now() < deadline)
+                        {
+                            ::Sleep(1);
+                        }
+                    },
+                });
                 if (!probe)
                 {
                     roll_back_generation();
@@ -287,12 +293,13 @@ extern "C"
             }
             if (options->enable_wheel != 0)
             {
-                Result<input::BindingGuard> wheel = input::register_combo(
-                    input::ComboBinding{.name = "staged.wheel",
-                                        .trigger = input::Trigger::Press,
-                                        .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
-                                        .consume = true,
-                                        .on_press = []() noexcept {}});
+                Result<input::BindingGuard> wheel = input::register_combo(input::ComboBinding{
+                    .name = "staged.wheel",
+                    .trigger = input::Trigger::Press,
+                    .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
+                    .consume = true,
+                    .on_press = []() noexcept {},
+                });
                 if (!wheel)
                 {
                     roll_back_generation();
@@ -302,13 +309,19 @@ extern "C"
             }
             if (options->enable_consume_gamepad != 0)
             {
-                Result<input::BindingGuard> chord = input::register_combo(
-                    input::ComboBinding{.name = "staged.chord",
-                                        .trigger = input::Trigger::Press,
-                                        .combos = {{.keys = {gamepad_button(GamepadCode::DpadUp)},
-                                                    .modifiers = {gamepad_button(GamepadCode::LeftBumper)}}},
-                                        .consume = true,
-                                        .on_press = []() noexcept {}});
+                Result<input::BindingGuard> chord = input::register_combo(input::ComboBinding{
+                    .name = "staged.chord",
+                    .trigger = input::Trigger::Press,
+                    .combos =
+                        {
+                            {
+                                .keys = {gamepad_button(GamepadCode::DpadUp)},
+                                .modifiers = {gamepad_button(GamepadCode::LeftBumper)},
+                            },
+                        },
+                    .consume = true,
+                    .on_press = []() noexcept {},
+                });
                 if (!chord)
                 {
                     roll_back_generation();
@@ -333,7 +346,10 @@ extern "C"
                 detail::set_xinput_module_override_for_test(s_xinput_proxy);
             }
 
-            input::Input::Settings input_settings{.poll_interval = 2ms, .require_focus = false};
+            input::Input::Settings input_settings{
+                .poll_interval = 2ms,
+                .require_focus = false,
+            };
             if (s_external_wheel)
             {
                 input_settings.wheel_backend = input::Input::WheelBackend::ExternalHost;

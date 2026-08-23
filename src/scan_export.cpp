@@ -319,10 +319,12 @@ namespace DetourModKit
                 match = Address{*target};
                 // The slot this name mapped to and the value read out of it, so a caller weighing two names can tell
                 // one physical entry point from two. A duplicate name aborts above, so this is written at most once.
-                resolution = ExportResolution{.module_base = base,
-                                              .function_index = *ordinal,
-                                              .function_rva = *func_rva,
-                                              .target = Address{*target}};
+                resolution = ExportResolution{
+                    .module_base = base,
+                    .function_index = *ordinal,
+                    .function_rva = *func_rva,
+                    .target = Address{*target},
+                };
             }
 
             if (match)
@@ -359,9 +361,11 @@ namespace DetourModKit
             {
                 return ImageIdentity{};
             }
-            return ImageIdentity{.timestamp = fields.timestamp,
-                                 .size_of_image = fields.size_of_image,
-                                 .section_digest = fields.section_digest};
+            return ImageIdentity{
+                .timestamp = fields.timestamp,
+                .size_of_image = fields.size_of_image,
+                .section_digest = fields.section_digest,
+            };
         }
     } // namespace scan
 } // namespace DetourModKit

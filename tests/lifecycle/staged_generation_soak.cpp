@@ -501,12 +501,13 @@ namespace
         }
         const std::uint32_t wheel_thread = static_cast<std::uint32_t>(::GetWindowThreadProcessId(window, nullptr));
 
-        Result<input::BindingGuard> wheel = input::register_combo(
-            input::ComboBinding{.name = "callsite.wheel",
-                                .trigger = input::Trigger::Press,
-                                .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
-                                .consume = true,
-                                .on_press = [] {}});
+        Result<input::BindingGuard> wheel = input::register_combo(input::ComboBinding{
+            .name = "callsite.wheel",
+            .trigger = input::Trigger::Press,
+            .combos = {{.keys = {mouse_wheel(WheelCode::Up)}, .modifiers = {}}},
+            .consume = true,
+            .on_press = [] {},
+        });
         if (!wheel)
         {
             return fail("uninstall-call-site", "wheel binding registration failed");
@@ -514,7 +515,10 @@ namespace
         input::BindingGuard guard = std::move(*wheel);
 
         if (!input::Input::instance().start(input::Input::Settings{
-                .poll_interval = 2ms, .require_focus = false, .wheel_target_thread_id = wheel_thread}))
+                .poll_interval = 2ms,
+                .require_focus = false,
+                .wheel_target_thread_id = wheel_thread,
+            }))
         {
             return fail("uninstall-call-site", "input engine did not start");
         }
@@ -699,10 +703,11 @@ namespace
             return fail("partial-init", "the generation's base hook did not establish the refusal premise");
         }
 
-        DetourModKit::hook::InlineRequest request{.name = "staged_gen_host_newer_hook",
-                                                  .target =
-                                                      DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
-                                                  .options = {.prologue = DetourModKit::hook::Prologue::Relocate}};
+        DetourModKit::hook::InlineRequest request{
+            .name = "staged_gen_host_newer_hook",
+            .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
+            .options = {.prologue = DetourModKit::hook::Prologue::Relocate},
+        };
         auto installed = DetourModKit::hook::inline_at(std::move(request), &hook_rival_detour);
         if (!installed)
         {
@@ -807,10 +812,11 @@ namespace
             return fail("foreign-xinput", "the generation did not publish live XInput coverage");
         }
 
-        DetourModKit::hook::InlineRequest request{.name = "staged_gen_host_xinput_rival",
-                                                  .target =
-                                                      DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
-                                                  .options = {.prologue = DetourModKit::hook::Prologue::Relocate}};
+        DetourModKit::hook::InlineRequest request{
+            .name = "staged_gen_host_xinput_rival",
+            .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
+            .options = {.prologue = DetourModKit::hook::Prologue::Relocate},
+        };
         auto installed = DetourModKit::hook::inline_at(std::move(request), &xinput_rival_detour);
         if (!installed)
         {

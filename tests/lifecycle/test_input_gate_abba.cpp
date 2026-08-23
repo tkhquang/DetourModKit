@@ -52,10 +52,12 @@ namespace
 
     input::ComboBinding make_hold_binding(std::string name, int key, std::function<void(bool)> callback)
     {
-        return input::ComboBinding{.name = std::move(name),
-                                   .trigger = input::Trigger::Hold,
-                                   .combos = {{{keyboard_key(key)}, {}}},
-                                   .on_state_change = std::move(callback)};
+        return input::ComboBinding{
+            .name = std::move(name),
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(key)}, {}}},
+            .on_state_change = std::move(callback),
+        };
     }
 
     // Bounded negative cleanup control for the cross-parking scenario below. Its callbacks block until the OTHER one
@@ -103,8 +105,10 @@ namespace
             }
             input::BindingGuard guard = std::move(*registered);
 
-            if (!manager.start(
-                    input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}))
+            if (!manager.start(input::Input::Settings{
+                    .poll_interval = std::chrono::milliseconds{1},
+                    .require_focus = false,
+                }))
             {
                 std::puts("FAIL: could not start the abandoned parked engine");
                 return 10;
@@ -672,8 +676,10 @@ int main(int argc, char **argv)
 
         if (!manager.is_running())
         {
-            const auto started = manager.start(
-                input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false});
+            const auto started = manager.start(input::Input::Settings{
+                .poll_interval = std::chrono::milliseconds{1},
+                .require_focus = false,
+            });
             if (!started)
             {
                 std::puts("FAIL: start");

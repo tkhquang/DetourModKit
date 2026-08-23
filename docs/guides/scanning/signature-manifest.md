@@ -105,7 +105,9 @@ for (auto &record : loaded->records)
         sigs.push_back(std::move(*sig));
 
 // Resolve + gate. reject_on_fingerprint_drift (the default) safe-disables a rewritten signature.
-const mf::GateResult gate = mf::resolve_and_gate(sigs, {.reject_on_fingerprint_drift = true});
+const mf::GateResult gate = mf::resolve_and_gate(sigs, {
+                                                          .reject_on_fingerprint_drift = true,
+                                                      });
 log().info("signatures: {} trusted, {} disabled ({} resolved of {})", gate.trusted.size(),
            gate.rejected.size(), gate.quality.resolved, gate.quality.total);
 for (const auto &r : gate.rejected)
@@ -172,7 +174,11 @@ for (auto &sig : sigs)
 std::vector<mf::SignatureRecord> to_save;
 for (const auto &sig : sigs)
     to_save.push_back(sig.record());
-if (auto saved = mf::save("MyMod.signatures.ini", mf::Manifest{.records = std::move(to_save)}); !saved)
+if (auto saved = mf::save("MyMod.signatures.ini",
+                          mf::Manifest{
+                              .records = std::move(to_save),
+                          });
+    !saved)
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 

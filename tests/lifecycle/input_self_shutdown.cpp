@@ -30,7 +30,10 @@ namespace
     constexpr auto SEAM_ORDER_WINDOW = std::chrono::milliseconds{50};
 
     // A console proof never owns the foreground window, so the focus gate would suppress every key event.
-    constexpr Input::Settings START_SETTINGS{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false};
+    constexpr Input::Settings START_SETTINGS{
+        .poll_interval = std::chrono::milliseconds{1},
+        .require_focus = false,
+    };
 
     template <typename Predicate> [[nodiscard]] bool wait_until(Predicate predicate)
     {
@@ -72,8 +75,9 @@ namespace
             .name = "self-shutdown",
             .trigger = Trigger::Hold,
             .combos = combos,
-            .on_state_change = [owner, &hold_thread, &release_thread, &shutdown_returned, &capture_survived,
-                                &released](bool active) noexcept
+            .on_state_change =
+                [owner, &hold_thread, &release_thread, &shutdown_returned, &capture_survived,
+                 &released](bool active) noexcept
             {
                 if (active)
                 {
@@ -89,7 +93,8 @@ namespace
                 }
                 release_thread.store(std::this_thread::get_id(), std::memory_order_release);
                 released.store(true, std::memory_order_release);
-            }});
+            },
+        });
 
         if (!registration)
         {
@@ -163,22 +168,24 @@ namespace
         KeyComboList combos;
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
 
-        auto registration = Input::instance().register_combo(
-            ComboBinding{.name = "race-shutdown",
-                         .trigger = Trigger::Hold,
-                         .combos = combos,
-                         .on_state_change = [&shutdown_requested, &rundown_done](bool active) noexcept
-                         {
-                             if (active)
-                             {
-                                 if (!shutdown_requested.exchange(true, std::memory_order_acq_rel))
-                                 {
-                                     Input::instance().shutdown();
-                                 }
-                                 return;
-                             }
-                             rundown_done.store(true, std::memory_order_release);
-                         }});
+        auto registration = Input::instance().register_combo(ComboBinding{
+            .name = "race-shutdown",
+            .trigger = Trigger::Hold,
+            .combos = combos,
+            .on_state_change =
+                [&shutdown_requested, &rundown_done](bool active) noexcept
+            {
+                if (active)
+                {
+                    if (!shutdown_requested.exchange(true, std::memory_order_acq_rel))
+                    {
+                        Input::instance().shutdown();
+                    }
+                    return;
+                }
+                rundown_done.store(true, std::memory_order_release);
+            },
+        });
         if (!registration || !Input::instance().start(START_SETTINGS))
         {
             std::fprintf(stderr, "FAIL: could not arm the registration race\n");
@@ -201,8 +208,11 @@ namespace
                 {
                     KeyComboList extra;
                     extra.push_back({{keyboard_key(0x42)}, {}});
-                    auto guard = Input::instance().register_combo(
-                        ComboBinding{.name = "racer", .trigger = Trigger::Press, .combos = extra});
+                    auto guard = Input::instance().register_combo(ComboBinding{
+                        .name = "racer",
+                        .trigger = Trigger::Press,
+                        .combos = extra,
+                    });
                     (void)guard;
                     (void)Input::instance().binding_count();
                     (void)Input::instance().is_active("racer");
@@ -241,20 +251,22 @@ namespace
 
         KeyComboList combos;
         combos.push_back({{keyboard_key(HELD_VK)}, {}});
-        auto registration = Input::instance().register_combo(
-            ComboBinding{.name = "external-shutdown",
-                         .trigger = Trigger::Hold,
-                         .combos = combos,
-                         .on_state_change = [&](bool active) noexcept
-                         {
-                             if (active)
-                             {
-                                 held.store(true, std::memory_order_release);
-                                 return;
-                             }
-                             release_thread.store(std::this_thread::get_id(), std::memory_order_release);
-                             released.store(true, std::memory_order_release);
-                         }});
+        auto registration = Input::instance().register_combo(ComboBinding{
+            .name = "external-shutdown",
+            .trigger = Trigger::Hold,
+            .combos = combos,
+            .on_state_change =
+                [&](bool active) noexcept
+            {
+                if (active)
+                {
+                    held.store(true, std::memory_order_release);
+                    return;
+                }
+                release_thread.store(std::this_thread::get_id(), std::memory_order_release);
+                released.store(true, std::memory_order_release);
+            },
+        });
         if (!registration || !Input::instance().start(START_SETTINGS))
         {
             std::fprintf(stderr, "FAIL: could not start the external-shutdown control\n");
@@ -311,8 +323,9 @@ namespace
                 .name = "abandoned-premise",
                 .trigger = Trigger::Hold,
                 .combos = combos,
-                .on_state_change = [&parked, &proceed, &shutdown_requested, &shutdown_returned, &callback_finished,
-                                    &rundown_done, &seam_live_in_callback](bool active) noexcept
+                .on_state_change =
+                    [&parked, &proceed, &shutdown_requested, &shutdown_returned, &callback_finished, &rundown_done,
+                     &seam_live_in_callback](bool active) noexcept
                 {
                     if (!active)
                     {
@@ -337,7 +350,8 @@ namespace
                     seam_live_in_callback.store(static_cast<bool>(DetourModKit::detail::g_input_key_state_probe),
                                                 std::memory_order_release);
                     callback_finished.store(true, std::memory_order_release);
-                }});
+                },
+            });
             if (!registration)
             {
                 std::fprintf(stderr, "FAIL: could not register the abandoned-premise binding\n");

@@ -129,9 +129,11 @@ extern "C"
         try
         {
             // LogOpenMode::Append preserves the prior generation's teardown records, retention warnings included.
-            auto started = dmk::Session::start(dmk::ModInfo{.name = MOD_NAME,
-                                                            .log_file = std::format("{}.log", MOD_NAME),
-                                                            .log_open_mode = dmk::LogOpenMode::Append});
+            auto started = dmk::Session::start(dmk::ModInfo{
+                .name = MOD_NAME,
+                .log_file = std::format("{}.log", MOD_NAME),
+                .log_open_mode = dmk::LogOpenMode::Append,
+            });
             if (!started)
             {
                 return 0;
@@ -145,8 +147,10 @@ extern "C"
             s_session->ini().load(std::format("{}.ini", MOD_NAME));
 
             auto installed = dmk::hook::inline_at(
-                dmk::hook::InlineRequest{.name = "demo_apply_damage",
-                                         .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)}},
+                dmk::hook::InlineRequest{
+                    .name = "demo_apply_damage",
+                    .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)},
+                },
                 &apply_damage_detour);
             if (!installed)
             {
@@ -168,7 +172,8 @@ extern "C"
                 .trigger = dmk::input::Trigger::Press,
                 .combos = {{.keys = {dmk::mouse_wheel(dmk::WheelCode::Up)}, .modifiers = {}}},
                 .consume = true,
-                .on_press = []() noexcept -> void { s_combo_presses.fetch_add(1, std::memory_order_relaxed); }});
+                .on_press = []() noexcept -> void { s_combo_presses.fetch_add(1, std::memory_order_relaxed); },
+            });
             if (!combo)
             {
                 roll_back_generation();
@@ -198,10 +203,11 @@ extern "C"
                                     }
                                 });
 
-            if (!s_session->input().start(
-                    dmk::input::Input::Settings{.wheel_backend = dmk::input::Input::WheelBackend::ExternalHost,
-                                                .wheel_host = request->wheel_host,
-                                                .wheel_host_required = true}))
+            if (!s_session->input().start(dmk::input::Input::Settings{
+                    .wheel_backend = dmk::input::Input::WheelBackend::ExternalHost,
+                    .wheel_host = request->wheel_host,
+                    .wheel_host_required = true,
+                }))
             {
                 roll_back_generation();
                 return 0;

@@ -237,8 +237,12 @@ namespace
 
 TEST(HookInline, CreateSucceedsDisabled)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "InlineCreate", .target = addr_of(&real_hook_target_add)},
-                               &real_hook_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "InlineCreate",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
 
     Hook h = std::move(*r);
@@ -252,8 +256,12 @@ TEST(HookInline, CreateSucceedsDisabled)
 
 TEST(HookInline, CreateInvalidTargetAddress)
 {
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "BadTarget", .target = Address{std::uintptr_t{0}}}, &real_hook_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "BadTarget",
+            .target = Address{std::uintptr_t{0}},
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidTargetAddress);
 }
@@ -261,16 +269,24 @@ TEST(HookInline, CreateInvalidTargetAddress)
 TEST(HookInline, CreateNullDetour)
 {
     EchoFn null_detour = nullptr;
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "NullDetour", .target = addr_of(&real_hook_target_add)}, null_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "NullDetour",
+            .target = addr_of(&real_hook_target_add),
+        },
+        null_detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidDetourFunction);
 }
 
 TEST(HookInline, CreateEmptyName)
 {
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "", .target = addr_of(&real_hook_target_add)}, &real_hook_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
@@ -316,7 +332,12 @@ TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
 
 TEST(HookInline, TypedTrampolineCallsOriginal)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "Trampoline", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Trampoline",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -332,7 +353,12 @@ TEST(HookInline, TypedTrampolineCallsOriginal)
 
 TEST(HookInline, EnableDisableTogglesDetour)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "Toggle", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Toggle",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -351,7 +377,12 @@ TEST(HookInline, EnableDisableTogglesDetour)
 
 TEST(HookInline, EnableDisableAreIdempotent)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "Idempotent", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Idempotent",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -368,8 +399,12 @@ TEST(HookInline, EnableDisableAreIdempotent)
 TEST(HookInline, OriginalNullForDisengagedHandle)
 {
     // Uses a dedicated leak target: release() leaves the detour installed for the process lifetime.
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "Disengaged", .target = addr_of(&leak_target_disengaged)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Disengaged",
+            .target = addr_of(&leak_target_disengaged),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -393,8 +428,13 @@ namespace
                                              std::initializer_list<std::uint8_t> prologue, Options options = {})
     {
         page.put(0, prologue);
-        return inline_at(InlineRequest{.name = name, .target = Address{page.addr(0)}, .options = options},
-                         reinterpret_cast<void (*)()>(&noop_detour));
+        return inline_at(
+            InlineRequest{
+                .name = name,
+                .target = Address{page.addr(0)},
+                .options = options,
+            },
+            reinterpret_cast<void (*)()>(&noop_detour));
     }
 
     // A function whose first instruction is a rel32 call is assembled on an executable page:
@@ -457,7 +497,12 @@ TEST(HookInlinePrologue, DefaultFailsOnIntNPrologue)
 // TargetPrologueUnsafe.
 TEST(HookInlinePrologue, DefaultInstallsOnNormalTarget)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "NormalPrologue", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "NormalPrologue",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << "Default policy must not refuse a normal function prologue: " << r.error().message();
     EXPECT_TRUE(static_cast<bool>(*r));
 }
@@ -475,8 +520,12 @@ TEST(HookInlinePrologue, LeadingRel32CallUsesBackendCapability)
     // Control: unhooked, the leading call reaches the callee and the target returns its value.
     ASSERT_EQ(target(), LEADING_CALL_CALLEE_VALUE);
 
-    Result<Hook> r = inline_at(InlineRequest{.name = "LeadingRel32Call", .target = Address{page.addr(0)}},
-                               reinterpret_cast<void (*)()>(&leading_call_detour));
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "LeadingRel32Call",
+            .target = Address{page.addr(0)},
+        },
+        reinterpret_cast<void (*)()>(&leading_call_detour));
     ASSERT_TRUE(r.has_value()) << "A backend-relocatable leading E8 rel32 call must not be refused by DMK under the "
                                   "default policy: "
                                << r.error().message();
@@ -503,10 +552,13 @@ TEST(HookInlinePrologue, LeadingRel32CallUsesBackendCapability)
 TEST(HookInlinePrologue, RelocatePolicyStillRefusesNonExecutableTarget)
 {
     alignas(16) static std::uint8_t data_prologue[32] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
-    Result<Hook> r = inline_at(InlineRequest{.name = "RelocateData",
-                                             .target = addr_of(data_prologue),
-                                             .options = Options{.prologue = Prologue::Relocate}},
-                               reinterpret_cast<void (*)()>(&noop_detour));
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "RelocateData",
+            .target = addr_of(data_prologue),
+            .options = Options{.prologue = Prologue::Relocate},
+        },
+        reinterpret_cast<void (*)()>(&noop_detour));
     ASSERT_FALSE(r.has_value()) << "Prologue::Relocate must not authorize a non-executable target.";
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -647,8 +699,12 @@ namespace
 
     Result<Hook> try_install_at(std::uintptr_t target, const char *name)
     {
-        return inline_at(InlineRequest{.name = name, .target = Address{target}},
-                         reinterpret_cast<void (*)()>(&noop_detour));
+        return inline_at(
+            InlineRequest{
+                .name = name,
+                .target = Address{target},
+            },
+            reinterpret_cast<void (*)()>(&noop_detour));
     }
 
     /// Plants `mov eax, 1; ret` at @p page offset 0: a complete leaf function, long enough for either patch form.
@@ -763,8 +819,12 @@ TEST(InlineHookFaultProof, InstructionStraddlingTwoValidPagesIsHooked)
     auto target = reinterpret_cast<int (*)()>(entry);
     ASSERT_EQ(target(), LEADING_CALL_CALLEE_VALUE) << "control: the straddling function runs before any hook";
 
-    Result<Hook> r = inline_at(InlineRequest{.name = "StraddlingInstruction", .target = Address{entry}},
-                               reinterpret_cast<void (*)()>(&leading_call_detour));
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "StraddlingInstruction",
+            .target = Address{entry},
+        },
+        reinterpret_cast<void (*)()>(&leading_call_detour));
     ASSERT_TRUE(r.has_value()) << "an instruction spanning two valid pages must not be refused: "
                                << r.error().message();
     Hook h = std::move(*r);
@@ -871,7 +931,12 @@ TEST(InlineHookFaultProof, UnrelatedFaultIsNotSwallowedByTheHookGate)
     EXPECT_EQ(read.error().code, ErrorCode::ReadFaulted);
 
     // A normal install still succeeds afterwards: the guard is scoped, not sticky.
-    Result<Hook> r = inline_at(InlineRequest{.name = "AfterUnrelatedFault", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "AfterUnrelatedFault",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     EXPECT_TRUE(r.has_value()) << "an unrelated contained fault must not disturb later hook installs";
     VirtualFree(unrelated, 0, MEM_RELEASE);
 }
@@ -958,15 +1023,22 @@ TEST(InlineHookFaultProof, DisableFailureIsReported)
 
 TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
 {
-    Result<Hook> first =
-        inline_at(InlineRequest{.name = "DupBase", .target = addr_of(&real_hook_target_add)}, &real_hook_detour_add);
+    Result<Hook> first = inline_at(
+        InlineRequest{
+            .name = "DupBase",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
-    Result<Hook> second = inline_at(InlineRequest{.name = "DupSecond",
-                                                  .target = addr_of(&real_hook_target_add),
-                                                  .options = Options{.fail_if_already_hooked = true}},
-                                    &real_hook_detour_add);
+    Result<Hook> second = inline_at(
+        InlineRequest{
+            .name = "DupSecond",
+            .target = addr_of(&real_hook_target_add),
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(second.has_value());
     // The ledger refuses before the prologue decode runs, so this is the same-kit mechanism, not the foreign one.
     EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
@@ -975,14 +1047,22 @@ TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
 
 TEST(HookInline, DefaultModeLayersSecondHook)
 {
-    Result<Hook> first =
-        inline_at(InlineRequest{.name = "LayerBase", .target = addr_of(&real_hook_target_mul)}, &real_hook_detour_add);
+    Result<Hook> first = inline_at(
+        InlineRequest{
+            .name = "LayerBase",
+            .target = addr_of(&real_hook_target_mul),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
     // Default mode (fail_if_already_hooked = false): the second hook simply layers on top.
-    Result<Hook> second = inline_at(InlineRequest{.name = "LayerSecond", .target = addr_of(&real_hook_target_mul)},
-                                    &real_hook_detour_add);
+    Result<Hook> second = inline_at(
+        InlineRequest{
+            .name = "LayerSecond",
+            .target = addr_of(&real_hook_target_mul),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(second.has_value()) << second.error().message();
     Hook layer = std::move(*second);
     // Teardown is newest-first by natural reverse-order destruction: layer (declared last) is destroyed before base.
@@ -1048,10 +1128,13 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
     std::memcpy(reinterpret_cast<void *>(page->addr(2)), &foreign_destination, sizeof(foreign_destination));
     page->put(10, {0xFF, 0xE0}); // jmp rax
 
-    Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpForeign",
-                                             .target = Address{page->addr(0)},
-                                             .options = Options{.fail_if_already_hooked = true}},
-                               &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "AbsJumpForeign",
+            .target = Address{page->addr(0)},
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &echo_detour);
     ASSERT_FALSE(r.has_value());
     // The ledger was asserted blind to this address above, so only the foreign-JMP decode can be the refuser.
     EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
@@ -1084,10 +1167,13 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAJumpIntoModulelessMemory)
     std::memcpy(reinterpret_cast<void *>(page->addr(2)), &moduleless_destination, sizeof(moduleless_destination));
     page->put(10, {0xFF, 0xE0}); // jmp rax
 
-    Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpModuleless",
-                                             .target = Address{page->addr(0)},
-                                             .options = Options{.fail_if_already_hooked = true}},
-                               &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "AbsJumpModuleless",
+            .target = Address{page->addr(0)},
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &echo_detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
 }
@@ -1104,7 +1190,12 @@ TEST(HookLedger, IsTargetHookedTrueWhileLiveFalseAfterDrop)
     const Address target = addr_of(&real_hook_target_mul);
     EXPECT_FALSE(is_target_hooked(target));
     {
-        Result<Hook> r = inline_at(InlineRequest{.name = "LedgerLive", .target = target}, &real_hook_detour_add);
+        Result<Hook> r = inline_at(
+            InlineRequest{
+                .name = "LedgerLive",
+                .target = target,
+            },
+            &real_hook_detour_add);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         EXPECT_TRUE(is_target_hooked(target));
@@ -1194,7 +1285,12 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
 
 TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "GuardedCall", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "GuardedCall",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1210,7 +1306,12 @@ TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
 // trampoline expects the scalar: silent, value-category-dependent ABI UB. By value, an lvalue argument round-trips.
 TEST(HookCall, GuardedCallPassesLvalueByValue)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "GuardedLvalue", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "GuardedLvalue",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1222,7 +1323,12 @@ TEST(HookCall, GuardedCallPassesLvalueByValue)
 // After disable(), call() observes an inactive hook and returns a value-initialized Ret (0 for int).
 TEST(HookCall, GuardedCallReturnsValueInitWhenInactive)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "GuardedInactive", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "GuardedInactive",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1236,14 +1342,23 @@ TEST(HookCall, GuardedCallReturnsValueInitWhenInactive)
 // handle's guarded call() dispatching through the SOURCE's trampoline while the moved-from source is inert.
 TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
 {
-    Result<Hook> first = inline_at(InlineRequest{.name = "MoveAssignOld", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> first = inline_at(
+        InlineRequest{
+            .name = "MoveAssignOld",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook dest = std::move(*first);
     ASSERT_TRUE(dest.enable().has_value()) << "dest enable failed";
     EXPECT_EQ(call_unfolded(&echo, 7), 107); // echo hooked by dest
 
-    Result<Hook> second = inline_at(InlineRequest{.name = "MoveAssignNew", .target = addr_of(&real_hook_target_add)},
-                                    &real_hook_detour_add);
+    Result<Hook> second = inline_at(
+        InlineRequest{
+            .name = "MoveAssignNew",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(second.has_value()) << second.error().message();
     Hook src = std::move(*second);
     ASSERT_TRUE(src.enable().has_value()) << "src enable failed";
@@ -1264,7 +1379,12 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
 // an error rather than a value-initialized Ret a caller cannot tell apart from a genuine one.
 TEST(HookCall, TryCallReachesOriginalAndReturnsValue)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallActive", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallActive",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1278,7 +1398,12 @@ TEST(HookCall, TryCallReachesOriginalAndReturnsValue)
 // 0 would also produce. try_call keeps the suppression in the error channel so the two cases are distinguishable.
 TEST(HookCall, TryCallFailsClosedWhenInactive)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallInactive", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallInactive",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1293,7 +1418,12 @@ TEST(HookCall, TryCallFailsClosedWhenInactive)
 // try_call<void> carries no value but still reports whether the call dispatched, so a void original can be guarded too.
 TEST(HookCall, TryCallVoidReportsDispatchAndFailClosed)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallVoid", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallVoid",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1310,7 +1440,12 @@ TEST(HookCall, TryCallVoidReportsDispatchAndFailClosed)
 // A moved-from handle has an empty gate: try_call fails closed just as call() no-ops, but reports it as an error.
 TEST(HookCall, TryCallOnMovedFromHandleFailsClosed)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallMovedFrom", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallMovedFrom",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     Hook moved = std::move(h);
@@ -1327,7 +1462,12 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
     // Dedicated leak target: this detour stays installed for the process lifetime, so no other test may share it.
     const Address target = addr_of(&leak_target_inline);
     EXPECT_EQ(call_unfolded(&leak_target_inline, 7), 7); // sanity: clean before the hook
-    Result<Hook> r = inline_at(InlineRequest{.name = "Released", .target = target}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Released",
+            .target = target,
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1345,7 +1485,12 @@ TEST(HookTeardown, DestructorRestoresPrologue)
 {
     EXPECT_EQ(call_unfolded(&echo, 7), 7); // sanity: unhooked
     {
-        Result<Hook> r = inline_at(InlineRequest{.name = "TeardownRestore", .target = addr_of(&echo)}, &echo_detour);
+        Result<Hook> r = inline_at(
+            InlineRequest{
+                .name = "TeardownRestore",
+                .target = addr_of(&echo),
+            },
+            &echo_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1358,7 +1503,12 @@ TEST(HookTeardown, MovedFromHandleIsInert)
 {
     EXPECT_EQ(call_unfolded(&echo, 7), 7);
     {
-        Result<Hook> r = inline_at(InlineRequest{.name = "MovedFrom", .target = addr_of(&echo)}, &echo_detour);
+        Result<Hook> r = inline_at(
+            InlineRequest{
+                .name = "MovedFrom",
+                .target = addr_of(&echo),
+            },
+            &echo_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook a = std::move(*r);
         ASSERT_TRUE(a.enable().has_value()) << "enable failed";
@@ -1379,7 +1529,12 @@ TEST(HookTeardown, MovedFromHandleIsInert)
 TEST(HookMid, CreateSucceedsDisabled)
 {
     auto detour = [](MidContext &) { s_mid_detour_calls.fetch_add(1, std::memory_order_relaxed); };
-    Result<Hook> r = mid_at(MidRequest{.name = "MidCreate", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidCreate",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     EXPECT_TRUE(static_cast<bool>(h));
@@ -1393,7 +1548,12 @@ TEST(HookMid, CreateSucceedsDisabled)
 TEST(HookMid, CreateInvalidTargetAddress)
 {
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidBadTarget", .target = Address{std::uintptr_t{0}}}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidBadTarget",
+            .target = Address{std::uintptr_t{0}},
+        },
+        detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidTargetAddress);
 }
@@ -1401,7 +1561,12 @@ TEST(HookMid, CreateInvalidTargetAddress)
 TEST(HookMid, CreateNullDetour)
 {
     MidHookFn null_detour = nullptr;
-    Result<Hook> r = mid_at(MidRequest{.name = "MidNullDetour", .target = addr_of(&real_hook_target_add)}, null_detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidNullDetour",
+            .target = addr_of(&real_hook_target_add),
+        },
+        null_detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidDetourFunction);
 }
@@ -1409,7 +1574,12 @@ TEST(HookMid, CreateNullDetour)
 TEST(HookMid, CreateEmptyName)
 {
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
@@ -1417,7 +1587,12 @@ TEST(HookMid, CreateEmptyName)
 TEST(HookMid, EnableDisableToggles)
 {
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 1000; };
-    Result<Hook> r = mid_at(MidRequest{.name = "MidToggle", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidToggle",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1433,7 +1608,12 @@ TEST(HookMid, EnableDisableToggles)
 TEST(HookMid, OriginalIsNullForMidHook)
 {
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidNoOriginal", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidNoOriginal",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     EXPECT_EQ(h.original<EchoFn>(), nullptr);
@@ -1442,14 +1622,22 @@ TEST(HookMid, OriginalIsNullForMidHook)
 TEST(HookMid, FailIfAlreadyHookedRefusesSecondMid)
 {
     auto detour = [](MidContext &) {};
-    Result<Hook> first = mid_at(MidRequest{.name = "MidDupBase", .target = addr_of(&real_hook_target_mul)}, detour);
+    Result<Hook> first = mid_at(
+        MidRequest{
+            .name = "MidDupBase",
+            .target = addr_of(&real_hook_target_mul),
+        },
+        detour);
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook base = std::move(*first);
 
-    Result<Hook> second = mid_at(MidRequest{.name = "MidDupSecond",
-                                            .target = addr_of(&real_hook_target_mul),
-                                            .options = Options{.fail_if_already_hooked = true}},
-                                 detour);
+    Result<Hook> second = mid_at(
+        MidRequest{
+            .name = "MidDupSecond",
+            .target = addr_of(&real_hook_target_mul),
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        detour);
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
@@ -1458,16 +1646,23 @@ TEST(HookMid, FailIfAlreadyHookedRefusesSecondMid)
 // mode (the ledger check is type-agnostic, overlapping the same prologue bytes).
 TEST(HookMid, FailIfAlreadyHookedRefusesOverInline)
 {
-    Result<Hook> inl = inline_at(InlineRequest{.name = "MidOverInlineBase", .target = addr_of(&real_hook_target_add)},
-                                 &real_hook_detour_add);
+    Result<Hook> inl = inline_at(
+        InlineRequest{
+            .name = "MidOverInlineBase",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(inl.has_value()) << inl.error().message();
     Hook base = std::move(*inl);
 
     auto detour = [](MidContext &) {};
-    Result<Hook> mid = mid_at(MidRequest{.name = "MidOverInline",
-                                         .target = addr_of(&real_hook_target_add),
-                                         .options = Options{.fail_if_already_hooked = true}},
-                              detour);
+    Result<Hook> mid = mid_at(
+        MidRequest{
+            .name = "MidOverInline",
+            .target = addr_of(&real_hook_target_add),
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        detour);
     ASSERT_FALSE(mid.has_value());
     EXPECT_EQ(mid.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
@@ -1480,7 +1675,12 @@ TEST(HookMid, DefaultFailsOnInt3Prologue)
     ASSERT_TRUE(page.ok());
     page.put(0, {0xCC, 0xC3, 0x90, 0x90});
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidInt3Prologue", .target = Address{page.addr(0)}}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidInt3Prologue",
+            .target = Address{page.addr(0)},
+        },
+        detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -1491,7 +1691,12 @@ TEST(HookMid, DefaultRefusesNonExecutableTarget)
 {
     alignas(16) static std::uint8_t mid_data_prologue[32] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidDataTarget", .target = addr_of(mid_data_prologue)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidDataTarget",
+            .target = addr_of(mid_data_prologue),
+        },
+        detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -1503,7 +1708,12 @@ TEST(HookMid, RealCreateModifiesArgViaRcx)
 #endif
     // A mid hook installed at the entry overwrites rcx (the first integer arg) before the body homes it.
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 1000; };
-    Result<Hook> r = mid_at(MidRequest{.name = "MidRealCreate", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidRealCreate",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1518,7 +1728,12 @@ TEST(HookMid, RealCreateDisabledRestoresOriginal)
     GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
 #endif
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 1000; };
-    Result<Hook> r = mid_at(MidRequest{.name = "MidRealDisabled", .target = addr_of(&real_hook_target_add)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidRealDisabled",
+            .target = addr_of(&real_hook_target_add),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "enable failed";
@@ -1536,7 +1751,12 @@ TEST(HookMid, TeardownRestoresOriginal)
     EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20);
     {
         auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 10; };
-        Result<Hook> r = mid_at(MidRequest{.name = "MidTeardown", .target = addr_of(&real_hook_target_mul)}, detour);
+        Result<Hook> r = mid_at(
+            MidRequest{
+                .name = "MidTeardown",
+                .target = addr_of(&real_hook_target_mul),
+            },
+            detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value());
@@ -1552,7 +1772,12 @@ TEST(HookMid, ReleaseLeavesMidInstalled)
 #endif
     // Dedicated leak target: the released mid hook stays installed for the process lifetime.
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 1000; };
-    Result<Hook> r = mid_at(MidRequest{.name = "MidReleased", .target = addr_of(&leak_target_mid)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidReleased",
+            .target = addr_of(&leak_target_mid),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value());
@@ -1571,7 +1796,12 @@ TEST(HookMid, MovedFromMidHandleIsInert)
     EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20);
     {
         auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 10; };
-        Result<Hook> r = mid_at(MidRequest{.name = "MidMovedFrom", .target = addr_of(&real_hook_target_mul)}, detour);
+        Result<Hook> r = mid_at(
+            MidRequest{
+                .name = "MidMovedFrom",
+                .target = addr_of(&real_hook_target_mul),
+            },
+            detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook a = std::move(*r);
         ASSERT_TRUE(a.enable().has_value());
@@ -1736,8 +1966,12 @@ static_assert(noexcept(install_all(std::span<const HookSpec>{})),
 TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
 {
     // Pre-hook the target so this instance's ledger reports it hooked.
-    Result<Hook> pre =
-        inline_at(InlineRequest{.name = "PerRowPreHook", .target = addr_of(&install_target_one)}, &install_detour_one);
+    Result<Hook> pre = inline_at(
+        InlineRequest{
+            .name = "PerRowPreHook",
+            .target = addr_of(&install_target_one),
+        },
+        &install_detour_one);
     ASSERT_TRUE(pre.has_value()) << pre.error().message();
     Hook keep = std::move(*pre);
 
@@ -1745,7 +1979,10 @@ TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
     // already-hooked target rather than layer.
     const HookSpec strict_table[] = {
         HookSpec::inline_hook("StrictRow", resolvable_request("StrictRowPat", &install_target_one), &install_detour_two,
-                              Severity::BestEffort, Options{.fail_if_already_hooked = true}),
+                              Severity::BestEffort,
+                              Options{
+                                  .fail_if_already_hooked = true,
+                              }),
     };
     Result<std::vector<InstallOutcome>> strict = install_all(strict_table);
     ASSERT_TRUE(strict.has_value()) << strict.error().message();
@@ -2290,7 +2527,12 @@ namespace
 TEST(HookEnableWitness, InlineFailureLeavesHookDisabledAndTargetPristine)
 {
     const Address target = addr_of(&witness_failure_inline_target);
-    Result<Hook> created = inline_at(InlineRequest{.name = "InlineWitnessFailure", .target = target}, &echo_detour);
+    Result<Hook> created = inline_at(
+        InlineRequest{
+            .name = "InlineWitnessFailure",
+            .target = target,
+        },
+        &echo_detour);
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook h = std::move(*created);
 
@@ -2313,7 +2555,12 @@ TEST(HookEnableWitness, MidFailureLeavesHookDisabledAndTargetPristine)
 {
     const Address target = addr_of(&witness_failure_mid_target);
     const auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 100; };
-    Result<Hook> created = mid_at(MidRequest{.name = "MidWitnessFailure", .target = target}, detour);
+    Result<Hook> created = mid_at(
+        MidRequest{
+            .name = "MidWitnessFailure",
+            .target = target,
+        },
+        detour);
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook h = std::move(*created);
 
@@ -2464,9 +2711,12 @@ TEST(HookPublicationProof, DisabledUntilCallerPublishesContext)
     std::optional<Hook> handle;
     {
         const HookPublishProbeScope probe_scope(&observe_target_from_foreign_thread);
-        Result<Hook> created =
-            inline_at(InlineRequest{.name = "PublicationProof", .target = addr_of(&publication_proof_target)},
-                      &publication_proof_detour);
+        Result<Hook> created = inline_at(
+            InlineRequest{
+                .name = "PublicationProof",
+                .target = addr_of(&publication_proof_target),
+            },
+            &publication_proof_detour);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         handle.emplace(std::move(*created));
     }
@@ -2510,7 +2760,12 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
         {
             s_oom_throw_step = step;
             const HookPublishProbeScope probe_scope(&oom_throwing_probe);
-            installed = inline_at(InlineRequest{.name = "OomPublication", .target = target}, &oom_publication_detour);
+            installed = inline_at(
+                InlineRequest{
+                    .name = "OomPublication",
+                    .target = target,
+                },
+                &oom_publication_detour);
         }
 
         ASSERT_FALSE(installed.has_value()) << "step " << static_cast<int>(step) << " did not fail the install";
@@ -2521,7 +2776,12 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
     }
 
     // The target survived every injected failure and a real install still works end to end.
-    Result<Hook> ok = inline_at(InlineRequest{.name = "OomRecovery", .target = target}, &oom_publication_detour);
+    Result<Hook> ok = inline_at(
+        InlineRequest{
+            .name = "OomRecovery",
+            .target = target,
+        },
+        &oom_publication_detour);
     ASSERT_TRUE(ok.has_value()) << ok.error().message();
     Hook h = std::move(*ok);
     ASSERT_TRUE(h.enable().has_value());
@@ -2534,8 +2794,12 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
         {
             s_oom_throw_step = step;
             const HookPublishProbeScope probe_scope(&oom_throwing_probe);
-            installed =
-                mid_at(MidRequest{.name = "OomPublicationMid", .target = mid_target}, &oom_publication_mid_detour);
+            installed = mid_at(
+                MidRequest{
+                    .name = "OomPublicationMid",
+                    .target = mid_target,
+                },
+                &oom_publication_mid_detour);
         }
 
         ASSERT_FALSE(installed.has_value()) << "mid step " << static_cast<int>(step) << " did not fail the install";
@@ -2546,8 +2810,12 @@ TEST(HookPublicationProof, FailureAtEachPublicationStepLeavesNoPartialHook)
             << "mid step " << static_cast<int>(step) << " left the target patched";
     }
 
-    Result<Hook> mid_ok =
-        mid_at(MidRequest{.name = "OomRecoveryMid", .target = mid_target}, &oom_publication_mid_detour);
+    Result<Hook> mid_ok = mid_at(
+        MidRequest{
+            .name = "OomRecoveryMid",
+            .target = mid_target,
+        },
+        &oom_publication_mid_detour);
     ASSERT_TRUE(mid_ok.has_value()) << mid_ok.error().message();
     Hook mid_hook = std::move(*mid_ok);
     ASSERT_TRUE(mid_hook.enable().has_value());
@@ -2568,8 +2836,12 @@ TEST(HookPublicationProof, MidHookIsDisabledUntilCallerPublishesContext)
     std::optional<Hook> handle;
     {
         const HookPublishProbeScope probe_scope(&observe_mid_target_from_foreign_thread);
-        Result<Hook> created =
-            mid_at(MidRequest{.name = "PublicationProofMid", .target = addr_of(&publication_proof_mid_target)}, detour);
+        Result<Hook> created = mid_at(
+            MidRequest{
+                .name = "PublicationProofMid",
+                .target = addr_of(&publication_proof_mid_target),
+            },
+            detour);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         handle.emplace(std::move(*created));
     }
@@ -2594,8 +2866,12 @@ TEST(HookPublicationProof, MidHookIsDisabledUntilCallerPublishesContext)
 TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
 {
     HookModuleRefFailureScope fail_scope;
-    Result<Hook> r = inline_at(InlineRequest{.name = "InlineAcquireFail", .target = addr_of(&real_hook_target_add)},
-                               &real_hook_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "InlineAcquireFail",
+            .target = addr_of(&real_hook_target_add),
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
     EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
@@ -2605,7 +2881,12 @@ TEST(HookModuleRef, MidAtAcquireFailurePopulatesErrorDetail)
 {
     auto detour = [](MidContext &) {};
     HookModuleRefFailureScope fail_scope;
-    Result<Hook> r = mid_at(MidRequest{.name = "MidAcquireFail", .target = addr_of(&real_hook_target_mul)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidAcquireFail",
+            .target = addr_of(&real_hook_target_mul),
+        },
+        detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
     EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
@@ -2686,11 +2967,17 @@ TEST(HookVmt, FailIfAlreadyHookedRefusesDoubleCreate)
 {
     auto target = std::make_unique<VmtTestTarget>();
 
-    Result<VmtHook> first = vmt_for("FirstVmt", target.get(), VmtOptions{.fail_if_already_hooked = true});
+    Result<VmtHook> first = vmt_for("FirstVmt", target.get(),
+                                    VmtOptions{
+                                        .fail_if_already_hooked = true,
+                                    });
     ASSERT_TRUE(first.has_value()) << first.error().message();
     VmtHook vh = std::move(*first);
 
-    Result<VmtHook> second = vmt_for("SecondVmt", target.get(), VmtOptions{.fail_if_already_hooked = true});
+    Result<VmtHook> second = vmt_for("SecondVmt", target.get(),
+                                     VmtOptions{
+                                         .fail_if_already_hooked = true,
+                                     });
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::HookAlreadyExists);
 }
@@ -2843,7 +3130,9 @@ TEST(HookVmt, ApplyToOwnCloneIsNoOpAnotherCloneFails)
     VmtHook vb = std::move(*rb);
 
     // target_b is already on vb's clone. Applying va onto target_b with fail_if_already_hooked must be refused.
-    Result<void> cross = va.apply_to(target_b.get(), VmtOptions{.fail_if_already_hooked = true});
+    Result<void> cross = va.apply_to(target_b.get(), VmtOptions{
+                                                         .fail_if_already_hooked = true,
+                                                     });
     ASSERT_FALSE(cross.has_value());
     EXPECT_EQ(cross.error().code, ErrorCode::HookAlreadyExists);
 }
@@ -2950,9 +3239,11 @@ TEST(HookDiagnosticContainment, RiskyPrologueWarningContainsEveryAllocationFailu
             {
                 return 0;
             }
-            InlineRequest request{.name = "PrologueWarnSweep",
-                                  .target = Address{page.addr(0)},
-                                  .options = Options{.prologue = Prologue::Relocate}};
+            InlineRequest request{
+                .name = "PrologueWarnSweep",
+                .target = Address{page.addr(0)},
+                .options = Options{.prologue = Prologue::Relocate},
+            };
             const long long before = dmk_test::thread_new_calls();
             bool has_value = false;
             {
@@ -2975,7 +3266,10 @@ TEST(HookDiagnosticContainment, TargetWindowWarningContainsEveryAllocationFailur
     sweep_allocation_failures(
         [](long long allow) -> long long
         {
-            InlineRequest request{.name = "TargetWindowWarnSweep", .target = addr_of(data_prologue)};
+            InlineRequest request{
+                .name = "TargetWindowWarnSweep",
+                .target = addr_of(data_prologue),
+            };
             const long long before = dmk_test::thread_new_calls();
             bool has_value = false;
             {
@@ -2996,8 +3290,12 @@ TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailur
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
     plant_leaf_function(page);
-    Result<Hook> installed = inline_at(InlineRequest{.name = "LayerWarnBase", .target = Address{page.addr(0)}},
-                                       reinterpret_cast<void (*)()>(&noop_detour));
+    Result<Hook> installed = inline_at(
+        InlineRequest{
+            .name = "LayerWarnBase",
+            .target = Address{page.addr(0)},
+        },
+        reinterpret_cast<void (*)()>(&noop_detour));
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     Hook base = std::move(*installed);
     ScopedLogCapture capture;
@@ -3005,7 +3303,10 @@ TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailur
     sweep_allocation_failures(
         [&page](long long allow) -> long long
         {
-            InlineRequest request{.name = "LayerWarnSweep", .target = Address{page.addr(0)}};
+            InlineRequest request{
+                .name = "LayerWarnSweep",
+                .target = Address{page.addr(0)},
+            };
             const long long before = dmk_test::thread_new_calls();
             bool has_value = false;
             {
@@ -3038,7 +3339,10 @@ TEST(HookDiagnosticContainment, ForeignJumpWarningContainsEveryAllocationFailure
     sweep_allocation_failures(
         [page](long long allow) -> long long
         {
-            InlineRequest request{.name = "ForeignJumpWarnSweep", .target = Address{page->addr(0)}};
+            InlineRequest request{
+                .name = "ForeignJumpWarnSweep",
+                .target = Address{page->addr(0)},
+            };
             const long long before = dmk_test::thread_new_calls();
             bool has_value = false;
             {
@@ -3320,7 +3624,10 @@ TEST(HookVmt, PreFlightRefusesInt3FirstSlot)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> r = vmt_for("Int3Vmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    Result<VmtHook> r = vmt_for("Int3Vmt", &vptr,
+                                VmtOptions{
+                                    .fail_on_non_function_pointer = true,
+                                });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
 
@@ -3342,7 +3649,10 @@ TEST(HookVmt, PreFlightAcceptsFunctionPrologue)
     vtable.methods[0] = slot_bodies().at(SlotBodyPage::PROLOGUE);
     void *vptr = &vtable.methods[0];
 
-    Result<VmtHook> r = vmt_for("PrologueVmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    Result<VmtHook> r = vmt_for("PrologueVmt", &vptr,
+                                VmtOptions{
+                                    .fail_on_non_function_pointer = true,
+                                });
     ASSERT_TRUE(r.has_value()) << r.error().message();
     {
         VmtHook vh = std::move(*r);
@@ -3374,7 +3684,10 @@ TEST(HookVmt, PreFlightOffByDefault)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> strict = vmt_for("RetSlotVmtStrict", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    Result<VmtHook> strict = vmt_for("RetSlotVmtStrict", &vptr,
+                                     VmtOptions{
+                                         .fail_on_non_function_pointer = true,
+                                     });
     ASSERT_FALSE(strict.has_value());
     EXPECT_EQ(strict.error().code, ErrorCode::InvalidObject);
 }
@@ -3402,7 +3715,10 @@ TEST(HookVmt, PreFlightRefusesSameModuleJumpStub)
     }
     ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
-    Result<VmtHook> r = vmt_for("JmpStubVmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    Result<VmtHook> r = vmt_for("JmpStubVmt", &vptr,
+                                VmtOptions{
+                                    .fail_on_non_function_pointer = true,
+                                });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
     EXPECT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
@@ -3426,7 +3742,9 @@ TEST(HookVmt, ApplyPreFlightRefusesInt3FirstSlot)
     vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
     void *vptr = &vtable;
 
-    Result<void> applied = vh.apply_to(&vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    Result<void> applied = vh.apply_to(&vptr, VmtOptions{
+                                                  .fail_on_non_function_pointer = true,
+                                              });
     ASSERT_FALSE(applied.has_value());
     EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
     EXPECT_EQ(vptr, static_cast<void *>(&vtable));
@@ -3681,7 +3999,12 @@ TEST(HookLifecycle, InlineEventsAreEmitted)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     {
-        Result<Hook> r = inline_at(InlineRequest{.name = "LifecycleHook", .target = addr_of(&echo)}, &echo_detour);
+        Result<Hook> r = inline_at(
+            InlineRequest{
+                .name = "LifecycleHook",
+                .target = addr_of(&echo),
+            },
+            &echo_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         // Created on install (disabled), then the arming enable, then a real disable -> enable transition pair, then
@@ -3712,7 +4035,12 @@ TEST(HookLifecycle, MidEventReportsMidKind)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidLifecycleHook", .target = addr_of(&real_hook_target_mul)}, detour);
+    Result<Hook> r = mid_at(
+        MidRequest{
+            .name = "MidLifecycleHook",
+            .target = addr_of(&real_hook_target_mul),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -3763,8 +4091,12 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     // Dedicated leak target: this test ends with release(), leaking the detour for the process lifetime.
-    Result<Hook> r = inline_at(InlineRequest{.name = "NoOpLifecycleHook", .target = addr_of(&leak_target_lifecycle)},
-                               &real_hook_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "NoOpLifecycleHook",
+            .target = addr_of(&leak_target_lifecycle),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_EQ(events.size(), 1u); // Created only
@@ -3900,13 +4232,19 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
         EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5); // pristine before install
 
         {
-            Result<Hook> base =
-                inline_at(InlineRequest{.name = "LayeredBase", .target = addr_of(&layered_disabled_target)},
-                          &layered_disabled_detour_a);
+            Result<Hook> base = inline_at(
+                InlineRequest{
+                    .name = "LayeredBase",
+                    .target = addr_of(&layered_disabled_target),
+                },
+                &layered_disabled_detour_a);
             ASSERT_TRUE(base.has_value()) << base.error().message();
-            Result<Hook> top =
-                inline_at(InlineRequest{.name = "LayeredTop", .target = addr_of(&layered_disabled_target)},
-                          &layered_disabled_detour_b);
+            Result<Hook> top = inline_at(
+                InlineRequest{
+                    .name = "LayeredTop",
+                    .target = addr_of(&layered_disabled_target),
+                },
+                &layered_disabled_detour_b);
             ASSERT_TRUE(top.has_value()) << top.error().message();
 
             Hook h_base = std::move(*base);
@@ -3948,8 +4286,12 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
 // state open until a reader reports it and fails if one never does. It does not claim the storm itself raced.
 TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
 {
-    Result<Hook> created =
-        inline_at(InlineRequest{.name = "GateQuery", .target = addr_of(&gate_query_target)}, &gate_query_detour);
+    Result<Hook> created = inline_at(
+        InlineRequest{
+            .name = "GateQuery",
+            .target = addr_of(&gate_query_target),
+        },
+        &gate_query_detour);
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook hook = std::move(*created);
     ASSERT_TRUE(hook.enable().has_value());
@@ -4068,7 +4410,12 @@ TEST(HookTeardownFaultProof, ReportedDisableFailurePinsBackendAndBooksLeak)
         // installed. Reversing the two would clear the seam before ~Hook ever consults it.
         const HookTeardownRestoreOverrideScope pin_scope(&reject_teardown_restore);
 
-        Result<Hook> created = inline_at(InlineRequest{.name = "TeardownPin", .target = target}, &teardown_pin_detour);
+        Result<Hook> created = inline_at(
+            InlineRequest{
+                .name = "TeardownPin",
+                .target = target,
+            },
+            &teardown_pin_detour);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook hook = std::move(*created);
         ASSERT_TRUE(hook.enable().has_value());
@@ -4100,8 +4447,12 @@ TEST(HookTeardownFaultProof, SyncExceptionDuringTeardownIsContainedAndPins)
     {
         const HookTeardownRestoreOverrideScope pin_scope(&throw_teardown_restore_failure);
 
-        Result<Hook> created =
-            inline_at(InlineRequest{.name = "TeardownThrow", .target = target}, &teardown_throw_detour);
+        Result<Hook> created = inline_at(
+            InlineRequest{
+                .name = "TeardownThrow",
+                .target = target,
+            },
+            &teardown_throw_detour);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook hook = std::move(*created);
         ASSERT_TRUE(hook.enable().has_value());
@@ -4127,8 +4478,12 @@ TEST(HookLayerStateProof, LowerLayerCannotOverwriteNewerLayer)
     ASSERT_EQ(call_unfolded(&layer_state_target, 5), 5);
 
     {
-        Result<Hook> base = inline_at(InlineRequest{.name = "LayerStateBase", .target = addr_of(&layer_state_target)},
-                                      &layer_state_detour_base);
+        Result<Hook> base = inline_at(
+            InlineRequest{
+                .name = "LayerStateBase",
+                .target = addr_of(&layer_state_target),
+            },
+            &layer_state_detour_base);
         ASSERT_TRUE(base.has_value()) << base.error().message();
         Hook h_base = std::move(*base);
         ASSERT_TRUE(h_base.enable().has_value());
@@ -4137,8 +4492,12 @@ TEST(HookLayerStateProof, LowerLayerCannotOverwriteNewerLayer)
         {
             // Created while the base is armed, so this layer captures the patched prologue rather than the pristine
             // one.
-            Result<Hook> top = inline_at(InlineRequest{.name = "LayerStateTop", .target = addr_of(&layer_state_target)},
-                                         &layer_state_detour_top);
+            Result<Hook> top = inline_at(
+                InlineRequest{
+                    .name = "LayerStateTop",
+                    .target = addr_of(&layer_state_target),
+                },
+                &layer_state_detour_top);
             ASSERT_TRUE(top.has_value()) << top.error().message();
             Hook h_top = std::move(*top);
             ASSERT_TRUE(h_top.enable().has_value());
@@ -4175,14 +4534,22 @@ TEST(HookLayerStateProof, NonTopLayerToggleCannotChangeTargetBytes)
 {
     ASSERT_FALSE(is_target_hooked(addr_of(&layer_state_target)));
 
-    Result<Hook> base = inline_at(InlineRequest{.name = "LayerBytesBase", .target = addr_of(&layer_state_target)},
-                                  &layer_state_detour_base);
+    Result<Hook> base = inline_at(
+        InlineRequest{
+            .name = "LayerBytesBase",
+            .target = addr_of(&layer_state_target),
+        },
+        &layer_state_detour_base);
     ASSERT_TRUE(base.has_value()) << base.error().message();
     Hook h_base = std::move(*base);
     ASSERT_TRUE(h_base.enable().has_value());
 
-    Result<Hook> top = inline_at(InlineRequest{.name = "LayerBytesTop", .target = addr_of(&layer_state_target)},
-                                 &layer_state_detour_top);
+    Result<Hook> top = inline_at(
+        InlineRequest{
+            .name = "LayerBytesTop",
+            .target = addr_of(&layer_state_target),
+        },
+        &layer_state_detour_top);
     ASSERT_TRUE(top.has_value()) << top.error().message();
     Hook h_top = std::move(*top);
     ASSERT_TRUE(h_top.enable().has_value());
@@ -4219,13 +4586,21 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
 
     {
         HookStack stack;
-        Result<Hook> base =
-            inline_at(InlineRequest{.name = "StackBase", .target = addr_of(&stack_target_primary)}, &stack_detour);
+        Result<Hook> base = inline_at(
+            InlineRequest{
+                .name = "StackBase",
+                .target = addr_of(&stack_target_primary),
+            },
+            &stack_detour);
         ASSERT_TRUE(base.has_value()) << base.error().message();
         stack.push(std::move(*base));
 
-        Result<Hook> layer =
-            inline_at(InlineRequest{.name = "StackLayer", .target = addr_of(&stack_target_primary)}, &stack_detour);
+        Result<Hook> layer = inline_at(
+            InlineRequest{
+                .name = "StackLayer",
+                .target = addr_of(&stack_target_primary),
+            },
+            &stack_detour);
         ASSERT_TRUE(layer.has_value()) << layer.error().message();
         stack.push(std::move(*layer));
 
@@ -4245,8 +4620,12 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
 TEST(HookStackTest, MoveConstructTransfersOwnershipAndLeavesSourceEmpty)
 {
     HookStack source;
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "MoveCtorHook", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "MoveCtorHook",
+            .target = addr_of(&stack_target_secondary),
+        },
+        &stack_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     ASSERT_TRUE(source.push(std::move(*r)).enable().has_value());
 
@@ -4278,13 +4657,21 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
 
     HookStack dest;
     {
-        Result<Hook> base =
-            inline_at(InlineRequest{.name = "MoveBase", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+        Result<Hook> base = inline_at(
+            InlineRequest{
+                .name = "MoveBase",
+                .target = addr_of(&stack_target_secondary),
+            },
+            &stack_detour);
         ASSERT_TRUE(base.has_value()) << base.error().message();
         ASSERT_TRUE(dest.push(std::move(*base)).enable().has_value());
 
-        Result<Hook> layer =
-            inline_at(InlineRequest{.name = "MoveLayer", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+        Result<Hook> layer = inline_at(
+            InlineRequest{
+                .name = "MoveLayer",
+                .target = addr_of(&stack_target_secondary),
+            },
+            &stack_detour);
         ASSERT_TRUE(layer.has_value()) << layer.error().message();
         ASSERT_TRUE(dest.push(std::move(*layer)).enable().has_value());
     }
@@ -4292,8 +4679,12 @@ TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
     ASSERT_TRUE(removed.empty()); // nothing torn down yet (setup only emits Created)
 
     HookStack replacement;
-    Result<Hook> adopted =
-        inline_at(InlineRequest{.name = "MoveAdopted", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    Result<Hook> adopted = inline_at(
+        InlineRequest{
+            .name = "MoveAdopted",
+            .target = addr_of(&stack_target_primary),
+        },
+        &stack_detour);
     ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
     ASSERT_TRUE(replacement.push(std::move(*adopted)).enable().has_value());
 
@@ -4330,13 +4721,21 @@ TEST(HookStackTest, ClearTearsDownNewestFirstAndEmpties)
         });
 
     HookStack stack;
-    Result<Hook> base =
-        inline_at(InlineRequest{.name = "ClearBase", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    Result<Hook> base = inline_at(
+        InlineRequest{
+            .name = "ClearBase",
+            .target = addr_of(&stack_target_primary),
+        },
+        &stack_detour);
     ASSERT_TRUE(base.has_value()) << base.error().message();
     stack.push(std::move(*base));
 
-    Result<Hook> layer =
-        inline_at(InlineRequest{.name = "ClearLayer", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    Result<Hook> layer = inline_at(
+        InlineRequest{
+            .name = "ClearLayer",
+            .target = addr_of(&stack_target_primary),
+        },
+        &stack_detour);
     ASSERT_TRUE(layer.has_value()) << layer.error().message();
     stack.push(std::move(*layer));
 
@@ -4357,7 +4756,12 @@ TEST(HookStackTest, PushReturnsUsableHandleAndReportsSize)
     EXPECT_TRUE(stack.empty());
     EXPECT_EQ(stack.size(), 0u);
 
-    Result<Hook> r = inline_at(InlineRequest{.name = "StackEcho", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "StackEcho",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook &stored = stack.push(std::move(*r));
     ASSERT_TRUE(stored.enable().has_value());
@@ -4425,7 +4829,12 @@ namespace
 
 TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "ConcEnableDisable", .target = addr_of(&echo)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "ConcEnableDisable",
+            .target = addr_of(&echo),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
@@ -4490,8 +4899,12 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
 
 TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
 {
-    Result<Hook> r =
-        inline_at(InlineRequest{.name = "Reentrant", .target = addr_of(&reentrant_target)}, &reentrant_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "Reentrant",
+            .target = addr_of(&reentrant_target),
+        },
+        &reentrant_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value());
@@ -4510,7 +4923,12 @@ TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
 
 TEST(HookConcurrency, DisableDrainsAnInFlightCall)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "DrainCall", .target = addr_of(&parking_original)}, &echo_detour);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "DrainCall",
+            .target = addr_of(&parking_original),
+        },
+        &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()); // publish the trampoline so call() dispatches to the parking original
@@ -4732,11 +5150,19 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
     // leak-count assertion in the suite.
     const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
 
-    Result<Hook> older =
-        inline_at(InlineRequest{.name = "LayerOld", .target = addr_of(&leak_target_layered)}, &real_hook_detour_add);
+    Result<Hook> older = inline_at(
+        InlineRequest{
+            .name = "LayerOld",
+            .target = addr_of(&leak_target_layered),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(older.has_value()) << older.error().message();
-    Result<Hook> newer =
-        inline_at(InlineRequest{.name = "LayerNew", .target = addr_of(&leak_target_layered)}, &real_hook_detour_add);
+    Result<Hook> newer = inline_at(
+        InlineRequest{
+            .name = "LayerNew",
+            .target = addr_of(&leak_target_layered),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(newer.has_value()) << newer.error().message();
 
     std::optional<Hook> old_handle(std::move(older.value()));
@@ -4753,10 +5179,13 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
     new_handle.reset();
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1);
 
-    Result<Hook> blocked = inline_at(InlineRequest{.name = "LayerAfterLeak",
-                                                   .target = addr_of(&leak_target_layered),
-                                                   .options = Options{.fail_if_already_hooked = true}},
-                                     &real_hook_detour_add);
+    Result<Hook> blocked = inline_at(
+        InlineRequest{
+            .name = "LayerAfterLeak",
+            .target = addr_of(&leak_target_layered),
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedByThisKit)
         << "a leaked backend remains physically installed and must stay represented in the ledger";
@@ -4776,7 +5205,12 @@ TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
     const Address target = addr_of(&leak_target_retained_id);
 
     // release() is the explicit pin verb: the backend stays installed and its id stays in the ledger for good.
-    Result<Hook> pinned = inline_at(InlineRequest{.name = "RetainPin", .target = target}, &real_hook_detour_add);
+    Result<Hook> pinned = inline_at(
+        InlineRequest{
+            .name = "RetainPin",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
     Hook pin_handle = std::move(*pinned);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -4785,7 +5219,12 @@ TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
 
     const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
     {
-        Result<Hook> later = inline_at(InlineRequest{.name = "RetainLater", .target = target}, &real_hook_detour_add);
+        Result<Hook> later = inline_at(
+            InlineRequest{
+                .name = "RetainLater",
+                .target = target,
+            },
+            &real_hook_detour_add);
         ASSERT_TRUE(later.has_value()) << later.error().message();
         Hook later_handle = std::move(*later);
         ASSERT_TRUE(later_handle.enable().has_value());
@@ -4803,12 +5242,22 @@ TEST(HookLedgerRetainedId, OlderLayerUnderAPinnedNewerLayerMustLeak)
 {
     const Address target = addr_of(&leak_target_retained_newer);
 
-    Result<Hook> older = inline_at(InlineRequest{.name = "RetainOlder", .target = target}, &real_hook_detour_add);
+    Result<Hook> older = inline_at(
+        InlineRequest{
+            .name = "RetainOlder",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(older.has_value()) << older.error().message();
     Hook older_handle = std::move(*older);
     ASSERT_TRUE(older_handle.enable().has_value());
 
-    Result<Hook> newer = inline_at(InlineRequest{.name = "RetainNewer", .target = target}, &real_hook_detour_add);
+    Result<Hook> newer = inline_at(
+        InlineRequest{
+            .name = "RetainNewer",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(newer.has_value()) << newer.error().message();
     Hook newer_handle = std::move(*newer);
     ASSERT_TRUE(newer_handle.enable().has_value());
@@ -4833,12 +5282,22 @@ TEST(HookLedgerRetainedId, LiveOlderLayerUnderAPinIsRefusedWithLayerConflict)
 {
     const Address target = addr_of(&leak_target_retained_conflict);
 
-    Result<Hook> older = inline_at(InlineRequest{.name = "ConflictOlder", .target = target}, &real_hook_detour_add);
+    Result<Hook> older = inline_at(
+        InlineRequest{
+            .name = "ConflictOlder",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(older.has_value()) << older.error().message();
     Hook older_handle = std::move(*older);
     ASSERT_TRUE(older_handle.enable().has_value());
 
-    Result<Hook> pin = inline_at(InlineRequest{.name = "ConflictPin", .target = target}, &real_hook_detour_add);
+    Result<Hook> pin = inline_at(
+        InlineRequest{
+            .name = "ConflictPin",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(pin.has_value()) << pin.error().message();
     Hook pin_handle = std::move(*pin);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -4868,7 +5327,12 @@ TEST(HookLedgerRetainedId, StrictInstallAfterAPinIsRefusedNotBlocked)
 {
     const Address target = addr_of(&leak_target_retained_strict);
 
-    Result<Hook> pinned = inline_at(InlineRequest{.name = "RetainStrictPin", .target = target}, &real_hook_detour_add);
+    Result<Hook> pinned = inline_at(
+        InlineRequest{
+            .name = "RetainStrictPin",
+            .target = target,
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
     Hook pin_handle = std::move(*pinned);
     ASSERT_TRUE(pin_handle.enable().has_value());
@@ -4876,7 +5340,11 @@ TEST(HookLedgerRetainedId, StrictInstallAfterAPinIsRefusedNotBlocked)
 
     // Returning at all is half the claim: a retained queue sentinel would park this call rather than refuse it.
     Result<Hook> strict = inline_at(
-        InlineRequest{.name = "RetainStrict", .target = target, .options = Options{.fail_if_already_hooked = true}},
+        InlineRequest{
+            .name = "RetainStrict",
+            .target = target,
+            .options = Options{.fail_if_already_hooked = true},
+        },
         &real_hook_detour_add);
     ASSERT_FALSE(strict.has_value());
     EXPECT_EQ(strict.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
@@ -4894,9 +5362,12 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
 
     const std::size_t disabled_before = diag::total_intentional_leaks();
     {
-        Result<Hook> created =
-            inline_at(InlineRequest{.name = "ReleaseBooksDisabled", .target = addr_of(&leak_target_release_disabled)},
-                      &real_hook_detour_add);
+        Result<Hook> created = inline_at(
+            InlineRequest{
+                .name = "ReleaseBooksDisabled",
+                .target = addr_of(&leak_target_release_disabled),
+            },
+            &real_hook_detour_add);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook handle = std::move(*created);
         handle.release();
@@ -4910,18 +5381,24 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
     // this, "keeps its backend and its ledger record without arming the target" is an unasserted public claim.
     EXPECT_TRUE(is_target_hooked(addr_of(&leak_target_release_disabled)))
         << "a hook released while disabled must keep its ledger record";
-    Result<Hook> after_disabled_pin = inline_at(InlineRequest{.name = "ReleaseDisabledStrict",
-                                                              .target = addr_of(&leak_target_release_disabled),
-                                                              .options = Options{.fail_if_already_hooked = true}},
-                                                &real_hook_detour_add);
+    Result<Hook> after_disabled_pin = inline_at(
+        InlineRequest{
+            .name = "ReleaseDisabledStrict",
+            .target = addr_of(&leak_target_release_disabled),
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &real_hook_detour_add);
     ASSERT_FALSE(after_disabled_pin.has_value());
     EXPECT_EQ(after_disabled_pin.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 
     const std::size_t inline_before = diag::total_intentional_leaks();
     {
-        Result<Hook> created =
-            inline_at(InlineRequest{.name = "ReleaseBooks", .target = addr_of(&leak_target_release_booked)},
-                      &real_hook_detour_add);
+        Result<Hook> created = inline_at(
+            InlineRequest{
+                .name = "ReleaseBooks",
+                .target = addr_of(&leak_target_release_booked),
+            },
+            &real_hook_detour_add);
         ASSERT_TRUE(created.has_value()) << created.error().message();
         Hook handle = std::move(*created);
         ASSERT_TRUE(handle.enable().has_value());
@@ -4941,8 +5418,10 @@ TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
     EXPECT_EQ(diag::total_intentional_leaks(), vmt_before + 1) << "VmtHook::release must book its deliberate leak";
     // The retention half of the VMT contract, asserted while the object still carries the leaked clone: the ledger
     // keeps the clone base, so a strict re-clone of the same object still recognises it.
-    Result<VmtHook> after_vmt_pin =
-        vmt_for("ReleaseBooksVmtStrict", probe.get(), VmtOptions{.fail_if_already_hooked = true});
+    Result<VmtHook> after_vmt_pin = vmt_for("ReleaseBooksVmtStrict", probe.get(),
+                                            VmtOptions{
+                                                .fail_if_already_hooked = true,
+                                            });
     ASSERT_FALSE(after_vmt_pin.has_value());
     EXPECT_EQ(after_vmt_pin.error().code, ErrorCode::HookAlreadyExists)
         << "a released clone base must stay recorded for VmtOptions::fail_if_already_hooked";
@@ -5052,9 +5531,16 @@ TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
 
     const std::array<VmtOptions, 4> policies{
         VmtOptions{},
-        VmtOptions{.fail_if_already_hooked = true},
-        VmtOptions{.fail_on_non_function_pointer = true},
-        VmtOptions{.fail_if_already_hooked = true, .fail_on_non_function_pointer = true},
+        VmtOptions{
+            .fail_if_already_hooked = true,
+        },
+        VmtOptions{
+            .fail_on_non_function_pointer = true,
+        },
+        VmtOptions{
+            .fail_if_already_hooked = true,
+            .fail_on_non_function_pointer = true,
+        },
     };
     const std::array<ObjectWordState, 4> states{ObjectWordState::NoAccess, ObjectWordState::ReadOnly,
                                                 ObjectWordState::Reserved, ObjectWordState::Guarded};
@@ -5716,7 +6202,9 @@ TEST(HookVmt, ApplyToUntrackedObjectOnOwnCloneIsRefusedUnderEveryPolicy)
         ~RestoreStowaway() noexcept { *reinterpret_cast<std::uintptr_t *>(object) = vptr; }
     } const restore{stowaway.get(), stowaway_pristine};
 
-    const std::array<VmtOptions, 2> policies{VmtOptions{}, VmtOptions{.fail_if_already_hooked = true}};
+    const std::array<VmtOptions, 2> policies{VmtOptions{}, VmtOptions{
+                                                               .fail_if_already_hooked = true,
+                                                           }};
     for (const VmtOptions &options : policies)
     {
         const Result<void> applied = vh.apply_to(stowaway.get(), options);
@@ -5812,9 +6300,12 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
         s_last_publish_step.reset();
         const HookPublishProbeScope steps{&record_publish_step};
         const LedgerLockFailureScope fail_commit{2};
-        Result<Hook> failed =
-            inline_at(InlineRequest{.name = "LedgerCommitFailure", .target = addr_of(&ledger_commit_failure_target)},
-                      &real_hook_detour_add);
+        Result<Hook> failed = inline_at(
+            InlineRequest{
+                .name = "LedgerCommitFailure",
+                .target = addr_of(&ledger_commit_failure_target),
+            },
+            &real_hook_detour_add);
         ASSERT_FALSE(failed.has_value());
         EXPECT_EQ(failed.error().code, ErrorCode::OutOfMemory);
         ASSERT_TRUE(s_last_publish_step.has_value()) << "install failed before creating a backend, so commit_hook was "
@@ -5825,8 +6316,12 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
     EXPECT_FALSE(is_target_hooked(addr_of(&ledger_commit_failure_target)));
     EXPECT_EQ(call_unfolded(&ledger_commit_failure_target, 20, 22), 45);
 
-    Result<Hook> created = inline_at(InlineRequest{.name = "LedgerSync", .target = addr_of(&leak_target_ledger_sync)},
-                                     &real_hook_detour_add);
+    Result<Hook> created = inline_at(
+        InlineRequest{
+            .name = "LedgerSync",
+            .target = addr_of(&leak_target_ledger_sync),
+        },
+        &real_hook_detour_add);
     ASSERT_TRUE(created.has_value()) << created.error().message();
     Hook hook = std::move(*created);
     ASSERT_TRUE(hook.enable().has_value());

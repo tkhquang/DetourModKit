@@ -281,7 +281,9 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
         records.push_back(std::move(record));
     }
 
-    const std::string text = serialize_ok(mf::Manifest{.records = records});
+    const std::string text = serialize_ok(mf::Manifest{
+        .records = records,
+    });
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records.size(), records.size());
@@ -355,7 +357,9 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     std::vector<mf::SignatureRecord> records;
     records.push_back(manual_record("floor", std::numeric_limits<std::int64_t>::min()));
 
-    const std::string text = serialize_ok(mf::Manifest{.records = records});
+    const std::string text = serialize_ok(mf::Manifest{
+        .records = records,
+    });
     EXPECT_NE(text.find("-0x8000000000000000"), std::string::npos);
 
     const auto parsed = mf::parse(text);
@@ -508,7 +512,9 @@ TEST(ManifestCompileTest, StructuralCharacterLabelFailsClosed)
         ASSERT_FALSE(compiled.has_value()) << label;
         EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << label;
 
-        const auto encoded = mf::serialize_checked(mf::Manifest{.records = {rec}});
+        const auto encoded = mf::serialize_checked(mf::Manifest{
+            .records = {rec},
+        });
         ASSERT_FALSE(encoded.has_value()) << label;
         EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg) << label;
 
@@ -1109,7 +1115,9 @@ TEST(ManifestPageClassTest, CompileAndAdoptRejectInvalidPageClass)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 
     // The checked encoder must not normalize an out-of-range page class to a permissive token.
-    const mf::Manifest malformed_manifest{.records = {record}};
+    const mf::Manifest malformed_manifest{
+        .records = {record},
+    };
     const auto encoded = mf::serialize_checked(malformed_manifest);
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
@@ -1145,7 +1153,9 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 
-    const auto encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+    const auto encoded = mf::serialize_checked(mf::Manifest{
+        .records = {record},
+    });
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -1156,7 +1166,9 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     stray.kind = an::AnchorKind::ExportName;
     stray.module = "kernel32.dll";
     stray.export_name = "CreateFileW";
-    const auto stray_encoded = mf::serialize_checked(mf::Manifest{.records = {stray}});
+    const auto stray_encoded = mf::serialize_checked(mf::Manifest{
+        .records = {stray},
+    });
     ASSERT_FALSE(stray_encoded.has_value());
     EXPECT_EQ(stray_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -1165,7 +1177,9 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
         std::ofstream out(rejected_save.path(), std::ios::binary);
         out << "last-known-good";
     }
-    const auto saved = mf::save(rejected_save.path(), mf::Manifest{.records = {record}});
+    const auto saved = mf::save(rejected_save.path(), mf::Manifest{
+                                                          .records = {record},
+                                                      });
     ASSERT_FALSE(saved.has_value());
     EXPECT_EQ(saved.error().code, dmk::ErrorCode::InvalidArg);
     std::ifstream retained_stream(rejected_save.path(), std::ios::binary);
@@ -1177,7 +1191,9 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     rung.displacement_at = 2;
     rung.instruction_length = 10;
     record.ladder = {rung};
-    const auto valid_encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+    const auto valid_encoded = mf::serialize_checked(mf::Manifest{
+        .records = {record},
+    });
     ASSERT_TRUE(valid_encoded.has_value()) << valid_encoded.error().message();
 }
 
@@ -1193,7 +1209,9 @@ TEST(ManifestSerializeTest, RipRelativePatternMustSpanDisplacement)
     record.kind = an::AnchorKind::RipGlobal;
     record.ladder = {rung};
 
-    const auto encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+    const auto encoded = mf::serialize_checked(mf::Manifest{
+        .records = {record},
+    });
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 }
@@ -1403,7 +1421,9 @@ TEST(ManifestBindingTest, InvalidBindingStructureFailsClosed)
     EXPECT_FALSE(mf::Signature::compile(inert_xmm).has_value());
 
     // The same validator guards checked serialization, so an inert edit cannot ride into the file either.
-    const auto inert_encoded = mf::serialize_checked(mf::Manifest{.records = {inert_vmt}});
+    const auto inert_encoded = mf::serialize_checked(mf::Manifest{
+        .records = {inert_vmt},
+    });
     ASSERT_FALSE(inert_encoded.has_value());
     EXPECT_EQ(inert_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -2435,12 +2455,16 @@ TEST(ManifestFileTest, SaveThenLoadRoundTrips)
 
     const ScopedManifestFile file("roundtrip");
 
-    const auto saved = mf::save(file.path(), mf::Manifest{.records = records});
+    const auto saved = mf::save(file.path(), mf::Manifest{
+                                                 .records = records,
+                                             });
     ASSERT_TRUE(saved.has_value()) << saved.error().message();
 
     const auto loaded = mf::load(file.path());
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
-    EXPECT_EQ(serialize_ok(*loaded), serialize_ok(mf::Manifest{.records = records}));
+    EXPECT_EQ(serialize_ok(*loaded), serialize_ok(mf::Manifest{
+                                         .records = records,
+                                     }));
 }
 
 TEST(ManifestFileTest, LoadMissingFileReportsFileOpenFailed)
@@ -2531,13 +2555,29 @@ TEST(ManifestRevisionTest, MalformedRevisionIsRejected)
 TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
 {
     // build_revision 0 opts out of gating: any file is accepted.
-    EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 3}, 0));
+    EXPECT_TRUE(mf::revision_compatible(
+        mf::ManifestHeader{
+            .revision = 3,
+        },
+        0));
 
     // Otherwise the file must target this build's exact contract epoch. A mismatch (an older file, or an
     // unversioned file under a versioned build) is rejected so the consumer falls back to its in-code defaults.
-    EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 2}, 2));
-    EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 1}, 2));
-    EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 0}, 2));
+    EXPECT_TRUE(mf::revision_compatible(
+        mf::ManifestHeader{
+            .revision = 2,
+        },
+        2));
+    EXPECT_FALSE(mf::revision_compatible(
+        mf::ManifestHeader{
+            .revision = 1,
+        },
+        2));
+    EXPECT_FALSE(mf::revision_compatible(
+        mf::ManifestHeader{
+            .revision = 0,
+        },
+        2));
 }
 
 TEST(ManifestRevisionTest, FileLoadPreservesRevision)
@@ -2766,7 +2806,9 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
     hand_built.label = "hand_built";
     hand_built.kind = an::AnchorKind::StringXref;
     hand_built.xref_text = "<<<TAG";
-    const auto hand_built_encoded = mf::serialize_checked(mf::Manifest{.records = {hand_built}});
+    const auto hand_built_encoded = mf::serialize_checked(mf::Manifest{
+        .records = {hand_built},
+    });
     ASSERT_FALSE(hand_built_encoded.has_value());
     EXPECT_EQ(hand_built_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -2775,7 +2817,9 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         std::ofstream out(rejected_save.path(), std::ios::binary);
         out << "last-known-good";
     }
-    const auto saved = mf::save(rejected_save.path(), mf::Manifest{.records = {hand_built}});
+    const auto saved = mf::save(rejected_save.path(), mf::Manifest{
+                                                          .records = {hand_built},
+                                                      });
     ASSERT_FALSE(saved.has_value());
     EXPECT_EQ(saved.error().code, dmk::ErrorCode::InvalidArg);
     std::ifstream retained_stream(rejected_save.path(), std::ios::binary);
@@ -2807,7 +2851,9 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         {
             EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << what;
         }
-        const auto encoded = mf::serialize_checked(mf::Manifest{.records = {rec}});
+        const auto encoded = mf::serialize_checked(mf::Manifest{
+            .records = {rec},
+        });
         EXPECT_FALSE(encoded.has_value()) << what << " must not encode";
         if (!encoded.has_value())
         {
@@ -2835,7 +2881,9 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         {
             EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << what;
         }
-        const auto encoded = mf::serialize_checked(mf::Manifest{.records = {rec}});
+        const auto encoded = mf::serialize_checked(mf::Manifest{
+            .records = {rec},
+        });
         EXPECT_FALSE(encoded.has_value()) << what << " must not encode";
         if (!encoded.has_value())
         {
@@ -3066,7 +3114,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
             spec.pattern = "DE AD";
             record.ladder.push_back(std::move(spec));
         }
-        mf::Manifest manifest{.records = {record}};
+        mf::Manifest manifest{
+            .records = {record},
+        };
         ASSERT_TRUE(mf::serialize_checked(manifest, limits).has_value());
         record.ladder.push_back(record.ladder.front());
         manifest.records[0] = std::move(record);
@@ -3096,7 +3146,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(over.has_value());
         EXPECT_EQ(over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        mf::Manifest manifest{.records = {manual_record("k", 1)}};
+        mf::Manifest manifest{
+            .records = {manual_record("k", 1)},
+        };
         limits.max_keys_per_section = 3; // kind + binding + manual_value
         ASSERT_TRUE(mf::serialize_checked(manifest, limits).has_value());
         limits.max_keys_per_section = 2;
@@ -3123,7 +3175,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(over.has_value());
         EXPECT_EQ(over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        mf::Manifest manifest{.records = {manual_record("section", 1)}};
+        mf::Manifest manifest{
+            .records = {manual_record("section", 1)},
+        };
         limits.max_sections = 2; // manifest + one record
         ASSERT_TRUE(mf::serialize_checked(manifest, limits).has_value());
         limits.max_sections = 1;
@@ -3160,7 +3214,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(label_over.has_value());
         EXPECT_EQ(label_over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        mf::Manifest label_manifest{.records = {manual_record(std::string(11, 'l'), 1)}};
+        mf::Manifest label_manifest{
+            .records = {manual_record(std::string(11, 'l'), 1)},
+        };
         ASSERT_TRUE(mf::serialize_checked(label_manifest, limits).has_value());
         label_manifest.records[0].label.push_back('l');
         const auto encoded_label_over = mf::serialize_checked(label_manifest, limits);
@@ -3178,7 +3234,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(over.has_value());
         EXPECT_EQ(over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        mf::Manifest manifest{.records = {manual_record("a", 1)}};
+        mf::Manifest manifest{
+            .records = {manual_record("a", 1)},
+        };
         limits.max_total_decoded_bytes = 17; // schema + kind + binding + manual_value
         ASSERT_TRUE(mf::serialize_checked(manifest, limits).has_value());
         limits.max_total_decoded_bytes = 16;
@@ -3315,7 +3373,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         record.label = "advanced";
         record.kind = an::AnchorKind::StringXref;
         record.xref_text = std::string(oversized_field, 'x');
-        const mf::Manifest manifest{.records = {record}};
+        const mf::Manifest manifest{
+            .records = {record},
+        };
 
         const auto conservative = mf::serialize_checked(manifest);
         ASSERT_FALSE(conservative.has_value());
@@ -3366,7 +3426,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_TRUE(retry.has_value()) << retry.error().message();
         EXPECT_EQ(retry->records.size(), 2u);
 
-        const mf::Manifest manifest{.records = {manual_record("a", 1), manual_record("b", 2)}};
+        const mf::Manifest manifest{
+            .records = {manual_record("a", 1), manual_record("b", 2)},
+        };
         // Stabilize library-managed lazy initialization before measuring repeat-call allocations.
         ASSERT_TRUE(mf::serialize_checked(manifest).has_value());
         const long long before = dmk_test::thread_new_calls();
@@ -3729,13 +3791,18 @@ TEST(ManifestParseTest, MalformedImageIdentityValueFailsClosed)
 TEST(ManifestImageIdentityTest, IncompleteProgrammaticIdentityFailsClosed)
 {
     mf::SignatureRecord record = manual_record("k", 1);
-    record.expected_image_identity = sc::ImageIdentity{.timestamp = 1, .section_digest = 1};
+    record.expected_image_identity = sc::ImageIdentity{
+        .timestamp = 1,
+        .section_digest = 1,
+    };
 
     const auto compiled = mf::Signature::compile(record);
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 
-    const auto serialized = mf::serialize_checked(mf::Manifest{.records = {record}});
+    const auto serialized = mf::serialize_checked(mf::Manifest{
+        .records = {record},
+    });
     ASSERT_FALSE(serialized.has_value());
     EXPECT_EQ(serialized.error().code, dmk::ErrorCode::InvalidArg);
 }
@@ -3746,8 +3813,13 @@ TEST(ManifestImageIdentityTest, CapturedImageIdentityRoundTrips)
 {
     mf::SignatureRecord record = manual_record("k", 1);
     record.expected_image_identity = sc::ImageIdentity{
-        .timestamp = 0x5F3A1B2C, .size_of_image = 0x00120000, .section_digest = 0xA1B2C3D4E5F60718ULL};
-    const mf::Manifest manifest{.records = {record}};
+        .timestamp = 0x5F3A1B2C,
+        .size_of_image = 0x00120000,
+        .section_digest = 0xA1B2C3D4E5F60718ULL,
+    };
+    const mf::Manifest manifest{
+        .records = {record},
+    };
 
     const std::string text = serialize_ok(manifest);
     ASSERT_FALSE(text.empty());
@@ -3823,9 +3895,11 @@ TEST(ManifestImageIdentityTest, MutationEntryRequiresMatchingLiveImageIdentity)
     // safe-disabled.
     {
         mf::SignatureRecord record = export_mutation_record();
-        record.expected_image_identity = sc::ImageIdentity{.timestamp = live.timestamp,
-                                                           .size_of_image = live.size_of_image,
-                                                           .section_digest = live.section_digest ^ 1U};
+        record.expected_image_identity = sc::ImageIdentity{
+            .timestamp = live.timestamp,
+            .size_of_image = live.size_of_image,
+            .section_digest = live.section_digest ^ 1U,
+        };
         std::array<mf::Signature, 1> signatures{mf::Signature::compile(record).value()};
         const mf::GateResult gated = mf::resolve_and_gate(signatures, policy, dmk::Region::host());
         EXPECT_EQ(gated.find("export.compute_damage"), nullptr);
@@ -3845,7 +3919,10 @@ TEST(ManifestImageIdentityTest, MutationEntryRevisionMismatchIsSafeDisabled)
     LoadedLibrary library;
     ASSERT_NE(library.get(), nullptr) << "Failed to load hook_target_lib.dll: " << GetLastError();
 
-    const mf::ManifestHeader header{.schema = mf::SCHEMA_VERSION, .revision = 5};
+    const mf::ManifestHeader header{
+        .schema = mf::SCHEMA_VERSION,
+        .revision = 5,
+    };
     const mf::GatePolicy policy{}; // Only the revision gate constrains the mutation-capable entry here.
 
     // A matching build revision trusts the mutation entry.
@@ -4034,7 +4111,10 @@ namespace
     [[nodiscard]] EvidenceGateOutcome gate_evidence(const mf::SignatureRecord &record, const mf::GatePolicy &policy,
                                                     std::uint32_t build_revision)
     {
-        const mf::ManifestHeader header{.schema = mf::SCHEMA_VERSION, .revision = 7};
+        const mf::ManifestHeader header{
+            .schema = mf::SCHEMA_VERSION,
+            .revision = 7,
+        };
         std::array<mf::Signature, 1> signatures{mf::Signature::compile(record).value()};
         const mf::GateResult gated =
             mf::resolve_and_gate(signatures, header, build_revision, policy, dmk::Region::host());
@@ -4047,7 +4127,10 @@ namespace
         {
             if (entry.label == record.label)
             {
-                outcome.rejected = EvidenceRejection{.status = entry.status, .reason = entry.reason};
+                outcome.rejected = EvidenceRejection{
+                    .status = entry.status,
+                    .reason = entry.reason,
+                };
                 break;
             }
         }
@@ -4397,7 +4480,10 @@ TEST(ManifestMutationEvidenceTest, WinningBytesRoundTripAndFailClosedWhenMalform
     ASSERT_TRUE(captured.has_value());
 
     mf::Manifest manifest;
-    manifest.header = mf::ManifestHeader{.schema = mf::SCHEMA_VERSION, .revision = 7};
+    manifest.header = mf::ManifestHeader{
+        .schema = mf::SCHEMA_VERSION,
+        .revision = 7,
+    };
     manifest.records = {*captured};
     const std::string text = serialize_ok(manifest);
     EXPECT_NE(text.find("winning_bytes"), std::string::npos);
@@ -4439,7 +4525,10 @@ TEST(ManifestMutationEvidenceTest, UnrepresentableWinningBytesRejectedByCompileA
         control.expected_winning_bytes.length = 4;
         control.expected_winning_bytes.bytes[0] = std::byte{0xAB};
         EXPECT_TRUE(mf::Signature::compile(control).has_value());
-        EXPECT_TRUE(mf::serialize_checked(mf::Manifest{.records = {control}}).has_value());
+        EXPECT_TRUE(mf::serialize_checked(mf::Manifest{
+                                              .records = {control},
+                                          })
+                        .has_value());
     }
 
     // A persisted baseline is only ever a COMPLETE capture, so a record may hold neither an over-long length nor a
@@ -4455,7 +4544,9 @@ TEST(ManifestMutationEvidenceTest, UnrepresentableWinningBytesRejectedByCompileA
         ASSERT_FALSE(compiled.has_value()) << "compile accepted " << name;
         EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << name;
 
-        const auto encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+        const auto encoded = mf::serialize_checked(mf::Manifest{
+            .records = {record},
+        });
         ASSERT_FALSE(encoded.has_value()) << "serialize_checked accepted " << name;
         EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg) << name;
     };
@@ -4492,7 +4583,9 @@ TEST(ManifestMutationEvidenceTest, MaximumLengthWinningBytesRoundTripsAndOverLon
         record.expected_winning_bytes.bytes[i] = static_cast<std::byte>(evidence_byte(i));
     }
 
-    const std::string text = serialize_ok(mf::Manifest{.records = {record}});
+    const std::string text = serialize_ok(mf::Manifest{
+        .records = {record},
+    });
     const dmk::Result<mf::Manifest> parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records.size(), 1U);
@@ -4515,7 +4608,9 @@ TEST(ManifestLoaderBoundary, CompiledAccessorsAreAllocationFreeWhileParseAllocat
     const mf::Signature signature = manual_signature("loader.boundary", 0x14000ABCD, 0);
     std::vector<mf::SignatureRecord> records;
     records.push_back(manual_record("loader.boundary", 0x14000ABCD, 0));
-    const std::string text = serialize_ok(mf::Manifest{.records = records});
+    const std::string text = serialize_ok(mf::Manifest{
+        .records = records,
+    });
     ASSERT_FALSE(text.empty());
 
     // Warm every route so a first-call cost is not charged to the measured window.

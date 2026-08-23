@@ -57,11 +57,13 @@ namespace
  */
 extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_stage() noexcept
 {
-    DetourModKit::Result<DetourModKit::input::BindingGuard> guard = DetourModKit::input::register_combo(
-        DetourModKit::input::ComboBinding{.name = "loader_detach_staged",
-                                          .trigger = DetourModKit::input::Trigger::Press,
-                                          .combos = {{{DetourModKit::keyboard_key(0x70)}, {}}},
-                                          .on_press = [witness = DestructionWitness{}] {}});
+    DetourModKit::Result<DetourModKit::input::BindingGuard> guard =
+        DetourModKit::input::register_combo(DetourModKit::input::ComboBinding{
+            .name = "loader_detach_staged",
+            .trigger = DetourModKit::input::Trigger::Press,
+            .combos = {{{DetourModKit::keyboard_key(0x70)}, {}}},
+            .on_press = [witness = DestructionWitness{}] {},
+        });
     if (!guard.has_value())
     {
         return FALSE;
@@ -88,7 +90,8 @@ extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_park_scope_guard
                 .name = "loader_detach_scope",
                 .trigger = DetourModKit::input::Trigger::Press,
                 .combos = {{{DetourModKit::keyboard_key(0x71)}, {}}},
-                .on_press = [witness = DestructionWitness{}, keep_alive = std::move(capture_owner)] {}});
+                .on_press = [witness = DestructionWitness{}, keep_alive = std::move(capture_owner)] {},
+            });
         if (!guard.has_value())
         {
             return FALSE;

@@ -588,26 +588,32 @@ namespace DetourModKit::manifest
                 // A non-unique or missed locate is never trusted.
                 if (resolved.status != anchor::AnchorStatus::Resolved)
                 {
-                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                .status = resolved.status,
-                                                                .fingerprint = fingerprint,
-                                                                .reason = GateReason::Unresolved});
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(),
+                        .status = resolved.status,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::Unresolved,
+                    });
                     continue;
                 }
                 if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
                 {
-                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = FingerprintState::Drifted,
-                                                                .reason = GateReason::FingerprintDrifted});
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = FingerprintState::Drifted,
+                        .reason = GateReason::FingerprintDrifted,
+                    });
                     continue;
                 }
                 if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
                 {
-                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = FingerprintState::Unset,
-                                                                .reason = GateReason::FingerprintUnset});
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = FingerprintState::Unset,
+                        .reason = GateReason::FingerprintUnset,
+                    });
                     continue;
                 }
                 // Evaluate binding_authorizes_mutation once here. Every later mutation gate uses this live, writable
@@ -618,20 +624,24 @@ namespace DetourModKit::manifest
                 // pin or binding-domain mismatch equals !mutation_capable and causes rejection.
                 if (policy.require_mutation_safe_binding && !mutation_capable)
                 {
-                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = fingerprint,
-                                                                .reason = GateReason::BindingCannotMutate});
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::BindingCannotMutate,
+                    });
                     continue;
                 }
                 // An unchecked revision and an incompatible revision both refuse authorization. The first skips
                 // comparison. The second comparison finds disagreement.
                 if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
                 {
-                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = fingerprint,
-                                                                .reason = GateReason::ContractRevision});
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::ContractRevision,
+                    });
                     continue;
                 }
                 if (mutation_capable && (policy.require_live_image_identity || policy.require_captured_image_identity))
@@ -643,10 +653,12 @@ namespace DetourModKit::manifest
                                             (!live.present() || expected != live);
                     if (missing_baseline || mismatched)
                     {
-                        result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                    .status = anchor::AnchorStatus::Resolved,
-                                                                    .fingerprint = fingerprint,
-                                                                    .reason = GateReason::ImageIdentity});
+                        result.rejected.push_back(RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::ImageIdentity,
+                        });
                         continue;
                     }
                 }
@@ -667,18 +679,22 @@ namespace DetourModKit::manifest
                         std::equal(current.begin(), current.begin() + expected.length, expected.bytes.begin());
                     if (!span_matches)
                     {
-                        result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                                    .status = anchor::AnchorStatus::Resolved,
-                                                                    .fingerprint = fingerprint,
-                                                                    .reason = GateReason::WinningEvidence});
+                        result.rejected.push_back(RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::WinningEvidence,
+                        });
                         continue;
                     }
                 }
 
-                result.trusted.push_back(GatedSignature{.label = signature.label(),
-                                                        .kind = signature.kind(),
-                                                        .address = Address{static_cast<std::uintptr_t>(resolved.value)},
-                                                        .binding = &signature.binding()});
+                result.trusted.push_back(GatedSignature{
+                    .label = signature.label(),
+                    .kind = signature.kind(),
+                    .address = Address{static_cast<std::uintptr_t>(resolved.value)},
+                    .binding = &signature.binding(),
+                });
                 trusted_fingerprints.push_back(fingerprint);
             }
 
@@ -701,10 +717,12 @@ namespace DetourModKit::manifest
                 {
                     for (std::size_t index = 0; index < result.trusted.size(); ++index)
                     {
-                        result.rejected.push_back(RejectedSignature{.label = result.trusted[index].label,
-                                                                    .status = anchor::AnchorStatus::Resolved,
-                                                                    .fingerprint = trusted_fingerprints[index],
-                                                                    .reason = GateReason::HealthFloor});
+                        result.rejected.push_back(RejectedSignature{
+                            .label = result.trusted[index].label,
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = trusted_fingerprints[index],
+                            .reason = GateReason::HealthFloor,
+                        });
                     }
                     result.trusted.clear();
                 }

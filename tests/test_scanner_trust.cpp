@@ -364,8 +364,10 @@ TEST(ScannerTrustProof, EngineMaskStorageIsNeverReturned)
     // the buffer cannot report itself as the match.
     const std::uintptr_t mask_base = reinterpret_cast<std::uintptr_t>(pattern->mask.data());
     const detail::ModuleSpan mask_range{mask_base, mask_base + pattern->mask.size()};
-    const detail::MatchResult result =
-        detail::scan_module_readable(*pattern, mask_range, detail::ScanQuery{.occurrence = 1});
+    const detail::MatchResult result = detail::scan_module_readable(*pattern, mask_range,
+                                                                    detail::ScanQuery{
+                                                                        .occurrence = 1,
+                                                                    });
     EXPECT_EQ(result.match, nullptr);
 }
 
@@ -417,9 +419,12 @@ TEST(ScannerTrustProof, MaximumOccurrenceDoesNotWrapTheCountCap)
 
     const auto base = reinterpret_cast<std::uintptr_t>(page.bytes());
     const detail::ModuleSpan range{base, base + page.size()};
-    const detail::MatchResult result = detail::scan_module_readable(
-        *pattern, range,
-        detail::ScanQuery{.occurrence = std::numeric_limits<std::size_t>::max(), .count_beyond = true});
+    const detail::MatchResult result =
+        detail::scan_module_readable(*pattern, range,
+                                     detail::ScanQuery{
+                                         .occurrence = std::numeric_limits<std::size_t>::max(),
+                                         .count_beyond = true,
+                                     });
     EXPECT_EQ(result.match, nullptr);
     EXPECT_EQ(result.count, 3u);
     EXPECT_FALSE(result.truncated());
@@ -604,7 +609,11 @@ TEST(ScannerTrustProof, RipTargetAndWinningEvidenceUseOneImmutableSnapshot)
     const scan::Candidate ladder[] = {
         scan::Candidate::rip_relative("rip-snapshot", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
     const scan::ScanRequest request{
-        .ladder = ladder, .label = "rip-snapshot", .scope = page.range(), .pages = scan::Pages::Executable};
+        .ladder = ladder,
+        .label = "rip-snapshot",
+        .scope = page.range(),
+        .pages = scan::Pages::Executable,
+    };
 
     Result<scan::Hit> hit;
     {
@@ -654,7 +663,11 @@ TEST(ScannerTrustProof, TruncatedWinningEvidenceRetainsPrivateRipSnapshot)
     {
         RipDisplacementMutationGuard mutation_guard(page.bytes() + instruction_offset + 3, replacement_displacement);
         hit = scan::resolve(scan::ScanRequest{
-            .ladder = ladder, .label = "long-rip", .scope = page.range(), .pages = scan::Pages::Executable});
+            .ladder = ladder,
+            .label = "long-rip",
+            .scope = page.range(),
+            .pages = scan::Pages::Executable,
+        });
     }
 
     ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);

@@ -343,11 +343,13 @@ namespace
                                 : "The export resolution failed. The staged image remains mapped.");
             return false;
         }
-        const StagedReloadInitRequest request{.struct_size = INIT_REQUEST_SIZE,
-                                              .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
-                                              .generation_id = generation.generation_id,
-                                              .expected_host_identity = s_host_identity,
-                                              .wheel_host = &s_wheel_host};
+        const StagedReloadInitRequest request{
+            .struct_size = INIT_REQUEST_SIZE,
+            .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
+            .generation_id = generation.generation_id,
+            .expected_host_identity = s_host_identity,
+            .wheel_host = &s_wheel_host,
+        };
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
             const bool unmapped = release_generation(generation);

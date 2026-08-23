@@ -224,10 +224,12 @@ namespace
 
     [[nodiscard]] Result<input::BindingGuard> stage_wheel_binding(const char *name)
     {
-        return input::register_combo(input::ComboBinding{.name = name,
-                                                         .trigger = input::Trigger::Press,
-                                                         .combos = {{{mouse_wheel(WheelCode::Up)}, {}}},
-                                                         .on_press = [] {}});
+        return input::register_combo(input::ComboBinding{
+            .name = name,
+            .trigger = input::Trigger::Press,
+            .combos = {{{mouse_wheel(WheelCode::Up)}, {}}},
+            .on_press = [] {},
+        });
     }
 } // namespace
 

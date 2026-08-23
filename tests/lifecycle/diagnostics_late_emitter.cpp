@@ -51,13 +51,17 @@ namespace
             const int scanner_before = s_scanner_deliveries;
             const int hook_before = s_hook_deliveries;
 
-            DetourModKit::diagnostics::scanner_faults().emit_safe(
-                ScannerFaultEvent{.faulted_regions = 7, .window_low = 0x1000, .window_high = 0x2000});
-            DetourModKit::diagnostics::hook_lifecycle().emit_safe(
-                HookLifecycleEvent{.name = "late_teardown",
-                                   .ledger_id = 99,
-                                   .kind = HookKind::Inline,
-                                   .transition = HookTransition::Removed});
+            DetourModKit::diagnostics::scanner_faults().emit_safe(ScannerFaultEvent{
+                .faulted_regions = 7,
+                .window_low = 0x1000,
+                .window_high = 0x2000,
+            });
+            DetourModKit::diagnostics::hook_lifecycle().emit_safe(HookLifecycleEvent{
+                .name = "late_teardown",
+                .ledger_id = 99,
+                .kind = HookKind::Inline,
+                .transition = HookTransition::Removed,
+            });
 
             if (s_scanner_deliveries != scanner_before + 1)
             {
@@ -102,10 +106,17 @@ int main()
 
     // Live control: without it, a subscription that never took would make the teardown check fail for the wrong
     // reason, and a delivery failure at exit could not be attributed to teardown order.
-    DetourModKit::diagnostics::scanner_faults().emit_safe(
-        ScannerFaultEvent{.faulted_regions = 1, .window_low = 0, .window_high = 0x10});
+    DetourModKit::diagnostics::scanner_faults().emit_safe(ScannerFaultEvent{
+        .faulted_regions = 1,
+        .window_low = 0,
+        .window_high = 0x10,
+    });
     DetourModKit::diagnostics::hook_lifecycle().emit_safe(HookLifecycleEvent{
-        .name = "live", .ledger_id = 1, .kind = HookKind::Inline, .transition = HookTransition::Created});
+        .name = "live",
+        .ledger_id = 1,
+        .kind = HookKind::Inline,
+        .transition = HookTransition::Created,
+    });
 
     if (s_scanner_deliveries != 1)
     {

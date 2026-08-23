@@ -1066,7 +1066,9 @@ namespace DetourModKit
                     "newest-first (hold them in a HookStack).",
                     name, target, sizeof(std::uintptr_t) * 2, newer);
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{.remains_live = true});
+                               RemovalPopulationState{
+                                   .remains_live = true,
+                               });
                 return;
             }
 
@@ -1092,7 +1094,9 @@ namespace DetourModKit
                     "backend to keep the possibly reachable trampoline mapped. The target remains tracked as hooked.",
                     name, target, sizeof(std::uintptr_t) * 2, witness_description(restore));
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{.remains_live = true});
+                               RemovalPopulationState{
+                                   .remains_live = true,
+                               });
                 return;
             }
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
@@ -1128,7 +1132,9 @@ namespace DetourModKit
                     "The callback will not be entered again, and the adapter is not reclaimed.",
                     name, target, sizeof(std::uintptr_t) * 2, blocked_stage);
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{.was_active = was_active});
+                               RemovalPopulationState{
+                                   .was_active = was_active,
+                               });
                 return;
             }
 
@@ -1147,7 +1153,9 @@ namespace DetourModKit
                     "pinned so that thread can return through its stub.",
                     name, target, sizeof(std::uintptr_t) * 2);
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                               RemovalPopulationState{.was_active = was_active});
+                               RemovalPopulationState{
+                                   .was_active = was_active,
+                               });
                 return;
             }
 
@@ -1162,7 +1170,9 @@ namespace DetourModKit
             (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
-                           RemovalPopulationState{.was_active = was_active});
+                           RemovalPopulationState{
+                               .was_active = was_active,
+                           });
         }
 
         Hook::operator bool() const noexcept
@@ -1653,7 +1663,9 @@ namespace DetourModKit
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
             // A VMT hook is live from creation and has no enable/disable transition, so it is always counted armed.
             emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed,
-                           RemovalPopulationState{.was_active = true});
+                           RemovalPopulationState{
+                               .was_active = true,
+                           });
         }
 
         VmtHook::operator bool() const noexcept

@@ -459,7 +459,10 @@ namespace DetourModKit
                 try
                 {
                     diagnostics::scanner_faults().emit_safe(diagnostics::ScannerFaultEvent{
-                        .faulted_regions = faulted_regions, .window_low = window_lo, .window_high = window_hi});
+                        .faulted_regions = faulted_regions,
+                        .window_low = window_lo,
+                        .window_high = window_hi,
+                    });
                 }
                 catch (...)
                 {

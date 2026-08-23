@@ -84,7 +84,10 @@ namespace
     // it. ASSERTs on failure via the returned Result being checked at the call site.
     [[nodiscard]] Result<Session> start_local_session(std::string_view name, std::string_view log_file)
     {
-        return Session::start(ModInfo{.name = name, .log_file = log_file});
+        return Session::start(ModInfo{
+            .name = name,
+            .log_file = log_file,
+        });
     }
 
     struct CallbackSignals
@@ -146,10 +149,12 @@ TEST(SessionFreeFunctions, ModuleHandleNullBeforeBootstrap)
 
 TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
 {
-    Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST",
-                                               .log_file = "sess_test_procgate.log",
-                                               .game_process_name = "DefinitelyNotTheCurrentProcess_xyz.exe",
-                                               .instance_mutex_prefix = "Sess_Test_Mutex_ProcGate_"});
+    Result<Session> r = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = "sess_test_procgate.log",
+        .game_process_name = "DefinitelyNotTheCurrentProcess_xyz.exe",
+        .instance_mutex_prefix = "Sess_Test_Mutex_ProcGate_",
+    });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
 }
@@ -291,13 +296,19 @@ TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
     const std::string log_file = to_utf8(child_log_path(own_path).filename().wstring());
     ASSERT_FALSE(log_file.empty());
 
-    Result<Session> rejected =
-        Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_file, .game_process_name = mismatch});
+    Result<Session> rejected = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = log_file,
+        .game_process_name = mismatch,
+    });
     ASSERT_FALSE(rejected.has_value());
     ASSERT_EQ(rejected.error().code, ErrorCode::ProcessMismatch);
 
-    Result<Session> started =
-        Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_file, .game_process_name = basename});
+    Result<Session> started = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = log_file,
+        .game_process_name = basename,
+    });
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     std::ofstream marker_stream(child_execution_marker_path(own_path), std::ios::binary | std::ios::trunc);
@@ -408,8 +419,11 @@ TEST(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
     ASSERT_NE(pre_owned, nullptr);
     ASSERT_EQ(GetLastError(), 0u);
 
-    Result<Session> r = Session::start(
-        ModInfo{.name = "SESS_TEST", .log_file = "sess_test_emptygate.log", .instance_mutex_prefix = prefix});
+    Result<Session> r = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = "sess_test_emptygate.log",
+        .instance_mutex_prefix = prefix,
+    });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -424,10 +438,12 @@ TEST(SessionStart, InstanceMutexCollisionReturnsAlreadyRunning)
     ASSERT_EQ(GetLastError(), 0u) << "Mutex name collided with an existing one before the test";
 
     const std::string exe_name = current_exe_basename();
-    Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST",
-                                               .log_file = "sess_test_mutex.log",
-                                               .game_process_name = exe_name,
-                                               .instance_mutex_prefix = prefix});
+    Result<Session> r = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = "sess_test_mutex.log",
+        .game_process_name = exe_name,
+        .instance_mutex_prefix = prefix,
+    });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -445,10 +461,12 @@ TEST(SessionStart, InstanceMutexLongPrefixDoesNotOverflow)
     ASSERT_EQ(GetLastError(), 0u) << "Long mutex name collided with an existing one before the test";
 
     const std::string exe_name = current_exe_basename();
-    Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST",
-                                               .log_file = "sess_test_mutex_long.log",
-                                               .game_process_name = exe_name,
-                                               .instance_mutex_prefix = prefix});
+    Result<Session> r = Session::start(ModInfo{
+        .name = "SESS_TEST",
+        .log_file = "sess_test_mutex_long.log",
+        .game_process_name = exe_name,
+        .instance_mutex_prefix = prefix,
+    });
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -474,10 +492,12 @@ TEST(SessionStart, StartDestroyCyclesReleaseTheGuard)
     // the next start succeeds. Drive several full cycles and require each start to succeed.
     for (int cycle = 0; cycle < 3; ++cycle)
     {
-        Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST",
-                                                   .log_file = "sess_test_cycle.log",
-                                                   .game_process_name = current_exe_basename(),
-                                                   .instance_mutex_prefix = "Sess_Test_Mutex_Cycle_"});
+        Result<Session> r = Session::start(ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_cycle.log",
+            .game_process_name = current_exe_basename(),
+            .instance_mutex_prefix = "Sess_Test_Mutex_Cycle_",
+        });
         ASSERT_TRUE(r.has_value()) << "cycle " << cycle << ": " << r.error().message();
         // Destroyed at loop-end: teardown releases the guard + mutex for the next cycle.
     }
@@ -639,7 +659,10 @@ TEST(SessionTeardown, FlushesConfiguredLogger)
 
     constexpr std::string_view kMarker = "Session teardown test message";
     {
-        Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_path.string()});
+        Result<Session> r = Session::start(ModInfo{
+            .name = "SESS_TEST",
+            .log_file = log_path.string(),
+        });
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
         s.log().set_log_level(LogLevel::Info); // deterministic: do not depend on a prior test's level
@@ -696,11 +719,13 @@ TEST(SessionTeardown, ClearsInputBindings)
         Result<Session> r = start_local_session("SESS_TEST", "sess_test_input.log");
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
-        (void)input::register_combo(input::ComboBinding{.name = std::string{"session_test_key"},
-                                                        .trigger = input::Trigger::Press,
-                                                        .combos = {{{keyboard_key(0x41)}, {}}},
-                                                        .on_press = []() {},
-                                                        .on_state_change = {}});
+        (void)input::register_combo(input::ComboBinding{
+            .name = std::string{"session_test_key"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        });
         EXPECT_EQ(mgr.binding_count(), 1u);
         // s destructs here: teardown shuts the input subsystem down.
     }
@@ -754,15 +779,19 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
 
-        auto guard = input::register_combo(input::ComboBinding{.name = "session_abandon_consume",
-                                                               .trigger = input::Trigger::Press,
-                                                               .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-                                                               .consume = true,
-                                                               .on_press = [] {}});
+        auto guard = input::register_combo(input::ComboBinding{
+            .name = "session_abandon_consume",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_press = [] {},
+        });
         ASSERT_TRUE(guard.has_value());
         s.scope().add(std::move(*guard));
 
-        (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+        (void)input::Input::instance().start(input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        });
         // The engine publishes its consume rules only while it owns the interception layer, which a headless test
         // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
         ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -804,7 +833,10 @@ TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
     constexpr std::string_view kMarker = "full-stack teardown marker";
 
     {
-        Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_path.string()});
+        Result<Session> r = Session::start(ModInfo{
+            .name = "SESS_TEST",
+            .log_file = log_path.string(),
+        });
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
         s.log().set_log_level(LogLevel::Info);
@@ -815,11 +847,13 @@ TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
         ASSERT_NO_THROW(config::load(ini_path.string()));
         ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
         // Input: one live binding.
-        (void)input::register_combo(input::ComboBinding{.name = std::string{"fullstack_key"},
-                                                        .trigger = input::Trigger::Press,
-                                                        .combos = {{{keyboard_key(0x42)}, {}}},
-                                                        .on_press = []() {},
-                                                        .on_state_change = {}});
+        (void)input::register_combo(input::ComboBinding{
+            .name = std::string{"fullstack_key"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        });
         EXPECT_EQ(input::Input::instance().binding_count(), 1u);
         // Memory cache: live.
         ASSERT_TRUE(memory::init_cache());
@@ -901,7 +935,12 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
     Session s = std::move(*rs);
 
     {
-        Result<Hook> r = inline_at(InlineRequest{.name = "session_raii_hook", .target = target}, &session_raii_detour);
+        Result<Hook> r = inline_at(
+            InlineRequest{
+                .name = "session_raii_hook",
+                .target = target,
+            },
+            &session_raii_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
@@ -945,15 +984,18 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
     const std::string exe_name = current_exe_basename();
     ASSERT_FALSE(exe_name.empty());
 
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_TEST",
-                                             .log_file = "sess_test_happy.log",
-                                             .game_process_name = exe_name,
-                                             .instance_mutex_prefix = "Sess_Test_Mutex_Happy_"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_happy.log",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = "Sess_Test_Mutex_Happy_",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -971,7 +1013,11 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
     EXPECT_EQ(module_handle(), expected_module);
 
     // A second bootstrap while the worker is live is rejected.
-    Result<void> second = bootstrap(ModInfo{.name = "SESS_TEST"}, [](Session &) -> Result<void> { return {}; });
+    Result<void> second = bootstrap(
+        ModInfo{
+            .name = "SESS_TEST",
+        },
+        [](Session &) -> Result<void> { return {}; });
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
     EXPECT_EQ(m_sig.ready_calls.load(), 1);
@@ -979,15 +1025,18 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
 
 TEST_F(SessionBootstrapTest, ProcessGateMismatchDoesNotSpawnWorker)
 {
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_TEST",
-                                             .log_file = "sess_test_bootstrap_gate.log",
-                                             .game_process_name = "DefinitelyNotTheCurrentProcess_boot.exe",
-                                             .instance_mutex_prefix = "Sess_Test_Mutex_BootGate_"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_bootstrap_gate.log",
+            .game_process_name = "DefinitelyNotTheCurrentProcess_boot.exe",
+            .instance_mutex_prefix = "Sess_Test_Mutex_BootGate_",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_FALSE(started.has_value());
     EXPECT_EQ(started.error().code, ErrorCode::ProcessMismatch);
     EXPECT_EQ(module_handle(), nullptr) << "a failed bootstrap must roll back the captured module";
@@ -1002,15 +1051,18 @@ TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
     for (int cycle = 1; cycle <= 2; ++cycle)
     {
         CallbackSignals sig;
-        Result<void> started = bootstrap(ModInfo{.name = "SESS_TEST",
-                                                 .log_file = "sess_test_reentrant.log",
-                                                 .game_process_name = exe_name,
-                                                 .instance_mutex_prefix = "Sess_Test_Mutex_Reentrant_"},
-                                         [&sig](Session &) -> Result<void>
-                                         {
-                                             sig.signal_ready();
-                                             return {};
-                                         });
+        Result<void> started = bootstrap(
+            ModInfo{
+                .name = "SESS_TEST",
+                .log_file = "sess_test_reentrant.log",
+                .game_process_name = exe_name,
+                .instance_mutex_prefix = "Sess_Test_Mutex_Reentrant_",
+            },
+            [&sig](Session &) -> Result<void>
+            {
+                sig.signal_ready();
+                return {};
+            });
         ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
         ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle << ": on_ready did not complete";
         EXPECT_EQ(sig.ready_calls.load(), 1) << "cycle " << cycle;
@@ -1026,15 +1078,18 @@ TEST_F(SessionBootstrapTest, OnReadyExceptionIsCaught)
     const std::string exe_name = current_exe_basename();
     ASSERT_FALSE(exe_name.empty());
 
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_TEST",
-                                             .log_file = "sess_test_throws.log",
-                                             .game_process_name = exe_name,
-                                             .instance_mutex_prefix = "Sess_Test_Mutex_Throws_"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         throw std::runtime_error("on_ready failure");
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_throws.log",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = "Sess_Test_Mutex_Throws_",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            throw std::runtime_error("on_ready failure");
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -1098,10 +1153,12 @@ TEST_F(SessionBootstrapTest, AttachEntryPublishesWorkerWithoutCallerThreadAlloca
     ASSERT_FALSE(exe_name.empty());
     s_attach_ready_calls.store(0, std::memory_order_release);
 
-    const ModInfo info{.name = "SESS_TEST",
-                       .log_file = "sess_attach_happy.log",
-                       .game_process_name = exe_name,
-                       .instance_mutex_prefix = "Sess_Attach_Mutex_Happy_"};
+    const ModInfo info{
+        .name = "SESS_TEST",
+        .log_file = "sess_attach_happy.log",
+        .game_process_name = exe_name,
+        .instance_mutex_prefix = "Sess_Attach_Mutex_Happy_",
+    };
     Result<void> started;
     {
         dmk_test::AllocFailScope no_alloc{0};
@@ -1115,7 +1172,9 @@ TEST_F(SessionBootstrapTest, AttachEntryPublishesWorkerWithoutCallerThreadAlloca
     EXPECT_NE(module_handle(), nullptr);
 
     // Build ModInfo before the probe because an MSVC debug string can allocate a proxy.
-    const ModInfo second_info{.name = "SESS_TEST"};
+    const ModInfo second_info{
+        .name = "SESS_TEST",
+    };
     Result<void> second;
     {
         dmk_test::AllocFailScope no_alloc{0};
@@ -1131,9 +1190,11 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
     s_attach_ready_calls.store(0, std::memory_order_release);
 
     {
-        const ModInfo mismatch{.name = "SESS_TEST",
-                               .log_file = "sess_attach_gate.log",
-                               .game_process_name = "DefinitelyNotTheCurrentProcess_attach.exe"};
+        const ModInfo mismatch{
+            .name = "SESS_TEST",
+            .log_file = "sess_attach_gate.log",
+            .game_process_name = "DefinitelyNotTheCurrentProcess_attach.exe",
+        };
         Result<void> started;
         {
             dmk_test::AllocFailScope no_alloc{0};
@@ -1148,7 +1209,11 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
         const std::string_view prefix = "Sess_Attach_Mutex_Held_";
         HANDLE pre_owned = CreateMutexW(nullptr, FALSE, instance_mutex_name(prefix).c_str());
         ASSERT_NE(pre_owned, nullptr);
-        const ModInfo held{.name = "SESS_TEST", .log_file = "sess_attach_held.log", .instance_mutex_prefix = prefix};
+        const ModInfo held{
+            .name = "SESS_TEST",
+            .log_file = "sess_attach_held.log",
+            .instance_mutex_prefix = prefix,
+        };
         Result<void> started;
         {
             dmk_test::AllocFailScope no_alloc{0};
@@ -1161,7 +1226,10 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
 
     {
         const std::string oversize(40000, 'x');
-        const ModInfo oversized{.name = oversize, .log_file = "sess_attach_oversize.log"};
+        const ModInfo oversized{
+            .name = oversize,
+            .log_file = "sess_attach_oversize.log",
+        };
         Result<void> started;
         {
             dmk_test::AllocFailScope no_alloc{0};
@@ -1174,7 +1242,10 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
     // Worker-launch failure reaches the complete unwind, and the slot admits a retry afterwards.
     {
         DetourModKit::bootstrap_fail_worker_launch_for_test(true);
-        const ModInfo launch{.name = "SESS_TEST", .log_file = "sess_attach_launch.log"};
+        const ModInfo launch{
+            .name = "SESS_TEST",
+            .log_file = "sess_attach_launch.log",
+        };
         Result<void> started;
         {
             dmk_test::AllocFailScope no_alloc{0};
@@ -1189,8 +1260,12 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
     EXPECT_EQ(s_attach_ready_calls.load(std::memory_order_acquire), 0)
         << "a pre-publication failure must not reach the callback";
 
-    Result<void> retry =
-        bootstrap_attach(ModInfo{.name = "SESS_TEST", .log_file = "sess_attach_retry.log"}, &attach_entry_on_ready);
+    Result<void> retry = bootstrap_attach(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_attach_retry.log",
+        },
+        &attach_entry_on_ready);
     ASSERT_TRUE(retry.has_value()) << retry.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(wait_for_attach_ready(1, kTestTimeout));
@@ -1238,17 +1313,24 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
     input::Input::instance().shutdown();
 
     const Address target{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
-    Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_hook", .target = target}, &logic_unload_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "logic_unload_hook",
+            .target = target,
+        },
+        &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
     ASSERT_TRUE(is_target_hooked(target));
 
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_binding"},
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x41)}, {}}},
-                                                    .on_press = []() {},
-                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"logic_unload_binding"},
+        .trigger = input::Trigger::Press,
+        .combos = {{{keyboard_key(0x41)}, {}}},
+        .on_press = []() {},
+        .on_state_change = {},
+    });
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"logic_unload_binding"};
@@ -1267,14 +1349,21 @@ TEST(SessionHotReload, UnloadIsIdempotent)
     input::Input::instance().shutdown();
 
     const Address target{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
-    Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_idem", .target = target}, &logic_unload_detour_add);
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "logic_unload_idem",
+            .target = target,
+        },
+        &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_idem_bind"},
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x42)}, {}}},
-                                                    .on_press = []() {},
-                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"logic_unload_idem_bind"},
+        .trigger = input::Trigger::Press,
+        .combos = {{{keyboard_key(0x42)}, {}}},
+        .on_press = []() {},
+        .on_state_change = {},
+    });
 
     const std::string_view bindings[] = {"logic_unload_idem_bind"};
     on_logic_dll_unload(bindings);
@@ -1292,26 +1381,38 @@ TEST(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
     const Address target_add{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     const Address target_sub{reinterpret_cast<std::uintptr_t>(&logic_unload_target_sub)};
 
-    Result<Hook> r_add =
-        inline_at(InlineRequest{.name = "logic_unload_all_add", .target = target_add}, &logic_unload_detour_add);
+    Result<Hook> r_add = inline_at(
+        InlineRequest{
+            .name = "logic_unload_all_add",
+            .target = target_add,
+        },
+        &logic_unload_detour_add);
     ASSERT_TRUE(r_add.has_value()) << r_add.error().message();
     Hook h_add = std::move(*r_add);
 
-    Result<Hook> r_sub =
-        inline_at(InlineRequest{.name = "logic_unload_all_sub", .target = target_sub}, &logic_unload_detour_sub);
+    Result<Hook> r_sub = inline_at(
+        InlineRequest{
+            .name = "logic_unload_all_sub",
+            .target = target_sub,
+        },
+        &logic_unload_detour_sub);
     ASSERT_TRUE(r_sub.has_value()) << r_sub.error().message();
     Hook h_sub = std::move(*r_sub);
 
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_bind_a"},
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x43)}, {}}},
-                                                    .on_press = []() {},
-                                                    .on_state_change = {}});
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_bind_b"},
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x44)}, {}}},
-                                                    .on_press = []() {},
-                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"logic_unload_all_bind_a"},
+        .trigger = input::Trigger::Press,
+        .combos = {{{keyboard_key(0x43)}, {}}},
+        .on_press = []() {},
+        .on_state_change = {},
+    });
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"logic_unload_all_bind_b"},
+        .trigger = input::Trigger::Press,
+        .combos = {{{keyboard_key(0x44)}, {}}},
+        .on_press = []() {},
+        .on_state_change = {},
+    });
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(2));
 
     on_logic_dll_unload_all();
@@ -1327,11 +1428,13 @@ TEST(SessionHotReload, UnloadAllIsIdempotent)
 {
     input::Input::instance().shutdown();
 
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_idem_bind"},
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x45)}, {}}},
-                                                    .on_press = []() {},
-                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"logic_unload_all_idem_bind"},
+        .trigger = input::Trigger::Press,
+        .combos = {{{keyboard_key(0x45)}, {}}},
+        .on_press = []() {},
+        .on_state_change = {},
+    });
 
     on_logic_dll_unload_all();
     on_logic_dll_unload_all();
@@ -1354,22 +1457,24 @@ TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
     auto release_count = std::make_shared<std::atomic<int>>(0);
     auto press_count = std::make_shared<std::atomic<int>>(0);
 
-    (void)input::register_combo(
-        input::ComboBinding{.name = std::string{"loader_lock_hold"},
-                            .trigger = input::Trigger::Hold,
-                            .combos = {{{keyboard_key(0x48)}, {}}},
-                            .on_press = {},
-                            .on_state_change = [release_count, press_count](bool pressed) noexcept
-                            {
-                                if (pressed)
-                                {
-                                    press_count->fetch_add(1, std::memory_order_relaxed);
-                                }
-                                else
-                                {
-                                    release_count->fetch_add(1, std::memory_order_relaxed);
-                                }
-                            }});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"loader_lock_hold"},
+        .trigger = input::Trigger::Hold,
+        .combos = {{{keyboard_key(0x48)}, {}}},
+        .on_press = {},
+        .on_state_change =
+            [release_count, press_count](bool pressed) noexcept
+        {
+            if (pressed)
+            {
+                press_count->fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                release_count->fetch_add(1, std::memory_order_relaxed);
+            }
+        },
+    });
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"loader_lock_hold"};
@@ -1592,17 +1697,20 @@ TEST(SessionHotReload, UnloadAllSuppressesHoldReleaseCallbacks)
 
     auto release_count = std::make_shared<std::atomic<int>>(0);
 
-    (void)input::register_combo(input::ComboBinding{.name = std::string{"loader_lock_hold_all"},
-                                                    .trigger = input::Trigger::Hold,
-                                                    .combos = {{{keyboard_key(0x49)}, {}}},
-                                                    .on_press = {},
-                                                    .on_state_change = [release_count](bool pressed) noexcept
-                                                    {
-                                                        if (!pressed)
-                                                        {
-                                                            release_count->fetch_add(1, std::memory_order_relaxed);
-                                                        }
-                                                    }});
+    (void)input::register_combo(input::ComboBinding{
+        .name = std::string{"loader_lock_hold_all"},
+        .trigger = input::Trigger::Hold,
+        .combos = {{{keyboard_key(0x49)}, {}}},
+        .on_press = {},
+        .on_state_change =
+            [release_count](bool pressed) noexcept
+        {
+            if (!pressed)
+            {
+                release_count->fetch_add(1, std::memory_order_relaxed);
+            }
+        },
+    });
 
     on_logic_dll_unload_all();
 
@@ -1717,16 +1825,22 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
     const Address target_damage{reinterpret_cast<std::uintptr_t>(mod.compute_damage)};
 
     {
-        Result<Hook> r_damage = inline_at(InlineRequest{.name = "fixture_dll_damage", .target = target_damage},
-                                          &fixture_detour_compute_damage);
+        Result<Hook> r_damage = inline_at(
+            InlineRequest{
+                .name = "fixture_dll_damage",
+                .target = target_damage,
+            },
+            &fixture_detour_compute_damage);
         ASSERT_TRUE(r_damage.has_value()) << r_damage.error().message();
         Hook h_damage = std::move(*r_damage);
 
-        (void)input::register_combo(input::ComboBinding{.name = std::string{"fixture_dll_bind"},
-                                                        .trigger = input::Trigger::Press,
-                                                        .combos = {{{keyboard_key(0x4A)}, {}}},
-                                                        .on_press = []() {},
-                                                        .on_state_change = {}});
+        (void)input::register_combo(input::ComboBinding{
+            .name = std::string{"fixture_dll_bind"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x4A)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        });
         EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
         ASSERT_TRUE(is_target_hooked(target_damage));
 
@@ -1744,11 +1858,13 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
     // Reload and strictly re-hook: either already-hooked refusal would mean the prologue was not restored.
     mod.unload();
     ASSERT_TRUE(mod.load()) << "hook_target_lib.dll must reload cleanly";
-    Result<Hook> reload =
-        inline_at(InlineRequest{.name = "fixture_dll_damage_reloaded",
-                                .target = Address{reinterpret_cast<std::uintptr_t>(mod.compute_damage)},
-                                .options = Options{.fail_if_already_hooked = true}},
-                  &fixture_detour_compute_damage);
+    Result<Hook> reload = inline_at(
+        InlineRequest{
+            .name = "fixture_dll_damage_reloaded",
+            .target = Address{reinterpret_cast<std::uintptr_t>(mod.compute_damage)},
+            .options = Options{.fail_if_already_hooked = true},
+        },
+        &fixture_detour_compute_damage);
     EXPECT_TRUE(reload.has_value()) << "fresh strict hook on the reloaded fixture must succeed";
 }
 
@@ -1822,10 +1938,13 @@ namespace
 // admission and drains admitted signalers before closing the handle.
 TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetiredEventSafely)
 {
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_EVENT_RACE",
-                                             .log_file = "sess_shutdown_event_race.log",
-                                             .instance_mutex_prefix = "Sess_Shutdown_Event_Race_"},
-                                     [](Session &) -> Result<void> { return {}; });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_EVENT_RACE",
+            .log_file = "sess_shutdown_event_race.log",
+            .instance_mutex_prefix = "Sess_Shutdown_Event_Race_",
+        },
+        [](Session &) -> Result<void> { return {}; });
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     // Capture the live event handle before the drain so closure can be checked after every admitted signaler exits.
@@ -1890,10 +2009,13 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetire
 // close. A regression that always retained (or never retired the pointer) fails deterministically.
 TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
 {
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_EVENT_QUIET",
-                                             .log_file = "sess_shutdown_event_quiet.log",
-                                             .instance_mutex_prefix = "Sess_Shutdown_Event_Quiet_"},
-                                     [](Session &) -> Result<void> { return {}; });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_EVENT_QUIET",
+            .log_file = "sess_shutdown_event_quiet.log",
+            .instance_mutex_prefix = "Sess_Shutdown_Event_Quiet_",
+        },
+        [](Session &) -> Result<void> { return {}; });
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     const HANDLE captured_event = bootstrap_shutdown_event_for_test();
@@ -1920,7 +2042,10 @@ TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
 TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
 {
     constexpr int GENERATIONS = 8;
-    const ModInfo attach_info{.name = "SESS_EVENT_REBOOT", .log_file = "sess_shutdown_event_reboot.log"};
+    const ModInfo attach_info{
+        .name = "SESS_EVENT_REBOOT",
+        .log_file = "sess_shutdown_event_reboot.log",
+    };
 
     std::vector<std::jthread> hammerers;
     for (int t = 0; t < 4; ++t)
@@ -1985,13 +2110,18 @@ TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
     const std::uint64_t before = DetourModKit::detail::lifecycle().generation();
 
     {
-        Result<Session> first = Session::start(ModInfo{.name = "GEN_A", .log_file = "sess_ctx_gen.log"});
+        Result<Session> first = Session::start(ModInfo{
+            .name = "GEN_A",
+            .log_file = "sess_ctx_gen.log",
+        });
         ASSERT_TRUE(first.has_value()) << first.error().message();
         EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "an admitted start opens a new epoch";
         EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
 
         // A second start while one is Running is rejected and must not advance the generation.
-        Result<Session> second = Session::start(ModInfo{.name = "GEN_B"});
+        Result<Session> second = Session::start(ModInfo{
+            .name = "GEN_B",
+        });
         ASSERT_FALSE(second.has_value());
         EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
         EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "a rejected start opens no epoch";
@@ -1999,14 +2129,20 @@ TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
 
     // ~Session ran the ordered teardown, so the slot is Stopped again and a fresh start opens the next epoch.
     EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
-    Result<Session> third = Session::start(ModInfo{.name = "GEN_C", .log_file = "sess_ctx_gen.log"});
+    Result<Session> third = Session::start(ModInfo{
+        .name = "GEN_C",
+        .log_file = "sess_ctx_gen.log",
+    });
     ASSERT_TRUE(third.has_value()) << third.error().message();
     EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 2);
 }
 
 TEST_F(SessionLifecycleContext, SynchronousStartLeavesLoaderContextNormal)
 {
-    Result<Session> session = Session::start(ModInfo{.name = "CTX_SYNC", .log_file = "sess_ctx_sync.log"});
+    Result<Session> session = Session::start(ModInfo{
+        .name = "CTX_SYNC",
+        .log_file = "sess_ctx_sync.log",
+    });
     ASSERT_TRUE(session.has_value()) << session.error().message();
     // A synchronously-hosted session was never inside a loader callback, whatever a prior bootstrap cycle left behind.
     EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
@@ -2015,12 +2151,16 @@ TEST_F(SessionLifecycleContext, SynchronousStartLeavesLoaderContextNormal)
 TEST_F(SessionLifecycleContext, BootstrapRetiresAttachOnTheWorkerAndRetiresTheDrainPhaseAfterward)
 {
     CallbackSignals sig;
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_BOOT", .log_file = "sess_ctx_boot.log"},
-                                     [&sig](Session &) -> Result<void>
-                                     {
-                                         sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "CTX_BOOT",
+            .log_file = "sess_ctx_boot.log",
+        },
+        [&sig](Session &) -> Result<void>
+        {
+            sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(sig.wait_for_ready(kTestTimeout));
@@ -2059,7 +2199,11 @@ TEST_F(SessionLifecycleContext, FailedAttachGateLeavesNoNonBlockingPhasePublishe
     ASSERT_EQ(GetLastError(), 0u) << "the instance name collided before the test could pre-own it";
 
     Result<void> started = bootstrap(
-        ModInfo{.name = "CTX_FAILED_ATTACH", .log_file = "sess_ctx_failed_attach.log", .instance_mutex_prefix = prefix},
+        ModInfo{
+            .name = "CTX_FAILED_ATTACH",
+            .log_file = "sess_ctx_failed_attach.log",
+            .instance_mutex_prefix = prefix,
+        },
         [](Session &) -> Result<void> { return {}; });
     CloseHandle(pre_owned);
 
@@ -2078,12 +2222,16 @@ TEST_F(SessionLifecycleContext, BootstrapDefersLoggerAndSessionSetupToTheWorker)
     (void)std::filesystem::remove(log_path, remove_error);
 
     BootstrapSetupHold setup_hold;
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_DEFERRED", .log_file = log_path.string()},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "CTX_DEFERRED",
+            .log_file = log_path.string(),
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(setup_hold.wait_until_entered(kTestTimeout));
@@ -2164,7 +2312,10 @@ TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnload
     std::atomic<bool> worker_authorized{false};
 
     Result<void> started = bootstrap(
-        ModInfo{.name = "CTX_WORKER_AUTH", .log_file = "sess_ctx_worker_auth.log"},
+        ModInfo{
+            .name = "CTX_WORKER_AUTH",
+            .log_file = "sess_ctx_worker_auth.log",
+        },
         [&](Session &) -> Result<void>
         {
             // Close the forced-probe seam before releasing the control thread. The
@@ -2210,12 +2361,16 @@ TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnload
 
 TEST_F(SessionLifecycleContext, SynchronousDrainHonorsTheLoaderLockVeto)
 {
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_DRAIN_VETO", .log_file = "sess_ctx_drain_veto.log"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "CTX_DRAIN_VETO",
+            .log_file = "sess_ctx_drain_veto.log",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -2242,20 +2397,23 @@ TEST_F(SessionLifecycleContext, SynchronousDrainFromTheWorkerThreadIsRefusedInst
     std::atomic<bool> refused_correctly{false};
     std::atomic<int> observed_code{-1};
 
-    Result<void> started =
-        bootstrap(ModInfo{.name = "CTX_SELF_DRAIN", .log_file = "sess_ctx_self_drain.log"},
-                  [this, &refused_correctly, &observed_code](Session &) -> Result<void>
-                  {
-                      // Runs on the bootstrap worker. A self-wait here would never return.
-                      Result<void> self = shutdown_and_wait();
-                      refused_correctly.store(!self.has_value(), std::memory_order_release);
-                      if (!self)
-                      {
-                          observed_code.store(static_cast<int>(self.error().code), std::memory_order_release);
-                      }
-                      m_sig.signal_ready();
-                      return {};
-                  });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "CTX_SELF_DRAIN",
+            .log_file = "sess_ctx_self_drain.log",
+        },
+        [this, &refused_correctly, &observed_code](Session &) -> Result<void>
+        {
+            // Runs on the bootstrap worker. A self-wait here would never return.
+            Result<void> self = shutdown_and_wait();
+            refused_correctly.store(!self.has_value(), std::memory_order_release);
+            if (!self)
+            {
+                observed_code.store(static_cast<int>(self.error().code), std::memory_order_release);
+            }
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -2281,15 +2439,19 @@ TEST_F(SessionLifecycleContext, SynchronousDrainFromTheWorkerThreadIsRefusedInst
 TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmittedIntoTheRetirement)
 {
     CallbackSignals release_worker;
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_ADMIT", .log_file = "sess_ctx_admit.log"},
-                                     [this, &release_worker](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         // Park the worker so the drainer below is certainly still inside its drain
-                                         // while the racing bootstrap is attempted.
-                                         (void)release_worker.wait_for_ready(kTestTimeout);
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "CTX_ADMIT",
+            .log_file = "sess_ctx_admit.log",
+        },
+        [this, &release_worker](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            // Park the worker so the drainer below is certainly still inside its drain
+            // while the racing bootstrap is attempted.
+            (void)release_worker.wait_for_ready(kTestTimeout);
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -2313,7 +2475,9 @@ TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmitted
     }
     EXPECT_TRUE(drain_claimed_slot) << "the drain never claimed the bootstrap state";
 
-    const ModInfo racing_info{.name = "CTX_ADMIT_2"};
+    const ModInfo racing_info{
+        .name = "CTX_ADMIT_2",
+    };
     Result<void> racing;
     {
         dmk_test::AllocFailScope no_alloc{0};
@@ -2332,12 +2496,16 @@ TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmitted
     EXPECT_EQ(module_handle(), nullptr);
 
     // The refusal released nothing: the slot is free again for the next generation.
-    Result<void> next = bootstrap(ModInfo{.name = "CTX_ADMIT_3", .log_file = "sess_ctx_admit.log"},
-                                  [this](Session &) -> Result<void>
-                                  {
-                                      m_sig.signal_ready();
-                                      return {};
-                                  });
+    Result<void> next = bootstrap(
+        ModInfo{
+            .name = "CTX_ADMIT_3",
+            .log_file = "sess_ctx_admit.log",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(next.has_value()) << next.error().message();
     m_bootstrapped = true;
 }
@@ -2350,10 +2518,13 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
     ASSERT_FALSE(exe_name.empty());
 
     DetourModKit::bootstrap_fail_worker_launch_for_test(true);
-    Result<void> failed = bootstrap(ModInfo{.name = "ATTACH_ROLLBACK",
-                                            .game_process_name = exe_name,
-                                            .instance_mutex_prefix = "Sess_Attach_Rollback_"},
-                                    [](Session &) -> Result<void> { return {}; });
+    Result<void> failed = bootstrap(
+        ModInfo{
+            .name = "ATTACH_ROLLBACK",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = "Sess_Attach_Rollback_",
+        },
+        [](Session &) -> Result<void> { return {}; });
     DetourModKit::bootstrap_fail_worker_launch_for_test(false);
 
     ASSERT_FALSE(failed.has_value()) << "the seam must have failed worker launch";
@@ -2366,15 +2537,18 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
 
     // A retained mutex reports InstanceAlreadyRunning; a terminal bootstrap slot reports SessionShutdownUnavailable.
     // Only a complete pre-publication rollback lets the same prefix load again.
-    Result<void> retried = bootstrap(ModInfo{.name = "ATTACH_ROLLBACK",
-                                             .log_file = "sess_attach_rollback.log",
-                                             .game_process_name = exe_name,
-                                             .instance_mutex_prefix = "Sess_Attach_Rollback_"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> retried = bootstrap(
+        ModInfo{
+            .name = "ATTACH_ROLLBACK",
+            .log_file = "sess_attach_rollback.log",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = "Sess_Attach_Rollback_",
+        },
+        [this](Session &) -> Result<void>
+        {
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(retried.has_value()) << "a failed attach left the process unable to load: "
                                      << retried.error().message();
     m_bootstrapped = true;
@@ -2417,12 +2591,16 @@ TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurren
     for (int cycle = 0; cycle < 8; ++cycle)
     {
         CallbackSignals sig;
-        Result<void> started = bootstrap(ModInfo{.name = "CTX_RACE", .log_file = "sess_ctx_race.log"},
-                                         [&sig](Session &) -> Result<void>
-                                         {
-                                             sig.signal_ready();
-                                             return {};
-                                         });
+        Result<void> started = bootstrap(
+            ModInfo{
+                .name = "CTX_RACE",
+                .log_file = "sess_ctx_race.log",
+            },
+            [&sig](Session &) -> Result<void>
+            {
+                sig.signal_ready();
+                return {};
+            });
         ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
         m_bootstrapped = true;
         ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle;
