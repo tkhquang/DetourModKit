@@ -27,6 +27,8 @@ namespace DetourModKit
      *          The raw-byte fallbacks are @ref scan::find_string_xref and @ref scan::read_code_constant. Only
      *          @ref RttiPresence::Absent proves a complete records-free sweep. The failure-mode discussion is in
      *          docs/guides/rtti/rtti-walker.md and docs/guides/rtti/rtti-self-heal.md.
+     * @warning `[B-100]` Under the loader lock, call @ref TypeIdentity::matches only after it is warm, or use another
+     *          Callback-safe entry point. Cold identity paths and setup routes can query the loader or scan an image.
      */
     namespace rtti
     {
@@ -136,10 +138,8 @@ namespace DetourModKit
          * @param out_len Capacity of @p out including the NUL terminator. The function never writes more than @p
          *                out_len bytes.
          * @return Number of name bytes written (excluding the NUL terminator), or 0 on failure or empty output.
-         * @note Zero-allocation, but each call runs the loader-querying COL prelude (a GetModuleHandleEx-class lookup),
-         *       so it is an occasional identity probe, not a zero-cost per-frame test; cache a @ref TypeIdentity when
-         *       checking the same type every frame.
-         * @note Setup/control-plane only: the COL prelude queries the loader.
+         * @note Setup/control-plane only: each call runs the COL prelude, which queries the loader. Cache a
+         *       @ref TypeIdentity for a per-frame check.
          */
         [[nodiscard]] std::size_t type_name_into(Address vtable, char *out, std::size_t out_len) noexcept;
 
@@ -185,10 +185,8 @@ namespace DetourModKit
          * @param expected Mangled name to compare against. Must be non-empty and shorter than @ref MAX_TYPE_NAME_LEN.
          * @return true on exact match; false on mismatch, on any read failure, or when @p expected is empty or
          *         oversized.
-         * @note Each call runs the loader-querying COL prelude, so it is an occasional identity probe, not a zero-cost
-         *       per-frame test; cache a @ref TypeIdentity when checking the same type every frame.
-         * @note Setup/control-plane only: the COL prelude queries the loader; @ref TypeIdentity::matches is the
-         *       per-frame route.
+         * @note Setup/control-plane only: each call runs the COL prelude, which queries the loader.
+         *       @ref TypeIdentity::matches is the per-frame route.
          */
         [[nodiscard]] bool vtable_is_type(Address vtable, std::string_view expected) noexcept;
 

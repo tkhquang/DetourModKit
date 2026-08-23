@@ -18,8 +18,11 @@
 
 #include "DetourModKit/scan.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/rtti_generation_fixture.hpp"
 #include "internal/rtti_shared.hpp"
+
+#include "test_alloc_probe.hpp"
 
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
@@ -851,4 +854,57 @@ TEST(RttiGenerationTest, TypeIdentityDoesNotSurviveASameBaseReplacement)
     ASSERT_TRUE(swap.swap_to_b());
     EXPECT_FALSE(identity.vtable().has_value())
         << "a warm TypeIdentity kept serving a vtable resolved in an image that is no longer mapped";
+}
+
+// [B-100] rtti boundary. A warm TypeIdentity answers under the loader lock and uses no heap. The name route
+// runs the COL prelude and allocates its result, so it belongs off the loader lock.
+TEST(RttiLoaderBoundary, WarmTypeIdentityIsAllocationFreeWhileTheNameRouteAllocates)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a());
+
+    const DetourModKit::Region module = DetourModKit::Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    ASSERT_NE(module.base.raw(), 0U);
+    const Address vtable{swap.module().vtable()};
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    const ScopedPointerImageGeneration generation{0x123456789ABCDEF0ULL};
+#endif
+    rtti::TypeIdentity identity(dmk_test::RTTI_FIXTURE_TYPE_A, module);
+    ASSERT_TRUE(identity.vtable().has_value());
+    ASSERT_TRUE(identity.matches(vtable)) << "the identity must be warm before the boundary window opens";
+
+    bool warm_match = false;
+    long long warm_allocations = -1;
+    long long name_allocations = -1;
+    std::optional<std::string> name;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    s_pointer_image_generation_calls.store(0, std::memory_order_relaxed);
+#endif
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before_warm = dmk_test::thread_new_calls();
+        for (int repeat = 0; repeat < 8; ++repeat)
+        {
+            warm_match = identity.matches(vtable);
+        }
+        warm_allocations = dmk_test::thread_new_calls() - before_warm;
+
+        const long long before_name = dmk_test::thread_new_calls();
+        name = rtti::type_name_of(vtable);
+        name_allocations = dmk_test::thread_new_calls() - before_name;
+    }
+
+    EXPECT_TRUE(warm_match);
+    EXPECT_EQ(warm_allocations, 0LL) << "the warm identity route must stay heap-free under the loader lock";
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    EXPECT_EQ(s_pointer_image_generation_calls.load(std::memory_order_relaxed), 8U)
+        << "each match must use the warm generation check instead of a cold RTTI route";
+#endif
+    ASSERT_TRUE(name.has_value());
+    EXPECT_EQ(*name, dmk_test::RTTI_FIXTURE_TYPE_A);
+    EXPECT_GT(name_allocations, 0LL) << "the owned-name route allocates, so it stays off the loader lock";
 }

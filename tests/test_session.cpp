@@ -28,6 +28,7 @@
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "fixtures/intercept_lease.hpp"
+#include "fixtures/loader_lock_scope.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -2096,45 +2097,9 @@ TEST_F(SessionLifecycleContext, BootstrapDefersLoggerAndSessionSetupToTheWorker)
     EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
 }
 
-namespace
-{
-    bool force_loader_lock_held() noexcept
-    {
-        return true;
-    }
-    bool force_loader_lock_free() noexcept
-    {
-        return false;
-    }
-
-    // Restores both the forced probe verdict and the loader context, so a failing expectation cannot leak either into
-    // a later case in the shared process.
-    class ForcedLoaderProbe
-    {
-    public:
-        explicit ForcedLoaderProbe(bool (*probe)() noexcept) noexcept
-            : m_saved_context(DetourModKit::detail::lifecycle().loader_context())
-        {
-            DetourModKit::detail::g_loader_lock_override = probe;
-        }
-        ForcedLoaderProbe(const ForcedLoaderProbe &) = delete;
-        ForcedLoaderProbe &operator=(const ForcedLoaderProbe &) = delete;
-        ForcedLoaderProbe(ForcedLoaderProbe &&) = delete;
-        ForcedLoaderProbe &operator=(ForcedLoaderProbe &&) = delete;
-        ~ForcedLoaderProbe() noexcept
-        {
-            DetourModKit::detail::g_loader_lock_override = nullptr;
-            DetourModKit::detail::lifecycle().set_loader_context(m_saved_context);
-        }
-
-    private:
-        DetourModKit::detail::LoaderContext m_saved_context;
-    };
-} // namespace
-
 TEST_F(SessionLifecycleContext, TypedLogicDllPreparationCannotAuthorizeUnderLoaderLock)
 {
-    ForcedLoaderProbe probe{&force_loader_lock_held};
+    const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
     DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::Normal);
     EXPECT_EQ(prepare_logic_dll_unload({}), LogicDllUnloadStatus::LoaderLock);
 }
@@ -2149,7 +2114,7 @@ TEST_F(SessionLifecycleContext, LoaderLockHeuristicVetoesButNeverAuthorizesBlock
     using DetourModKit::detail::LoaderContext;
 
     {
-        ForcedLoaderProbe probe{&force_loader_lock_free};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_never_held};
         lifecycle().set_loader_context(LoaderContext::Normal);
         EXPECT_TRUE(blocking_teardown_permitted()) << "an authorizing context with no veto must permit blocking";
 
@@ -2171,7 +2136,7 @@ TEST_F(SessionLifecycleContext, LoaderLockHeuristicVetoesButNeverAuthorizesBlock
 
     {
         // The veto direction: an authorizing context is still overridden by a held/indeterminate probe.
-        ForcedLoaderProbe probe{&force_loader_lock_held};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
         lifecycle().set_loader_context(LoaderContext::Normal);
         EXPECT_FALSE(blocking_teardown_permitted()) << "a held probe must veto an otherwise authorizing context";
 
@@ -2207,7 +2172,7 @@ TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnload
             // no peer thread reads it, and the control thread's shutdown_and_wait() reads
             // it through is_loader_lock_held().
             {
-                ForcedLoaderProbe probe{&force_loader_lock_free};
+                const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_never_held};
                 DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
                 observed_worker_tid.store(static_cast<std::uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
                 identity_published.store(DetourModKit::detail::lifecycle().is_worker_thread(),
@@ -2256,7 +2221,7 @@ TEST_F(SessionLifecycleContext, SynchronousDrainHonorsTheLoaderLockVeto)
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
 
     {
-        ForcedLoaderProbe probe{&force_loader_lock_held};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
         Result<void> refused = shutdown_and_wait();
         ASSERT_FALSE(refused.has_value());
         EXPECT_EQ(refused.error().code, ErrorCode::SessionShutdownWouldBlock);

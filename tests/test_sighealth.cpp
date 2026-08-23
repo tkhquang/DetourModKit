@@ -13,6 +13,9 @@
 #include "DetourModKit/scan.hpp"
 #include "DetourModKit/sighealth.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 namespace sh = DetourModKit::sighealth;
 namespace sc = DetourModKit::scan;
 namespace mf = DetourModKit::manifest;
@@ -218,13 +221,14 @@ TEST(SigHealthPolicy, LargerHaystackRaisesExpectedMatches)
 {
     const sc::Pattern pattern = make_pattern("11 22 33 44");
 
-    sh::HealthPolicy small;
-    small.nominal_haystack_bytes = 1u * 1024u * 1024u;
-    sh::HealthPolicy large;
-    large.nominal_haystack_bytes = 256u * 1024u * 1024u;
+    // Named with a suffix because <windows.h> defines `small` as a macro.
+    sh::HealthPolicy small_policy;
+    small_policy.nominal_haystack_bytes = 1u * 1024u * 1024u;
+    sh::HealthPolicy large_policy;
+    large_policy.nominal_haystack_bytes = 256u * 1024u * 1024u;
 
-    const sh::PatternHealth small_health = sh::analyze_pattern(pattern, small);
-    const sh::PatternHealth large_health = sh::analyze_pattern(pattern, large);
+    const sh::PatternHealth small_health = sh::analyze_pattern(pattern, small_policy);
+    const sh::PatternHealth large_health = sh::analyze_pattern(pattern, large_policy);
 
     // Same selectivity, bigger haystack: strictly more expected false matches.
     EXPECT_DOUBLE_EQ(small_health.selectivity_bits, large_health.selectivity_bits);
@@ -775,4 +779,56 @@ TEST(SigHealthFormat, RecordReportRendersExportNameKind)
     EXPECT_NE(report.find("platform.by_export"), std::string::npos);
     EXPECT_NE(report.find("ExportName"), std::string::npos);
     EXPECT_NE(report.find("anchor text"), std::string::npos);
+}
+
+// [B-100] sighealth boundary. The to_string value maps answer under the loader lock with no heap traffic. A weak
+// analysis owns findings, and report format owns text, so both stay off the loader lock.
+TEST(SigHealthLoaderBoundary, ValueMapsAreAllocationFreeWhileAnalysisAllocates)
+{
+    const sc::Pattern weak = make_pattern("90 90 90 90 90 90 90 90");
+
+    // Warm both routes so a first-call cost is not charged to the measured window.
+    (void)sh::to_string(sh::Grade::Fragile);
+    (void)sh::format_report(sh::analyze_pattern(weak), "warm");
+
+    std::string_view grade_label;
+    std::string_view severity_label;
+    std::string_view kind_label;
+    sh::Grade grade = sh::Grade::Robust;
+    std::size_t findings = 0;
+    std::size_t report_length = 0;
+    long long map_allocations = -1;
+    long long analysis_allocations = -1;
+    long long report_allocations = -1;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before_maps = dmk_test::thread_new_calls();
+        grade_label = sh::to_string(sh::Grade::Fragile);
+        severity_label = sh::to_string(sh::Severity::Critical);
+        kind_label = sh::to_string(sh::FindingKind::LowByteEntropy);
+        map_allocations = dmk_test::thread_new_calls() - before_maps;
+
+        const long long before_analysis = dmk_test::thread_new_calls();
+        const sh::PatternHealth health = sh::analyze_pattern(weak);
+        analysis_allocations = dmk_test::thread_new_calls() - before_analysis;
+        grade = health.grade;
+        findings = health.findings.size();
+
+        const long long before_report = dmk_test::thread_new_calls();
+        report_length = sh::format_report(health, "loader-boundary").size();
+        report_allocations = dmk_test::thread_new_calls() - before_report;
+    }
+
+    EXPECT_EQ(map_allocations, 0LL) << "a to_string value map must stay heap-free under the loader lock";
+    EXPECT_FALSE(grade_label.empty());
+    EXPECT_FALSE(severity_label.empty());
+    EXPECT_FALSE(kind_label.empty());
+
+    EXPECT_NE(grade, sh::Grade::Robust) << "the repetitive fixture pattern must draw at least one finding";
+    EXPECT_GT(findings, static_cast<std::size_t>(0));
+    EXPECT_GT(report_length, static_cast<std::size_t>(0));
+    EXPECT_GT(analysis_allocations, 0LL) << "the weak analysis owns findings, so it stays off the loader lock";
+    EXPECT_GT(report_allocations, 0LL) << "report format owns text, so it stays off the loader lock";
 }

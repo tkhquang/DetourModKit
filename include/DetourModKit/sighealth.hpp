@@ -22,6 +22,8 @@
  *          @ref analyze_record one @ref manifest::SignatureRecord, and @ref analyze_manifest a whole file. Each level
  *          yields a @ref Grade and a list of @ref Finding values that name what is weak. The @ref format_report
  *          overloads render a report for a tool or a log.
+ * @warning `[B-100]` Analysis and report format can allocate, so run them only off the loader lock. The to_string
+ *          value maps are safe there.
  */
 
 #include "DetourModKit/anchor.hpp"
