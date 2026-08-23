@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "DetourModKit/detail/pattern_core.hpp"
@@ -301,6 +302,49 @@ TEST(PatternJumps, MatchesAtWorkBudgetCapsPathologicalBacktracking)
     bytes[0] = std::byte{0xA5};
 
     EXPECT_FALSE(p->matches_at(bytes));
+}
+
+TEST(PatternJumps, MatchesAtBudgetExhaustionIsFailClosed)
+{
+    constexpr std::string_view dsl =
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF";
+    const auto p = scan::Pattern::compile(dsl);
+    ASSERT_TRUE(p.has_value());
+    ASSERT_EQ(p->min_match_length(), 9U);
+    ASSERT_EQ(p->max_match_length(), 2049U);
+
+    const detail::PatternParse parsed = detail::parse_pattern(dsl);
+    ASSERT_EQ(parsed.status, detail::PatternStatus::Ok);
+    ASSERT_EQ(parsed.buffer.jump_count, detail::MAX_PATTERN_JUMPS);
+    ASSERT_EQ(parsed.buffer.length, 9U);
+    ASSERT_EQ(parsed.buffer.bytes[0], std::byte{0xA5});
+    ASSERT_EQ(parsed.buffer.mask[0], std::byte{0xFF});
+    ASSERT_EQ(parsed.buffer.bytes[parsed.buffer.length - 1], std::byte{0xFF});
+    ASSERT_EQ(parsed.buffer.mask[parsed.buffer.length - 1], std::byte{0xFF});
+    for (std::size_t i = 0; i < parsed.buffer.jump_count; ++i)
+    {
+        ASSERT_EQ(parsed.buffer.jumps[i].min_skip, 0U);
+        ASSERT_EQ(parsed.buffer.jumps[i].max_skip, 255U);
+    }
+    for (std::size_t i = 1; i + 1 < parsed.buffer.length; ++i)
+    {
+        ASSERT_EQ(parsed.buffer.mask[i], std::byte{0x00});
+    }
+
+    // The minimum span selects zero for every gap.
+    // This control rejects a matcher that refuses all maximum-jump patterns.
+    std::vector<std::byte> early(p->min_match_length(), std::byte{0x00});
+    early.front() = std::byte{0xA5};
+    early.back() = std::byte{0xFF};
+    EXPECT_TRUE(p->matches_at(early));
+
+    // Only the final byte holds FF. A valid far placement requires 255 bytes from every gap.
+    std::vector<std::byte> far(p->max_match_length(), std::byte{0x00});
+    far.front() = std::byte{0xA5};
+    far.back() = std::byte{0xFF};
+
+    // The search visits lower gap widths first. It exhausts the budget before the all-255 placement.
+    EXPECT_FALSE(p->matches_at(far));
 }
 
 TEST(PatternJumps, RejectsMalformedAndIllegalJumps)

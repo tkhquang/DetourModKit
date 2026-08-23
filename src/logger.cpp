@@ -6,8 +6,6 @@
 #include "internal/win_file_stream.hpp"
 #include "platform.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -32,6 +30,10 @@ namespace DetourModKit::detail
     // is the only way to reach the rollback that breaks a retention root whose writer was never published. Set /
     // cleared on a single thread inside a test fixture; the definition and fire site compile out of shipping builds.
     void (*g_logger_publication_probe)() = nullptr;
+
+    // Test-only probe fired after Logger::log() snapshots an async writer and before it calls enqueue(). A fixture
+    // retires that writer inside the probe to prove a late rejection reaches the facade's cumulative drop counter.
+    void (*g_logger_async_snapshot_probe)() noexcept = nullptr;
 #endif
 } // namespace DetourModKit::detail
 
@@ -40,13 +42,43 @@ namespace DetourModKit
 
     namespace
     {
-        std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
+        using StaticConfigAtom = std::atomic<std::shared_ptr<const Logger::StaticConfig>>;
+
+        /**
+         * @brief Returns the never-destroyed process configuration publication slot.
+         * @details The slot matches the process-lifetime Logger storage (`[B-47]`).
+         */
+        StaticConfigAtom &static_config_atom()
         {
-            static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
-                std::make_shared<const Logger::StaticConfig>(std::string{DEFAULT_LOG_PREFIX},
-                                                             std::string{DEFAULT_LOG_FILE_NAME},
-                                                             std::string{DEFAULT_TIMESTAMP_FORMAT})};
-            return instance;
+            alignas(StaticConfigAtom) static unsigned char storage[sizeof(StaticConfigAtom)];
+            static StaticConfigAtom *const atom = ::new (static_cast<void *>(storage))
+                StaticConfigAtom{std::make_shared<const Logger::StaticConfig>(std::string{DEFAULT_LOG_PREFIX},
+                                                                              std::string{DEFAULT_LOG_FILE_NAME},
+                                                                              std::string{DEFAULT_TIMESTAMP_FORMAT})};
+            return *atom;
+        }
+
+        /**
+         * @brief Serializes process-default configuration publication and application.
+         * @details Late static teardown can call configure(). The mutex uses never-destroyed storage (`[B-47]`).
+         */
+        [[nodiscard]] std::mutex &static_config_mutex() noexcept
+        {
+            alignas(std::mutex) static unsigned char storage[sizeof(std::mutex)];
+            static std::mutex *const mutex = ::new (static_cast<void *>(storage)) std::mutex();
+            return *mutex;
+        }
+
+        /**
+         * @brief Writes one INFO banner line from a pre-rendered timestamp.
+         * @details Stream insertion records an error through failbit. This helper does not throw after a state
+         *          commit.
+         */
+        void write_banner_line(detail::WinFileStream &sink, std::string_view timestamp,
+                               std::string_view message) noexcept
+        {
+            sink << "[" << timestamp << "] " << "[" << std::setw(7) << std::left << "INFO" << "] :: " << message
+                 << '\n';
         }
 
         /**
@@ -79,11 +111,25 @@ namespace DetourModKit
         static_config_atom().store(std::move(config), std::memory_order_release);
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::shared_ptr<const Logger::StaticConfig> Logger::static_config_for_test()
+    {
+        return get_static_config();
+    }
+#endif
+
     LogLevel string_to_log_level(std::string_view level_str)
     {
         std::string upper_level_str(level_str);
-        std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        for (char &c : upper_level_str)
+        {
+            // Fold ASCII a-z by hand, as manifest.cpp does for its keywords: std::toupper is locale sensitive, which
+            // [B-37] forbids on a resolution path. LoggerTest.StringToLogLevelUsesAsciiFold pins the rule.
+            if (c >= 'a' && c <= 'z')
+            {
+                c = static_cast<char>(c - 'a' + 'A');
+            }
+        }
 
         if (upper_level_str == "TRACE")
             return LogLevel::Trace;
@@ -104,33 +150,53 @@ namespace DetourModKit
     void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
                            LogOpenMode open_mode)
     {
-        set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
-                                                               std::string(timestamp_fmt), open_mode));
+        std::lock_guard<std::mutex> config_lock(static_config_mutex());
 
-        // Qualify the free accessor: inside this static member an unqualified log() would bind to the member log()
-        // overload set (which all take arguments), hiding the namespace-scope process-default accessor.
-        Logger &instance = DetourModKit::log();
+        // The staged snapshot precedes first use because the process-default constructor reads it. The prior snapshot
+        // restores the last accepted defaults after a failed apply.
+        auto staged_config = std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
+                                                                  std::string(timestamp_fmt), open_mode);
+        auto previous_config = get_static_config();
+        set_static_config(std::move(staged_config));
 
-        // An inert first-use logger (OOM at construction) owns no sink or mutex and cannot be reconfigured into a
-        // live one; it stays inert for the process generation.
-        if (instance.is_inert())
+        // The qualified free accessor avoids the member log() overload set, which hides the process-default accessor.
+        try
         {
-            return;
-        }
+            Logger &instance = DetourModKit::log();
 
-        // configure() is the authoritative reset path: it may re-enable the process default even after a shutdown so
-        // a test fixture or re-attach can reuse the sink. Clear the shutdown flag and apply the settings UNDER the
-        // same lock shutdown_internal() takes to close the sink, so the reset is serialized against a concurrent
-        // shutdown. Configure never reopens in the middle of shutdown's close, and shutdown never closes a sink
-        // configure just reopened. Whichever acquires the lock last determines the final sink state deterministically.
-        std::scoped_lock lock(instance.m_async_mutex, *instance.m_log_mutex_ptr);
-        if (instance.m_async_writer_abandoned.load(std::memory_order_acquire))
-        {
-            // A detached writer retains final sink ownership. Reopening this facade would create a second sink owner.
-            return;
+            // An inert first-use logger owns no sink or mutex and cannot apply the staged defaults. Restore the prior
+            // snapshot before it returns to its process-lifetime inert state.
+            if (instance.is_inert())
+            {
+                set_static_config(std::move(previous_config));
+                return;
+            }
+
+            // The sink locks serialize configuration with shutdown. Neither operation can split the other's sink
+            // transition.
+            std::scoped_lock lock(instance.m_async_mutex, *instance.m_log_mutex_ptr);
+            if (instance.m_async_writer_abandoned.load(std::memory_order_acquire))
+            {
+                // A detached writer retains final sink ownership. Restore the snapshot to avoid a second sink owner.
+                set_static_config(std::move(previous_config));
+                return;
+            }
+            // configure() is the authoritative reset path: it re-enables the process default even after a shutdown,
+            // so a test fixture or a re-attach can reuse the sink. The latch is deliberately outside the sink
+            // transaction. A live facade over an unopenable sink still routes an Error record to stderr.
+            instance.m_shutdown_called.store(false, std::memory_order_release);
+            if (!instance.reconfigure_locked(prefix, file_name, timestamp_fmt))
+            {
+                set_static_config(std::move(previous_config));
+            }
         }
-        instance.m_shutdown_called.store(false, std::memory_order_release);
-        instance.reconfigure_locked(prefix, file_name, timestamp_fmt);
+        catch (...)
+        {
+            // A post-publication allocation can throw. Rollback pairs the immutable defaults with the last accepted
+            // configuration and preserves configure()'s exception contract.
+            set_static_config(std::move(previous_config));
+            throw;
+        }
     }
 
     void Logger::reconfigure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
@@ -153,72 +219,111 @@ namespace DetourModKit
         {
             return;
         }
-        reconfigure_locked(prefix, file_name, timestamp_fmt);
+        // The public form reports nothing: a caller that needs the outcome reads the log file it named.
+        (void)reconfigure_locked(prefix, file_name, timestamp_fmt);
     }
 
-    void Logger::reconfigure_locked(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
+    bool Logger::reconfigure_locked(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
     {
         // Precondition: the caller holds m_async_mutex and *m_log_mutex_ptr.
 
         // Skip only when all parameters match AND the stream is usable. After shutdown or a prior open failure the
         // stream may be closed, so fall through to reopen even if the strings are identical.
-        if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good() && m_log_prefix == prefix &&
-            m_log_file_name == file_name && m_timestamp_format == timestamp_fmt)
+        const bool sink_usable = m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good();
+        if (sink_usable && m_log_prefix == prefix && m_log_file_name == file_name &&
+            m_timestamp_format == timestamp_fmt)
         {
-            return;
+            return true;
         }
 
-        // The prefix and timestamp format are applied per line, not baked into the open file, so a change that keeps
-        // the same file needs no reopen. Reopening truncates the existing records. Detect a file change to
-        // decide between keeping the open stream and (re)opening a different or closed sink.
-        const bool file_changed = (m_log_file_name != file_name);
+        // The prefix and timestamp format apply per line, not baked into the open file, so a change that keeps the
+        // same file needs no reopen. A different target file, or an unusable stream, needs a replacement sink. Only
+        // the process-start constructor truncates, so the replacement opens in append mode and the target file keeps
+        // its existing records.
+        const bool needs_new_sink = (m_log_file_name != file_name) || !sink_usable;
 
-        m_log_prefix = prefix;
-        m_log_file_name = file_name;
-        m_timestamp_format = timestamp_fmt;
-
-        if (!file_changed && m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
+        // All transaction allocation precedes file creation. A failed candidate leaves the current configuration and
+        // sink intact. A failed retirement can leave an empty candidate file, but it retains the current handle and
+        // tail.
+        // LoggerTest.Reconfigure_InvalidPath_KeepsOldFile and LoggerTest.Reconfigure_AllocationFailure_KeepsOldSink
+        // pin both halves.
+        std::string staged_prefix(prefix);
+        std::string staged_file_name(file_name);
+        std::string staged_timestamp_format(timestamp_fmt);
+        std::string staged_async_format = staged_timestamp_format;
+        const bool retires_prior_sink = needs_new_sink && m_log_file_stream_ptr->is_open();
+        const std::string retire_timestamp = retires_prior_sink ? get_timestamp(m_timestamp_format) : std::string{};
+        std::string retire_notice;
+        if (retires_prior_sink)
         {
-            // Same file, still open: keep the stream and its records. Note the change in-line; never truncate.
-            if (m_log_file_stream_ptr->good())
+            retire_notice = "Logger reconfiguring. New file: ";
+            retire_notice += file_name;
+        }
+        const std::string adopt_notice = needs_new_sink ? ("Logger reconfigured. Now logging to: " + staged_file_name)
+                                                        : std::string("Logger reconfigured (same file retained).");
+        const std::string adopt_timestamp = get_timestamp(staged_timestamp_format);
+
+        std::shared_ptr<detail::WinFileStream> staged_sink;
+        if (needs_new_sink)
+        {
+            staged_sink = open_sink(staged_file_name, /*truncate=*/false);
+            if (!staged_sink)
             {
-                *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                       << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                       << "Logger reconfigured (same file retained)." << '\n';
+                return false;
+            }
+        }
+
+        // The current sink closes before the state commit. A close failure retains the handle and buffered tail.
+        // Cleared stream flags permit a later retry. The candidate stays uncommitted while recoverable state exists.
+        if (staged_sink && retires_prior_sink)
+        {
+            if (sink_usable)
+            {
+                write_banner_line(*m_log_file_stream_ptr, retire_timestamp, retire_notice);
                 m_log_file_stream_ptr->flush();
             }
+            m_log_file_stream_ptr->close();
+            if (m_log_file_stream_ptr->is_open())
+            {
+                m_log_file_stream_ptr->clear();
+                return false;
+            }
+        }
+
+        // Member moves, banner writes, and both async setters are no-throw. The configuration cannot become
+        // half-applied.
+        m_log_prefix = std::move(staged_prefix);
+        m_log_file_name = std::move(staged_file_name);
+        m_timestamp_format = std::move(staged_timestamp_format);
+
+        if (staged_sink)
+        {
+            m_log_file_stream_ptr = std::move(staged_sink);
+            write_banner_line(*m_log_file_stream_ptr, adopt_timestamp, adopt_notice);
         }
         else
         {
-            // A different target file, or a closed stream: (re)open it in append mode so existing records in the
-            // target file are preserved. Only the process-start constructor truncates.
-            if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
-            {
-                *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                       << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                       << "Logger reconfiguring. New file: " << file_name << '\n';
-                m_log_file_stream_ptr->flush();
-                m_log_file_stream_ptr->close();
-            }
-            open_sink(/*reconfiguring=*/true, /*truncate=*/false);
+            // The same file stays open with its records intact. The in-line banner records the change without
+            // truncation.
+            write_banner_line(*m_log_file_stream_ptr, adopt_timestamp, adopt_notice);
+            m_log_file_stream_ptr->flush();
         }
 
-        // Push the new timestamp format into any live async writer. enable_async_mode snapshots the format into the
-        // AsyncLogger's private config at construction and the writer shares the WinFileStream kept/reopened above, so
-        // without this push a format change would leave every async line on the old format. Safe under the held
-        // scoped_lock: the setter assigns without locking and the writer reads the format only under *m_log_mutex_ptr.
+        // A live async writer receives the committed sink and timestamp format. enable_async_mode captures both at
+        // construction. Without this update, the writer keeps the old format and writes to the retired stream. Each
+        // setter assigns under the scoped lock, and the writer reads both only under *m_log_mutex_ptr.
         if (m_async_mode_enabled.load(std::memory_order_acquire))
         {
             if (auto async_logger = m_async_logger.load(std::memory_order_acquire))
             {
-                async_logger->set_timestamp_format(m_timestamp_format);
+                async_logger->set_file_stream(m_log_file_stream_ptr);
+                async_logger->set_timestamp_format(std::move(staged_async_format));
             }
         }
+        return true;
     }
 
-    Logger::Logger()
-        : m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
-          m_log_mutex_ptr(std::make_shared<std::mutex>())
+    Logger::Logger() : m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
         const auto config = get_static_config();
         m_log_prefix = config->log_prefix;
@@ -227,7 +332,7 @@ namespace DetourModKit
 
         // A default construction starts a fresh log unless the published configuration selected Append.
         // Reconfiguration never truncates.
-        open_sink(false, /*truncate=*/config->open_mode == LogOpenMode::Truncate);
+        adopt_first_sink(/*truncate=*/config->open_mode == LogOpenMode::Truncate);
     }
 
     Logger::Logger(InertTag) noexcept
@@ -241,34 +346,44 @@ namespace DetourModKit
     Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
                    LogOpenMode open_mode)
         : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
-          m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
           m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
         // Construction starts a fresh log unless the caller selected Append. Reconfiguration never truncates.
-        open_sink(false, /*truncate=*/open_mode == LogOpenMode::Truncate);
+        adopt_first_sink(/*truncate=*/open_mode == LogOpenMode::Truncate);
     }
 
-    void Logger::open_sink(bool reconfiguring, bool truncate)
+    std::shared_ptr<detail::WinFileStream> Logger::open_sink(const std::string &file_name, bool truncate) const
     {
-        // A constructor runs before publication. reconfigure_locked() holds both lifecycle and file mutexes.
-        // open_sink does not lock, so both routes can call it. Truncate starts a fresh file. Append preserves prior
-        // records.
-        const std::wstring log_file_full_path = generate_log_file_path();
+        // Opens a candidate sink and never touches this Logger, so reconfigure_locked() can prove the replacement
+        // file before it retires the live one. Truncate starts a fresh file. Append preserves prior records.
+        const std::wstring log_file_full_path = generate_log_file_path(file_name);
         const auto mode = truncate ? (std::ios::out | std::ios::trunc) : (std::ios::out | std::ios::app);
-        m_log_file_stream_ptr->open(log_file_full_path, mode);
+        auto sink = std::make_shared<detail::WinFileStream>();
+        sink->open(log_file_full_path, mode);
 
-        if (!m_log_file_stream_ptr->is_open())
+        if (!sink->is_open())
         {
             std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
                       << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
                       << ". Subsequent logs to file will fail." << '\n';
+            return nullptr;
+        }
+        return sink;
+    }
+
+    void Logger::adopt_first_sink(bool truncate)
+    {
+        // Construction only: a failed open still leaves a stream object, because every later log() dereferences
+        // m_log_file_stream_ptr and fails closed on the closed stream rather than on a null pointer.
+        auto sink = open_sink(m_log_file_name, truncate);
+        if (!sink)
+        {
+            m_log_file_stream_ptr = std::make_shared<detail::WinFileStream>();
             return;
         }
-
-        *m_log_file_stream_ptr << "[" << get_timestamp() << "] [" << std::setw(7) << std::left << "INFO" << "] :: "
-                               << "Logger "
-                               << (reconfiguring ? "reconfigured. Now logging to: " : "initialized. Logging to: ")
-                               << m_log_file_name << '\n';
+        m_log_file_stream_ptr = std::move(sink);
+        write_banner_line(*m_log_file_stream_ptr, get_timestamp(m_timestamp_format),
+                          "Logger initialized. Logging to: " + m_log_file_name);
     }
 
     Logger::~Logger() noexcept
@@ -421,9 +536,14 @@ namespace DetourModKit
             auto local_logger = m_async_logger.load(std::memory_order_acquire);
             if (local_logger)
             {
-                // Propagate the queue's accept/drop result so callers learn the true delivery status instead of an
-                // unconditional success.
-                return local_logger->enqueue(level, message);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *snapshot_probe = detail::g_logger_async_snapshot_probe)
+                {
+                    snapshot_probe();
+                }
+#endif
+                // The queue result exposes the true delivery status instead of unconditional success.
+                return local_logger->enqueue_from_facade(level, message, m_dropped_messages);
             }
         }
 
@@ -441,7 +561,7 @@ namespace DetourModKit
 
         if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
         {
-            *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
+            *m_log_file_stream_ptr << "[" << get_timestamp(m_timestamp_format) << "] "
                                    << "[" << std::setw(7) << std::left << level_str << "] :: " << message << '\n';
 
             // Flush on warnings/errors to ensure critical messages survive crashes
@@ -462,8 +582,8 @@ namespace DetourModKit
 
         if (level >= LogLevel::Error)
         {
-            std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] [" << std::setw(7)
-                      << std::left << level_str << "] :: " << message << '\n';
+            std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp(m_timestamp_format) << "] ["
+                      << std::setw(7) << std::left << level_str << "] :: " << message << '\n';
         }
 
         // The file sink was closed or unhealthy; the message was not delivered to it (an error-level message reached
@@ -482,11 +602,14 @@ namespace DetourModKit
         }
         catch (...)
         {
+            // log() counts every record it refuses and never throws after counting one, so this catch owns the
+            // records that were lost mid-write, which otherwise leave dropped_count() below the real loss.
+            m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
     }
 
-    std::string Logger::get_timestamp() const
+    std::string Logger::get_timestamp(const std::string &format) const
     {
         try
         {
@@ -509,7 +632,7 @@ namespace DetourModKit
 #endif
             // Single stack buffer for timestamp + milliseconds, no heap allocation
             char buf[134];
-            const size_t len = std::strftime(buf, sizeof(buf) - 5, m_timestamp_format.c_str(), &timeinfo_struct);
+            const size_t len = std::strftime(buf, sizeof(buf) - 5, format.c_str(), &timeinfo_struct);
             if (len == 0)
             {
                 return "TIMESTAMP_FORMAT_ERROR";
@@ -533,9 +656,9 @@ namespace DetourModKit
         }
     }
 
-    std::wstring Logger::generate_log_file_path() const
+    std::wstring Logger::generate_log_file_path(const std::string &file_name) const
     {
-        std::filesystem::path log_file_path_obj(m_log_file_name);
+        std::filesystem::path log_file_path_obj(file_name);
         if (log_file_path_obj.is_absolute())
         {
             return log_file_path_obj.wstring();
@@ -547,25 +670,25 @@ namespace DetourModKit
             if (module_dir.empty() || module_dir == L".")
             {
                 std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] "
-                          << "Could not determine module directory. Using relative path: " << m_log_file_name << '\n';
+                          << "Could not determine module directory. Using relative path: " << file_name << '\n';
                 return log_file_path_obj.wstring();
             }
 
-            const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / m_log_file_name;
+            const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / file_name;
             return final_log_path.lexically_normal().wstring();
         }
         catch (const std::exception &e)
         {
             std::cerr << "[" << m_log_prefix
                       << " Logger PATH_WARNING] Failed to determine module directory for log file: " << e.what()
-                      << ". Using relative path for log file: " << m_log_file_name << '\n';
+                      << ". Using relative path for log file: " << file_name << '\n';
             return log_file_path_obj.wstring();
         }
         catch (...)
         {
             std::cerr << "[" << m_log_prefix
                       << " Logger PATH_WARNING] Unknown exception while determining module directory for log file."
-                      << " Using relative path: " << m_log_file_name << '\n';
+                      << " Using relative path: " << file_name << '\n';
             return log_file_path_obj.wstring();
         }
     }

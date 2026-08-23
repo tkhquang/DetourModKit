@@ -49,11 +49,11 @@ See `WinFileStreamBuf` and the `WinFileStreamBufTest` drain-failure proofs.
 
 ### [B-50]
 
-`AsyncLogger`'s writer copies the timestamp format into its private `m_config` at construction. A `Logger::reconfigure` that changes the format must push the new value into the live writer through `AsyncLogger::set_timestamp_format`. Otherwise async lines keep the old format for the life of the writer while sync banner lines in the same file use the new one.
+`AsyncLogger`'s writer owns a private timestamp format and a shared sink. `Logger::reconfigure` must update each changed worker field. Use `AsyncLogger::set_timestamp_format` for the format. Use `AsyncLogger::set_file_stream` for the sink. Otherwise async lines retain stale format or use a retired stream.
 
-The setter assigns without a lock. Its precondition is that the caller already holds the shared log mutex that the writer reads that field under. `reconfigure` holds that mutex through `scoped_lock`. A self-locking setter deadlocks against that same non-recursive mutex.
+Both setters assign without a lock. The caller must hold the shared log mutex. The writer reads both fields under that mutex. `reconfigure` holds the mutex through `scoped_lock`. A setter that acquires the same non-recursive mutex deadlocks.
 
-Mutate only the one field, which is a distinct memory location. Do not touch the other snapshot fields on a live worker, because the worker thread reads them locklessly. A rejection of the change instead is a capability regression.
+Mutate only those two fields. Each field has a distinct address, and the writer reads both under the shared log mutex. Do not touch other live-worker fields because the worker reads them without a lock. A rejection of the change is a capability regression.
 
 ### [B-88]
 

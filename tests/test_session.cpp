@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -15,6 +16,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <process.h>
 #include <windows.h>
 
 #include "DetourModKit.hpp"
@@ -109,10 +111,9 @@ namespace
     };
 } // namespace
 
-// ~Session runs the ordered teardown from loader-lock / DLL_PROCESS_DETACH paths where an escaping exception would
-// terminate the host. Every subsystem teardown it invokes is noexcept, so pin the no-throw destructor at compile time.
-static_assert(std::is_nothrow_destructible_v<Session>,
-              "~Session must be noexcept so teardown cannot throw into a host unwinding under the loader lock.");
+// The session.hpp `[B-100]` warning owns the teardown route. An exception from host teardown terminates the process.
+// This assertion pins the no-throw destructor.
+static_assert(std::is_nothrow_destructible_v<Session>, "~Session must stay noexcept during host teardown.");
 static_assert(!std::is_copy_constructible_v<Session>, "Session is move-only.");
 static_assert(std::is_nothrow_move_constructible_v<Session>, "Session move must be noexcept for the RAII contract.");
 static_assert(std::is_nothrow_move_assignable_v<Session>, "Session move-assign must be noexcept.");
@@ -150,6 +151,253 @@ TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
                                                .instance_mutex_prefix = "Sess_Test_Mutex_ProcGate_"});
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
+}
+
+// The child executable supplies the long basename that the process gate reads. The parent starts the exact child case
+// and checks its proof marker.
+namespace
+{
+    constexpr DWORD CHILD_PROCESS_TIMEOUT_MS = 60000;
+    constexpr std::string_view CHILD_EXECUTION_MARKER =
+        "SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename:complete";
+    std::atomic<std::uint32_t> s_child_image_counter{0};
+
+    // The 100 U+65E5 code points use 300 UTF-8 bytes and 100 UTF-16 code units. The PID and counter make the child
+    // image name unique, while the complete component stays below the 255-code-unit limit.
+    [[nodiscard]] std::wstring unique_long_multibyte_stem()
+    {
+        const std::uint32_t counter = s_child_image_counter.fetch_add(1, std::memory_order_relaxed);
+        return std::wstring(100, L'\u65e5') + L"_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(counter);
+    }
+
+    [[nodiscard]] std::wstring current_exe_path_wide()
+    {
+        std::wstring path(32768, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0 || length >= path.size())
+        {
+            return {};
+        }
+        path.resize(length);
+        return path;
+    }
+
+    [[nodiscard]] std::string to_utf8(std::wstring_view text)
+    {
+        if (text.empty())
+        {
+            return {};
+        }
+        const int needed =
+            WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+        if (needed <= 0)
+        {
+            return {};
+        }
+        std::string out(static_cast<size_t>(needed), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), needed, nullptr,
+                            nullptr);
+        return out;
+    }
+
+    [[nodiscard]] std::filesystem::path child_execution_marker_path(const std::filesystem::path &image)
+    {
+        std::filesystem::path marker = image;
+        marker += L".session-child-proof";
+        return marker;
+    }
+
+    [[nodiscard]] std::filesystem::path child_log_path(const std::filesystem::path &image)
+    {
+        std::filesystem::path log = image;
+        log += L".session.log";
+        return log;
+    }
+
+    /**
+     * @class ChildArtifactCleanup
+     * @brief Owns cleanup for a child image, proof marker, and log.
+     */
+    class ChildArtifactCleanup final
+    {
+    public:
+        /**
+         * @brief Copies the artifact paths into the cleanup owner.
+         * @param image Temporary child image path.
+         * @param marker Temporary proof marker path.
+         * @param log Temporary child log path.
+         */
+        ChildArtifactCleanup(const std::filesystem::path &image, const std::filesystem::path &marker,
+                             const std::filesystem::path &log)
+            : m_image(image), m_marker(marker), m_log(log)
+        {
+        }
+
+        /** @brief Retries cleanup on scope exit. */
+        ~ChildArtifactCleanup() noexcept
+        {
+            std::error_code error;
+            (void)cleanup(error);
+        }
+
+        /**
+         * @brief Removes each artifact and reports the first file-system error.
+         * @param error Receives the first file-system error.
+         * @return True when all three removal operations report no error.
+         */
+        [[nodiscard]] bool cleanup(std::error_code &error) noexcept
+        {
+            std::error_code marker_error;
+            (void)std::filesystem::remove(m_marker, marker_error);
+            std::error_code log_error;
+            (void)std::filesystem::remove(m_log, log_error);
+            std::error_code image_error;
+            (void)std::filesystem::remove(m_image, image_error);
+            error = marker_error ? marker_error : (log_error ? log_error : image_error);
+            return !error;
+        }
+
+    private:
+        ChildArtifactCleanup(const ChildArtifactCleanup &) = delete;
+        ChildArtifactCleanup &operator=(const ChildArtifactCleanup &) = delete;
+        ChildArtifactCleanup(ChildArtifactCleanup &&) = delete;
+        ChildArtifactCleanup &operator=(ChildArtifactCleanup &&) = delete;
+
+        std::filesystem::path m_image;
+        std::filesystem::path m_marker;
+        std::filesystem::path m_log;
+    };
+} // namespace
+
+TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
+{
+    const std::wstring own = current_exe_path_wide();
+    ASSERT_FALSE(own.empty());
+    const std::filesystem::path own_path{own};
+    const std::wstring basename_wide = own_path.filename().wstring();
+    const std::string basename = to_utf8(basename_wide);
+    ASSERT_GE(basename.size(), static_cast<size_t>(MAX_PATH)) << "the child image lacks the required long basename";
+
+    ASSERT_FALSE(basename_wide.empty());
+    ASSERT_EQ(basename_wide.front(), L'\u65e5');
+    std::wstring mismatch_wide = basename_wide;
+    mismatch_wide.front() = L'\u65e6';
+    const std::string mismatch = to_utf8(mismatch_wide);
+    ASSERT_EQ(mismatch_wide.size(), basename_wide.size());
+    ASSERT_EQ(mismatch.size(), basename.size());
+    ASSERT_NE(mismatch, basename);
+
+    const std::string log_file = to_utf8(child_log_path(own_path).filename().wstring());
+    ASSERT_FALSE(log_file.empty());
+
+    Result<Session> rejected =
+        Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_file, .game_process_name = mismatch});
+    ASSERT_FALSE(rejected.has_value());
+    ASSERT_EQ(rejected.error().code, ErrorCode::ProcessMismatch);
+
+    Result<Session> started =
+        Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_file, .game_process_name = basename});
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+
+    std::ofstream marker_stream(child_execution_marker_path(own_path), std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(marker_stream.is_open()) << "the child failed to create its proof marker";
+    marker_stream << CHILD_EXECUTION_MARKER;
+    marker_stream.close();
+    ASSERT_TRUE(marker_stream) << "the child failed to commit its proof marker";
+}
+
+TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
+{
+    const std::wstring own = current_exe_path_wide();
+    ASSERT_FALSE(own.empty());
+
+    // Place the child image beside the original so it resolves the same fixture DLLs. A hard link avoids a copy of the
+    // large test binary. A file system without hard links uses a copy.
+    const std::filesystem::path directory = std::filesystem::path(own).parent_path();
+    const std::filesystem::path renamed = directory / (unique_long_multibyte_stem() + L".exe");
+    const std::filesystem::path marker = child_execution_marker_path(renamed);
+    const std::filesystem::path child_log = child_log_path(renamed);
+    ChildArtifactCleanup artifacts{renamed, marker, child_log};
+
+    std::error_code cleanup_error;
+    ASSERT_TRUE(artifacts.cleanup(cleanup_error))
+        << "failed to clear prior child artifacts: " << cleanup_error.message();
+
+    std::error_code create_error;
+    std::filesystem::create_hard_link(own, renamed, create_error);
+    if (create_error)
+    {
+        create_error.clear();
+        std::filesystem::copy_file(own, renamed, create_error);
+    }
+    ASSERT_FALSE(create_error) << "failed to create the child image: " << create_error.message();
+
+    std::wstring command = L"\"" + renamed.wstring() +
+                           L"\" --gtest_also_run_disabled_tests"
+                           L" --gtest_filter=SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessW(renamed.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                        nullptr, directory.c_str(), &startup, &process);
+    if (!created)
+    {
+        const DWORD launch_error = GetLastError();
+        FAIL() << "CreateProcessW failed with " << launch_error;
+    }
+
+    const DWORD wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
+    const DWORD wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    BOOL terminate_result = TRUE;
+    DWORD terminate_error = ERROR_SUCCESS;
+    DWORD terminate_wait_result = WAIT_OBJECT_0;
+    if (wait_result != WAIT_OBJECT_0)
+    {
+        terminate_result = TerminateProcess(process.hProcess, 1);
+        if (!terminate_result)
+        {
+            terminate_error = GetLastError();
+        }
+        terminate_wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
+    }
+
+    DWORD exit_code = STILL_ACTIVE;
+    BOOL exit_code_read = FALSE;
+    DWORD exit_code_error = ERROR_SUCCESS;
+    if (wait_result == WAIT_OBJECT_0)
+    {
+        exit_code_read = GetExitCodeProcess(process.hProcess, &exit_code);
+        if (!exit_code_read)
+        {
+            exit_code_error = GetLastError();
+        }
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    if (wait_result != WAIT_OBJECT_0)
+    {
+        std::error_code failure_cleanup_error;
+        EXPECT_TRUE(artifacts.cleanup(failure_cleanup_error))
+            << "failed to remove child artifacts: " << failure_cleanup_error.message();
+    }
+    ASSERT_EQ(wait_result, static_cast<DWORD>(WAIT_OBJECT_0))
+        << "child wait result " << wait_result << ", Win32 error " << wait_error << ", terminate result "
+        << terminate_result << ", terminate error " << terminate_error << ", final wait result "
+        << terminate_wait_result;
+    ASSERT_NE(exit_code_read, FALSE) << "GetExitCodeProcess failed with " << exit_code_error;
+    ASSERT_EQ(exit_code, 0u) << "the child process reported a failed Session proof";
+
+    std::string observed_marker;
+    {
+        std::ifstream marker_stream(marker, std::ios::binary);
+        ASSERT_TRUE(marker_stream.is_open()) << "the child produced no proof marker";
+        observed_marker.assign(std::istreambuf_iterator<char>{marker_stream}, std::istreambuf_iterator<char>{});
+    }
+    ASSERT_EQ(observed_marker, CHILD_EXECUTION_MARKER);
+
+    cleanup_error.clear();
+    ASSERT_TRUE(artifacts.cleanup(cleanup_error)) << "failed to remove child artifacts: " << cleanup_error.message();
 }
 
 TEST(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
