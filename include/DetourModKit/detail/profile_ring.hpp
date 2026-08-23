@@ -101,6 +101,12 @@ namespace DetourModKit::detail
         std::uint32_t duration_us{0};
         /// Win32 thread ID of the recording thread.
         std::uint32_t thread_id{0};
+        /**
+         * @brief Byte count of @ref name, published with it.
+         * @note The extent travels with the pointer, so the exporter never scans for a terminator. A source array
+         *       with no null still exports exactly its own bytes.
+         */
+        std::uint32_t name_length{0};
 
         ProfileSample() noexcept = default;
         ProfileSample(const ProfileSample &) = delete;
@@ -266,6 +272,7 @@ namespace DetourModKit::detail
         void publish(
             const Claim &claim,
             const char *name,
+            std::uint32_t name_length,
             std::int64_t start_ticks,
             std::uint32_t duration_us,
             std::uint32_t thread_id
@@ -281,6 +288,7 @@ namespace DetourModKit::detail
             // concurrently. Relaxed is sufficient: the release store on the ticket word below is what orders these
             // writes for a reader that accepts the slot.
             std::atomic_ref<const char *>(slot.name).store(name, std::memory_order_relaxed);
+            std::atomic_ref<std::uint32_t>(slot.name_length).store(name_length, std::memory_order_relaxed);
             std::atomic_ref<std::int64_t>(slot.start_ticks).store(start_ticks, std::memory_order_relaxed);
             std::atomic_ref<std::uint32_t>(slot.duration_us).store(duration_us, std::memory_order_relaxed);
             std::atomic_ref<std::uint32_t>(slot.thread_id).store(thread_id, std::memory_order_relaxed);
@@ -290,7 +298,7 @@ namespace DetourModKit::detail
 
         /**
          * @brief Invokes @p visitor for each committed sample in ring traversal order.
-         * @param visitor Called as `visitor(name, start_ticks, duration_us, thread_id)`.
+         * @param visitor Called as `visitor(name, name_length, start_ticks, duration_us, thread_id)`.
          */
         template <typename Visitor> void visit_committed(Visitor &&visitor) const
         {
@@ -312,6 +320,8 @@ namespace DetourModKit::detail
                 {
                     continue;
                 }
+                const auto name_length =
+                    std::atomic_ref<std::uint32_t>(slot.name_length).load(std::memory_order_relaxed);
                 const auto start_ticks =
                     std::atomic_ref<std::int64_t>(slot.start_ticks).load(std::memory_order_relaxed);
                 const auto duration_us =
@@ -323,7 +333,7 @@ namespace DetourModKit::detail
                 {
                     continue;
                 }
-                visitor(name, start_ticks, duration_us, thread_id);
+                visitor(name, name_length, start_ticks, duration_us, thread_id);
             }
         }
 
@@ -336,6 +346,7 @@ namespace DetourModKit::detail
             {
                 ProfileSample &slot = m_slots[i];
                 std::atomic_ref<const char *>(slot.name).store(nullptr, std::memory_order_relaxed);
+                std::atomic_ref<std::uint32_t>(slot.name_length).store(0, std::memory_order_relaxed);
                 std::atomic_ref<std::int64_t>(slot.start_ticks).store(0, std::memory_order_relaxed);
                 std::atomic_ref<std::uint32_t>(slot.duration_us).store(0, std::memory_order_relaxed);
                 std::atomic_ref<std::uint32_t>(slot.thread_id).store(0, std::memory_order_relaxed);

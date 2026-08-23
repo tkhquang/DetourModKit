@@ -94,6 +94,8 @@ Preserve truthful failure precedence: restoration failure outranks a partial wri
 
 `VirtualProtect` over a multi-region span reports only the first page's prior protection. A `write_bytes` escalation or a `ProtectGuard` that straddles a `.rdata` / `.text` boundary then restores the executable region to `PAGE_READONLY`. The region access-violates under DEP on its next execution. Even a two-byte write can straddle two regions. Change and restore the span one VirtualQuery region at a time, each with its own captured prior protection. Fail closed if it crosses more distinct regions than the tracker holds. `detail::protect_across_regions` / `restore_across_regions` implement this, used by both `patch_bytes` and `ProtectGuard`.
 
+A page entry retires as soon as it holds no transaction, even when the OS refused its final restore. A retained entry gives its obsolete baseline to the next guard over that page. `MemoryTest.MemoryProtectGuardProof_FailedRestoreDoesNotPoisonDifferentLaterBaseline` pins this rule.
+
 ### [B-19]
 
 `VirtualQuery` describes only the region that contains its argument. An `is_readable` / `is_writable` over a span that crosses a re-protected interior page otherwise fails closed at the first region's end. It does so even when every byte is committed and permitted. That page shape is one reservation split into several `MEMORY_BASIC_INFORMATION` regions. That false NotReadable makes a caller skip a valid read.

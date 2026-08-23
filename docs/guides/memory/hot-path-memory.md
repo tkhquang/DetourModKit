@@ -116,11 +116,12 @@ Writes follow the same rule as reads. A pointer the hook was handed is live by d
 
 There are two guarded write families, split by what happens when the target is not already writable.
 
-`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target's first byte is not writable (nothing is written). Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field). It stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of a silent unprotect and corruption of that page. The copy is not atomic across a writability seam. A span that straddles a writable page and an adjacent unwritable one writes the writable prefix before it faults and returns `ErrorCode::WriteMayBePartial`, so that target is indeterminate, not untouched. Size a per-frame store so it cannot straddle a protection boundary.
+`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target's first byte is not writable (nothing is written). Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field). It stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of a silent unprotect and corruption of that page. The copy is not atomic across a writability seam. A span that straddles a writable page and an adjacent unwritable one faults and returns `ErrorCode::WriteMayBePartial`, whose changed prefix is indeterminate. Size a per-frame store so it cannot straddle a protection boundary.
 
 ```cpp
 namespace mem = DetourModKit::memory;
 using DetourModKit::Address;
+using DetourModKit::ErrorCode;
 
 // Write a camera transform every frame through a resolved chain. Fault-guarded: a stale chain fails closed
 // instead of faulting the host, and a slot that is not writable (the chain drifted onto a protected page) is
@@ -128,12 +129,14 @@ using DetourModKit::Address;
 const Matrix4x4 next = compute_camera(...);
 if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 {
-    if (!mem::write_in_place<Matrix4x4>(*slot, next))
+    if (const auto written = mem::write_in_place<Matrix4x4>(*slot, next); !written)
     {
-        // Faulted or not writable this frame -- skip it, do not crash.
+        // WriteFaulted changed nothing, so skip this frame. WriteMayBePartial leaves the transform
+        // indeterminate, so stop writing through this slot and re-resolve the chain first.
+        camera_slot_usable = written.error().code != ErrorCode::WriteMayBePartial;
     }
 }
-// else: chain went stale this frame -- skip the write.
+// else: chain went stale this frame, so skip the write.
 ```
 
 `memory::write<T>` / `memory::write_bytes` are the escalating data write. They first try the same no-reprotect copy, then fall back to a flip of protection (write, restore) when that fast write faults because the page is read-only or executable. Reach for them when data-write escalation is the intent, not for a per-frame write where a non-writable target signals a bug you want surfaced rather than papered over. They do not provide the instruction-cache maintenance executable patches require. Use `memory::patch_code` for code, because it checks a flush on every path that can modify code, including an already-writable target or a partially changed prefix.

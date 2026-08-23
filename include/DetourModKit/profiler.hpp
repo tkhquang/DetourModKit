@@ -23,17 +23,14 @@
 #define DMK_CONCAT_IMPL(a, b) a##b
 #define DMK_CONCAT(a, b) DMK_CONCAT_IMPL(a, b)
 
-// Scoped timing measurement. The `name` argument must refer to storage that outlives the process, because the pointer
-// is stored unchanged in the ring buffer and read asynchronously by export methods. String literals satisfy this
-// automatically. See ScopedProfile for the array-reference lifetime contract.
+// Scoped timer. ScopedProfile owns the label lifetime and extent contract for `name`.
 #define DMK_PROFILE_SCOPE(name)                                                                                        \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__)                                            \
     {                                                                                                                  \
         name                                                                                                           \
     }
 
-// Scoped timing using the enclosing function name. `__func__` is a static-storage array per [dcl.fct.def.general]/8, so
-// it binds to the array-reference constructor and the stored pointer remains valid for the lifetime of the process.
+// Scoped timer for the current function. `__func__` has static storage per [dcl.fct.def.general]/8.
 #define DMK_PROFILE_FUNCTION()                                                                                         \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__)                                       \
     {                                                                                                                  \
@@ -87,17 +84,45 @@ namespace DetourModKit
         [[nodiscard]] static Profiler &get_instance() noexcept;
 
         /**
-         * @brief Records a completed timing sample.
-         * @param name Non-owning pointer that must outlive the process: the ring stores it as-is and export reads it
-         *             asynchronously. A pointer whose storage is released before process exit is undefined behavior.
-         *             Safe sources: string literals, namespace-scope `static constexpr char` arrays, and `__func__`.
+         * @brief Records a completed profile sample whose label is null-terminated.
+         * @param name Pointer to storage that must outlive the process.
+         *             The ring stores it as-is, and export reads it later. A pointer whose storage is released before
+         *             process exit is undefined behavior. A non-null @p name must be null-terminated because this
+         *             overload measures the label here. A null @p name records a sample that export skips. Safe
+         *             sources include string literals, namespace-scope `static constexpr char` arrays with a
+         *             terminator, and `__func__`.
          * @param start_ticks QPC tick count at scope entry.
-         * @param end_ticks QPC tick count at scope exit. Any ordering and any magnitude is accepted: a non-increasing
-         *                  interval records a zero duration and a long one saturates, neither overflows.
-         * @param thread_id Win32 thread ID of the recording thread.
+         * @param end_ticks QPC tick count at scope exit.
+         *                  Any order and magnitude is accepted. An interval with `end_ticks <= start_ticks` records
+         *                  zero. A long interval saturates. Neither case overflows.
+         * @param thread_id Win32 thread ID for the source thread.
          * @note Lock-free. Safe to call from any thread at any time.
          */
         void record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept;
+
+        /**
+         * @brief Records a completed profile sample whose label extent the caller supplies.
+         * @param name Pointer to label storage.
+         *             For a non-null pointer, at least @p name_length bytes must remain readable until process exit.
+         *             No terminator is required. A null pointer records a sample that export skips.
+         * @param name_length Label byte count.
+         *                    Export reads exactly this many bytes. A value above `UINT32_MAX` saturates.
+         * @param start_ticks QPC tick count at scope entry.
+         * @param end_ticks QPC tick count at scope exit.
+         *                  The null-terminated overload defines its range behavior.
+         * @param thread_id Win32 thread ID for the source thread.
+         * @details This is the bounded route.
+         *          @ref ScopedProfile uses it for every array label. A `static constexpr char label[3]{'f','p','s'}`
+         *          therefore exports as `fps`. Publication stores the pointer and extent together without allocation.
+         * @note Lock-free. Safe to call from any thread at any time.
+         */
+        void record(
+            const char *name,
+            size_t name_length,
+            int64_t start_ticks,
+            int64_t end_ticks,
+            uint32_t thread_id
+        ) noexcept;
 
         /**
          * @brief Resets the profiler, discarding all recorded samples and counters.
@@ -153,18 +178,21 @@ namespace DetourModKit
     public:
         /**
          * @brief Begins a profiling scope.
-         * @tparam N Deduced length of the bound array (including the trailing null terminator when the source is a
-         *           string literal).
+         * @tparam N Deduced extent of the bound array.
+         *           For a string literal, this includes the final null.
          * @param name Reference to a `const char` array. The array-reference parameter rejects decayed pointer sources
          *        (`std::string::c_str()`, `const char *` function arguments, `char *` buffers) at compile time.
          *        Reference binding still accepts an array with automatic storage, which dangles once its scope exits,
          *        so this does NOT prove static storage; callers must ensure the bound array outlives the process. Safe
          *        sources: string literals, namespace-scope `static constexpr char` arrays, and `__func__`
          *        (static-storage per [dcl.fct.def.general]/8).
+         * @details The label extent is `N` less one final null.
+         *          The bounded @ref Profiler::record overload receives that extent and the pointer. An array with no
+         *          terminator exports its own bytes. For a null-padded array, only the final null is removed.
          */
         template <size_t N>
         explicit ScopedProfile(const char (&name)[N]) noexcept
-            : ScopedProfile(static_cast<const char *>(name), LiteralTag{})
+            : ScopedProfile(static_cast<const char *>(name), name[N - 1] == '\0' ? N - 1 : N, LiteralTag{})
         {
         }
         ~ScopedProfile() noexcept;
@@ -179,9 +207,10 @@ namespace DetourModKit
         {
         };
 
-        ScopedProfile(const char *name, LiteralTag) noexcept;
+        ScopedProfile(const char *name, size_t name_length, LiteralTag) noexcept;
 
         const char *m_name;
+        size_t m_name_length;
         int64_t m_start_ticks;
         uint32_t m_thread_id;
     };

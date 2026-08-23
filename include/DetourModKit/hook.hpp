@@ -377,8 +377,9 @@ namespace DetourModKit
             /**
              * @brief Calls the original function through the trampoline under DMK's per-hook guard (inline hooks only).
              * @tparam Ret The original's return type (defaults to void).
-             * @tparam Args The original's parameter types, taken BY VALUE so the reconstructed pointer type is the
-             *         real by-value C ABI.
+             * @tparam Args The exact parameter types for the original by-value C ABI.
+             *         A movable argument moves into the dispatch. If its ABI type cannot construct from an rvalue,
+             *         dispatch preserves the prior lvalue copy path.
              * @return The original's return value, or a value-initialized Ret when the hook is inactive / not inline.
              * @details Pins the refcounted call gate before taking its recursive mutex and holds both through the
              *          invocation. Teardown publishes a null trampoline under the same mutex before destroying any
@@ -412,7 +413,7 @@ namespace DetourModKit
                         return;
                     }
                 }
-                return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
+                return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(forward_call_argument<Args>(args)...);
             }
 
             /**
@@ -436,12 +437,14 @@ namespace DetourModKit
                 }
                 if constexpr (std::is_void_v<Ret>)
                 {
-                    reinterpret_cast<void (*)(Args...)>(dispatch.trampoline)(args...);
+                    reinterpret_cast<void (*)(Args...)>(dispatch.trampoline)(forward_call_argument<Args>(args)...);
                     return {};
                 }
                 else
                 {
-                    return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
+                    return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(
+                        forward_call_argument<Args>(args)...
+                    );
                 }
             }
 
@@ -526,6 +529,20 @@ namespace DetourModKit
 
         private:
             struct Impl;
+
+            template <typename Arg>
+            [[nodiscard]] static decltype(auto) forward_call_argument(std::remove_reference_t<Arg> &arg) noexcept
+            {
+                if constexpr (!std::is_reference_v<Arg> && !std::is_move_constructible_v<Arg>)
+                {
+                    return (arg);
+                }
+                else
+                {
+                    return std::forward<Arg>(arg);
+                }
+            }
+
             /**
              * @brief Refcounted call guard defined in src/internal/hook_backend.hpp.
              * @details A late @ref call pins it before locking, so concurrent teardown cannot free its mutex.
@@ -1045,7 +1062,8 @@ namespace DetourModKit
              * @brief Restores the original vptr on one applied object.
              * @param object The object to restore.
              * @return Success, or LoaderLockActive for a loader-lock caller / InvalidObject for a null @p object /
-             *         InvalidHookState for a disengaged handle.
+             *         InvalidHookState for a disengaged handle / UnknownError when the exclusive object gate could not
+             *         be acquired.
              * @details Success does not assert that @p object was applied here, nor that a restore happened: an
              *          untracked object is a harmless no-op, and a tracked one releases its binding only once its word
              *          is observed at the recorded original. A writable object on this clone is swapped back to that
@@ -1073,9 +1091,13 @@ namespace DetourModKit
              * @return Success, or an Error: LoaderLockActive (loader-lock caller), InvalidHookState (disengaged
              * handle), InvalidArg (null @p detour or an out-of-range @p index), MethodAlreadyHooked (occupied index),
              * BackendFailed, or OutOfMemory.
-             * @note Setup/control-plane only: mutates the cloned vtable and the per-index hook table under the
-             * exclusive write lock. Do not call it from a hooked method's detour while another thread reads the same
-             * handle; install all method hooks during setup.
+             * @warning The detour MUST NOT THROW. The slot holds it directly.
+             *          No DMK frame can contain an exception. An exception crosses a caller that expects none and
+             *          terminates the host. The type cannot enforce this rule because the slot accepts an ordinary
+             *          function pointer. `[B-84]` owns the rule.
+             * @note Setup/control-plane only: mutates the clone under the exclusive write lock.
+             *       Do not call it from a hooked method's detour while another thread reads the same handle. Install
+             *       all method hooks during setup.
              */
             template <detail::FunctionPointer Fn> [[nodiscard]] Result<void> hook_method(std::size_t index, Fn detour)
             {
@@ -1120,6 +1142,10 @@ namespace DetourModKit
              *       @ref VmtOptions::fail_if_already_hooked keeps recognising it.
              * @note Setup/control-plane only: transfers the clone to process-lifetime retention; do not call from a
              *       hook or input callback.
+             * @warning Applied objects continue to use the retained clone.
+             *          Each method detour and its callees must remain mapped until process exit. DMK pins its own
+             *          module, not the detour provider. A detour in a Logic DLL requires that DLL to stay loaded. If
+             *          code unmaps it, the clone slot points at unmapped code.
              */
             void release() noexcept;
 

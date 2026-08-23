@@ -334,8 +334,9 @@ namespace DetourModKit
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
          *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `OverlappingRanges` (@p source intersects the target
          *         range; nothing is written), `ProtectionChangeFailed`, `WriteFaulted` (nothing was written),
-         *         `WriteMayBePartial` (a forward-copy prefix was written before a fault), `InstructionFlushFailed`, or
-         *         `ProtectionRestoreFailed`.
+         *         `WriteMayBePartial` (the changed prefix is indeterminate, as @ref ErrorCode::WriteMayBePartial
+         *         defines),
+         *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
          * @details The escalating DATA write. @ref patch_code is the route for bytes that are executed. It first
          *          attempts a guarded write that changes NO page protection, so a target that is already writable
          *          costs no `VirtualProtect` and no instruction-cache flush. Only a fault on that attempt takes the
@@ -384,17 +385,18 @@ namespace DetourModKit
          *               a null @p address fails with `NullTargetAddress` even for an empty span.
          * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` /
          *         `OverlappingRanges` (@p source intersects the target range) for a rejected argument,
-         *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a forward-copy
-         *         prefix was written before a fault), `ProtectionRestoreFailed`, or `InstructionFlushFailed` (the bytes
-         *         landed but the flush failed).
+         *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (the changed
+         *         prefix is indeterminate, as @ref ErrorCode::WriteMayBePartial defines), `ProtectionRestoreFailed`, or
+         *         `InstructionFlushFailed` (the bytes landed but the flush failed).
          * @details Use this route whenever the target bytes are executed as code. Every path that may modify the target
          *          checks an instruction-cache flush, including already-writable code and a partial guarded prefix. A
          *          covering flush for a partial prefix uses the full requested range before protection-changing
          *          fallback setup. Read-only targets are made writable without adding execute to data pages, then
          *          written, flushed, restored, and invalidated in the protection cache. Use @ref write_bytes or
          *          @ref write_in_place for data.
-         * @warning The write is not atomic. Once an attempt changes a prefix, a covering flush is attempted.
-         *          A later retry that writes nothing cannot downgrade `WriteMayBePartial` to `WriteFaulted`.
+         * @warning The write is not atomic.
+         *          A copy that can have changed a prefix receives a full-range flush. A later retry that writes nothing
+         *          cannot downgrade `WriteMayBePartial` to `WriteFaulted`.
          *          Restoration failure outranks partial-write status, which outranks a flush-only failure.
          * @note Callback-safe on the fast path; the protection-changing slow path is setup/control-plane work.
          */
@@ -408,13 +410,13 @@ namespace DetourModKit
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
          *         (over @ref MAX_WRITE_SIZE) / `OverlappingRanges` (@p source intersects the target range) for a
          *         rejected argument; `ErrorCode::WriteFaulted` when the target's first byte was not writable and
-         *         nothing was written; or `ErrorCode::WriteMayBePartial` when a writable prefix was written before a
-         *         fault on an unwritable byte further in the span.
+         *         nothing was written; or `ErrorCode::WriteMayBePartial` when a byte further in the span faulted after
+         *         the copy reached a writable page.
          * @warning Not atomic across a writability seam. When @p source straddles a writable page and an adjacent
-         *          unwritable one, the forward copy writes the writable prefix and then faults, so the result is
-         *          `ErrorCode::WriteMayBePartial` and the prefix bytes are already modified. Size a per-frame store so
-         *          it cannot straddle a protection boundary, or treat a `WriteMayBePartial` target as indeterminate; a
-         *          `WriteFaulted` return, by contrast, guarantees nothing was written.
+         *          unwritable one, the copy faults and returns `ErrorCode::WriteMayBePartial`, whose changed prefix is
+         *          indeterminate and can be empty. Size a per-frame store so it cannot straddle a protection boundary,
+         *          or treat a `WriteMayBePartial` target as indeterminate; a `WriteFaulted` return, by contrast,
+         *          guarantees that no byte changed.
          * @details The counterpart to @ref write_bytes for memory the target already keeps writable. It does NOT
          *          escalate: a read-only, executable, or no-access target fails closed with `WriteFaulted` instead of
          *          an unprotect and a write. Use it to keep a per-frame store off the `VirtualProtect` path, or to
@@ -440,9 +442,9 @@ namespace DetourModKit
          *       byte-span sink, is a deliberate compile error rather than a silent scalar bit-copy. The typed form only
          *       ever writes a genuine value.
          * @note Callback-safe (see @ref write_in_place).
-         * @warning Not atomic across a writability seam. A straddling store writes the writable prefix and then faults,
-         *          so it returns `ErrorCode::WriteMayBePartial` with the prefix already modified (see
-         *          @ref write_in_place(Address, std::span<const std::byte>)).
+         * @warning Not atomic across a writability seam.
+         *          A store across that seam returns `ErrorCode::WriteMayBePartial`. Its changed prefix is indeterminate
+         *          (see @ref ErrorCode::WriteMayBePartial).
          */
         template <class T>
             requires std::is_trivially_copyable_v<T> && (!detail::is_non_owning_view_v<std::remove_cvref_t<T>>)
@@ -566,7 +568,13 @@ namespace DetourModKit
             /// True while the guard is armed (it will restore on destruction); false after a move or @ref release.
             [[nodiscard]] explicit operator bool() const noexcept;
 
-            /// Disarms the guard so the destructor leaves the changed protection in place rather than restoring it.
+            /**
+             * @brief Disarms the guard. Its destructor then leaves the changed protection in place.
+             * @details The page entry leaves the ledger once no other guard holds that page, so the next guard over
+             *          it captures the current protection. While another guard still holds the page, this guard's
+             *          applied protection becomes that guard's restore baseline.
+             * @note Setup/control-plane only: ledger removal takes the protection ledger lock.
+             */
             void release() noexcept;
 
             /**

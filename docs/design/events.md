@@ -21,6 +21,7 @@ The profiler records into a lock-free ring buffer (`detail::ProfileRing`):
 - The ticket strictly increases per slot, so the cold export path is exact. The export loads the word, copies the fields, re-loads behind an acquire fence, and drops the sample if the word changed or is odd.
 - Ticks convert to microseconds through a saturating quotient/remainder split. The split neither overflows nor takes an undefined signed difference.
 - `DMK_PROFILE_SCOPE(name)` binds `name` to a `const char (&)[N]` reference. The reference rejects decayed pointer sources at compile time, and `profiler.hpp` states the array-lifetime contract.
+- The slot carries the label pointer and its byte extent. `ScopedProfile` removes one final null from `N` and calls the bounded `Profiler::record` overload. Export never scans a label for a terminator. `ProfilerRecordTest.NonTerminatedStaticArrayExportsExactExtent` pins that. The pointer-only overload measures the label and therefore requires a terminator.
 
 Hot-path mechanism: One sample costs one `fetch_add`, one CAS, and the field writes.
 

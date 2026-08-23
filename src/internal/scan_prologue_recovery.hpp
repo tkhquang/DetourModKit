@@ -29,8 +29,9 @@ namespace DetourModKit
          * @brief The result of a prologue-recovery pass over a candidate ladder.
          * @details @ref hit holds the recovered Hit when a shape uniquely recovered an executable target and that site
          *          passed the request's identity gate (@ref scan::FallbackPolicy). @ref not_applicable stays true until
-         *          some Direct candidate yields a usable rebuilt pattern, so the resolver can report
-         *          PrologueFallbackNotApplicable only when a Direct row existed but its literal tail was too short.
+         *          some Direct candidate yields a usable rebuilt pattern. A candidate yields none when it carries
+         *          bounded jumps, is shorter than the shape's jump patch, has an undecodable initial span, or leaves a
+         *          literal tail below the floor. The resolver reports PrologueFallbackNotApplicable for any of those.
          *          @ref had_direct is true once any Direct candidate was a real rebuild target. @ref identity_rejected
          *          is set when RequireIdentity refused a structurally-recovered site, so the resolver reports
          *          PrologueIdentityRejected rather than a plain miss. @ref identity_warned is set when a WarnOnly

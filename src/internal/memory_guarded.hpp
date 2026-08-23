@@ -142,9 +142,12 @@ namespace DetourModKit
          * @param address Destination address. Below memory::USERSPACE_PTR_MIN, or a wrapping end, is rejected.
          * @param source Source buffer; null is rejected.
          * @param bytes Byte count; zero is a successful no-op.
-         * @return Whether all bytes landed, the first byte faulted, or a later byte faulted after progress.
-         * @details The forward-copy primitive exposes whether a fault occurred at byte zero or after progress, making
-         *          `NotWritten` truthful without a racy permission query. This is memory::write_bytes' no-protect path.
+         * @return Whether all bytes landed, the first byte faulted (`NotWritten`), or the fault address lay past the
+         *         first byte (`MayBePartial`).
+         * @details The primitive exposes whether a fault occurred at byte zero or past it.
+         *          This keeps `NotWritten` truthful without a racy permission query. `MayBePartial` bounds the damage
+         *          to the requested span, but it does not prove that any byte changed. A fixed-width store faults as
+         *          one instruction. This is memory::write_bytes' no-protect path.
          */
         [[nodiscard]] GuardedWriteStatus
         guarded_write_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept;
@@ -272,9 +275,9 @@ namespace DetourModKit
             /// The first target byte faulted after protection changed, so nothing was written.
             WriteFaulted,
             /**
-             * @brief The guarded copy faulted after writing a prefix.
-             * @details Required cache maintenance was attempted and protection was restored. The prefix may already
-             *          contain changed bytes, so the failure is reported without terminating the host.
+             * @brief The guarded copy faulted past the first target byte.
+             * @details Required cache maintenance was attempted and protection was restored. The changed prefix has an
+             *          unknown length and can be empty. See @ref ErrorCode::WriteMayBePartial for the caller contract.
              */
             WriteMayBePartial,
             /// Bytes written and protection restored, but an executable region's instruction-cache flush failed.
