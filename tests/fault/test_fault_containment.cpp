@@ -211,7 +211,11 @@ TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
     const scan::Candidate ladder[] = {
         scan::Candidate::rip_relative("boundary-tail", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
     const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder, .label = "boundary-tail", .scope = pages.range(), .pages = scan::Pages::Executable});
+        .ladder = ladder,
+        .label = "boundary-tail",
+        .scope = pages.range(),
+        .pages = scan::Pages::Executable,
+    });
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::IncompleteScan);

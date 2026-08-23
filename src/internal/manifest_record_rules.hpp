@@ -70,7 +70,10 @@ namespace DetourModKit::manifest
             }
             index = (index * 10U) + digit;
         }
-        return RungSectionName{.parent = name.substr(0, pos), .index = index};
+        return RungSectionName{
+            .parent = name.substr(0, pos),
+            .index = index,
+        };
     }
 
     // A record label becomes its `[sig.<label>]` section name. Reject a label that cannot round-trip. Reject INI

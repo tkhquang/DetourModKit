@@ -92,7 +92,10 @@ namespace
         // The backend registers its trap handler lazily, on the first hook that opens a protection window. Without a
         // live hook there is no handler to prove anything about.
         auto created = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = "trap-closed-window", .target = DetourModKit::Address{&hook_target}},
+            DetourModKit::hook::MidRequest{
+                .name = "trap-closed-window",
+                .target = DetourModKit::Address{&hook_target},
+            },
             &mid_detour);
         if (!created)
         {
@@ -151,7 +154,10 @@ namespace
     int run_late_static()
     {
         auto created = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = "trap-late-static", .target = DetourModKit::Address{&hook_target}},
+            DetourModKit::hook::MidRequest{
+                .name = "trap-late-static",
+                .target = DetourModKit::Address{&hook_target},
+            },
             &mid_detour);
         if (!created || !created->enable() || !created->disable())
         {

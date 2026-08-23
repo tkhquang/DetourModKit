@@ -251,7 +251,11 @@ namespace DetourModKit::detail
                 m_dropped.fetch_add(1, std::memory_order_relaxed);
                 return Claim{};
             }
-            return Claim{.index = index, .ticket = position, .owned = true};
+            return Claim{
+                .index = index,
+                .ticket = position,
+                .owned = true,
+            };
         }
 
         /// Writes the payload into a claimed slot and commits it. A refused claim publishes nothing.

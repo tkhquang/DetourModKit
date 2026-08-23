@@ -120,10 +120,12 @@ namespace DetourModKit
                 digest = mix(digest, static_cast<std::uint64_t>(section.Characteristics));
             }
 
-            return ImageIdentityFields{.timestamp = nt->FileHeader.TimeDateStamp,
-                                       .size_of_image = image_size,
-                                       .section_digest = digest,
-                                       .valid = true};
+            return ImageIdentityFields{
+                .timestamp = nt->FileHeader.TimeDateStamp,
+                .size_of_image = image_size,
+                .section_digest = digest,
+                .valid = true,
+            };
         }
 
         std::uint64_t image_generation_token(std::uintptr_t module_base) noexcept

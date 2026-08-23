@@ -812,7 +812,11 @@ TEST(ScanExportTest, DeclaredImageExtentBoundsEveryExportRead)
     image.put(SyntheticExportImage::NT_RVA, nt);
 
     dmk::detail::ExportResolution provenance{
-        .module_base = 1, .function_index = 1, .function_rva = 1, .target = dmk::Address{1}};
+        .module_base = 1,
+        .function_index = 1,
+        .function_rva = 1,
+        .target = dmk::Address{1},
+    };
     const dmk::Result<dmk::Address> target_result =
         dmk::detail::resolve_export_with_provenance("fixture_export", image.range(), provenance);
     ASSERT_FALSE(target_result.has_value());
@@ -858,7 +862,11 @@ TEST(ScanExportTest, MalformedNameAfterAMatchFailsClosed)
               static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES));
 
     dmk::detail::ExportResolution provenance{
-        .module_base = 1, .function_index = 1, .function_rva = 1, .target = dmk::Address{1}};
+        .module_base = 1,
+        .function_index = 1,
+        .function_rva = 1,
+        .target = dmk::Address{1},
+    };
     const dmk::Result<dmk::Address> result =
         dmk::detail::resolve_export_with_provenance("fixture_export", image.range(), provenance);
     ASSERT_FALSE(result.has_value());
@@ -1149,10 +1157,12 @@ TEST(AnchorTest, ExportProvenanceNamesTheSlotAndTheTarget)
     // retargets AddressOfFunctions[i] between them leaves one slot with two RVAs, and comparing only the resolved
     // target would call that pair independent. Within one consistent snapshot the two rules agree, so this is the only
     // shape that separates them.
-    const dmk::detail::ExportResolution rewritten{.module_base = syn_one.module_base,
-                                                  .function_index = syn_one.function_index,
-                                                  .function_rva = syn_one.function_rva + 0x10,
-                                                  .target = dmk::Address{syn_one.target.raw() + 0x10}};
+    const dmk::detail::ExportResolution rewritten{
+        .module_base = syn_one.module_base,
+        .function_index = syn_one.function_index,
+        .function_rva = syn_one.function_rva + 0x10,
+        .target = dmk::Address{syn_one.target.raw() + 0x10},
+    };
     EXPECT_NE(rewritten.function_rva, syn_one.function_rva);
     EXPECT_TRUE(dmk::detail::same_export_site(syn_one, rewritten));
 
@@ -1194,7 +1204,12 @@ TEST(AnchorTest, ExportNameCountsInResolvableDenominator)
     // A resolved ExportName is ordinary resolvable evidence: it counts toward the resolved tally and, unlike the
     // unsupported CallArgHome kind, stays in the gate's resolvable denominator.
     const an::ResolvedAnchor report[] = {
-        {.label = "export", .kind = an::AnchorKind::ExportName, .status = an::AnchorStatus::Resolved, .value = 0x1000},
+        {
+            .label = "export",
+            .kind = an::AnchorKind::ExportName,
+            .status = an::AnchorStatus::Resolved,
+            .value = 0x1000,
+        },
     };
     const an::AnchorQuality quality = an::assess_quality(report);
     EXPECT_EQ(quality.total, 1U);
@@ -3765,7 +3780,12 @@ namespace
     // anchors; only kind and status feed the quality summary the gate reads.
     [[nodiscard]] an::ResolvedAnchor ra(an::AnchorKind kind, an::AnchorStatus status)
     {
-        return an::ResolvedAnchor{.label = "t", .kind = kind, .status = status, .value = 0};
+        return an::ResolvedAnchor{
+            .label = "t",
+            .kind = kind,
+            .status = status,
+            .value = 0,
+        };
     }
 } // namespace
 
@@ -3803,9 +3823,17 @@ TEST(AnchorGateTest, PartialResolveIsGatedByRatio)
                                                    ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
 
     // 1/3 < 0.5 -> Fail.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.5}), an::GateVerdict::Fail);
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.5,
+                                }),
+              an::GateVerdict::Fail);
     // 1/3 >= 0.3 -> clears the ratio; no failure and no manual, so Pass.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3}), an::GateVerdict::Pass);
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.3,
+                                }),
+              an::GateVerdict::Pass);
 }
 
 TEST(AnchorGateTest, UnsupportedKindExcludedFromDenominator)
@@ -3825,7 +3853,11 @@ TEST(AnchorGateTest, ResolvedManualDowngradesToDegraded)
                                                    ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved)};
     EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Degraded);
     // ...but a policy that opts out of the manual downgrade treats it as a plain Pass.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.manual_at_risk_degrades = false}), an::GateVerdict::Pass);
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .manual_at_risk_degrades = false,
+                                }),
+              an::GateVerdict::Pass);
 }
 
 TEST(AnchorGateTest, FailedManualStillCountsAtRisk)
@@ -3836,11 +3868,19 @@ TEST(AnchorGateTest, FailedManualStillCountsAtRisk)
                                                    ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
                                                    ra(an::AnchorKind::Manual, an::AnchorStatus::Failed)};
     EXPECT_EQ(an::assess_quality(report).manual_at_risk, 1u);
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.5, .max_failed = 1}),
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.5,
+                                    .max_failed = 1,
+                                }),
               an::GateVerdict::Degraded);
     // Opting out of the manual downgrade restores the tolerated-failure Pass.
-    EXPECT_EQ(an::evaluate_gate(
-                  report, an::GatePolicy{.min_resolved_ratio = 0.5, .max_failed = 1, .manual_at_risk_degrades = false}),
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.5,
+                                    .max_failed = 1,
+                                    .manual_at_risk_degrades = false,
+                                }),
               an::GateVerdict::Pass);
 }
 
@@ -3865,10 +3905,18 @@ TEST(AnchorGateTest, MaxFailedToleratesConfiguredFailures)
     const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
                                                    ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed),
                                                    ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed)};
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3, .max_failed = 2}),
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.3,
+                                    .max_failed = 2,
+                                }),
               an::GateVerdict::Pass);
     // One below the cap still fails.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3, .max_failed = 1}),
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 0.3,
+                                    .max_failed = 1,
+                                }),
               an::GateVerdict::Fail);
 }
 
@@ -3877,11 +3925,21 @@ TEST(AnchorGateTest, OutOfRangeRatioIsClamped)
     const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
                                                    ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
     // A ratio above 1.0 clamps to 1.0 (still requires every resolvable anchor): 1/2 -> Fail.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 5.0}), an::GateVerdict::Fail);
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = 5.0,
+                                }),
+              an::GateVerdict::Fail);
     // A negative ratio clamps to 0.0 (any resolved fraction clears it): Pass.
-    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = -1.0}), an::GateVerdict::Pass);
+    EXPECT_EQ(an::evaluate_gate(report,
+                                an::GatePolicy{
+                                    .min_resolved_ratio = -1.0,
+                                }),
+              an::GateVerdict::Pass);
     // NaN is treated as the strict default, not as a threshold that silently passes every report.
-    const an::GatePolicy nan_policy{.min_resolved_ratio = std::numeric_limits<double>::quiet_NaN()};
+    const an::GatePolicy nan_policy{
+        .min_resolved_ratio = std::numeric_limits<double>::quiet_NaN(),
+    };
     EXPECT_EQ(an::evaluate_gate(report, nan_policy), an::GateVerdict::Fail);
 }
 
@@ -3890,13 +3948,19 @@ TEST(AnchorGateTest, SpanOverloadMatchesQualityOverload)
     const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
                                                    ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved),
                                                    ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)};
-    const an::GatePolicy policy{.min_resolved_ratio = 0.5, .max_failed = 1};
+    const an::GatePolicy policy{
+        .min_resolved_ratio = 0.5,
+        .max_failed = 1,
+    };
     EXPECT_EQ(an::evaluate_gate(report, policy), an::evaluate_gate(an::assess_quality(report), policy));
 }
 
 TEST(AnchorGateTest, InconsistentQualitySummaryFailsClosed)
 {
-    const an::AnchorQuality quality{.total = 1, .resolved = 2};
+    const an::AnchorQuality quality{
+        .total = 1,
+        .resolved = 2,
+    };
     EXPECT_EQ(an::evaluate_gate(quality), an::GateVerdict::Fail);
 }
 
@@ -4043,8 +4107,16 @@ TEST(AnchorTrustFingerprintTest, DefinitionFingerprintIsScopeFreeButTrustFingerp
     a.kind = an::AnchorKind::Manual;
     a.manual_value = 42;
 
-    const sc::ImageIdentity id1{.timestamp = 1, .size_of_image = 0x1000, .section_digest = 0xAA};
-    const sc::ImageIdentity id2{.timestamp = 2, .size_of_image = 0x2000, .section_digest = 0xBB};
+    const sc::ImageIdentity id1{
+        .timestamp = 1,
+        .size_of_image = 0x1000,
+        .section_digest = 0xAA,
+    };
+    const sc::ImageIdentity id2{
+        .timestamp = 2,
+        .size_of_image = 0x2000,
+        .section_digest = 0xBB,
+    };
 
     // The definition fingerprint takes no scope and is stable; the trust fingerprint differs from it and moves with
     // the bound image identity.
@@ -4066,7 +4138,11 @@ TEST(AnchorTrustFingerprintTest, InheritedEmptyExportModuleScopeCollidesWithExpl
     explicit_mod.export_name = "compute_damage";
     explicit_mod.export_module = "game.dll";
 
-    const sc::ImageIdentity effective{.timestamp = 7, .size_of_image = 0x4000, .section_digest = 0xC0FFEE};
+    const sc::ImageIdentity effective{
+        .timestamp = 7,
+        .size_of_image = 0x4000,
+        .section_digest = 0xC0FFEE,
+    };
 
     // Two ways to name one effective export collapse to one TRUST key (the declared module string is replaced by the
     // effective identity), even though their DEFINITION fingerprints differ (one folds the module string).
@@ -4082,8 +4158,16 @@ TEST(AnchorTrustFingerprintTest, SameBaseRemappedModuleChangesTrustFingerprintNo
     a.export_name = "compute_damage";
 
     // A same-base remap keeps timestamp and size but rewrites the section table (a different PE at the same base).
-    const sc::ImageIdentity before{.timestamp = 9, .size_of_image = 0x8000, .section_digest = 0x1111};
-    const sc::ImageIdentity after{.timestamp = 9, .size_of_image = 0x8000, .section_digest = 0x2222};
+    const sc::ImageIdentity before{
+        .timestamp = 9,
+        .size_of_image = 0x8000,
+        .section_digest = 0x1111,
+    };
+    const sc::ImageIdentity after{
+        .timestamp = 9,
+        .size_of_image = 0x8000,
+        .section_digest = 0x2222,
+    };
 
     EXPECT_NE(an::anchor_trust_fingerprint(a, before), an::anchor_trust_fingerprint(a, after));
     EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(a));

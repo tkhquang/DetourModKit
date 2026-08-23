@@ -849,9 +849,11 @@ namespace DetourModKit::manifest
             {
                 return std::nullopt;
             }
-            return scan::ImageIdentity{.timestamp = static_cast<std::uint32_t>(timestamp),
-                                       .size_of_image = static_cast<std::uint32_t>(size_of_image),
-                                       .section_digest = digest};
+            return scan::ImageIdentity{
+                .timestamp = static_cast<std::uint32_t>(timestamp),
+                .size_of_image = static_cast<std::uint32_t>(size_of_image),
+                .section_digest = digest,
+            };
         }
 
         // Rejects any key in @p section that @p is_read does not recognize, as MalformedLine.
@@ -1127,13 +1129,15 @@ namespace DetourModKit::manifest
         /// Maps the public limits onto the grammar limits, so the reader and writer passes share one map.
         [[nodiscard]] detail::GrammarLimits to_grammar_limits(const ManifestLimits &limits) noexcept
         {
-            return detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
-                                         .max_sections = limits.max_sections,
-                                         .max_keys_per_section = limits.max_keys_per_section,
-                                         .max_records = limits.max_records,
-                                         .max_rungs_per_record = limits.max_rungs_per_record,
-                                         .max_field_bytes = limits.max_field_bytes,
-                                         .max_total_decoded_bytes = limits.max_total_decoded_bytes};
+            return detail::GrammarLimits{
+                .max_file_bytes = limits.max_file_bytes,
+                .max_sections = limits.max_sections,
+                .max_keys_per_section = limits.max_keys_per_section,
+                .max_records = limits.max_records,
+                .max_rungs_per_record = limits.max_rungs_per_record,
+                .max_field_bytes = limits.max_field_bytes,
+                .max_total_decoded_bytes = limits.max_total_decoded_bytes,
+            };
         }
 
         [[nodiscard]] Result<Manifest> parse_impl(std::string_view text, const ManifestLimits &limits)
@@ -1286,8 +1290,10 @@ namespace DetourModKit::manifest
 
                 records.push_back(std::move(*record));
             }
-            return Manifest{.header = {.schema = static_cast<std::uint32_t>(*schema), .revision = revision},
-                            .records = std::move(records)};
+            return Manifest{
+                .header = {.schema = static_cast<std::uint32_t>(*schema), .revision = revision},
+                .records = std::move(records),
+            };
         }
     } // namespace
 

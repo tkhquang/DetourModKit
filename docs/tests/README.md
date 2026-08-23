@@ -140,8 +140,10 @@ DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 // Create a hook on a real, callable function. The returned Hook is a
 // move-only RAII handle, DISABLED; call enable() to arm it. Its destructor unhooks.
 auto result = DetourModKit::hook::inline_at(
-    {.name = "TestHook",
-     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&real_hook_target_add)}},
+    {
+        .name = "TestHook",
+        .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&real_hook_target_add)},
+    },
     &real_hook_detour_add);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
@@ -156,8 +158,10 @@ HMODULE dll = LoadLibraryA("hook_target_lib.dll");
 auto fn = reinterpret_cast<ComputeDamageFn>(GetProcAddress(dll, "compute_damage"));
 
 auto result = DetourModKit::hook::inline_at(
-    {.name = "DamageHook",
-     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(fn)}},
+    {
+        .name = "DamageHook",
+        .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(fn)},
+    },
     &detour_compute_damage);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
@@ -406,8 +410,10 @@ TEST_F(SomeTest, Method_ErrorCondition)
 // Hook::original<Fn>() and Hook::call<Ret>(Args...) are templates, so a test
 // that instantiates them with the target signature drives that coverage.
 auto result = DetourModKit::hook::inline_at(
-    {.name = "HookName",
-     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&target)}},
+    {
+        .name = "HookName",
+        .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&target)},
+    },
     &detour);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);

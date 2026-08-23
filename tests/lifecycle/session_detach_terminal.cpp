@@ -121,15 +121,21 @@ int main()
 
     // Built before the budget is armed. Constructing it inside the armed scope would charge the caller's own
     // argument setup to the refusal and throw out of a noexcept frame.
-    const ModInfo terminal_attach_info{.name = "SESS_DETACH_TERMINAL_RELOAD"};
+    const ModInfo terminal_attach_info{
+        .name = "SESS_DETACH_TERMINAL_RELOAD",
+    };
 
     const auto ready = std::make_shared<ReadyGate>();
-    Result<void> started = bootstrap(ModInfo{.name = "SESS_DETACH_TERMINAL", .log_file = "sess_detach_terminal.log"},
-                                     [ready](Session &) -> Result<void>
-                                     {
-                                         ready->signal();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_DETACH_TERMINAL",
+            .log_file = "sess_detach_terminal.log",
+        },
+        [ready](Session &) -> Result<void>
+        {
+            ready->signal();
+            return {};
+        });
     if (!started)
     {
         (void)fail("bootstrap failed");

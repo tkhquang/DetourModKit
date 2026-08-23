@@ -99,13 +99,22 @@ namespace
 
     Result<Hook> install_leaf(dmk_test::ScratchPage &page, const char *name)
     {
-        return inline_at(InlineRequest{.name = name, .target = Address{page.addr(0)}},
-                         reinterpret_cast<void (*)()>(&detour_leaf));
+        return inline_at(
+            InlineRequest{
+                .name = name,
+                .target = Address{page.addr(0)},
+            },
+            reinterpret_cast<void (*)()>(&detour_leaf));
     }
 
     Result<Hook> install_mid_leaf(dmk_test::ScratchPage &page, const char *name)
     {
-        return mid_at(MidRequest{.name = name, .target = Address{page.addr(0)}}, &mid_detour);
+        return mid_at(
+            MidRequest{
+                .name = name,
+                .target = Address{page.addr(0)},
+            },
+            &mid_detour);
     }
 
     /// A volatile indirection forces the call to reach the patched entry even when the optimizer can see the callee.

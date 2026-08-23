@@ -206,6 +206,8 @@ A `.cpp` must live beside the kind of header it implements. A TU for an installe
 - Keep the OS spelling for each Win32-mirror identifier, for example `wButtons`, `dwPacketNumber`, and `hMod`.
 - Use descriptive names. Name the value so a reader does not track its contents: `anchor`, not `a`, and `candidate` , not `c`. Use `i` through `k` for loop counters and `n` for a count that changes. A small fixed set, a conventional math quantity, or a file that already uses a short abbreviation can use single letters. Follow the current file.
 - Braces must use Allman style. `InsertBraces` remains unset, so a guard clause can omit braces. Every multi-line or non-obvious body must have braces.
+- Add a trailing comma to every top-level designated-initializer list, regardless of its field count. clang-format keeps the break. Put each field on its own line at the block indent. A rename then does not re-flow the block. Keep a designated-initializer list inside another field value compact and omit its own trailing comma. clang-format breaks after the `=` when that nested list expands.
+- Put each element of a multi-element braced sequence list on its own line. Add a trailing comma after the final element to preserve the break. The alternatives then line up for comparison. Keep a one-element list on one line. This rule covers container elements. Aggregate fields follow the designated-initializer rule above.
 - Use 4 spaces for indentation. Do not use tabs.
 - Apply these namespace rules:
 - Put all public API in `namespace DetourModKit`.
@@ -337,7 +339,12 @@ Handle these formatter exclusions by hand:
 ### Example - good hook install pattern
 
 ```cpp
-auto r = hook::inline_at({.name = "camera_update", .target = Address{addr}}, &detour);
+auto r = hook::inline_at(
+    {
+        .name = "camera_update",
+        .target = Address{addr},
+    },
+    &detour);
 if (r)
 {
     Hook h = std::move(*r);

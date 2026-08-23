@@ -197,8 +197,12 @@ namespace DetourModKit
             // the ambiguity verdict describe the same view of memory. A truncated sweep (a faulted region skipped, or
             // bounded-jump backtracking spent) makes the count a lower bound, so a single hit does not prove
             // uniqueness; fail closed. More than one hit makes the rebuilt jump ambiguous; fail closed.
-            const detail::MatchResult found = detail::scan_module_executable(
-                *rebuilt, range, detail::ScanQuery{.occurrence = 1, .count_beyond = true, .exclusions = nullptr});
+            const detail::MatchResult found = detail::scan_module_executable(*rebuilt, range,
+                                                                             detail::ScanQuery{
+                                                                                 .occurrence = 1,
+                                                                                 .count_beyond = true,
+                                                                                 .exclusions = nullptr,
+                                                                             });
             // Truncation is recorded even when this shape would have been rejected anyway: it says the executable
             // pages were not fully read, so the caller must not report the whole recovery pass as a proven absence.
             // build_rebuilt_prologue refuses jump-bearing patterns, so a skipped faulted region is the only channel.

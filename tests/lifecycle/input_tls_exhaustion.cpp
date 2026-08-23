@@ -182,10 +182,12 @@ namespace
 
     input::ComboBinding make_hold_binding(std::string name, int key, std::function<void(bool)> callback)
     {
-        return input::ComboBinding{.name = std::move(name),
-                                   .trigger = input::Trigger::Hold,
-                                   .combos = {{{keyboard_key(key)}, {}}},
-                                   .on_state_change = std::move(callback)};
+        return input::ComboBinding{
+            .name = std::move(name),
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(key)}, {}}},
+            .on_state_change = std::move(callback),
+        };
     }
 
     // Drives one held edge through the real facade and reports how many consumer callbacks it produced.

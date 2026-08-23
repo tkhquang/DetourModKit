@@ -224,8 +224,12 @@ int main()
     dmk_bench::GateLedger gates("hook");
 
     const Address target{reinterpret_cast<std::uintptr_t>(&bench_hook_target)};
-    Result<Hook> created =
-        inline_at(InlineRequest{.name = "BenchGuardedDispatch", .target = target}, &bench_hook_detour);
+    Result<Hook> created = inline_at(
+        InlineRequest{
+            .name = "BenchGuardedDispatch",
+            .target = target,
+        },
+        &bench_hook_detour);
     if (!created.has_value())
     {
         std::fprintf(stderr, "bench_hook: inline_at failed: %s\n", created.error().message().c_str());

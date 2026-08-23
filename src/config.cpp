@@ -945,12 +945,14 @@ namespace DetourModKit
 
                 // Register the binding with an empty combo set. The combo config item below parses default_combo
                 // exactly once and rebinds. A prior parse here duplicates the parse and any typo WARNING.
-                input::ComboBinding binding{.name = binding_name_str,
-                                            .trigger = trigger,
-                                            .combos = {},
-                                            .consume = consume.value_or(false),
-                                            .on_press = std::move(on_press),
-                                            .on_state_change = std::move(on_state_change)};
+                input::ComboBinding binding{
+                    .name = binding_name_str,
+                    .trigger = trigger,
+                    .combos = {},
+                    .consume = consume.value_or(false),
+                    .on_press = std::move(on_press),
+                    .on_state_change = std::move(on_state_change),
+                };
 
                 input::BindingGuard guard;
                 if (auto reg = input::register_combo(std::move(binding)); reg.has_value())

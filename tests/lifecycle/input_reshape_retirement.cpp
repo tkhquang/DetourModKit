@@ -28,7 +28,10 @@ namespace
     constexpr std::string_view PROBE_NAME = "reshape_probe";
 
     // Because this console never owns the foreground window, disable focus checks. The key seam prevents input edges.
-    constexpr Input::Settings START_SETTINGS{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false};
+    constexpr Input::Settings START_SETTINGS{
+        .poll_interval = std::chrono::milliseconds{1},
+        .require_focus = false,
+    };
 
     std::atomic<bool> s_inside_reshape{false};
     std::atomic<bool> s_reentered{false};
