@@ -216,6 +216,46 @@ namespace
         return x + 100;
     }
 
+    // Move-only by-value parameter target. A copy-constructible parameter cannot expose the guarded-dispatch defect:
+    // only a move-only type makes an lvalue dispatch ill-formed at the call site.
+    using OwnedIntFn = int (*)(std::unique_ptr<int>);
+
+    DMK_TEST_NOINLINE int consume_owned_int(std::unique_ptr<int> owned) noexcept
+    {
+        volatile int r = owned ? *owned : -1;
+        return r;
+    }
+
+    int consume_owned_int_detour(std::unique_ptr<int> owned) noexcept
+    {
+        return owned ? *owned + 100 : -1;
+    }
+
+    struct CopyOnlyInt
+    {
+        int value;
+
+        explicit CopyOnlyInt(int initial) noexcept : value(initial) {}
+        CopyOnlyInt(const CopyOnlyInt &) = default;
+        CopyOnlyInt &operator=(const CopyOnlyInt &) = default;
+        CopyOnlyInt(CopyOnlyInt &&) = delete;
+        CopyOnlyInt &operator=(CopyOnlyInt &&) = delete;
+        ~CopyOnlyInt() noexcept = default;
+    };
+
+    using CopyOnlyIntFn = int (*)(CopyOnlyInt);
+
+    DMK_TEST_NOINLINE int consume_copy_only_int(CopyOnlyInt owned) noexcept
+    {
+        volatile int result = owned.value;
+        return result;
+    }
+
+    int consume_copy_only_int_detour(CopyOnlyInt owned) noexcept
+    {
+        return owned.value + 100;
+    }
+
     std::atomic<int> s_mid_detour_calls{0};
 
     // Builds an Address from a free function pointer via the uintptr form (a function pointer does not implicitly
@@ -1489,6 +1529,89 @@ TEST(HookCall, TryCallVoidReportsDispatchAndFailClosed)
     const Result<void> inactive = h.try_call<void, int>(7);
     ASSERT_FALSE(inactive.has_value());
     EXPECT_EQ(inactive.error().code, ErrorCode::InvalidHookState);
+}
+
+// The guarded dispatch moves a move-only value into the original. If it passes the local as an lvalue, this test fails
+// to compile.
+TEST(HookCall, CallMoveOnlyByValueReachesOriginal)
+{
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "GuardedMoveOnly",
+            .target = addr_of(&consume_owned_int),
+        },
+        &consume_owned_int_detour
+    );
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "enable failed";
+
+    // The detour is active, so a direct call answers 141; the guarded call routes through the trampoline to 41.
+    OwnedIntFn const volatile direct = &consume_owned_int;
+    EXPECT_EQ(direct(std::make_unique<int>(41)), 141);
+    EXPECT_EQ(h.call<int>(std::make_unique<int>(41)), 41);
+}
+
+// try_call shares the dispatch, so it carries the same forwarding contract.
+TEST(HookCall, TryCallMoveOnlyByValueReachesOriginal)
+{
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallMoveOnly",
+            .target = addr_of(&consume_owned_int),
+        },
+        &consume_owned_int_detour
+    );
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "enable failed";
+
+    const Result<int> got = h.try_call<int>(std::make_unique<int>(41));
+    ASSERT_TRUE(got.has_value()) << got.error().message();
+    EXPECT_EQ(*got, 41);
+
+    ASSERT_TRUE(h.disable().has_value());
+    const Result<int> suppressed = h.try_call<int>(std::make_unique<int>(41));
+    ASSERT_FALSE(suppressed.has_value());
+    EXPECT_EQ(suppressed.error().code, ErrorCode::InvalidHookState);
+}
+
+TEST(HookCall, CallCopyOnlyByValueReachesOriginal)
+{
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "GuardedCopyOnly",
+            .target = addr_of(&consume_copy_only_int),
+        },
+        &consume_copy_only_int_detour
+    );
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "enable failed";
+
+    const CopyOnlyInt value{41};
+    CopyOnlyIntFn const volatile direct = &consume_copy_only_int;
+    EXPECT_EQ(direct(value), 141);
+    EXPECT_EQ(h.call<int>(value), 41);
+}
+
+TEST(HookCall, TryCallCopyOnlyByValueReachesOriginal)
+{
+    Result<Hook> r = inline_at(
+        InlineRequest{
+            .name = "TryCallCopyOnly",
+            .target = addr_of(&consume_copy_only_int),
+        },
+        &consume_copy_only_int_detour
+    );
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "enable failed";
+
+    const CopyOnlyInt value{41};
+    const Result<int> got = h.try_call<int>(value);
+    ASSERT_TRUE(got.has_value()) << got.error().message();
+    EXPECT_EQ(*got, 41);
 }
 
 // A moved-from handle has an empty gate: try_call fails closed just as call() no-ops, but reports it as an error.

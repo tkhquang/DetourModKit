@@ -634,6 +634,62 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesBackspaceFormFeedAndRawContro
         << "JSON output must escape \\b, \\f, and raw control bytes. Got: " << json;
 }
 
+// Place recognizable bytes after the label in one static object. A C-string read exposes those neighbor bytes.
+namespace
+{
+    struct LabelBlock
+    {
+        char label[10];
+        char neighbor[8];
+    };
+
+    constexpr LabelBlock UNTERMINATED_BLOCK{
+        {'d', 'm', 'k', '_', 'e', 'x', 't', 'e', 'n', 't'},
+        {'P', 'O', 'I', 'S', 'O', 'N', '!', '\0'}
+    };
+} // namespace
+
+TEST_F(ProfilerRecordTest, NonTerminatedStaticArrayExportsExactExtent)
+{
+    auto &profiler = Profiler::get_instance();
+    {
+        ScopedProfile scope(UNTERMINATED_BLOCK.label);
+    }
+    ASSERT_EQ(profiler.total_samples_recorded(), 1u);
+
+    const std::string json = profiler.export_chrome_json();
+    EXPECT_NE(json.find("\"name\":\"dmk_extent\""), std::string::npos)
+        << "the label must export exactly its array extent. Got: " << json;
+    EXPECT_EQ(json.find("POISON"), std::string::npos)
+        << "export must not read past a label that carries no terminator. Got: " << json;
+}
+
+// The bounded record overload is the same route without a ScopedProfile: a caller-supplied extent, no terminator.
+TEST_F(ProfilerRecordTest, BoundedRecordExportsSuppliedExtent)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+    profiler.record(UNTERMINATED_BLOCK.label, sizeof(UNTERMINATED_BLOCK.label), tick.QuadPart, tick.QuadPart + 10, 3);
+
+    const std::string json = profiler.export_chrome_json();
+    EXPECT_NE(json.find("\"name\":\"dmk_extent\""), std::string::npos) << json;
+    EXPECT_EQ(json.find("POISON"), std::string::npos) << json;
+}
+
+// One final null is removed, so a string literal keeps its written form.
+TEST_F(ProfilerRecordTest, ScopedProfileTrimsExactlyOneTrailingNull)
+{
+    auto &profiler = Profiler::get_instance();
+    {
+        ScopedProfile scope("literal_label");
+    }
+    ASSERT_EQ(profiler.total_samples_recorded(), 1u);
+    const std::string json = profiler.export_chrome_json();
+    EXPECT_NE(json.find("\"name\":\"literal_label\""), std::string::npos) << json;
+}
+
 TEST_F(ProfilerRecordTest, ExportChromeJson_PlainNameUnchanged)
 {
     auto &profiler = Profiler::get_instance();

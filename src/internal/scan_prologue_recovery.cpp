@@ -179,8 +179,8 @@ namespace DetourModKit
 
         // Try one prologue shape for one Direct candidate: rebuild, require the rebuilt pattern to match exactly once
         // in the scope's executable pages (a hooked prologue is code), decode the jump to confirm a real redirect, and
-        // resolve the anchored match. applicable becomes true once the rebuilt pattern is usable (enough literal tail),
-        // independent of whether it then matches, so the caller can tell "no shape applied" from "applied but missed".
+        // resolve the anchored match. applicable becomes true once the rebuilt pattern is usable, independent of
+        // whether it then matches, so the caller can tell "no shape applied" from "applied but missed".
         std::optional<std::uintptr_t> try_prologue_shape(
             const scan::DirectPattern &direct,
             const PrologueShape &shape,

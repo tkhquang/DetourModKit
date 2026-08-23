@@ -23,10 +23,28 @@ namespace
     {
         std::vector<Recovered> out;
         ring.visit_committed(
-            [&out](const char *name, std::int64_t start_ticks, std::uint32_t duration_us, std::uint32_t thread_id)
-            { out.push_back(Recovered{name, start_ticks, duration_us, thread_id}); }
+            [&out](
+                const char *name,
+                std::uint32_t name_length,
+                std::int64_t start_ticks,
+                std::uint32_t duration_us,
+                std::uint32_t thread_id
+            ) { out.push_back(Recovered{std::string{name, name_length}, start_ticks, duration_us, thread_id}); }
         );
         return out;
+    }
+
+    template <std::size_t N>
+    void publish_label(
+        ProfileRing &ring,
+        const ProfileRing::Claim &claim,
+        const char (&name)[N],
+        std::int64_t start_ticks,
+        std::uint32_t duration_us,
+        std::uint32_t thread_id
+    )
+    {
+        ring.publish(claim, name, static_cast<std::uint32_t>(N - 1), start_ticks, duration_us, thread_id);
     }
 } // namespace
 
@@ -103,7 +121,7 @@ TEST(ProfileRingTest, InertRingAcceptsEveryOperationAndCommitsNothing)
 
     const auto claim = ring.claim();
     EXPECT_FALSE(claim.owned);
-    ring.publish(claim, "ignored", 1, 2, 3);
+    publish_label(ring, claim, "ignored", 1, 2, 3);
 
     EXPECT_EQ(ring.claims(), 1u);
     EXPECT_EQ(ring.dropped(), 1u);
@@ -112,6 +130,21 @@ TEST(ProfileRingTest, InertRingAcceptsEveryOperationAndCommitsNothing)
 
     ring.reset();
     EXPECT_EQ(ring.claims(), 0u);
+}
+
+TEST(ProfileRingTest, PublishedExtentBoundsTheRecoveredLabel)
+{
+    static constexpr char UNTERMINATED[]{'r', 'i', 'n', 'g'};
+
+    ProfileRing ring(4);
+    const auto claim = ring.claim();
+    ASSERT_TRUE(claim.owned);
+    ring.publish(claim, UNTERMINATED, static_cast<std::uint32_t>(sizeof(UNTERMINATED)), 5, 6, 7);
+
+    const auto recovered = collect(ring);
+    ASSERT_EQ(recovered.size(), 1u);
+    EXPECT_EQ(recovered[0].name, "ring");
+    EXPECT_EQ(recovered[0].name.size(), sizeof(UNTERMINATED));
 }
 
 TEST(ProfileRingTest, NonPowerOfTwoCapacityIsRefusedRatherThanMisIndexed)
@@ -128,7 +161,7 @@ TEST(ProfileRingTest, CommittedSamplesRoundTripInOrder)
     {
         const auto claim = ring.claim();
         ASSERT_TRUE(claim.owned);
-        ring.publish(claim, "sample", static_cast<std::int64_t>(i), i * 10, i);
+        publish_label(ring, claim, "sample", static_cast<std::int64_t>(i), i * 10, i);
     }
 
     const auto recovered = collect(ring);
@@ -163,14 +196,14 @@ TEST(ProfilerConcurrencyProof, RingSlotReuseCannotPublishTornSample)
         const auto filler = ring.claim();
         ASSERT_TRUE(filler.owned);
         ASSERT_NE(filler.index, writer_a.index);
-        ring.publish(filler, "filler", static_cast<std::int64_t>(i), i, i);
+        publish_label(ring, filler, "filler", static_cast<std::int64_t>(i), i, i);
     }
 
     // Writer B reuses slot 0 while A still owns it. It must be refused and counted, never overwrite A's slot.
     const auto writer_b = ring.claim();
     EXPECT_FALSE(writer_b.owned);
     EXPECT_EQ(ring.dropped(), 1u);
-    ring.publish(writer_b, "writer_b", 999, 999, 999); // a refused claim publishes nothing
+    publish_label(ring, writer_b, "writer_b", 999, 999, 999); // a refused claim publishes nothing
 
     // Export with both writers controlled: the contested slot is skipped entirely and every visible sample is one
     // writer's complete payload.
@@ -184,7 +217,7 @@ TEST(ProfilerConcurrencyProof, RingSlotReuseCannotPublishTornSample)
     }
 
     // A completing late still publishes into the slot it owns, and only then does it become visible.
-    ring.publish(writer_a, "writer_a", 7, 11, 13);
+    publish_label(ring, writer_a, "writer_a", 7, 11, 13);
     recovered = collect(ring);
     ASSERT_EQ(recovered.size(), CAPACITY);
     const Recovered &late = recovered.back();
@@ -204,11 +237,11 @@ TEST(ProfilerConcurrencyProof, StaleWriterCannotOverwriteANewerCommittedSlot)
     const std::uint64_t stalled_position = ring.reserve_position();
     const auto second = ring.claim(); // position 1 -> slot 1
     ASSERT_TRUE(second.owned);
-    ring.publish(second, "second", 2, 2, 2);
+    publish_label(ring, second, "second", 2, 2, 2);
     const auto third = ring.claim(); // position 2 -> slot 0 again
     ASSERT_TRUE(third.owned);
     ASSERT_EQ(third.index, 0u);
-    ring.publish(third, "third", 3, 3, 3);
+    publish_label(ring, third, "third", 3, 3, 3);
 
     // A writer that took position 0 and lost the CPU for a full ring cycle resumes here.
     const auto stalled = ring.claim_at(stalled_position);
@@ -227,7 +260,7 @@ TEST(ProfileRingTest, CommittedTicketCannotBeClaimedAgain)
     ProfileRing ring(2);
     const auto original = ring.claim();
     ASSERT_TRUE(original.owned);
-    ring.publish(original, "original", 1, 2, 3);
+    publish_label(ring, original, "original", 1, 2, 3);
 
     const auto duplicate = ring.claim_at(original.ticket);
     EXPECT_FALSE(duplicate.owned);
@@ -243,7 +276,7 @@ TEST(ProfileRingTest, ResetClearsSamplesAndCounters)
     ProfileRing ring(2);
     const auto claim = ring.claim();
     ASSERT_TRUE(claim.owned);
-    ring.publish(claim, "before_reset", 1, 2, 3);
+    publish_label(ring, claim, "before_reset", 1, 2, 3);
     ASSERT_EQ(collect(ring).size(), 1u);
 
     ring.reset();

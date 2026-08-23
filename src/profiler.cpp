@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <cstdio>
+#include <cstring>
 #include <format>
 #include <memory>
 #include <new>
@@ -18,11 +19,8 @@ namespace DetourModKit
     namespace
     {
         /**
-         * @brief Escapes a string for safe embedding in a JSON value.
-         * @details Escapes backslash, double quote, and the control characters U+0000..U+001F. Forward slash is left
-         *          alone (legal unescaped per RFC 8259).
-         * @param input The raw string to escape.
-         * @return A JSON-safe escaped string (without surrounding quotes).
+         * @brief Escapes @p input for use in a JSON value, without the outer quotes.
+         * @details Forward slash is left alone. RFC 8259 permits that form.
          */
         std::string escape_json_string(std::string_view input)
         {
@@ -110,14 +108,27 @@ namespace DetourModKit
 
     void Profiler::record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept
     {
+        record(name, name != nullptr ? std::strlen(name) : 0, start_ticks, end_ticks, thread_id);
+    }
+
+    void Profiler::record(
+        const char *name,
+        size_t name_length,
+        int64_t start_ticks,
+        int64_t end_ticks,
+        uint32_t thread_id
+    ) noexcept
+    {
         const auto claim = m_ring.claim();
         if (!claim.owned)
         {
             return;
         }
+        const size_t bounded_length = name_length < UINT32_MAX ? name_length : UINT32_MAX;
         m_ring.publish(
             claim,
             name,
+            static_cast<uint32_t>(bounded_length),
             start_ticks,
             detail::ticks_to_microseconds(start_ticks, end_ticks, m_qpc_frequency),
             thread_id
@@ -148,7 +159,7 @@ namespace DetourModKit
         const double ticks_to_us = 1'000'000.0 / static_cast<double>(m_qpc_frequency);
         bool first = true;
         m_ring.visit_committed(
-            [&](const char *name, int64_t start_ticks, uint32_t duration_us, uint32_t thread_id)
+            [&](const char *name, uint32_t name_length, int64_t start_ticks, uint32_t duration_us, uint32_t thread_id)
             {
                 if (!first)
                 {
@@ -157,11 +168,12 @@ namespace DetourModKit
                 first = false;
 
                 // Chrome Trace Event Format: "X" = complete event (has duration). The name is escaped so a caller's
-                // quotes or backslashes still produce valid JSON.
+                // quotes or backslashes still produce valid JSON. The published extent bounds the read, so a source
+                // array with no terminator cannot cause an over-read.
                 const double ts = static_cast<double>(start_ticks) * ticks_to_us;
                 json += std::format(
                     R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
-                    escape_json_string(name),
+                    escape_json_string(std::string_view{name, name_length}),
                     ts,
                     duration_us,
                     thread_id
@@ -234,8 +246,8 @@ namespace DetourModKit
         return m_qpc_frequency;
     }
 
-    ScopedProfile::ScopedProfile(const char *name, LiteralTag) noexcept
-        : m_name(name), m_thread_id(GetCurrentThreadId())
+    ScopedProfile::ScopedProfile(const char *name, size_t name_length, LiteralTag) noexcept
+        : m_name(name), m_name_length(name_length), m_thread_id(GetCurrentThreadId())
     {
         LARGE_INTEGER ticks;
         QueryPerformanceCounter(&ticks);
@@ -246,7 +258,7 @@ namespace DetourModKit
     {
         LARGE_INTEGER ticks;
         QueryPerformanceCounter(&ticks);
-        Profiler::get_instance().record(m_name, m_start_ticks, ticks.QuadPart, m_thread_id);
+        Profiler::get_instance().record(m_name, m_name_length, m_start_ticks, ticks.QuadPart, m_thread_id);
     }
 
 } // namespace DetourModKit

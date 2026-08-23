@@ -253,7 +253,9 @@ namespace DetourModKit
         }
 
         // Release each transaction holder and restore the newest live target, or the original protection when no
-        // holder remains. Attempt every page so one failure cannot strand unrelated pages.
+        // holder remains. Attempt every page so one failure cannot strand unrelated pages. Erase each holder-free entry
+        // after its final restore attempt. A retained entry gives an obsolete baseline to the next guard over that
+        // page. Proof: MemoryTest.MemoryProtectGuardProof_FailedRestoreDoesNotPoisonDifferentLaterBaseline.
         [[nodiscard]] bool restore_segments_locked(
             const detail::ProtectionSegment *segments,
             std::size_t count,
@@ -295,15 +297,12 @@ namespace DetourModKit
                         }
                         all_restored = false;
                     }
-                    else
+                    for (std::uintptr_t page = run_begin; page < run_end; page += step)
                     {
-                        for (std::uintptr_t page = run_begin; page < run_end; page += step)
+                        const auto entry = ledger->find(page);
+                        if (entry != ledger->end() && entry->second.empty())
                         {
-                            const auto entry = ledger->find(page);
-                            if (entry != ledger->end() && entry->second.empty())
-                            {
-                                ledger->erase(entry);
-                            }
+                            ledger->erase(entry);
                         }
                     }
                     in_run = false;
