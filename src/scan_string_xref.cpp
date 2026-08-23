@@ -410,21 +410,12 @@ namespace DetourModKit
 #endif
             }
 
-            // Phase 2 (default, "narrow") of find_string_xref: scan the image's execute-readable windows for the
-            // dominant 64-bit string-load forms whose resolved absolute target is string_addr.
+            // The narrow phase sweeps execute-readable windows for dominant REX.W RIP-relative loads that resolve to
+            // string_addr.
             //
-            // Recognizes a mandatory REX.W prefix (0x48..0x4F), opcode 8D (lea) or 8B (mov), and a ModRM byte in the
-            // RIP-relative form, followed by a 4-byte displacement. That form is mod == 00b and rm == 101b, that is,
-            // (modrm & 0xC7) == 0x05. That required REX.W byte makes the instruction exactly 7 bytes and the disp32
-            // sits at offset 3, so the candidate is self-delimiting from its shape: this needs no
-            // instruction-aligned linear sweep and therefore cannot desync on data or jump tables embedded in .text.
-            //
-            // The resolved target is next-instruction-address + sign-extended disp32, done in unsigned modular
-            // arithmetic so it is well-defined for every input. Only a target that exactly equals string_addr is
-            // accepted, which is an extremely strong filter: string_addr is the already-located, plausible .rdata
-            // address, so this equality subsumes the is_plausible_ptr floor and a coincidental byte sequence
-            // resolving to precisely string_addr is not a realistic false positive. Counting stops at the second hit so
-            // the caller can fail closed on ambiguity.
+            // The accepted seven-byte shape uses REX.W LEA/MOV with a RIP-relative ModRM byte and disp32. The disp32
+            // starts at offset 3. Exact target equality accepts a reference. The second hit marks ambiguity. `[B-63]`
+            // owns shapes outside this tier.
             std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr,
                                                   std::span<const detail::ExecutableWindow> windows,
                                                   std::size_t &found_count, LeaReferenceInfo &info, bool &incomplete)
@@ -445,18 +436,12 @@ namespace DetourModKit
                               "instr_len must span scan_window_narrow_body's disp32 tail read at bytes[i+3..i+6]");
                 std::size_t faulted_windows = 0;
 
-                // Cross-window back-carry, mirroring the phase-1 scan_regions_filtered carry. A `.text` section split
-                // by a VirtualProtect into two abutting execute-readable regions yields two windows; an instruction
-                // that STARTS in the first window's tail and ENDS in the second fits in neither window's independent
-                // [0, span - instr_len] sweep and is silently missed. With two real references the straddler
-                // is dropped and the survivor falsely certified unique (a wrong-site anchor). When this window abuts
-                // the previous one, extend its scan start back by instr_len - 1 so those straddlers are caught. The
-                // carry bytes lie inside the previous window (gated readable at collect time and abutting), so the
-                // guarded read stays over already-gated memory. No count floor is needed: a fixed-length instruction
-                // starting in the carry region [base - (instr_len-1), base) can never have fit in the previous window's
-                // own sweep (its starts end one byte earlier, at base - instr_len), so the carry region is disjoint and
-                // nothing is double-counted. The carry is bounded by the previous window's span so it never reads
-                // before it into a possible gap; page-granular regions make that bound a formality.
+                // Adjacent execute windows require back-carry from the prior window. Without it, a split instruction
+                // fits neither window and can create false uniqueness. When windows abut, the next scan includes at
+                // most instr_len - 1 prior bytes. The earlier window collection applied the readability gate to those
+                // bytes. A carried start never fits the prior sweep, so no duplicate count arises. The
+                // StringXrefTest.NarrowReferenceStraddlingProtectionSplitIsFound and
+                // NarrowTwoReferencesOneStraddlingSplitAreAmbiguous cases pin both outcomes.
                 std::uintptr_t prev_end = 0;
                 std::size_t prev_span = 0;
                 bool have_prev = false;
@@ -497,34 +482,16 @@ namespace DetourModKit
                 return (found_count == 1) ? first_site : 0;
             }
 
-            // Store-xref forward scan: starting just past a `lea reg, [rip+string]`, decode forward instruction by
-            // instruction (Zydis, the same decoder scan_string_ref_broad uses) and return the slot a `mov [rip+slot],
-            // reg` store caches the loaded pointer into, where reg is the lea destination. Decoding rather than a raw
-            // byte sweep keeps the match instruction-aligned and lets the scan stop the moment the loaded register is
-            // overwritten. The store shape is REX.W MOV [rip+disp32], reg64. The match is first-within-window, not
-            // uniqueness-checked, so the window is kept tight. Returns 0 (the caller maps it to StoreNotFound) on no
-            // store, a write to the loaded register, a CALL, an unconditional control transfer (JMP / RET), UD2, or an
-            // INT3, a decode failure, an unreadable byte, or the bound being hit. Reads go through
-            // detail::guarded_read_bytes so a truncated or unmapped tail cannot fault the host.
+            // The store-slot scan decodes forward after `lea reg, [rip+string]`. It accepts the first
+            // `REX.W MOV [rip+disp32], reg64` store within the caller's tight window.
             //
-            // The scan must be control-flow-aware: the linear byte window can run past the end of this function into
-            // the next one, and a store there caches an UNRELATED pointer. A `ret`, an unconditional `jmp` (a tail
-            // call), UD2, or an `int3` alignment pad each ends this function's straight-line flow, so any store decoded
-            // after one of them is not on the lea's execution path. Crucially, INT3 (0xCC) decodes as a valid
-            // one-byte instruction and UD2 (0F 0B) as a valid two-byte instruction, neither of which clobbers the
-            // loaded register, is a CALL, or carries a RET / unconditional-branch category, so a category-only check
-            // would miss them: without an explicit mnemonic stop the cursor would walk straight through the INT3
-            // padding between functions into the next one and return its store - a wrong slot the mod would then
-            // write through, strictly worse than a fail-closed StoreNotFound. A NOP (0x90) is deliberately NOT a stop
-            // even though it can also pad, because unlike an INT3 run it legitimately appears as intra-function
-            // alignment; the common-case RET / JMP / CALL stops already end the scan at the true function boundary
-            // before any inter-function padding is reached. A CONDITIONAL branch (Jcc) is deliberately NOT a stop:
-            // its fall-through path can legitimately reach the caching store, so stopping there would drop a real
-            // capability.
-            // @p store_end receives one past the last byte of the store the slot was read from, so the caller can
-            // publish the bytes this value actually depends on. The slot address is computed entirely from that store's
-            // own disp32 field, and the walk decodes every instruction between the lea and it, so the whole run is
-            // evidence: a co-voting selector that matches any of it shares this resolution's failure domain.
+            // Zydis does not classify INT3 or UD2 as a return or unconditional branch. Explicit stops keep the cursor
+            // inside the current function. NOP and conditional branches retain valid fall-through
+            // paths. The StringXrefTest.StringPointerSlotStopsAt* and
+            // StringPointerSlotContinuesPastConditionalBranch cases pin these choices.
+            //
+            // store_end marks one past the accepted store. The complete decoded span forms the evidence for selector
+            // failure-domain overlap.
             std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
                                                      std::uintptr_t window_end, std::uint8_t lea_reg,
                                                      detail::ModuleSpan range, std::uintptr_t &store_end) noexcept
@@ -932,20 +899,13 @@ namespace DetourModKit
 #endif
             }
 
-            // Phase 2 ("broad") add-on for find_string_xref: a Zydis-verified sweep that recognizes the rarer
-            // RIP-relative reference shapes the narrow scan does not model: cmp [rip+d], imm; push [rip+d]; a no-REX
-            // lea/mov; any instruction whose memory operand is [rip+disp] and resolves to string_addr. The caller
-            // merges this with the narrow scan so broad_match cannot lose coverage for the default lea/mov anchors.
+            // The broad phase uses Zydis to verify every RIP-relative memory reference that resolves to string_addr.
+            // `[B-63]` owns when a derived return must use this phase.
             //
-            // Discovery is separated from framing, because x86-64 is not self-synchronizing and a linear decode is
-            // therefore not a search: one mis-framed instruction consumes the bytes of the next, so a single false
-            // boundary early in a window can swallow a real referencing instruction and report it absent. Discovery
-            // instead tests the RIP-relative arithmetic at EVERY byte offset, which no framing can affect, and only the
-            // handful of positions that survive it pay for a decode. Each survivor is then framed against the innermost
-            // .pdata function start where one exists (a boundary the compiler itself declared) and against a bounded
-            // probe of every possible instruction start otherwise, which is what covers leaf functions and code with no
-            // registered exception table. Counting stops at the second referencing instruction so the caller fails
-            // closed on ambiguity.
+            // An arbitrary byte does not identify an x86-64 instruction boundary. Discovery therefore tests target
+            // arithmetic at every byte offset. Only survivors pay for decode and boundary validation. The .pdata entry
+            // supplies a registered boundary, while a bounded probe covers fallback code. The second hit marks
+            // ambiguity. StringXrefBoundaryProof.FalseBoundaryCannotSuppressBroadOnlyReference pins this order.
             std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr,
                                                  std::span<const detail::ExecutableWindow> windows,
                                                  std::size_t &found_count, std::uintptr_t &out_end,
@@ -1020,25 +980,15 @@ namespace DetourModKit
                 return first_site;
             }
 
-            // Authoritative x64 function-boundary lookup through the exception directory (.pdata). Every function that
-            // touches the stack or calls another function must register a RUNTIME_FUNCTION in its module's .pdata, so
-            // the OS-maintained function table yields the exact [BeginAddress, EndAddress) bounds. This is strictly
-            // better than the byte back-scan below: it is exact rather than heuristic, carries no distance bound (a
-            // reference far into a large function still resolves, where the fixed back-scan window would give up), and
-            // cannot be fooled by a 0xC3/0xCC byte that is really part of an instruction's immediate or displacement.
-            // RtlLookupFunctionEntry resolves instr_addr against whichever loaded module (or dynamically registered
-            // table) covers it and reports that module's image base plus the innermost RUNTIME_FUNCTION. It returns
-            // nullptr for a leaf function (one with no unwind data) or an address in a region with no registered table
-            // (a raw code buffer), which is the caller's signal to fall back to the heuristic.
+            // `[B-64]` requires the x64 exception directory before the heuristic scan. RtlLookupFunctionEntry reports
+            // the image base and innermost RUNTIME_FUNCTION for registered code. A null or invalid result permits the
+            // fallback.
             //
-            // A funclet (a catch/finally handler) or a hot/cold-split fragment carries its own RUNTIME_FUNCTION whose
-            // UNWIND_INFO sets UNW_FLAG_CHAININFO and chains back to the primary function. The enclosing function is
-            // the root of that chain, not the fragment. Retail game builds routinely split cold paths out via PGO, so
-            // a string reference on a cold path resolves to a fragment start unless the chain is followed. The chained
-            // RUNTIME_FUNCTION sits immediately after the even-count-padded unwind-code array (each code is two bytes),
-            // at UnwindData + 4 + 2 * ((CountOfCodes + 1) & ~1). Every module read is fault-guarded: .pdata /
-            // .xdata is normally resident, but a partially unmapped or corrupt module must degrade to the fallback
-            // rather than fault the host, and the hop count is bounded against a malformed self-referential chain.
+            // UNW_FLAG_CHAININFO links a funclet or hot/cold fragment to its primary function. The chained record
+            // follows the padded unwind-code array at UnwindData + 4 + 2 * ((CountOfCodes + 1) & ~1). Guarded reads and
+            // a bounded hop count convert invalid metadata into fallback. The
+            // StringXrefTest.EnclosingFunctionFollowsChainInfoToPrimaryFunction and
+            // EnclosingFunctionFallsBackWhenChainInfoIsCyclic cases pin both outcomes.
             std::uintptr_t function_entry_via_pdata(std::uintptr_t instr_addr) noexcept
             {
                 DWORD64 image_base = 0;
@@ -1134,14 +1084,10 @@ namespace DetourModKit
                 return 0;
             }
 
-            // Enclosing-function entry for a referencing instruction. The authoritative .pdata lookup above is tried
-            // first; it resolves any function with unwind data exactly. Only a leaf function (no unwind data) or an
-            // address in a region with no registered exception table (a raw code buffer) falls through to this bounded
-            // heuristic. The heuristic walks backward for the nearest function boundary, either a terminal RET
-            // (0xC3) or a run of INT3 (0xCC) alignment padding. It returns the first byte after that boundary that
-            // passes is_likely_function_prologue, and skips further INT3 padding. The back-scan is bounded so a
-            // pathological region cannot scan unboundedly, and it fails closed (returns 0) when no boundary is
-            // found in the window.
+            // `[B-64]` requires the authoritative lookup before this bounded heuristic. Absent or malformed metadata
+            // permits the fallback. The scan finds the nearest 0xC3 RET or 0xCC INT3 boundary and then requires a
+            // plausible prologue. It returns zero when the bounded window contains no boundary. The Windows x64 ABI
+            // cleans the stack in the caller, so no epilogue uses RET imm16 and 0xC2 stays out of the boundary set.
             std::uintptr_t enclosing_function_start(std::uintptr_t instr_addr, std::uintptr_t window_lo) noexcept
             {
                 if (const std::uintptr_t via_pdata = function_entry_via_pdata(instr_addr); via_pdata != 0)
@@ -1328,27 +1274,14 @@ namespace DetourModKit
                 merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + lea_info.instr_len : 0,
                                      (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count, narrow_incomplete);
 
-                // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a
-                // SHAPE-LOCAL uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d];
-                // a no-REX lea/mov) elsewhere is invisible to it. For the derived return modes the result is computed
-                // FROM that single reference, either the enclosing function it sits in (EnclosingFunction) or the
-                // store slot its loaded pointer feeds (StringPointerSlot). A hidden second reference makes that
-                // derivation attribute the answer to a site that is not actually unique. Confirm uniqueness with the
-                // broad Zydis sweep (a superset of every reference shape) before certifying, even when the caller did
-                // not opt into broad_match. ReferencingInstruction returns the dominant reference directly and stays on
-                // the fast narrow-only path. The broad sweep re-counts the narrow lea itself, so a genuinely-unique
-                // reference stays count 1 at the same site while a rarer-shape twin trips count 2 and fails closed;
-                // lea_info is untouched by the sweep, so StringPointerSlot still derives from the narrow lea.
+                // `[B-63]` requires a broad second check before a derived return can certify one narrow hit. The
+                // narrow shape accepts REX.W LEA and MOV, so the broad sweep re-counts whichever reference the
+                // narrow phase returned. A rarer-shape twin raises the count to 2 and fails closed. lea_info stays
+                // unchanged, so EnclosingFunction keeps that site and StringPointerSlot still requires the narrow
+                // lea. ReferencingInstruction stays on the narrow path.
                 //
-                // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation sweeps
-                // the whole executable range once per derived-return anchor: the per-byte displacement test, plus a
-                // decode of each offset that survives it. There is no early-out to skip it. A manifest that anchors
-                // many EnclosingFunction/StringPointerSlot strings in one module therefore pays one full sweep per
-                // such anchor at startup. Sharing a sweep's reference index across anchors would require cross-thread
-                // state in the parallel resolver, while skipping confirmation based on the
-                // narrow count is unsound because the narrow scan cannot see rarer reference shapes. Callers that
-                // resolve many string anchors in one image and can key on the referencing instruction should prefer
-                // ReferencingInstruction, which stays on the narrow-only path.
+                // A derived anchor that remains unique pays one complete executable-range sweep.
+                // ReferencingInstruction avoids that confirmation unless broad_match requests the broad phase.
                 const bool derived_return = query.return_mode != XrefReturn::ReferencingInstruction;
                 const bool confirm_derived_uniqueness = derived_return && references.count == 1;
                 if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))

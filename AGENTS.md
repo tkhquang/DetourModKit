@@ -127,6 +127,7 @@ The benchmark suite has these targets:
 - `DetourModKit_bench_logger` covers asynchronous logs under each overflow policy.
 - `DetourModKit_bench_rtti` covers the warm type-identity probe and the uncached pointer-table sweep.
 - `DetourModKit_bench_hook` covers guarded hook dispatch under single-thread and two-thread load.
+- `DetourModKit_bench_input` covers the per-frame input query path and its poller-acquire floor.
 - `DetourModKit_bench_footprint` covers logger/profiler resident bytes and high-water.
 - `DetourModKit_corpus_sighealth` covers the signature-health estimate against a real x64 corpus.
 
@@ -443,7 +444,7 @@ These paths run at 60 fps or more from game callbacks. `[B-02]` governs allocati
 - The `Logger::log()` asynchronous enqueue uses an atomic shared-pointer snapshot and a lock-free queue push. The snapshot uses a bounded internal lock.
 - `memory::is_readable(Region)` uses a sharded SRWLOCK reader and a cache lookup.
 - `memory::is_readable_nonblocking(Region)` uses a shared try-lock and a cache lookup. It returns `Unknown` after contention or an unpublished cache result.
-- `memory::walk(base, {offsets})` uses one walk and one out-of-line call. It issues one `guarded_read_bytes` for each intermediate hop and screens the leaf without a copy. The walk screens each hop against that hop's `min_valid` floor and `USERSPACE_PTR_MAX`. The bare-offset overload uses a 32-entry stack buffer and returns `SizeTooLarge` past it.
+- `memory::walk(base, {offsets})` uses one walk and one out-of-line call. It issues one `guarded_read_bytes` for each intermediate hop and screens the leaf without a copy. `min_valid` gates the dereferenced link at each hop. The never-dereferenced leaf receives the canonical-range screen instead, `USERSPACE_PTR_MIN` to `USERSPACE_PTR_MAX`. The bare-offset overload uses a 32-entry stack buffer and returns `SizeTooLarge` past it.
 - `memory::read<T>()`, `memory::read_into()`, `memory::write_in_place<T>()`, and each `memory::walk()` hop are guarded paths. They use SEH under MSVC and a vectored handler under MinGW x64. The normal path does not call `VirtualQuery` for each operation. If MinGW cannot install the vectored handler, byte copies use `VirtualQuery` and process-memory APIs.
 - `memory::unchecked::read<T>()` uses a raw copy without validation. The caller must prove that the range is committed and readable.
 - `memory::is_plausible_ptr(Address)` and `Region::contains(Address)` use constant expression arithmetic without a system call.
@@ -528,7 +529,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-61]` `[CORRECTNESS]` **A phase-2 window scan must use the same cross-window back-carry as its phase-1 peer.** [docs/design/resolution.md](docs/design/resolution.md) `[B-61]` owns the rationale for `find_string_xref`.
 - `[B-62]` `[CORRECTNESS]` **Code must not rebuild a bounded-jump pattern through flat byte and mask concatenation.** `build_rebuilt_prologue` must fail closed when `original.has_jumps()`. [docs/design/resolution.md](docs/design/resolution.md) `[B-62]` owns the rationale.
 - `[B-63]` `[CORRECTNESS]` **Phase-2 `string-xref` uniqueness must identify the certified shapes.** A derived return must run the broad Zydis sweep as a second check. [docs/design/resolution.md](docs/design/resolution.md) `[B-63]` owns the rationale.
-- `[B-64]` `[CORRECTNESS]` **Function boundary recovery must use authoritative `.pdata`.** `enclosing_function_start` must call `RtlLookupFunctionEntry` first. The RET/INT3 back-scan must serve only as the leaf or no-unwind fallback. [docs/design/resolution.md](docs/design/resolution.md) `[B-64]` owns the rationale.
+- `[B-64]` `[CORRECTNESS]` **Function boundary recovery must use authoritative `.pdata`.** `enclosing_function_start` must call `RtlLookupFunctionEntry` first. The RET/INT3 back-scan must serve only when authoritative metadata yields no boundary. Malformed registered metadata permits that fallback. [docs/design/resolution.md](docs/design/resolution.md) `[B-64]` owns the rationale.
 - `[B-65]` `[SAFETY]` **The segmented matcher must stay bounded, and allocation failures must remain recoverable.** `SEGMENT_MATCH_STEP_BUDGET` defines the work bound. [docs/design/resolution.md](docs/design/resolution.md) `[B-65]` owns the rationale.
 - `[B-66]` `[SAFETY]` **Unchecked backends must not enter foreign-memory fault paths, and allocation-size facts must become immutable before backend use.** Code must guard-copy the complete span and detach the backend. Its atomic compare-exchange must stay within that span. [docs/design/hooking.md](docs/design/hooking.md) `[B-66]` owns the rationale.
 - `[B-67]` `[CONVENTION]` **Each per-frame resolve that does not latch a miss must use a throttle.** The miss must remain unlatchable. `RESOLVE_RETRY_COOLDOWN_MS` must gate each new sweep. [docs/design/resolution.md](docs/design/resolution.md) `[B-67]` owns the rationale.

@@ -2459,15 +2459,10 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 TEST(ScannerTest, active_simd_level_returns_valid_tier)
 {
     const auto level = scan::active_simd_level();
-    // Must be one of the defined tiers. Avx512 is only reachable in a DMK_ENABLE_AVX512 build on AVX-512 hardware;
-    // on every other build/host the runtime gate falls back to a lower tier, which is what this also asserts.
-    EXPECT_TRUE(level == scan::SimdLevel::Scalar || level == scan::SimdLevel::Sse2 || level == scan::SimdLevel::Avx2 ||
-                level == scan::SimdLevel::Avx512);
-
-    // On x86-64, SSE2 is guaranteed at minimum
-#if defined(__x86_64__) || defined(_M_X64)
+    // SSE2 is the x86-64 baseline, so the engine never reports Scalar. An Avx512 result requires a
+    // DMK_ENABLE_AVX512 build and AVX-512 hardware. Other builds or hosts use a lower tier.
+    EXPECT_TRUE(level == scan::SimdLevel::Sse2 || level == scan::SimdLevel::Avx2 || level == scan::SimdLevel::Avx512);
     EXPECT_GE(static_cast<int>(level), static_cast<int>(scan::SimdLevel::Sse2));
-#endif
 }
 
 TEST(ScannerTest, active_simd_level_is_deterministic)

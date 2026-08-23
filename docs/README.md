@@ -76,3 +76,5 @@ Archived benchmark snapshots. Record new measurements in a new folder rather tha
 - [Protection-cache comparison](analysis/memory_cache_comparison_v4/README.md). Cache vs uncached decision record (A3).
 - [Runtime footprint](analysis/runtime_footprint_v4/README.md). Logger and profiler resident bytes and high-water (P2-4).
 - [Signature-health corpus](analysis/sighealth_corpus_v4/README.md). Estimate vs ground truth over real x64 code (P1-9).
+- [Hot-path costs](analysis/hot_path_bench_v4/README.md). Type identity, guarded hook dispatch, and the asynchronous log producer (B1).
+- [Input token query](analysis/input_token_bench_v4/README.md). Per-frame `is_active` cost and the poller-acquire floor (C17).
