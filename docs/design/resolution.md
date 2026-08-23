@@ -165,7 +165,17 @@ Derived returns (`EnclosingFunction` / `StringPointerSlot`) compute an answer fr
 
 ### [B-64]
 
-`enclosing_function_start` resolves the referencing instruction's function through `RtlLookupFunctionEntry` first. The x64 exception directory gives the exact `[BeginAddress, EndAddress)`. That range cannot be fooled by a `0xC3` / `0xCC` byte embedded in an instruction immediate, and no back-scan window bounds it. A follow of `UNW_FLAG_CHAININFO` chains to the primary entry maps a hot/cold-split fragment back to its true function. The bounded RET/INT3 back-scan survives only as the fallback. The fallback cases are a leaf function, which has no unwind data, and an address in a region with no registered exception table. The latter is a raw or JIT code buffer. It is not a substitute for the metadata. Read the module's `.pdata` / `.xdata` through `detail::guarded_read_bytes`, so a partially-unmapped module degrades to the fallback instead of a host fault. Bound the chain walk against a malformed self-referential record.
+`enclosing_function_start` calls `RtlLookupFunctionEntry` first. The x64 exception directory supplies exact half-open bounds. The function follows `UNW_FLAG_CHAININFO` to the primary entry for a funclet or hot/cold fragment.
+
+The bounded RET/INT3 scan applies when authoritative metadata yields no boundary:
+
+- A leaf function has no unwind entry.
+- An unregistered region can contain raw or JIT code.
+- Malformed registered metadata proves no boundary.
+
+Guarded reads let a partially mapped module use the fallback without a host fault. The hop bound rejects cyclic chains.
+
+`StringXrefTest.EnclosingFunctionFallsBackWhenChainInfoIsCyclic` pins fallback after malformed metadata. `StringXrefTest.EnclosingFunctionRejectsOutOfImageIntermediateChainExtent` pins invalid chained-extent rejection.
 
 ### [B-65]
 

@@ -10,6 +10,7 @@
 
 #include "internal/scan_engine.hpp"
 
+#include "DetourModKit/defines.hpp"
 #include "DetourModKit/detail/pattern_core.hpp"
 
 #include <cstddef>
@@ -18,42 +19,31 @@
 #include <optional>
 #include <vector>
 
-#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define DMK_HAS_SSE2 1
+// DMK_ARCH_X64 in defines.hpp rejects every other target, so SSE2 and the AVX2 intrinsic headers are always present
+// and only the compiler differs. GCC and Clang need a per-function target attribute, which keeps the rest of this
+// translation unit SSE2-only and runnable on any x86-64 CPU. MSVC exposes the intrinsics unconditionally. Every tier
+// above SSE2 stays behind its runtime CPUID gate.
 #include <emmintrin.h>
-#endif
-
-// AVX2 support: compile-time header + runtime CPUID detection. On GCC/Clang, AVX2 intrinsics require either -mavx2
-// globally or
-// __attribute__((target("avx2"))) per function. We use the latter so the rest of the TU stays SSE2-only and runs on any
-// x86-64 CPU. On MSVC, intrinsics are always available; runtime CPUID gates usage.
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
-#define DMK_HAS_AVX2 1
 #include <immintrin.h>
+#if defined(__GNUC__) || defined(__clang__)
 #include <cpuid.h>
 #define DMK_AVX2_TARGET __attribute__((target("avx2")))
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#define DMK_HAS_AVX2 1
-#include <immintrin.h>
+#else
 #include <intrin.h>
 #define DMK_AVX2_TARGET
 #endif
 
-// AVX-512 verify tier: opt-in, off by default. Gated behind the DMK_ENABLE_AVX512 build option rather than a global
-// /arch:AVX512 or -mavx512 flag. A global flag lets the compiler emit AVX-512 across the whole TU, and that code
-// faults with #UD on the majority of CPUs that lack AVX-512. When the option is on, the verify tier is compiled
-// with a per-function target attribute on GCC/Clang (exactly like the AVX2 tier), so the rest of the TU stays
-// AVX2-only and runs anywhere; the tier is reached only after the runtime cpu_has_avx512() gate confirms both the CPU
-// and the OS support it. Byte-granular masked compare (_mm512_test_epi8_mask) is an AVX-512BW instruction, so the gate
-// requires AVX-512F + AVX-512BW, not F alone.
-#if defined(DMK_ENABLE_AVX512) && defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+// AVX-512 verify tier: opt-in through the DMK_ENABLE_AVX512 build option rather than a global /arch:AVX512 or
+// -mavx512 flag. A global flag lets the compiler emit AVX-512 across the whole translation unit, and that code faults
+// with #UD on the majority of CPUs that lack AVX-512. Byte-granular masked compare (_mm512_test_epi8_mask) is an
+// AVX-512BW instruction, so cpu_has_avx512() requires AVX-512F and AVX-512BW, not F alone.
+#if defined(DMK_ENABLE_AVX512)
 #define DMK_HAS_AVX512 1
-#include <immintrin.h>
+#if defined(__GNUC__) || defined(__clang__)
 #define DMK_AVX512_TARGET __attribute__((target("avx512f,avx512bw")))
-#elif defined(DMK_ENABLE_AVX512) && defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#define DMK_HAS_AVX512 1
-#include <immintrin.h>
+#else
 #define DMK_AVX512_TARGET
+#endif
 #endif
 
 // AddressSanitizer poisons the shadow of this process's own committed, readable memory - the redzones around stack
@@ -75,7 +65,6 @@ namespace DetourModKit
 {
     namespace
     {
-#if defined(DMK_HAS_AVX2) || defined(DMK_HAS_AVX512)
         constexpr unsigned int CPUID_ECX_XSAVE = 1u << 26;
         constexpr unsigned int CPUID_ECX_OSXSAVE = 1u << 27;
         constexpr unsigned int CPUID_ECX_AVX = 1u << 28;
@@ -134,9 +123,7 @@ namespace DetourModKit
             return false;
 #endif
         }
-#endif
 
-#ifdef DMK_HAS_AVX2
         /**
          * @brief Detects AVX2 support at runtime via CPUID.
          * @details Checks CPUID leaf 1 ECX bit 28 (AVX) plus CPUID leaf 7 subleaf 0 EBX bit 5 (AVX2), then verifies
@@ -206,7 +193,6 @@ namespace DetourModKit
 
             return j;
         }
-#endif // DMK_HAS_AVX2
 
 #ifdef DMK_HAS_AVX512
         /**
@@ -431,18 +417,15 @@ namespace DetourModKit
         // any no_sanitize_address attribute on the caller, so a per-function escape hatch is not enough: the function
         // itself must do the byte comparisons.
         //
-        // The needle search is tiered the same way the verify path is. On x86-64 the SSE2 body (16 bytes per iteration)
-        // is always available (SSE2 is part of the x86-64 baseline, so no runtime gate is needed) and an AVX2 body
-        // (32 bytes per iteration) is selected at runtime through the same cpu_has_avx2() gate the verify tier uses.
-        // Each SIMD body broadcasts the needle into every lane, compares a whole vector against it with one PCMPEQB,
-        // and collapses the per-byte result to a movemask bitmask; count-trailing-zeros on the first nonzero mask gives
-        // the lane index of the first match, so the search keeps libc memchr's "lowest address wins" contract. A scalar
-        // byte loop finishes the sub-vector tail and is the only body on targets without SSE2 (32-bit x86 built without
-        // it). None of the tiers call into libc, so the ASan interceptor never sees the read; the explicit intrinsics
-        // also use unaligned loads, so there is no type-punned qword load for clang-cl's strict-aliasing TBAA to
-        // miscompile.
+        // The needle search is tiered the same way the verify path is. The SSE2 body (16 bytes per iteration) is the
+        // x86-64 baseline and needs no runtime gate. The AVX2 body (32 bytes per iteration) is selected at runtime
+        // through the same cpu_has_avx2() gate the verify tier uses. Each SIMD body broadcasts the needle into every
+        // lane, compares a whole vector against it with one PCMPEQB, and collapses the per-byte result to a movemask
+        // bitmask. The first set bit in a nonzero mask gives the lane index of the first match, so the
+        // search keeps libc memchr's "lowest address wins" contract. A scalar byte loop finishes the sub-vector tail.
+        // None of the tiers call into libc, so the ASan interceptor never sees the read. The explicit intrinsics also
+        // use unaligned loads, so there is no type-punned qword load that clang-cl TBAA can miscompile.
 
-#if defined(DMK_HAS_SSE2) || defined(DMK_HAS_AVX2)
         /// Count-trailing-zeros over a known-nonzero movemask result; yields the first matching byte's lane index.
         inline unsigned dmk_movemask_first_index(unsigned int mask) noexcept
         {
@@ -454,12 +437,9 @@ namespace DetourModKit
             return static_cast<unsigned>(__builtin_ctz(mask));
 #endif
         }
-#endif // DMK_HAS_SSE2 || DMK_HAS_AVX2
 
-#ifdef DMK_HAS_SSE2
         // SSE2 needle search over [p, p + n): a 16-byte body plus a scalar tail. No runtime gate is needed, because
-        // DMK_HAS_SSE2 implies the target is x86-64 (or x86 built with SSE2), where these instructions are always
-        // legal.
+        // SSE2 is part of the x86-64 baseline.
         DMK_NO_SANITIZE_ADDRESS
         const unsigned char *dmk_memchr_sse2(const unsigned char *p, unsigned char needle, std::size_t n) noexcept
         {
@@ -483,9 +463,7 @@ namespace DetourModKit
             }
             return nullptr;
         }
-#endif // DMK_HAS_SSE2
 
-#ifdef DMK_HAS_AVX2
         // AVX2 needle search over [p, p + n): a 32-byte body plus a scalar tail. Compiled with AVX2 codegen via the
         // target attribute on GCC/Clang so the rest of the TU stays SSE2-only, and only entered after cpu_has_avx2()
         // has confirmed both the CPU and the OS support the instructions. The tail is scalar rather than an SSE2 call
@@ -515,12 +493,10 @@ namespace DetourModKit
             }
             return nullptr;
         }
-#endif // DMK_HAS_AVX2
 
         // use_avx2 is hoisted by find_pattern_raw so the per-anchor-hit sweep never re-reads the cpu_has_avx2() static.
         DMK_NO_SANITIZE_ADDRESS
-        const void *dmk_memchr(const void *haystack, unsigned char needle, std::size_t n,
-                               [[maybe_unused]] bool use_avx2) noexcept
+        const void *dmk_memchr(const void *haystack, unsigned char needle, std::size_t n, bool use_avx2) noexcept
         {
             if (n == 0)
             {
@@ -528,26 +504,13 @@ namespace DetourModKit
             }
             const auto *p = static_cast<const unsigned char *>(haystack);
 
-#ifdef DMK_HAS_AVX2
-            // The 32-byte body only pays for itself once a full vector is in play; shorter spans skip straight to the
-            // SSE2/scalar bodies, which avoids the target-switch on the tail of a sweep that has nearly run out.
+            // The 32-byte body pays for itself only when a full vector remains.
+            // Shorter spans use the SSE2 body and avoid a target switch near the end of the sweep.
             if (use_avx2 && n >= 32)
             {
                 return dmk_memchr_avx2(p, needle, n);
             }
-#endif
-#ifdef DMK_HAS_SSE2
             return dmk_memchr_sse2(p, needle, n);
-#else
-            for (; n > 0; ++p, --n)
-            {
-                if (*p == needle)
-                {
-                    return p;
-                }
-            }
-            return nullptr;
-#endif
         }
 
         // memchr over [begin, end] for the anchor byte. Routes through the self-provided dmk_memchr above so the ASan
@@ -627,12 +590,7 @@ namespace DetourModKit
         // Hoist runtime CPU detection. The query itself is a function-local static behind a one-shot init, but
         // reading it on every memchr hit and every verify adds an indirect load per false candidate. Caching it
         // once here lets both the prefilter sweep and the per-candidate verify branch use a register-resident bool.
-        // It is defined unconditionally (false without an AVX2 build) because the prefilter takes it on every call.
-#ifdef DMK_HAS_AVX2
         const bool use_avx2 = cpu_has_avx2();
-#else
-        const bool use_avx2 = false;
-#endif
 #ifdef DMK_HAS_AVX512
         const bool use_avx512 = cpu_has_avx512();
 #endif
@@ -669,7 +627,6 @@ namespace DetourModKit
             }
 #endif // DMK_HAS_AVX512
 
-#ifdef DMK_HAS_AVX2
             if (match_found && use_avx2)
             {
                 const auto next_j = verify_pattern_avx2(pattern_start, pattern, j);
@@ -682,9 +639,7 @@ namespace DetourModKit
                     match_found = false;
                 }
             }
-#endif // DMK_HAS_AVX2
 
-#ifdef DMK_HAS_SSE2
             for (; match_found && j + 16 <= pattern_size; j += 16)
             {
                 const __m128i mem = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern_start + j));
@@ -701,7 +656,6 @@ namespace DetourModKit
                     break;
                 }
             }
-#endif // DMK_HAS_SSE2
 
             for (; match_found && j < pattern_size; ++j)
             {
@@ -993,11 +947,7 @@ namespace DetourModKit
 
         // Bounded-jump pattern: hoist the AVX2 gate once for the segmented sweep's memchr, then run the segmented
         // matcher, which applies the offset itself because a jump match's marker delta is not a constant.
-#ifdef DMK_HAS_AVX2
         const bool use_avx2 = cpu_has_avx2();
-#else
-        const bool use_avx2 = false;
-#endif
         detail::SegmentedScanBudget local_budget{};
         detail::SegmentedScanBudget &budget = segmented_budget != nullptr ? *segmented_budget : local_budget;
         return find_pattern_segmented(start_address, region_size, pattern, budget, use_avx2);
@@ -1078,14 +1028,8 @@ namespace DetourModKit
         if (cpu_has_avx512())
             return scan::SimdLevel::Avx512;
 #endif
-#ifdef DMK_HAS_AVX2
         if (cpu_has_avx2())
             return scan::SimdLevel::Avx2;
-#endif
-#ifdef DMK_HAS_SSE2
         return scan::SimdLevel::Sse2;
-#else
-        return scan::SimdLevel::Scalar;
-#endif
     }
 } // namespace DetourModKit
