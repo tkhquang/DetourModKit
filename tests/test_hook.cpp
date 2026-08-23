@@ -220,13 +220,13 @@ namespace
     // only a move-only type makes an lvalue dispatch ill-formed at the call site.
     using OwnedIntFn = int (*)(std::unique_ptr<int>);
 
-    DMK_TEST_NOINLINE int consume_owned_int(std::unique_ptr<int> owned)
+    DMK_TEST_NOINLINE int consume_owned_int(std::unique_ptr<int> owned) noexcept
     {
         volatile int r = owned ? *owned : -1;
         return r;
     }
 
-    int consume_owned_int_detour(std::unique_ptr<int> owned)
+    int consume_owned_int_detour(std::unique_ptr<int> owned) noexcept
     {
         return owned ? *owned + 100 : -1;
     }
@@ -245,13 +245,13 @@ namespace
 
     using CopyOnlyIntFn = int (*)(CopyOnlyInt);
 
-    DMK_TEST_NOINLINE int consume_copy_only_int(CopyOnlyInt owned)
+    DMK_TEST_NOINLINE int consume_copy_only_int(CopyOnlyInt owned) noexcept
     {
         volatile int result = owned.value;
         return result;
     }
 
-    int consume_copy_only_int_detour(CopyOnlyInt owned)
+    int consume_copy_only_int_detour(CopyOnlyInt owned) noexcept
     {
         return owned.value + 100;
     }

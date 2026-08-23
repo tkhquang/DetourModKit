@@ -504,7 +504,8 @@ namespace DetourModKit
                     }
                     if (fallback.had_direct && fallback.not_applicable)
                     {
-                        // Distinct from a plain miss: a name/string/RipRelative-only ladder has no Direct row at all.
+                        // At least one Direct candidate existed, and no shape rebuilt a usable pattern from any of
+                        // them. Distinct from a plain miss, where a ladder carries no Direct row to rebuild.
                         log_unresolved(request, "prologue recovery had no rebuildable Direct candidate");
                         return std::unexpected(Error{ErrorCode::PrologueFallbackNotApplicable, "scan::resolve"});
                     }

@@ -121,6 +121,7 @@ There are two guarded write families, split by what happens when the target is n
 ```cpp
 namespace mem = DetourModKit::memory;
 using DetourModKit::Address;
+using DetourModKit::ErrorCode;
 
 // Write a camera transform every frame through a resolved chain. Fault-guarded: a stale chain fails closed
 // instead of faulting the host, and a slot that is not writable (the chain drifted onto a protected page) is
@@ -128,9 +129,11 @@ using DetourModKit::Address;
 const Matrix4x4 next = compute_camera(...);
 if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 {
-    if (!mem::write_in_place<Matrix4x4>(*slot, next))
+    if (const auto written = mem::write_in_place<Matrix4x4>(*slot, next); !written)
     {
-        // Faulted or not writable this frame. Skip it, do not crash.
+        // WriteFaulted changed nothing, so skip this frame. WriteMayBePartial leaves the transform
+        // indeterminate, so stop writing through this slot and re-resolve the chain first.
+        camera_slot_usable = written.error().code != ErrorCode::WriteMayBePartial;
     }
 }
 // else: chain went stale this frame, so skip the write.
