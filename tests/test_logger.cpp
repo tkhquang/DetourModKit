@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <clocale>
 #include <fstream>
 #include <filesystem>
 #include <memory>
@@ -412,6 +413,51 @@ TEST_F(LoggerTest, StringToLogLevel_VariousCases)
 
     EXPECT_EQ(string_to_log_level("123"), LogLevel::Info);
     EXPECT_EQ(string_to_log_level("0"), LogLevel::Info);
+}
+
+TEST_F(LoggerTest, StringToLogLevelUsesAsciiFold)
+{
+    // [B-37]: the level parse must fold ASCII and nothing else, so LC_CTYPE cannot change which name a config file
+    // resolves to. Turkish is the classic counterexample locale for a locale-sensitive fold of 'i'.
+    struct CtypeLocale
+    {
+        explicit CtypeLocale(const char *name) : m_restore(std::setlocale(LC_CTYPE, nullptr))
+        {
+            m_set = std::setlocale(LC_CTYPE, name);
+        }
+        ~CtypeLocale() noexcept { std::setlocale(LC_CTYPE, m_restore.c_str()); }
+        CtypeLocale(const CtypeLocale &) = delete;
+        CtypeLocale &operator=(const CtypeLocale &) = delete;
+        CtypeLocale(CtypeLocale &&) = delete;
+        CtypeLocale &operator=(CtypeLocale &&) = delete;
+        [[nodiscard]] bool installed() const noexcept { return m_set != nullptr; }
+
+        std::string m_restore;
+        const char *m_set{nullptr};
+    };
+
+    for (const char *name : {"C", "turkish", "greek", "russian"})
+    {
+        const CtypeLocale locale(name);
+        if (!locale.installed())
+        {
+            continue;
+        }
+        EXPECT_EQ(string_to_log_level("trace"), LogLevel::Trace) << name;
+        EXPECT_EQ(string_to_log_level("dEbUg"), LogLevel::Debug) << name;
+        EXPECT_EQ(string_to_log_level("warning"), LogLevel::Warning) << name;
+        EXPECT_EQ(string_to_log_level("ERROR"), LogLevel::Error) << name;
+
+        // Each installed locale must leave high-byte inputs outside the ASCII level names.
+        for (int candidate = 0x80; candidate <= 0xFF; ++candidate)
+        {
+            std::string spelled = "WARN";
+            spelled.push_back(static_cast<char>(candidate));
+            spelled += "NG";
+            EXPECT_EQ(string_to_log_level(spelled), LogLevel::Info)
+                << name << ": byte " << candidate << " must not fold into a level name";
+        }
+    }
 }
 
 TEST_F(LoggerTest, LongFormatString)
@@ -999,13 +1045,224 @@ TEST_F(LoggerTest, Reconfigure_InvalidPath_KeepsOldFile)
 
     logger.reconfigure("BAD", "Z:\\nonexistent\\dir\\test.log", "%Y-%m-%d %H:%M:%S");
 
-    logger.info("AFTER_INVALID_RECONFIG_9p2x");
+    // The staged transaction opens the replacement before it retires the live sink, so a failed open leaves the prior
+    // sink OPEN. A best-effort reopen cannot give that guarantee, which is why the later record is the real oracle.
+    EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_INVALID_RECONFIG_9p2x"));
     logger.flush();
 
     std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("BEFORE_INVALID_RECONFIG_3k7m"), std::string::npos);
+    EXPECT_NE(content.find("AFTER_INVALID_RECONFIG_9p2x"), std::string::npos);
+}
+
+TEST_F(LoggerTest, Configure_InvalidPath_KeepsOldSink)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    const auto accepted_snapshot = Logger::static_config_for_test();
+
+    logger.info("BEFORE_INVALID_CONFIGURE_5t1r");
+    logger.flush();
+
+    Logger::configure("BAD_CONFIG", "Z:\\nonexistent\\dir\\configure.log", "%H:%M:%S");
+
+    EXPECT_EQ(Logger::static_config_for_test(), accepted_snapshot);
+    EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_INVALID_CONFIGURE_6h8d"));
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("BEFORE_INVALID_CONFIGURE_5t1r"), std::string::npos);
+    EXPECT_NE(content.find("AFTER_INVALID_CONFIGURE_6h8d"), std::string::npos);
+}
+
+TEST_F(LoggerTest, Configure_AllocationFailureRestoresPublishedSnapshot)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    static std::atomic<int> s_configure_alloc_counter{0};
+    const auto target = std::filesystem::temp_directory_path() /
+                        ("test_logger_configure_alloc_" + std::to_string(GetCurrentProcessId()) + "_" +
+                         std::to_string(s_configure_alloc_counter.fetch_add(1, std::memory_order_relaxed)) + ".log");
+    const std::string prior_prefix(48, 'P');
+    const std::string target_prefix(48, 'T');
+    const std::string prior_timestamp(48, 'A');
+    const std::string target_timestamp(48, 'B');
+    const std::string prior_file = m_test_log_file.string();
+    const std::string target_file = target.string();
+
+    Logger::configure(prior_prefix, prior_file, prior_timestamp, LogOpenMode::Append);
+    const long long allocation_count_before = dmk_test::thread_new_calls();
+    Logger::configure(prior_prefix, prior_file, prior_timestamp, LogOpenMode::Append);
+    const long long publication_allocations = dmk_test::thread_new_calls() - allocation_count_before;
+    const auto prior_snapshot = Logger::static_config_for_test();
+    ASSERT_GT(publication_allocations, 0);
+
+    constexpr long long max_allocation_budget = 64;
+    long long failures = 0;
+    bool completed = false;
+    for (long long allow = 0; allow < max_allocation_budget && !completed; ++allow)
+    {
+        try
+        {
+            const dmk_test::AllocFailScope guard(allow);
+            Logger::configure(target_prefix, target_file, target_timestamp, LogOpenMode::Append);
+            completed = true;
+        }
+        catch (const std::bad_alloc &)
+        {
+            ++failures;
+        }
+
+        if (!completed)
+        {
+            EXPECT_EQ(Logger::static_config_for_test(), prior_snapshot)
+                << "budget " << allow << " left the staged snapshot published after configure threw";
+        }
+    }
+
+    EXPECT_GT(failures, publication_allocations)
+        << "the sweep did not reach a reconfigure allocation after snapshot publication";
+    ASSERT_TRUE(completed) << "configure never completed within the allocation budget";
+    const auto committed_snapshot = Logger::static_config_for_test();
+    ASSERT_NE(committed_snapshot, prior_snapshot) << "configure rejected the final allocation budget";
+    EXPECT_EQ(committed_snapshot->log_prefix, target_prefix);
+    EXPECT_EQ(committed_snapshot->log_file_name, target_file);
+    EXPECT_EQ(committed_snapshot->timestamp_format, target_timestamp);
+
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    std::error_code error_code;
+    (void)std::filesystem::remove(target, error_code);
+    EXPECT_FALSE(error_code) << "failed to remove configure target: " << error_code.message();
+}
+
+TEST_F(LoggerTest, Reconfigure_AllocationFailure_KeepsOldSink)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("BEFORE_ALLOC_FAIL_RECONFIG_4c9v");
+    logger.flush();
+
+    static std::atomic<int> s_alloc_reconfig_counter{0};
+    const auto target = std::filesystem::temp_directory_path() /
+                        ("test_logger_alloc_reconfig_" + std::to_string(GetCurrentProcessId()) + "_" +
+                         std::to_string(s_alloc_reconfig_counter.fetch_add(1)) + ".log");
+    const std::string target_path = target.string();
+    std::error_code initial_cleanup_error;
+    (void)std::filesystem::remove(target, initial_cleanup_error);
+    ASSERT_FALSE(initial_cleanup_error) << "failed to clear allocation target: " << initial_cleanup_error.message();
+
+    // The allocation sweep requires a live prior sink and no replacement file after each failure. All allocation
+    // precedes file creation, so an allocation failure cannot reach CreateFile.
+    int failures = 0;
+    bool completed = false;
+    constexpr long long max_allocation_budget = 64;
+    for (long long allow = 0; allow < max_allocation_budget && !completed; ++allow)
+    {
+        try
+        {
+            const dmk_test::AllocFailScope guard(allow);
+            logger.reconfigure("ALLOC_FAIL", target_path, "%H:%M:%S");
+            completed = true;
+        }
+        catch (const std::bad_alloc &)
+        {
+            ++failures;
+        }
+        if (!completed)
+        {
+            EXPECT_FALSE(std::filesystem::exists(target))
+                << "budget " << allow << " created the replacement file after an allocation failure";
+            EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_ALLOC_FAIL_RECONFIG_7b2k"))
+                << "budget " << allow << " left the prior sink unusable";
+        }
+    }
+    EXPECT_GT(failures, 0) << "no staged allocation failed, so the rollback path was never reached";
+    ASSERT_TRUE(completed) << "reconfigure never completed within the allocation budget";
+    ASSERT_TRUE(logger.log(LogLevel::Info, "AFTER_ALLOC_COMMIT_1f6w"));
+    logger.flush();
+
+    {
+        std::ifstream prior_input(m_test_log_file);
+        ASSERT_TRUE(prior_input.is_open());
+        const std::string prior_content((std::istreambuf_iterator<char>(prior_input)),
+                                        std::istreambuf_iterator<char>());
+        EXPECT_NE(prior_content.find("BEFORE_ALLOC_FAIL_RECONFIG_4c9v"), std::string::npos);
+        EXPECT_NE(prior_content.find("AFTER_ALLOC_FAIL_RECONFIG_7b2k"), std::string::npos);
+    }
+
+    {
+        std::ifstream target_input(target);
+        ASSERT_TRUE(target_input.is_open()) << "reconfigure rejected the final allocation budget";
+        const std::string target_content((std::istreambuf_iterator<char>(target_input)),
+                                         std::istreambuf_iterator<char>());
+        EXPECT_NE(target_content.find("AFTER_ALLOC_COMMIT_1f6w"), std::string::npos);
+    }
+
+    logger.reconfigure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    logger.flush();
+    std::error_code cleanup_error;
+    (void)std::filesystem::remove(target, cleanup_error);
+    EXPECT_FALSE(cleanup_error) << "failed to remove allocation target: " << cleanup_error.message();
+}
+
+TEST_F(LoggerTest, LogNoexceptCountsASuppressedSinkFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("warm the synchronous sink");
+    logger.flush();
+
+    const std::size_t before = logger.dropped_count();
+    bool delivered = true;
+    {
+        const dmk_test::AllocFailScope guard(0);
+        delivered = logger.log_noexcept(LogLevel::Info, "NOEXCEPT_DROP_COUNT_PROBE");
+    }
+
+    EXPECT_FALSE(delivered);
+    EXPECT_EQ(logger.dropped_count(), before + 1) << "a record lost to a suppressed throw must still be counted";
+}
+
+TEST_F(LoggerTest, TryLogCountsAFormatFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("warm the synchronous sink");
+    logger.flush();
+
+    // The oversized message selects the documented std::format overflow path and forces an allocation.
+    const std::string oversize(LOG_INLINE_MESSAGE_SIZE + 64, 'x');
+    const std::size_t before = logger.dropped_count();
+    bool delivered = true;
+    {
+        const dmk_test::AllocFailScope guard(0);
+        delivered = logger.try_log(LogLevel::Info, "{}", oversize);
+    }
+
+    EXPECT_FALSE(delivered);
+    EXPECT_EQ(logger.dropped_count(), before + 1) << "a record lost to a format failure must be counted once";
+}
+
+TEST_F(LoggerTest, LogNoexceptCountsARefusedRecordOnce)
+{
+    // The sink already counts what it refuses, so the no-throw wrapper must not add a second charge for it.
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.shutdown();
+
+    const std::size_t before = logger.dropped_count();
+    EXPECT_FALSE(logger.log_noexcept(LogLevel::Error, "REFUSED_AFTER_SHUTDOWN_1q4z"));
+    EXPECT_EQ(logger.dropped_count(), before + 1);
 }
 
 TEST_F(LoggerTest, FlushAsync_DrainsPendingMessages)
@@ -1096,24 +1353,31 @@ TEST_F(LoggerTest, Reconfigure_WhileAsyncMode_Works)
                      std::to_string(s_reconfig_counter.fetch_add(1)) + ".log");
 
     logger.reconfigure("ASYNC_RECONFIG", new_file.string(), "%Y-%m-%d %H:%M:%S");
+    EXPECT_TRUE(logger.is_async_mode_enabled())
+        << "reconfigure retired the async transport instead of the required handoff";
 
     logger.info("ASYNC_RECONFIG_VERIFY_8n4j");
     logger.flush();
     logger.disable_async_mode();
 
-    std::ifstream ifs(new_file);
-    ASSERT_TRUE(ifs.is_open());
-    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    EXPECT_NE(content.find("ASYNC_RECONFIG_VERIFY_8n4j"), std::string::npos);
+    {
+        std::ifstream new_input(new_file);
+        ASSERT_TRUE(new_input.is_open());
+        const std::string content((std::istreambuf_iterator<char>(new_input)), std::istreambuf_iterator<char>());
+        EXPECT_NE(content.find("ASYNC_RECONFIG_VERIFY_8n4j"), std::string::npos);
 
-    try
-    {
-        if (std::filesystem::exists(new_file))
-            std::filesystem::remove(new_file);
+        // The commit hands the new sink to the live writer. Without that handoff, the record stays in the old file.
+        std::ifstream old_input(m_test_log_file);
+        ASSERT_TRUE(old_input.is_open());
+        const std::string old_content((std::istreambuf_iterator<char>(old_input)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(old_content.find("ASYNC_RECONFIG_VERIFY_8n4j"), std::string::npos);
     }
-    catch (const std::filesystem::filesystem_error &)
-    {
-    }
+
+    logger.reconfigure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    logger.flush();
+    std::error_code cleanup_error;
+    (void)std::filesystem::remove(new_file, cleanup_error);
+    EXPECT_FALSE(cleanup_error) << "failed to remove async reconfigure target: " << cleanup_error.message();
 }
 
 TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
@@ -1934,14 +2198,69 @@ namespace DetourModKit::detail
     extern std::atomic<std::atomic<bool> *> g_async_logger_writer_gate;
     extern std::atomic<std::size_t> g_async_logger_live_count_for_test;
     extern void (*g_logger_publication_probe)();
+    extern void (*g_logger_async_snapshot_probe)() noexcept;
+    extern int (*g_win_file_write_override)(void *, const void *, unsigned long, unsigned long *);
 } // namespace DetourModKit::detail
 
 namespace
 {
+    Logger *s_snapshot_probe_logger = nullptr;
+
     bool logger_detach_always_true_loader_lock() noexcept
     {
         return true;
     }
+
+    void retire_snapshotted_async_writer() noexcept
+    {
+        s_snapshot_probe_logger->disable_async_mode();
+    }
+
+    int logger_write_always_fails(void *, const void *, unsigned long, unsigned long *written) noexcept
+    {
+        if (written != nullptr)
+        {
+            *written = 0;
+        }
+        return 0;
+    }
+
+    class LoggerSnapshotProbeScope
+    {
+    public:
+        explicit LoggerSnapshotProbeScope(Logger &logger) noexcept
+        {
+            s_snapshot_probe_logger = &logger;
+            DetourModKit::detail::g_logger_async_snapshot_probe = &retire_snapshotted_async_writer;
+        }
+
+        ~LoggerSnapshotProbeScope() noexcept
+        {
+            DetourModKit::detail::g_logger_async_snapshot_probe = nullptr;
+            s_snapshot_probe_logger = nullptr;
+        }
+
+        LoggerSnapshotProbeScope(const LoggerSnapshotProbeScope &) = delete;
+        LoggerSnapshotProbeScope &operator=(const LoggerSnapshotProbeScope &) = delete;
+        LoggerSnapshotProbeScope(LoggerSnapshotProbeScope &&) = delete;
+        LoggerSnapshotProbeScope &operator=(LoggerSnapshotProbeScope &&) = delete;
+    };
+
+    class LoggerWriteFailureScope
+    {
+    public:
+        LoggerWriteFailureScope() noexcept
+        {
+            DetourModKit::detail::g_win_file_write_override = &logger_write_always_fails;
+        }
+
+        ~LoggerWriteFailureScope() noexcept { DetourModKit::detail::g_win_file_write_override = nullptr; }
+
+        LoggerWriteFailureScope(const LoggerWriteFailureScope &) = delete;
+        LoggerWriteFailureScope &operator=(const LoggerWriteFailureScope &) = delete;
+        LoggerWriteFailureScope(LoggerWriteFailureScope &&) = delete;
+        LoggerWriteFailureScope &operator=(LoggerWriteFailureScope &&) = delete;
+    };
 
     class LoggerSeamReset
     {
@@ -1979,6 +2298,7 @@ namespace
 
         Logger::configure("DEFAULT_DETACH", log_file.string(), "%H:%M:%S");
         Logger &logger = DetourModKit::log();
+        const auto accepted_snapshot = Logger::static_config_for_test();
         DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
         DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
 
@@ -1994,8 +2314,9 @@ namespace
         logger.disable_async_mode();
         Logger::configure("DEFAULT_RIVAL", rival_file.string(), "%H:%M:%S");
         const bool revived = DetourModKit::log().log(LogLevel::Error, "DEFAULT_DETACH_REVIVED");
+        const bool snapshot_changed = Logger::static_config_for_test() != accepted_snapshot;
         writer_gate.store(false, std::memory_order_release);
-        std::_Exit(revived || std::filesystem::exists(rival_file) ? 32 : 0);
+        std::_Exit(revived || snapshot_changed || std::filesystem::exists(rival_file) ? 32 : 0);
     }
 } // namespace
 
@@ -2035,6 +2356,82 @@ TEST_F(LoggerTest, DroppedCountSurvivesNormalAsyncDisable)
         << "retiring the async writer discarded its cumulative drop telemetry";
 
     std::filesystem::remove(async_file, error_code);
+}
+
+TEST_F(LoggerTest, LateRetiredAsyncSnapshotCountsAtFacade)
+{
+    static std::atomic<int> s_snapshot_counter{0};
+    const auto snapshot_file = std::filesystem::temp_directory_path() /
+                               ("test_logger_stale_snapshot_" + std::to_string(GetCurrentProcessId()) + "_" +
+                                std::to_string(s_snapshot_counter.fetch_add(1, std::memory_order_relaxed)) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(snapshot_file, error_code);
+
+    Logger logger("STALE_SNAPSHOT", snapshot_file.string(), "%H:%M:%S");
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+    const std::size_t baseline = logger.dropped_count();
+
+    bool accepted = true;
+    {
+        LoggerSnapshotProbeScope snapshot_probe{logger};
+        accepted = logger.log(LogLevel::Info, "LATE_STALE_SNAPSHOT_7m3q");
+    }
+
+    EXPECT_FALSE(accepted);
+    EXPECT_FALSE(logger.is_async_mode_enabled());
+    EXPECT_EQ(logger.dropped_count(), baseline + 1)
+        << "the retired writer rejected the stale snapshot but did not transfer the loss to the facade";
+
+    logger.shutdown();
+    (void)std::filesystem::remove(snapshot_file, error_code);
+    EXPECT_FALSE(error_code) << "failed to remove stale-snapshot sink: " << error_code.message();
+}
+
+TEST_F(LoggerTest, ReconfigureFailedOldSinkDrainPreservesSinkAndBufferedRecord)
+{
+    static std::atomic<int> s_drain_counter{0};
+    const int test_id = s_drain_counter.fetch_add(1, std::memory_order_relaxed);
+    const auto old_file = std::filesystem::temp_directory_path() /
+                          ("test_logger_failed_drain_old_" + std::to_string(GetCurrentProcessId()) + "_" +
+                           std::to_string(test_id) + ".log");
+    const auto candidate_file = std::filesystem::temp_directory_path() /
+                                ("test_logger_failed_drain_new_" + std::to_string(GetCurrentProcessId()) + "_" +
+                                 std::to_string(test_id) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(old_file, error_code);
+    std::filesystem::remove(candidate_file, error_code);
+
+    Logger logger("DRAIN_OLD", old_file.string(), "%H:%M:%S");
+    ASSERT_TRUE(logger.log(LogLevel::Info, "BUFFERED_BEFORE_FAILED_DRAIN_2j8c"));
+    {
+        LoggerWriteFailureScope write_failure;
+        logger.reconfigure("DRAIN_NEW", candidate_file.string(), "%H:%M:%S");
+    }
+
+    EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_FAILED_DRAIN_6p4v"));
+    logger.flush();
+
+    {
+        std::ifstream old_input(old_file);
+        ASSERT_TRUE(old_input.is_open());
+        const std::string old_content((std::istreambuf_iterator<char>(old_input)), std::istreambuf_iterator<char>());
+        EXPECT_NE(old_content.find("BUFFERED_BEFORE_FAILED_DRAIN_2j8c"), std::string::npos);
+        EXPECT_NE(old_content.find("AFTER_FAILED_DRAIN_6p4v"), std::string::npos)
+            << "failed retirement replaced the old sink instead of the required preservation";
+
+        std::ifstream candidate_input(candidate_file);
+        const std::string candidate_content((std::istreambuf_iterator<char>(candidate_input)),
+                                            std::istreambuf_iterator<char>());
+        EXPECT_EQ(candidate_content.find("AFTER_FAILED_DRAIN_6p4v"), std::string::npos);
+    }
+
+    logger.shutdown();
+    (void)std::filesystem::remove(old_file, error_code);
+    EXPECT_FALSE(error_code) << "failed to remove old sink: " << error_code.message();
+    error_code.clear();
+    (void)std::filesystem::remove(candidate_file, error_code);
+    EXPECT_FALSE(error_code) << "failed to remove candidate sink: " << error_code.message();
 }
 
 TEST_F(LoggerTest, LoaderLockDetachLeaksHandleAndKeepsSinkForTheRetainedWriter)

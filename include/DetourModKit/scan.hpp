@@ -151,17 +151,15 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief Tests whether the pattern matches the bytes at the start of @p window, honoring any bounded jumps.
-         * @param window The candidate byte window; must be at least min_match_length() bytes for a match to be
-         * possible.
-         * @return True when the pattern (every segment placed across its gaps) matches beginning at the window start.
-         * @details Applies the same compare the scan engine uses, expressed per byte: a position matches when
-         *          (memory ^ pattern) & mask is zero for every byte, so wildcard bytes (mask 0x00) always agree and a
-         *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A jump-free pattern is a single
-         *          fixed-width compare; a pattern with bounded jumps runs the same bounded backtracking search the
-         *          engine uses,
-         *          trying each gap width in ascending order. A window too short to hold the pattern cannot match.
-         * @note Callback-safe: a pure masked byte compare with no allocation, I/O, or locking.
+         * @brief Tests whether the pattern matches at the start of @p window and honors each bounded jump.
+         * @param window The candidate byte window. A match requires at least min_match_length() bytes.
+         * @return True only when the bounded search finds a complete placement at the window start.
+         *         It returns false when the search finds no placement or exhausts its per-position budget before it
+         *         checks every candidate placement. A false result is not proof of absence.
+         *         PatternJumps.MatchesAtBudgetExhaustionIsFailClosed pins the exhausted case.
+         * @details A byte agrees when (memory ^ pattern) & mask is zero. A mask of 0x00 accepts every byte.
+         *          Masks 0xF0 and 0x0F compare only the fixed nibble. The search tries gaps from smallest to largest.
+         * @note Callback-safe: the bounded search allocates no memory, performs no I/O, and takes no lock.
          */
         [[nodiscard]] constexpr bool matches_at(std::span<const std::byte> window) const noexcept
         {
