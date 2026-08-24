@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -42,15 +43,29 @@ namespace
     std::uint8_t *g_page = nullptr;
     LONG g_faults_seen = 0;
 
-    /// A hook target with a body large enough for any backend patch length.
-    __declspec(noinline) int hook_target(int value) noexcept
+    [[nodiscard]] std::uint8_t *allocate_hook_target() noexcept
     {
-        volatile int accumulated = value;
-        for (int i = 0; i < 4; ++i)
+        auto *const page = static_cast<std::uint8_t *>(
+            ::VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+        );
+        if (page == nullptr)
         {
-            accumulated += i;
+            return nullptr;
         }
-        return accumulated;
+
+        std::memset(page, 0x90, 32);
+        page[16] = 0x8B;
+        page[17] = 0xC1;
+        page[18] = 0x83;
+        page[19] = 0xC0;
+        page[20] = 0x06;
+        page[21] = 0xC3;
+        if (::FlushInstructionCache(::GetCurrentProcess(), page, 32) == FALSE)
+        {
+            (void)::VirtualFree(page, 0, MEM_RELEASE);
+            return nullptr;
+        }
+        return page;
     }
 
     void mid_detour(DetourModKit::hook::MidContext &) noexcept {}
@@ -88,13 +103,18 @@ namespace
 {
     int run_closed_window()
     {
-
+        auto *const hook_target = allocate_hook_target();
+        if (hook_target == nullptr)
+        {
+            std::fprintf(stderr, "SETUP: hook target allocation failed (error %lu)\n", ::GetLastError());
+            return SETUP_FAILURE;
+        }
         // The backend registers its trap handler lazily, on the first hook that opens a protection window. Without a
         // live hook there is no handler to prove anything about.
         auto created = DetourModKit::hook::mid_at(
             DetourModKit::hook::MidRequest{
                 .name = "trap-closed-window",
-                .target = DetourModKit::Address{&hook_target},
+                .target = DetourModKit::Address{hook_target},
             },
             &mid_detour
         );
@@ -108,7 +128,7 @@ namespace
             std::fprintf(stderr, "SETUP: enable failed\n");
             return SETUP_FAILURE;
         }
-        (void)hook_target(1);
+        reinterpret_cast<int (*)(int)>(hook_target)(1);
 
         g_page = static_cast<std::uint8_t *>(
             ::VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
@@ -157,10 +177,16 @@ namespace
 
     int run_late_static()
     {
+        auto *const hook_target = allocate_hook_target();
+        if (hook_target == nullptr)
+        {
+            std::fprintf(stderr, "SETUP: hook target allocation failed (error %lu)\n", ::GetLastError());
+            return SETUP_FAILURE;
+        }
         auto created = DetourModKit::hook::mid_at(
             DetourModKit::hook::MidRequest{
                 .name = "trap-late-static",
-                .target = DetourModKit::Address{&hook_target},
+                .target = DetourModKit::Address{hook_target},
             },
             &mid_detour
         );

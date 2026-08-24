@@ -73,6 +73,9 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - post-static-destruction teardown,
 - a logical enabled flag that follows committed or exactly witnessed reachability, with explicit emitted-patch provenance,
 - a retry for an execute fault whose protection window closed before the fault reached the trap handler,
+- instruction-cache maintenance for generated code and target patch commits,
+- instruction-boundary relocation and trap redirection for widened branches,
+- refusal before multi-byte writes when a required transaction code page must stay executable,
 - a VMT move constructor that propagates allocation failure.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.

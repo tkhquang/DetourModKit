@@ -24,6 +24,7 @@
 
 #include <safetyhook.hpp>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -239,6 +240,44 @@ namespace DetourModKit
 
         /// Returns one segment address from the latest ordered restore trace.
         [[nodiscard]] void *backend_trap_restore_trace_address_for_test(std::size_t index) noexcept;
+
+        /// Describes one backend instruction-cache flush and its transaction position.
+        struct BackendInstructionFlushObservation
+        {
+            void *address{nullptr};
+            std::size_t size{0};
+            std::size_t protect_calls_before{0};
+            bool succeeded{false};
+        };
+
+        /// Clears the backend instruction-cache flush trace for the current thread.
+        void reset_backend_instruction_flush_trace_for_test() noexcept;
+
+        /// Forces one upcoming backend instruction-cache flush call to fail, or disables failure with zero.
+        void set_backend_instruction_flush_failure_call_for_test(std::size_t call) noexcept;
+
+        /// Returns the backend instruction-cache flush trace size for the current thread.
+        [[nodiscard]] std::size_t backend_instruction_flush_trace_size_for_test() noexcept;
+
+        /// Returns one backend instruction-cache flush trace record.
+        [[nodiscard]] BackendInstructionFlushObservation
+        backend_instruction_flush_trace_for_test(std::size_t index) noexcept;
+
+        /// Forces the next backend inline setup to use its FF path.
+        void force_backend_ff_hook_for_test(bool force) noexcept;
+
+        /// Returns the latest backend E9 instruction-boundary count for the current thread.
+        [[nodiscard]] std::size_t backend_instruction_boundary_trace_size_for_test() noexcept;
+
+        /// Returns one original-to-trampoline instruction boundary.
+        [[nodiscard]] std::array<std::size_t, 2>
+        backend_instruction_boundary_trace_for_test(std::size_t index) noexcept;
+
+        /// Returns the latest backend inline error type for the current thread.
+        [[nodiscard]] std::uint8_t backend_last_inline_error_type_for_test() noexcept;
+
+        /// Returns an address whose page cannot enter a non-executable backend transaction.
+        [[nodiscard]] void *backend_non_executable_transaction_marker_for_test() noexcept;
     } // namespace detail
 #endif
 } // namespace DetourModKit

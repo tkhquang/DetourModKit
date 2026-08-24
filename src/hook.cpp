@@ -214,6 +214,62 @@ namespace DetourModKit::detail
     {
         return safetyhook::trap_restore_trace_address_for_test(index);
     }
+
+    void reset_backend_instruction_flush_trace_for_test() noexcept
+    {
+        safetyhook::reset_instruction_cache_flush_trace_for_test();
+    }
+
+    void set_backend_instruction_flush_failure_call_for_test(std::size_t call) noexcept
+    {
+        safetyhook::g_instruction_cache_flush_failure_call.store(call, std::memory_order_release);
+    }
+
+    std::size_t backend_instruction_flush_trace_size_for_test() noexcept
+    {
+        return safetyhook::instruction_cache_flush_trace_size_for_test();
+    }
+
+    BackendInstructionFlushObservation backend_instruction_flush_trace_for_test(std::size_t index) noexcept
+    {
+        const safetyhook::InstructionCacheFlushObservation observation =
+            safetyhook::instruction_cache_flush_trace_for_test(index);
+        return BackendInstructionFlushObservation{
+            .address = observation.address,
+            .size = observation.size,
+            .protect_calls_before = observation.protect_calls_before,
+            .succeeded = observation.succeeded,
+        };
+    }
+
+    void force_backend_ff_hook_for_test(bool force) noexcept
+    {
+        safetyhook::force_ff_hook_for_test(force);
+    }
+
+    std::size_t backend_instruction_boundary_trace_size_for_test() noexcept
+    {
+        return safetyhook::instruction_boundary_trace_size_for_test();
+    }
+
+    std::array<std::size_t, 2> backend_instruction_boundary_trace_for_test(std::size_t index) noexcept
+    {
+        const safetyhook::InstructionBoundary boundary = safetyhook::instruction_boundary_trace_for_test(index);
+        return {
+            boundary.original_offset,
+            boundary.trampoline_offset,
+        };
+    }
+
+    std::uint8_t backend_last_inline_error_type_for_test() noexcept
+    {
+        return safetyhook::last_inline_hook_error_type_for_test();
+    }
+
+    void *backend_non_executable_transaction_marker_for_test() noexcept
+    {
+        return safetyhook::non_executable_transaction_marker_for_test();
+    }
 #endif
 } // namespace DetourModKit::detail
 
@@ -468,6 +524,18 @@ namespace DetourModKit
                 return std::format(
                     "InlineHook backend error ({}): the routed retention ceiling refused the permanent "
                     "chain for {}",
+                    type_int,
+                    ip_str
+                );
+            case safetyhook::InlineHook::Error::FAILED_TO_FLUSH_INSTRUCTION_CACHE:
+                return std::format(
+                    "InlineHook backend error ({}): failed to flush the instruction cache at {}",
+                    type_int,
+                    ip_str
+                );
+            case safetyhook::InlineHook::Error::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE:
+                return std::format(
+                    "InlineHook backend error ({}): a non-executable patch transaction is unavailable at {}",
                     type_int,
                     ip_str
                 );
