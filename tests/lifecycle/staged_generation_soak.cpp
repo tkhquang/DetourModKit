@@ -253,7 +253,19 @@ namespace
         {
             return false;
         }
-        std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        // One bulk read. A per-character read of the coverage-instrumented copy costs seconds per generation.
+        file.seekg(0, std::ios::end);
+        const std::streamoff staged_size = file.tellg();
+        if (staged_size <= 0)
+        {
+            return false;
+        }
+        file.seekg(0, std::ios::beg);
+        std::vector<char> bytes(static_cast<std::size_t>(staged_size));
+        if (!file.read(bytes.data(), staged_size))
+        {
+            return false;
+        }
         const std::string_view needle{staged_gen::TAG_MARKER};
         const auto found = std::string_view{bytes.data(), bytes.size()}.find(needle);
         if (found == std::string_view::npos)
