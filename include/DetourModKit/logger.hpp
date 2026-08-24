@@ -25,12 +25,15 @@
 
 namespace DetourModKit
 {
+    class Logger;
+
     namespace detail
     {
         // Forward-declared so this public header never pulls the Win32-backed file-stream definition onto a
         // consumer's include path. Logger's special members are out-of-line, so the shared_ptr is instantiated only
         // in logger.cpp.
         class WinFileStream;
+        class LoggerDropAccess;
     } // namespace detail
 
     /**
@@ -297,6 +300,9 @@ namespace DetourModKit
         /**
          * @brief Sets the minimum level for messages to be recorded.
          * @param level The minimum LogLevel to record; an out-of-range value is ignored with a warning.
+         * @details A changed threshold emits one Info control record that names both levels. The record bypasses the
+         *          level filter, so a stricter new threshold cannot hide the transition that produced it. An
+         *          unchanged threshold emits nothing.
          * @note Setup/control-plane only: emits a log line about the change, so it can allocate and do sink I/O.
          */
         void set_log_level(LogLevel level);
@@ -479,6 +485,8 @@ namespace DetourModKit
 #endif
 
     private:
+        friend class detail::LoggerDropAccess;
+
         /// Constructs the process-default logger from the published StaticConfig; reached only through log().
         Logger();
 
@@ -506,6 +514,15 @@ namespace DetourModKit
 
         /// True for the inert first-use logger, which never allocated a sink or mutex. See create_process_default().
         [[nodiscard]] bool is_inert() const noexcept { return !m_log_mutex_ptr; }
+
+        /**
+         * @brief Attempts delivery of an already-rendered line without the level filter.
+         * @details Carries every other delivery rule of @ref log: shutdown and inert gates, the async route, the
+         *          synchronous stream, the Warning force-flush, and the drop count. set_log_level() uses it for each
+         *          transition control record.
+         * @return The delivery status @ref log documents.
+         */
+        bool emit_record(LogLevel level, std::string_view message);
 
         /**
          * @brief Renders a source-located line into a stack buffer and hands it to @p sink.

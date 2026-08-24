@@ -207,7 +207,11 @@ namespace DetourModKit
         namespace detail
         {
             // Contract in internal/config_pass.hpp. The grammar helpers above stay file-local.
-            input::KeyComboList parse_key_combo_list(const std::string &input, std::string_view binding_log_name)
+            input::KeyComboList parse_key_combo_list(
+                const std::string &input,
+                DeferredDiagnostics &diags,
+                std::string_view binding_log_name
+            )
             {
                 input::KeyComboList result;
 
@@ -250,7 +254,9 @@ namespace DetourModKit
                 {
                     const std::string_view name_view =
                         binding_log_name.empty() ? std::string_view{"<unnamed>"} : binding_log_name;
-                    log().warning(
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
                         "Config: combo string \"{}\" for binding '{}' did not parse to any "
                         "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
                         "out explicitly.",
@@ -324,14 +330,14 @@ namespace DetourModKit
                 ConfigItemBase(ConfigItemBase &&) = delete;
                 ConfigItemBase &operator=(ConfigItemBase &&) = delete;
 
-                /// Loads the configuration value from the INI file.
-                virtual void load(CSimpleIniA &ini, Logger &logger) = 0;
+                /// Loads the configuration value from the INI file and defers every diagnostic it produces.
+                virtual void load(CSimpleIniA &ini, detail::DeferredDiagnostics &diags) = 0;
 
                 /// Returns a deferred callback to invoke the setter outside the config mutex, or empty without one.
                 [[nodiscard]] virtual std::function<void()> take_deferred_apply() const = 0;
 
-                /// Logs the current value of the configuration item.
-                virtual void log_current_value(Logger &logger) const = 0;
+                /// Defers one record that names the current value of the configuration item.
+                virtual void log_current_value(detail::DeferredDiagnostics &diags) const = 0;
             };
 
             /**
@@ -420,7 +426,7 @@ namespace DetourModKit
                 {
                 }
 
-                void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override
+                void load(CSimpleIniA &ini, [[maybe_unused]] detail::DeferredDiagnostics &diags) override
                 {
                     // The generic body handles scalar and string types. KeyComboList uses the explicit specialization.
                     if constexpr (std::same_as<T, int>)
@@ -451,7 +457,9 @@ namespace DetourModKit
                             if (!fully_consumed || parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
                                 parsed > static_cast<long long>(std::numeric_limits<int>::max()))
                             {
-                                logger.warning(
+                                detail::defer_diagnostic(
+                                    diags,
+                                    LogLevel::Warning,
                                     "Config: value '{}' for '{}' is not a valid int (non-numeric or out of "
                                     "range); using default {}.",
                                     raw,
@@ -487,7 +495,9 @@ namespace DetourModKit
                             // because it poisons bound arithmetic downstream.
                             if (!fully_consumed || !std::isfinite(parsed))
                             {
-                                logger.warning(
+                                detail::defer_diagnostic(
+                                    diags,
+                                    LogLevel::Warning,
                                     "Config: value '{}' for '{}' is not a valid finite float (non-numeric, "
                                     "non-finite, or out of range); using default {}.",
                                     raw,
@@ -517,7 +527,9 @@ namespace DetourModKit
                         else
                         {
                             // If present but unrecognized, diagnose it under the int/float warn-and-default rule.
-                            logger.warning(
+                            detail::defer_diagnostic(
+                                diags,
+                                LogLevel::Warning,
                                 "Config: value '{}' for '{}' is not a valid bool "
                                 "(true/false, yes/no, on/off, 1/0); using default {}.",
                                 raw,
@@ -533,19 +545,31 @@ namespace DetourModKit
                     }
                 }
 
-                void log_current_value(Logger &logger) const override
+                void log_current_value(detail::DeferredDiagnostics &diags) const override
                 {
                     if constexpr (std::same_as<T, bool>)
                     {
-                        logger.debug("Config:   {} = {}", ini_key, current_value ? "true" : "false");
+                        detail::defer_diagnostic(
+                            diags,
+                            LogLevel::Debug,
+                            "Config:   {} = {}",
+                            ini_key,
+                            current_value ? "true" : "false"
+                        );
                     }
                     else if constexpr (std::same_as<T, std::string>)
                     {
-                        logger.debug("Config:   {} = \"{}\"", ini_key, current_value);
+                        detail::defer_diagnostic(
+                            diags,
+                            LogLevel::Debug,
+                            "Config:   {} = \"{}\"",
+                            ini_key,
+                            current_value
+                        );
                     }
                     else // int, float
                     {
-                        logger.debug("Config:   {} = {}", ini_key, current_value);
+                        detail::defer_diagnostic(diags, LogLevel::Debug, "Config:   {} = {}", ini_key, current_value);
                     }
                 }
 
@@ -568,12 +592,12 @@ namespace DetourModKit
 
             // KeyComboList needs an explicit specialization because its parse path differs.
             template <>
-            void CallbackConfigItem<input::KeyComboList>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+            void CallbackConfigItem<input::KeyComboList>::load(CSimpleIniA &ini, detail::DeferredDiagnostics &diags)
             {
                 const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
                 if (ini_value_str != nullptr)
                 {
-                    current_value = detail::parse_key_combo_list(ini_value_str, log_key_name);
+                    current_value = detail::parse_key_combo_list(ini_value_str, diags, log_key_name);
                 }
                 else
                 {
@@ -581,16 +605,17 @@ namespace DetourModKit
                 }
             }
 
-            template <> void CallbackConfigItem<input::KeyComboList>::log_current_value(Logger &logger) const
+            template <>
+            void CallbackConfigItem<input::KeyComboList>::log_current_value(detail::DeferredDiagnostics &diags) const
             {
                 const std::string formatted = format_key_combo_list(current_value);
                 if (formatted.empty())
                 {
-                    logger.debug("Config:   {} = (none)", ini_key);
+                    detail::defer_diagnostic(diags, LogLevel::Debug, "Config:   {} = (none)", ini_key);
                 }
                 else
                 {
-                    logger.debug("Config:   {} = {}", ini_key, formatted);
+                    detail::defer_diagnostic(diags, LogLevel::Debug, "Config:   {} = {}", ini_key, formatted);
                 }
             }
 
@@ -802,13 +827,15 @@ namespace DetourModKit
         namespace detail
         {
             // Contract in internal/config_pass.hpp.
-            std::filesystem::path get_ini_file_path(const std::string &ini_filename, Logger &logger)
+            std::filesystem::path get_ini_file_path(const std::string &ini_filename, DeferredDiagnostics &diags)
             {
                 std::wstring module_dir = get_runtime_directory();
 
                 if (module_dir.empty() || module_dir == L".")
                 {
-                    logger.warning(
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
                         "Config: Could not reliably determine module directory or it's current working directory. "
                         "Using relative path for INI: {}",
                         ini_filename
@@ -820,12 +847,19 @@ namespace DetourModKit
                 {
                     std::filesystem::path ini_path_obj =
                         (std::filesystem::path(module_dir) / ini_filename).lexically_normal();
-                    logger.debug("Config: Determined INI file path: {}", ini_path_obj.string());
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Debug,
+                        "Config: Determined INI file path: {}",
+                        ini_path_obj.string()
+                    );
                     return ini_path_obj;
                 }
                 catch (const std::filesystem::filesystem_error &fs_err)
                 {
-                    logger.warning(
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
                         "Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}",
                         fs_err.what(),
                         ini_filename
@@ -833,7 +867,9 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    logger.warning(
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
                         "Config: General error constructing INI path: {}. Using relative path for INI: {}",
                         e.what(),
                         ini_filename
@@ -976,7 +1012,10 @@ namespace DetourModKit
             std::string_view default_value
         )
         {
-            input::KeyComboList default_combos = detail::parse_key_combo_list(std::string(default_value), display_name);
+            detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
+            input::KeyComboList default_combos =
+                detail::parse_key_combo_list(std::string(default_value), diags, display_name);
+            detail::emit_deferred_diagnostics(diags);
 
             std::function<void()> deferred;
             {
@@ -1165,13 +1204,15 @@ namespace DetourModKit
             std::optional<std::uint64_t> hash_to_commit;
             std::uint64_t generation_to_commit = 0;
 
+            // The filename is a caller argument, so the whole path resolution runs before the registry lock.
+            detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
+            std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), diags);
+            std::string ini_path_str = ini_path.string();
+            loaded_resolved_path = ini_path_str;
+
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
 
-                Logger &logger = log();
-                std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), logger);
-                std::string ini_path_str = ini_path.string();
-                loaded_resolved_path = ini_path_str;
                 CSimpleIniA ini;
                 ini.SetUnicode(false);  // Assume ASCII/MBCS INI
                 ini.SetMultiKey(false); // Disallow duplicate keys in a section
@@ -1180,13 +1221,20 @@ namespace DetourModKit
 
                 if (!outcome.read_succeeded)
                 {
-                    logger.error("Config: Failed to open '{}'. Using defaults.", ini_path_str);
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Error,
+                        "Config: Failed to open '{}'. Using defaults.",
+                        ini_path_str
+                    );
                     // Wipe the cached hash so the next reload() does not short-circuit against a stale value.
                     get_last_loaded_ini_hash().reset();
                 }
                 else if (!outcome.parse_succeeded)
                 {
-                    logger.error(
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Error,
                         "Config: Failed to parse '{}' (error {}). Using defaults.",
                         ini_path_str,
                         static_cast<int>(outcome.parse_rc)
@@ -1196,17 +1244,17 @@ namespace DetourModKit
                 }
                 else
                 {
-                    logger.debug("Config: Opened {}", ini_path_str);
+                    detail::defer_diagnostic(diags, LogLevel::Debug, "Config: Opened {}", ini_path_str);
                     // Do not publish this hash until every deferred setter succeeds.
                     // Reset the prior snapshot so a setter failure cannot suppress an identical-byte retry.
                     get_last_loaded_ini_hash().reset();
                     hash_to_commit = outcome.hash;
                 }
 
-                // Read all values under lock, but defer setter callbacks.
+                // Read all values under lock, but defer setter callbacks and diagnostics.
                 for (const auto &item : get_registered_config_items())
                 {
-                    item->load(ini, logger);
+                    item->load(ini, diags);
                     auto cb = item->take_deferred_apply();
                     if (cb)
                     {
@@ -1221,8 +1269,16 @@ namespace DetourModKit
                 // failed load resets the hash, and reload() retains the last values, so this path remains safe.
                 get_last_loaded_ini_path() = std::string(ini_filename);
 
-                logger.info("Config: Loaded {} items from {}", get_registered_config_items().size(), ini_path_str);
+                detail::defer_diagnostic(
+                    diags,
+                    LogLevel::Info,
+                    "Config: Loaded {} items from {}",
+                    get_registered_config_items().size(),
+                    ini_path_str
+                );
             }
+
+            detail::emit_deferred_diagnostics(diags);
 
             // Invoke setters outside the config mutex under the deferred pattern. Setters can re-enter the data-plane
             // API. The held pass lock forbids load()/reload()/disable_auto_reload()/clear() because those calls
@@ -1302,6 +1358,12 @@ namespace DetourModKit
                 std::optional<std::uint64_t> hash_to_commit;
                 std::uint64_t generation_to_commit = 0;
 
+                // reload() takes its path from registry state, so resolution stays under the lock and reports through
+                // deferred records. The pass emits them immediately after the unlock, before any setter runs.
+                DeferredDiagnostics diags = open_deferred_diagnostics();
+
+                // The locked pass returns a value only when it stops early. Every exit path then reaches one emit.
+                const std::optional<bool> early_result = [&]() -> std::optional<bool>
                 {
                     std::lock_guard<std::mutex> lock(get_config_mutex());
 
@@ -1312,8 +1374,7 @@ namespace DetourModKit
                         return false;
                     }
 
-                    DetourModKit::Logger &logger = DetourModKit::log();
-                    std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
+                    std::filesystem::path ini_path = get_ini_file_path(ini_filename, diags);
                     std::string ini_path_str = ini_path.string();
 
                     CSimpleIniA ini;
@@ -1329,7 +1390,9 @@ namespace DetourModKit
                         // unpopulated
                         // CSimpleIniA replaces live state with defaults.
                         get_last_loaded_ini_hash() = std::nullopt;
-                        logger.warning(
+                        defer_diagnostic(
+                            diags,
+                            LogLevel::Warning,
                             "Config: reload() could not open '{}'; retaining last values (setters not "
                             "re-run).",
                             ini_path_str
@@ -1349,7 +1412,9 @@ namespace DetourModKit
                         if (cached_hash.has_value() && current_hash == *cached_hash && applied_generation.has_value() &&
                             *applied_generation == generation_to_commit)
                         {
-                            logger.debug(
+                            defer_diagnostic(
+                                diags,
+                                LogLevel::Debug,
                                 "Config: reload content unchanged (hash {:016x}, binding gen {}); skipping "
                                 "setters.",
                                 current_hash,
@@ -1364,7 +1429,9 @@ namespace DetourModKit
                             // allocation failure, not a property of the bytes. Treat it like the read-failure
                             // branch: retain last values and CLEAR the cached hash so the same bytes stay retryable.
                             get_last_loaded_ini_hash() = std::nullopt;
-                            logger.warning(
+                            defer_diagnostic(
+                                diags,
+                                LogLevel::Warning,
                                 "Config: reload() parse error on '{}' (error {}); retaining last values "
                                 "(setters not re-run).",
                                 ini_path_str,
@@ -1379,12 +1446,12 @@ namespace DetourModKit
                         get_last_loaded_ini_hash().reset();
                         get_applied_binding_generation().reset();
                         hash_to_commit = current_hash;
-                        logger.debug("Config: Reloading from {}", ini_path_str);
+                        defer_diagnostic(diags, LogLevel::Debug, "Config: Reloading from {}", ini_path_str);
                     }
 
                     for (const auto &item : get_registered_config_items())
                     {
-                        item->load(ini, logger);
+                        item->load(ini, diags);
                         auto cb = item->take_deferred_apply();
                         if (cb)
                         {
@@ -1392,8 +1459,20 @@ namespace DetourModKit
                         }
                     }
 
-                    logger
-                        .info("Config: Reloaded {} items from {}", get_registered_config_items().size(), ini_path_str);
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Info,
+                        "Config: Reloaded {} items from {}",
+                        get_registered_config_items().size(),
+                        ini_path_str
+                    );
+                    return std::nullopt;
+                }();
+
+                emit_deferred_diagnostics(diags);
+                if (early_result.has_value())
+                {
+                    return *early_result;
                 }
 
                 // Setters run unlocked (the deferred pattern), each wrapped so one throw cannot block the rest.
@@ -1448,40 +1527,45 @@ namespace DetourModKit
 
         void log_all()
         {
-            std::lock_guard<std::mutex> lock(get_config_mutex());
+            detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
 
-            Logger &logger = log();
-            const auto &items = get_registered_config_items();
-            if (items.empty())
             {
-                logger.info("Config: No configuration items registered.");
-                return;
-            }
+                std::lock_guard<std::mutex> lock(get_config_mutex());
 
-            logger.info(
-                "Config: {} registered values across {} section(s)",
-                items.size(),
-                [&items]()
+                const auto &items = get_registered_config_items();
+                if (items.empty())
                 {
-                    std::unordered_set<std::string_view> seen;
+                    detail::defer_diagnostic(diags, LogLevel::Info, "Config: No configuration items registered.");
+                }
+                else
+                {
+                    std::unordered_set<std::string_view> sections;
                     for (const auto &item : items)
                     {
-                        seen.insert(item->section);
+                        sections.insert(item->section);
                     }
-                    return seen.size();
-                }()
-            );
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Info,
+                        "Config: {} registered values across {} section(s)",
+                        items.size(),
+                        sections.size()
+                    );
 
-            std::string current_section;
-            for (const auto &item : items)
-            {
-                if (item->section != current_section)
-                {
-                    current_section = item->section;
-                    logger.debug("Config: [{}]", current_section);
+                    std::string current_section;
+                    for (const auto &item : items)
+                    {
+                        if (item->section != current_section)
+                        {
+                            current_section = item->section;
+                            detail::defer_diagnostic(diags, LogLevel::Debug, "Config: [{}]", current_section);
+                        }
+                        item->log_current_value(diags);
+                    }
                 }
-                item->log_current_value(logger);
             }
+
+            detail::emit_deferred_diagnostics(diags);
         }
 
         void clear() noexcept
@@ -1534,4 +1618,17 @@ namespace DetourModKit
             }
         }
     } // namespace config
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace detail
+    {
+        // Reports whether the registry mutex is free right now. A record producer cannot pass this probe under the
+        // same non-recursive mutex.
+        bool config_registry_mutex_free_for_test() noexcept
+        {
+            std::unique_lock<std::mutex> probe(config::get_config_mutex(), std::try_to_lock);
+            return probe.owns_lock();
+        }
+    } // namespace detail
+#endif
 } // namespace DetourModKit

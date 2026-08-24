@@ -293,6 +293,13 @@ Handle these formatter exclusions by hand:
 - Mark each `const` getter that does not allocate as `noexcept`.
 - A `const` member that formats or allocates is not a getter under this rule.
 - Within a `noexcept` function, wrap every step that can throw in a local `try` / `catch`.
+- A lock or wait on a live synchronization object is not such a step.
+- This exception covers `std::lock_guard`, `std::unique_lock`, and `std::shared_lock` over `std::mutex` or `detail::SrwSharedMutex`.
+- It also covers a `std::condition_variable` wait with no predicate or a `noexcept` predicate.
+- `SrwSharedMutex` declares every operation `noexcept`.
+- A live non-recursive `std::mutex` acquisition has no reachable failure on either shipped toolchain.
+- Treat a failure there as an invariant failure, not a recoverable operation.
+- `tests/test_noexcept_containment.cpp` pins the cited type and boundary contracts.
 - Fallible work must allocate before a state commit. A failure must leave state unchanged.
 - On failure, return a failure or no-op result. Log only through `Logger::log_noexcept` or `Logger::try_log`.
 - If an allocation can fail under load, prefer `new (std::nothrow)`.
@@ -321,6 +328,7 @@ Handle these formatter exclusions by hand:
 1. Collect each critical-section message in a local.
 2. Release the lock.
 3. Emit the messages.
+- `ConfigTest.DeferredDiagnosticsDoNotReenterRegistryMutex` pins that order for the config registry.
 - Keep these operations off callback paths:
 - Do not take an exclusive lock, perform I/O that can wait, create or remove hooks, or reload configuration.
 - Follow `[B-02]` for allocation limits and `[B-15]` for handler exceptions.

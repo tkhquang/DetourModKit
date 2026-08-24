@@ -9,8 +9,9 @@
  *          pipeline, and the grammar itself stay confined to config.cpp.
  */
 
+#include "internal/config_diagnostics.hpp"
+
 #include "DetourModKit/input.hpp"
-#include "DetourModKit/logger.hpp"
 
 #include <filesystem>
 #include <string>
@@ -35,17 +36,17 @@ namespace DetourModKit::config::detail
     /// Takes the config mutex and returns a tear-free copy of the INI path last passed to load().
     [[nodiscard]] std::string snapshot_last_loaded_ini_path();
 
-    /// Determines the full absolute path for the INI configuration file.
-    [[nodiscard]] std::filesystem::path get_ini_file_path(const std::string &ini_filename, Logger &logger);
+    /// Determines the full INI path and records each diagnostic for later emission.
+    [[nodiscard]] std::filesystem::path get_ini_file_path(const std::string &ini_filename, DeferredDiagnostics &diags);
 
     /**
      * @brief Parses a comma-separated string of key combos (OR logic) into a KeyComboList.
      * @details Two opt-out sentinels yield an empty result silently: an empty post-trim input and the literal
      *          "NONE". A non-empty non-sentinel input whose every token fails to parse is a user typo and
-     *          emits one WARNING that names @p binding_log_name (or "<unnamed>").
+     *          records one WARNING that names @p binding_log_name (or "<unnamed>").
      */
     [[nodiscard]] input::KeyComboList
-    parse_key_combo_list(const std::string &input, std::string_view binding_log_name = {});
+    parse_key_combo_list(const std::string &input, DeferredDiagnostics &diags, std::string_view binding_log_name = {});
 } // namespace DetourModKit::config::detail
 
 #endif // DETOURMODKIT_INTERNAL_CONFIG_PASS_HPP

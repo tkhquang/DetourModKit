@@ -34,12 +34,17 @@ namespace DetourModKit::detail
     // Test-only probe fired after Logger::log() snapshots an async writer and before it calls enqueue(). A fixture
     // retires that writer inside the probe to prove a late rejection reaches the facade's cumulative drop counter.
     void (*g_logger_async_snapshot_probe)() noexcept = nullptr;
+
+    // Test-only probe at entry to each record delivery route. A fixture checks whether a config lock spans that route.
+    void (*g_logger_record_probe)(LogLevel, std::string_view) noexcept = nullptr;
+
+    // Test-only rendezvous after set_log_level() reads the current level and before it attempts the state transition.
+    void (*g_logger_level_transition_probe)() noexcept = nullptr;
 #endif
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
 {
-
     namespace
     {
         using StaticConfigAtom = std::atomic<std::shared_ptr<const Logger::StaticConfig>>;
@@ -514,14 +519,34 @@ namespace DetourModKit
         }
 
         auto old_level = m_current_log_level.load(std::memory_order_acquire);
-        if (old_level == level)
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (const auto transition_probe = detail::g_logger_level_transition_probe)
         {
-            return;
+            transition_probe();
+        }
+#endif
+
+        for (;;)
+        {
+            if (old_level == level)
+            {
+                return;
+            }
+            if (m_current_log_level
+                    .compare_exchange_weak(old_level, level, std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                break;
+            }
         }
 
-        m_current_log_level.store(level, std::memory_order_release);
-
-        log(LogLevel::Info, "Log level changed from {} to {}", to_string(old_level), to_string(level));
+        // The new threshold precedes this record. The ordinary predicate discards the record after an upward change.
+        (void)format_located(
+            [this](std::string_view rendered) { return this->emit_record(LogLevel::Info, rendered); },
+            std::source_location::current(),
+            "Log level changed from {} to {}",
+            to_string(old_level),
+            to_string(level)
+        );
     }
 
     bool Logger::log(LogLevel level, std::string_view message)
@@ -531,6 +556,17 @@ namespace DetourModKit
             return false;
         }
 
+        return emit_record(level, message);
+    }
+
+    bool Logger::emit_record(LogLevel level, std::string_view message)
+    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (const auto record_probe = detail::g_logger_record_probe)
+        {
+            record_probe(level, message);
+        }
+#endif
         if (m_shutdown_called.load(std::memory_order_acquire) ||
             m_async_writer_abandoned.load(std::memory_order_acquire))
         {

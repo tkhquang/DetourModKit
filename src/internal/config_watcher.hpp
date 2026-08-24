@@ -9,6 +9,8 @@
  *          installed. The config surface owns the watcher's lifetime; consumers do not see this type.
  */
 
+#include "internal/config_diagnostics.hpp"
+
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -20,6 +22,8 @@ namespace DetourModKit
 {
     namespace detail
     {
+        struct ConfigWatcherStartGate;
+
         /**
          * @class ConfigWatcher
          * @brief Background watcher for a single INI config file.
@@ -51,6 +55,8 @@ namespace DetourModKit
         class ConfigWatcher
         {
         public:
+            using StartGate = std::shared_ptr<ConfigWatcherStartGate>;
+
             /**
              * @brief Constructs a watcher for @p ini_path.
              * @param ini_path Absolute or relative path to the INI file to monitor. The parent directory is opened for
@@ -75,14 +81,28 @@ namespace DetourModKit
 
             /**
              * @brief Starts the background watcher thread.
-             * @details Idempotent. If the watcher is already running, the call is a no-op and returns true. The worker
-             *          opens the parent directory and issues the first overlapped
-             *          ReadDirectoryChangesW before signalling the main thread, so a true return means I/O is in
-             *          flight.
-             * @return true if the worker is (or already was) running. Returns false when the directory handle could not
-             *         be opened, when the startup handshake timed out after 5 seconds (e.g. a hostile hook on
-             *         CreateFileW), or when the worker lambda threw before signalling. In all three cases an error
-             *         is already logged and the watcher remains stopped.
+             * @details Repeated calls leave an active watcher unchanged. The worker opens the parent directory and
+             *          queues the first ReadDirectoryChangesW request before it notifies the caller. A true result
+             *          means I/O is active. The lock order is watcher mutex, start mutex, then startup-channel mutex.
+             * @param diags Collects each caller-side and pre-handshake diagnostic.
+             * @param gate Receives the worker release gate. Release it after the caller unlocks its control mutex.
+             * @return true if the worker becomes active or is already active. Returns false after an open failure,
+             *         handshake timeout, or pre-handshake exception. The watcher stays stopped after each reported
+             *         failure.
+             */
+            [[nodiscard]] bool start(config::detail::DeferredDiagnostics &diags, StartGate &gate);
+
+            /**
+             * @brief Releases a worker after its caller exits the control-mutex scope.
+             *
+             * @param gate The gate returned by the record-list start overload. A null gate is a no-op.
+             */
+            static void release_start_gate(const StartGate &gate) noexcept;
+
+            /**
+             * @brief Starts the watcher and emits its diagnostics before worker release.
+             *
+             * @details Use this overload only when the caller holds no lock that a sink call can span.
              */
             [[nodiscard]] bool start();
 

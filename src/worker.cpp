@@ -3,6 +3,7 @@
 #include "DetourModKit/logger.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
+#include "internal/worker_start_log.hpp"
 #include "platform.hpp"
 
 #include <atomic>
@@ -86,6 +87,10 @@ namespace DetourModKit
 
             m_stop_source = m_thread->get_stop_source();
             m_self_ref = self_ref;
+            if (!detail::WorkerStartLogDeferral::defer_start(m_name, std::source_location::current()))
+            {
+                (void)log().try_log(LogLevel::Debug, "StoppableWorker '{}' started.", m_name);
+            }
         }
         catch (...)
         {
@@ -110,10 +115,6 @@ namespace DetourModKit
             detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Worker);
             throw;
         }
-
-        // Best-effort log AFTER publication. try_log never throws, so a logging failure here can neither
-        // unwind the constructor nor leak the module reference the worker now owns.
-        (void)log().try_log(LogLevel::Debug, "StoppableWorker '{}' started.", m_name);
     }
 
     StoppableWorker::~StoppableWorker() noexcept
