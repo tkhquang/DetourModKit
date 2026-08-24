@@ -1,3 +1,8 @@
+# The single build-target owner for this directory's proof hosts. A registered ctest declares no build dependency on
+# its host, so every consumer builds this aggregate instead of naming hosts. Register each host on it beside the
+# host's declaration. FaultProof.LabelInventoryIsComplete rejects a lost case.
+add_custom_target(dmk_fault_proof_hosts)
+
 # Persistent PAGE_NOACCESS fixtures, isolated from the monolithic suite. Both toolchains register every case: the
 # cases carry their own per-compiler arms where the fault frame differs (MSVC __try/__except versus the MinGW vectored
 # handler), so a gate here would leave MSVC's SEH paths unproven rather than avoiding a wrong expectation.
@@ -16,6 +21,7 @@ if(DMK_FAULT_SOURCES)
       ${PROJECT_SOURCE_DIR}/external/simpleini
       ${DIRECTXMATH_INCLUDE_DIR}
     LABELS "fault-proof")
+  add_dependencies(dmk_fault_proof_hosts fault_tests)
 else()
   message(STATUS "No tests/fault/test_*.cpp sources found; the fault-containment proof target is not registered.")
 endif()
@@ -31,6 +37,7 @@ target_include_directories(fault_scanner_escape_probe PRIVATE
   ${PROJECT_SOURCE_DIR}/tests/fixtures)
 target_compile_definitions(fault_scanner_escape_probe PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(fault_scanner_escape_probe)
+add_dependencies(dmk_fault_proof_hosts fault_scanner_escape_probe)
 
 dmk_add_raw_proof(NAME FaultProof.RegionSweepDoesNotSwallowAnOutOfSpanFault
   COMMAND $<TARGET_FILE:fault_scanner_escape_probe> region
@@ -50,8 +57,8 @@ dmk_add_raw_proof(NAME FaultProof.NarrowWindowSweepContainsAnInSpanFault
   TEST_TIMEOUT 60
   LABELS "fault-proof")
 
-# Negative control. The scenarios above select on argv[1] in one host, so a typo'd token -- or a host built before a
-# scenario existed -- would otherwise run some other path and report PASS having asserted nothing about what it names.
+# Negative control. The scenarios above select on argv[1] in one host, so a typo'd token, or a host built before a
+# scenario existed, would otherwise run some other path and report PASS having asserted nothing about what it names.
 # WILL_FAIL inverts the verdict, so this passes only while the host rejects a token it does not implement.
 add_test(NAME FaultProof.ScannerEscapeProbeRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:fault_scanner_escape_probe> no-such-scenario)

@@ -1,6 +1,12 @@
+# The single build-target owner for this directory's proof hosts. A registered ctest declares no build dependency on
+# its host, so CI and scripts/run_lifecycle_proofs.sh build this aggregate instead of naming hosts. Register each
+# host on it beside the host's declaration. Lifecycle.LabelInventoryIsComplete rejects a lost case.
+add_custom_target(dmk_lifecycle_proof_hosts)
+
 # The hung probe is visible only to the outer verifier, so it cannot block the normal suite directly.
 add_executable(dmk_timeout_probe timeout_probe.cpp)
 dmk_static_runtime(dmk_timeout_probe)
+add_dependencies(dmk_lifecycle_proof_hosts dmk_timeout_probe)
 
 add_test(NAME CTestTimeoutControl
   COMMAND ${CMAKE_COMMAND}
@@ -16,6 +22,7 @@ set_tests_properties(CTestTimeoutControl PROPERTIES TIMEOUT 120 LABELS "timeout-
 # FATALs. A larger inner timeout keeps a slow cold launch from turning the fast exit into a real timeout.
 add_executable(fast_fail_probe fast_fail_probe.cpp)
 dmk_static_runtime(fast_fail_probe)
+add_dependencies(dmk_lifecycle_proof_hosts fast_fail_probe)
 
 add_test(NAME CTestTimeoutControlNegative
   COMMAND ${CMAKE_COMMAND}
@@ -34,6 +41,7 @@ target_include_directories(hook_static_order PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(hook_static_order PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(hook_static_order)
+add_dependencies(dmk_lifecycle_proof_hosts hook_static_order)
 
 dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   COMMAND $<TARGET_FILE:hook_static_order>
@@ -49,6 +57,7 @@ target_include_directories(vmt_late_static_owner PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(vmt_late_static_owner PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(vmt_late_static_owner)
+add_dependencies(dmk_lifecycle_proof_hosts vmt_late_static_owner)
 
 dmk_add_raw_proof(NAME Lifecycle.LateVmtOwnerOutlivesTheObjectGate
   COMMAND $<TARGET_FILE:vmt_late_static_owner>
@@ -65,6 +74,7 @@ target_include_directories(trap_closed_window PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(trap_closed_window PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(trap_closed_window)
+add_dependencies(dmk_lifecycle_proof_hosts trap_closed_window)
 
 dmk_add_raw_proof(NAME Lifecycle.TrapRetriesClosedWindowExecuteFault
   COMMAND $<TARGET_FILE:trap_closed_window> closed-window
@@ -85,6 +95,7 @@ add_executable(logger_first_use_oom logger_first_use_oom.cpp)
 target_link_libraries(logger_first_use_oom PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(logger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(logger_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts logger_first_use_oom)
 
 dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:logger_first_use_oom> oom
@@ -112,6 +123,7 @@ target_include_directories(logger_writer_batch_oom PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
 dmk_static_runtime(logger_writer_batch_oom)
+add_dependencies(dmk_lifecycle_proof_hosts logger_writer_batch_oom)
 
 dmk_add_raw_proof(NAME Lifecycle.LoggerPersistentBatchOomStillDrainsAndJoins
   COMMAND $<TARGET_FILE:logger_writer_batch_oom> persistent-batch-oom
@@ -132,6 +144,7 @@ add_executable(logger_generation_log logger_generation_log.cpp)
 target_link_libraries(logger_generation_log PRIVATE DetourModKit dmk_coverage)
 target_include_directories(logger_generation_log PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(logger_generation_log)
+add_dependencies(dmk_lifecycle_proof_hosts logger_generation_log)
 
 dmk_add_raw_proof(NAME Lifecycle.LoggerAppendModePreservesPriorGenerationRecords
   COMMAND $<TARGET_FILE:logger_generation_log> append-preserves
@@ -173,6 +186,7 @@ add_executable(hook_instance_scope test_hook_instance_scope.cpp)
 target_include_directories(hook_instance_scope PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_dependencies(hook_instance_scope kit_a kit_b hook_target_lib)
 dmk_static_runtime(hook_instance_scope)
+add_dependencies(dmk_lifecycle_proof_hosts hook_instance_scope)
 
 # The host loads its DLLs by bare name, which resolves from the application directory. The kits build into that
 # directory already; hook_target_lib is declared one level up and has to be staged in.
@@ -207,6 +221,7 @@ target_include_directories(input_gate_abba PRIVATE
 # added at all. A seam call in this host therefore needs no #if guard of its own; guarding one would be dead code.
 target_compile_definitions(input_gate_abba PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_gate_abba)
+add_dependencies(dmk_lifecycle_proof_hosts input_gate_abba)
 
 dmk_add_raw_proof(NAME Lifecycle.CrossBindingReleaseHasNoABBA
   COMMAND $<TARGET_FILE:input_gate_abba>
@@ -260,7 +275,7 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedParkedCallbackRunsDownBefore
 
 # Negative control for the argv-selected scenarios above. They select on argv[1] inside a host that also carries the
 # no-argument ABBA scenario, so a typo'd token, or a host built before a scenario existed, would silently run the ABBA
-# case and exit 0 well inside TEST_TIMEOUT 10 -- a proof reporting PASS having asserted nothing about what it names.
+# case and exit 0 well inside TEST_TIMEOUT 10, a proof reporting PASS having asserted nothing about what it names.
 # WILL_FAIL inverts the verdict, so this passes only while the host rejects a token it does not implement.
 add_test(NAME Lifecycle.InputGateProofRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:input_gate_abba> no-such-scenario)
@@ -275,6 +290,7 @@ add_executable(dispatch_cow test_dispatch_cow.cpp)
 target_link_libraries(dispatch_cow PRIVATE DetourModKit dmk_coverage)
 target_include_directories(dispatch_cow PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(dispatch_cow)
+add_dependencies(dmk_lifecycle_proof_hosts dispatch_cow)
 
 set(dispatch_cow_proofs
   Lifecycle.DispatcherSubscribeCopiesNoCallableUnderLock  subscribe-copy-reentry
@@ -306,6 +322,7 @@ target_link_libraries(input_reshape_retirement PRIVATE DetourModKit dmk_coverage
 target_include_directories(input_reshape_retirement PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(input_reshape_retirement PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_reshape_retirement)
+add_dependencies(dmk_lifecycle_proof_hosts input_reshape_retirement)
 
 set(input_reshape_proofs
   InputLifecycleProof.RemovalDestroysCallablesOutsideFacadeMutex        pending-remove
@@ -341,6 +358,7 @@ target_include_directories(input_tls_exhaustion PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(input_tls_exhaustion PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_tls_exhaustion)
+add_dependencies(dmk_lifecycle_proof_hosts input_tls_exhaustion)
 
 dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery
   COMMAND $<TARGET_FILE:input_tls_exhaustion> exhausted
@@ -389,6 +407,7 @@ target_include_directories(config_servicer_self_retire PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
 dmk_static_runtime(config_servicer_self_retire)
+add_dependencies(dmk_lifecycle_proof_hosts config_servicer_self_retire)
 
 dmk_add_raw_proof(NAME Lifecycle.ReloadServicerSelfRetiresThroughReaper
   COMMAND $<TARGET_FILE:config_servicer_self_retire>
@@ -406,6 +425,7 @@ target_include_directories(input_self_shutdown PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(input_self_shutdown PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_self_shutdown)
+add_dependencies(dmk_lifecycle_proof_hosts input_self_shutdown)
 
 dmk_add_raw_proof(NAME Lifecycle.InputCallbackSelfShutdownDoesNotJoinSelf
   COMMAND $<TARGET_FILE:input_self_shutdown> self-shutdown
@@ -441,6 +461,7 @@ add_executable(input_first_use_oom input_first_use_oom.cpp)
 target_link_libraries(input_first_use_oom PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(input_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(input_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts input_first_use_oom)
 
 dmk_add_raw_proof(NAME Lifecycle.InputFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:input_first_use_oom> oom
@@ -470,6 +491,7 @@ target_include_directories(xinput_detour_rundown PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(xinput_detour_rundown PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_detour_rundown)
+add_dependencies(dmk_lifecycle_proof_hosts xinput_detour_rundown)
 
 dmk_add_raw_proof(NAME Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
   COMMAND $<TARGET_FILE:xinput_detour_rundown> timeout
@@ -750,6 +772,7 @@ target_include_directories(xinput_forwarding_guard PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(xinput_forwarding_guard PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_forwarding_guard)
+add_dependencies(dmk_lifecycle_proof_hosts xinput_forwarding_guard)
 
 dmk_add_raw_proof(NAME Lifecycle.XInputForwardedExOrdinalIsHooked
   COMMAND $<TARGET_FILE:xinput_forwarding_guard> forwarded
@@ -783,6 +806,7 @@ add_executable(profiler_late_uaf
   ${PROJECT_SOURCE_DIR}/src/profiler.cpp)
 target_include_directories(profiler_late_uaf PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(profiler_late_uaf)
+add_dependencies(dmk_lifecycle_proof_hosts profiler_late_uaf)
 
 dmk_add_raw_proof(NAME Lifecycle.ProfilerLateScopedProfileNoUAF
   COMMAND $<TARGET_FILE:profiler_late_uaf>
@@ -795,6 +819,7 @@ add_executable(profiler_first_use_oom profiler_first_use_oom.cpp)
 target_link_libraries(profiler_first_use_oom PRIVATE DetourModKit dmk_coverage)
 target_include_directories(profiler_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(profiler_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts profiler_first_use_oom)
 
 dmk_add_raw_proof(NAME Lifecycle.ProfilerFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:profiler_first_use_oom> oom
@@ -819,6 +844,7 @@ add_executable(diagnostics_late_emitter diagnostics_late_emitter.cpp)
 target_link_libraries(diagnostics_late_emitter PRIVATE DetourModKit dmk_coverage)
 target_include_directories(diagnostics_late_emitter PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(diagnostics_late_emitter)
+add_dependencies(dmk_lifecycle_proof_hosts diagnostics_late_emitter)
 
 dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDestroyedState
   COMMAND $<TARGET_FILE:diagnostics_late_emitter>
@@ -846,6 +872,7 @@ dmk_static_runtime(diagnostics_oom_probe SHARED)
 add_executable(diagnostics_first_use_oom diagnostics_first_use_oom.cpp)
 add_dependencies(diagnostics_first_use_oom diagnostics_oom_probe)
 dmk_static_runtime(diagnostics_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts diagnostics_first_use_oom)
 
 dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.PoisonedModuleLoadReportsExactZeroPopulation
   COMMAND $<TARGET_FILE:diagnostics_first_use_oom> poisoned-load
@@ -870,6 +897,7 @@ dmk_static_runtime(bootstrap_probe SHARED)
 add_executable(bootstrap_module_ref test_bootstrap_module_ref.cpp)
 add_dependencies(bootstrap_module_ref bootstrap_probe)
 dmk_static_runtime(bootstrap_module_ref)
+add_dependencies(dmk_lifecycle_proof_hosts bootstrap_module_ref)
 
 dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerStaysMapped
   COMMAND $<TARGET_FILE:bootstrap_module_ref> mapped
@@ -912,6 +940,7 @@ dmk_static_runtime(input_loader_probe SHARED)
 add_executable(input_loader_detach test_input_loader_detach.cpp)
 add_dependencies(input_loader_detach input_loader_probe)
 dmk_static_runtime(input_loader_detach)
+add_dependencies(dmk_lifecycle_proof_hosts input_loader_detach)
 
 dmk_add_raw_proof(NAME Lifecycle.InputLoaderDetachRetainsCompleteOwner
   COMMAND $<TARGET_FILE:input_loader_detach>
@@ -932,6 +961,7 @@ target_include_directories(session_detach_terminal PRIVATE
   ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(session_detach_terminal PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(session_detach_terminal)
+add_dependencies(dmk_lifecycle_proof_hosts session_detach_terminal)
 
 dmk_add_raw_proof(NAME Lifecycle.DetachAfterDrainRevokesBlockingAuthorization
   COMMAND $<TARGET_FILE:session_detach_terminal>
@@ -939,10 +969,10 @@ dmk_add_raw_proof(NAME Lifecycle.DetachAfterDrainRevokesBlockingAuthorization
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
-# The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process -- a drained
+# The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process: a drained
 # generation, a refused concurrent drain, an abandoned-and-pinned bootstrap, and a live session carried into CRT
-# teardown -- so each is its own registered proof over the same binary. It links the archive because the whole point
-# is to drive the real process-global subsystems, and it needs src/ on the include path for the internal lifecycle
+# teardown. Each is therefore its own registered proof over the same binary. It links the archive because the whole
+# point is to drive the real process-global subsystems, and it needs src/ on the include path for the internal lifecycle
 # control block whose published context the misuse scenario asserts.
 add_executable(full_lifecycle test_full_lifecycle.cpp)
 target_link_libraries(full_lifecycle PRIVATE DetourModKit dmk_coverage)
@@ -950,6 +980,7 @@ target_include_directories(full_lifecycle PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
 dmk_static_runtime(full_lifecycle)
+add_dependencies(dmk_lifecycle_proof_hosts full_lifecycle)
 
 # The ctest name states the claim proved; the argv token stays the scenario keyword the host dispatches on. Both are
 # spelled out so the registered test name is greppable in this file, matching the hook_instance_scope list above.
@@ -985,6 +1016,7 @@ target_include_directories(logic_dll_unload PRIVATE
 target_compile_definitions(logic_dll_unload PRIVATE DMK_ENABLE_TEST_SEAMS)
 add_dependencies(logic_dll_unload logic_callback_dll hook_target_lib)
 dmk_static_runtime(logic_dll_unload)
+add_dependencies(dmk_lifecycle_proof_hosts logic_dll_unload)
 
 # Both companions load by bare name from the application directory. logic_callback_dll is declared here and already
 # builds into it; hook_target_lib is declared one level up and has to be staged in.
@@ -1037,6 +1069,7 @@ target_include_directories(staged_generation_soak PRIVATE
 target_compile_definitions(staged_generation_soak PRIVATE DMK_ENABLE_TEST_SEAMS)
 add_dependencies(staged_generation_soak staged_generation_dll xinput_forwarding_proxy_local hook_target_lib)
 dmk_static_runtime(staged_generation_soak)
+add_dependencies(dmk_lifecycle_proof_hosts staged_generation_soak)
 
 # The parent fixture needs a copy beside the host. The other DLL fixtures already use this output directory.
 add_custom_command(TARGET staged_generation_soak POST_BUILD

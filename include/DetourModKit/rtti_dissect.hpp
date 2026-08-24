@@ -166,7 +166,7 @@ namespace DetourModKit
          * @param out Receives the resolved slots, appended in slot order.
          * @param stride Byte distance between adjacent slots. Zero is treated as sizeof(std::uintptr_t).
          * @return Number of slots appended to @p out.
-         * @warning ALLOCATES (grows @p out) and calls the syscall-heavy prelude per slot. Init-time / tooling only --
+         * @warning ALLOCATES (grows @p out) and calls the syscall-heavy prelude per slot. Init-time / tooling only,
          *          never the hot path.
          * @note The (slot_count * stride) span is overflow-guarded; a malformed tuple is treated as an empty block and
          *       returns 0. If a reallocation of @p out throws, the sweep stops early and returns the count appended so

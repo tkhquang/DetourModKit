@@ -6,9 +6,8 @@
  * @brief The Address value type, the single addressing vocabulary of the public surface.
  * @details Address is exactly one machine pointer in size and alignment, and trivially copyable. The static_asserts
  *          at the bottom of this file pin both. The arithmetic and the comparisons are `constexpr` and touch no
- *          memory. Integer
- *          <-> pointer punning is confined to four members: the templated pointer constructor, `as<T>()`,
- *          `ptr<T>()`, and `rip()`, which additionally reads a disp32 out of process memory.
+ *          memory. Pointer punning is confined to the templated pointer constructor, `as<T>()`, `ptr<T>()`, and
+ *          `rip()`. Only `rip()` reads process memory, a disp32 at the caller-supplied offset.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -23,7 +22,7 @@ namespace DetourModKit
 {
     /**
      * @class Address
-     * @brief A strongly-typed machine address with constexpr arithmetic and a single audited cast surface.
+     * @brief A strongly-typed machine address with constexpr arithmetic and an explicit cast surface.
      * @details Constructs from a raw integer, from `nullptr`, or from any object/function pointer, and converts back
      *          out only through the explicit `as<T>()` / `ptr<T>()` accessors. Comparisons and the boolean test follow
      *          pointer intuition (null is false; ordering is by numeric address). The type is trivially copyable and
@@ -59,9 +58,7 @@ namespace DetourModKit
          * @tparam T The pointee type, deduced from the argument.
          * @param pointer The pointer to capture as an address.
          * @details The `T*` parameter only deduces against an actual pointer argument, so a non-pointer is a deduction
-         *          failure and never competes here, and `std::nullptr_t` is taken by the overload above. That keeps
-         *          this one of the four audited reinterpret_cast sites instead of letting pointer punning leak to
-         *          call sites.
+         *          failure and never competes here, and `std::nullptr_t` is taken by the overload above.
          */
         template <class T> explicit Address(T *pointer) noexcept : m_value{reinterpret_cast<std::uintptr_t>(pointer)} {}
 

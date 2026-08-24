@@ -8,7 +8,7 @@ JOBS ?= 4
 
 .PHONY: all configure build install test test_mingw test_msvc test_asan test_proofs clean distclean help
 
-# --- Build Targets ---
+# Build Targets
 all: build
 
 configure:
@@ -20,7 +20,7 @@ build: configure
 install: build
 	cmake --install build/$(PRESET) --prefix build/install
 
-# --- Test Targets ---
+# Test Targets
 test:
 	cmake --preset $(TEST_PRESET)
 	cmake --build --preset $(TEST_PRESET) --parallel $(JOBS)
@@ -42,11 +42,11 @@ test_asan:
 test_proofs:
 	cmake --preset mingw-debug
 	cmake --build build/mingw-debug \
-		--target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe \
+		--target dmk_fault_proof_hosts dmk_lifecycle_proof_hosts \
 		--parallel $(JOBS)
 	ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
 
-# --- Housekeeping ---
+# Housekeeping
 clean:
 	@echo "Cleaning preset build directories..."
 	rm -rf build/mingw-debug build/mingw-release build/msvc-debug build/msvc-release build/mingw-debug-coverage build/msvc-debug-asan
@@ -55,7 +55,7 @@ distclean:
 	@echo "Full clean (entire build directory)..."
 	rm -rf build
 
-# --- Help ---
+# Help
 help:
 	@echo "DetourModKit Build System"
 	@echo ""
