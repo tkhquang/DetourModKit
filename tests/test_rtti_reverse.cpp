@@ -110,10 +110,10 @@ namespace
         return buf_base + REV_VTABLE_OFFSET;
     }
 
-    // The pool sub-range written so far, used as a tight search scope. It is not a
-    // PE image, so collect_rtti_scan_ranges' header parse fails and the resolver sweeps exactly this range;
-    // resolve_col_site still validates every hit against the real owning module. This keeps the unit tests fast and
-    // deterministic instead of sweeping the whole multi-megabyte test executable.
+    // The pool sub-range written so far, used as a tight search scope. It is not a PE image, so
+    // collect_rtti_scan_ranges' header parse fails and the resolver sweeps exactly this range; resolve_col_site still
+    // validates every hit against the real owning module. This keeps the unit tests fast and deterministic instead of
+    // sweeping the whole multi-megabyte test executable.
     [[nodiscard]] Region pool_range() noexcept
     {
         const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
@@ -701,10 +701,9 @@ protected:
 
 TEST_F(RttiReverseProof, IncompleteSectionOrPageTraversalCannotAuthorizeVerdict)
 {
-    // Primary A is on a readable page; duplicate primary B is on a page that can be made inaccessible. A complete
-    // sweep sees both and reports the name ambiguous; a sweep that cannot read B's page sees
-    // only A and must NOT report A as the unique primary, because a second primary hides in the region it could not
-    // read.
+    // Primary A is on a readable page; duplicate primary B is on a page that can be made inaccessible. A complete sweep
+    // sees both and reports the name ambiguous; a sweep that cannot read B's page sees only A and must NOT report A as
+    // the unique primary, because a second primary hides in the region it could not read.
     const std::uintptr_t a = build_synth(".?AVRevIncomplete@@", 0);
     ASSERT_NE(a, 0u);
 

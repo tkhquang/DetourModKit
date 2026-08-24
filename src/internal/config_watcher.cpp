@@ -352,13 +352,12 @@ namespace DetourModKit
 
             // stop() reaches StoppableWorker::shutdown(), which re-queries the process-global blocking-teardown
             // predicate for itself. Another thread can narrow that predicate between the check above and shutdown()'s
-            // own, so an arm entered as a join can still finish as a detach. The pump then keeps reading
-            // stop_requested / worker_exited / worker_thread_id through raw slots into Impl, and running ~Impl here
-            // would write-after-free them from a thread that is still executing. Observe the body's own exit
-            // publication instead of re-querying the predicate (which would TOCTOU against the same decision) and
-            // husk the watcher when it has not exited, the self-safe-destructor discipline AsyncLogger applies to its
-            // detached writer. Leaking is the safe direction: a body that exits immediately after this load only
-            // costs one bounded Impl.
+            // own, so an arm entered as a join can still finish as a detach. The pump then keeps reading stop_requested
+            // / worker_exited / worker_thread_id through raw slots into Impl, and running ~Impl here would
+            // write-after-free them from a thread that is still executing. Observe the body's own exit publication
+            // instead of re-querying the predicate (which would TOCTOU against the same decision) and husk the watcher
+            // when it has not exited, the self-safe-destructor discipline AsyncLogger applies to its detached writer.
+            // Leaking is the safe direction: a body that exits immediately after this load only costs one bounded Impl.
             if (m_impl && !m_impl->worker_exited.load(std::memory_order_acquire))
             {
                 leak_impl_storage(m_impl);
@@ -463,27 +462,26 @@ namespace DetourModKit
             }
             std::lock_guard<std::mutex> lock(m_impl->start_mutex);
 
-            // A worker object can already exist. If its body is still live, the watcher is running. Keep it.
-            // But a post-handshake runtime failure (the watched parent removed, a GetOverlappedResultEx error,
-            // or a re-issue failure) makes the body return on its own while the StoppableWorker lingers with a
-            // finished thread; a restart must not treat that exited husk as success. Join and drop the
-            // exited worker, then fall through to a fresh worker and handshake.
+            // A worker object can already exist. If its body is still live, the watcher is running. Keep it. But a
+            // post-handshake runtime failure (the watched parent removed, a GetOverlappedResultEx error, or a re-issue
+            // failure) makes the body return on its own while the StoppableWorker lingers with a finished thread; a
+            // restart must not treat that exited husk as success. Join and drop the exited worker, then fall through to
+            // a fresh worker and handshake.
             //
             // Liveness is tested on the same worker_thread_id slot is_running() publishes, not on
             // StoppableWorker::is_running(). The two clear in a fixed order: WorkerThreadIdGuard is the body's
             // first-declared local, so the slot is cleared as the body's last act, while the Exited transition is
-            // published by the StoppableWorker wrapper only after the body has returned. Testing the worker state
-            // here would leave a window in which a caller that observed is_running() == false is told the restart
-            // succeeded while this exited husk stays installed. Reading the published slot closes it: a non-null
-            // worker under start_mutex implies a settled successful handshake (every failure path resets the worker
-            // or husks the Impl), and the body stores its id before settling, so an empty slot with a live worker
-            // object means the body has already finished and reset() joins a thread that is returning.
-            // The slot is tested before the worker handle, not inside a null check on it: a stop() whose
-            // StoppableWorker::shutdown() hits the blocking-teardown veto detaches the body and drops the handle, so a
-            // null handle does not imply a finished body. That body observes only stop_requested, which the restart
-            // below clears, and resurrecting it leaves two pumps sharing one Impl. Whichever exits first
-            // publishes worker_exited and lets ~ConfigWatcher free storage the other still reads. Resetting a null
-            // handle is a no-op, so the settled-husk case is unchanged.
+            // published by the StoppableWorker wrapper only after the body has returned. Testing the worker state here
+            // would leave a window in which a caller that observed is_running() == false is told the restart succeeded
+            // while this exited husk stays installed. Reading the published slot closes it: a non-null worker under
+            // start_mutex implies a settled successful handshake (every failure path resets the worker or husks the
+            // Impl), and the body stores its id before settling, so an empty slot with a live worker object means the
+            // body has already finished and reset() joins a thread that is returning. The slot is tested before the
+            // worker handle, not inside a null check on it: a stop() whose StoppableWorker::shutdown() hits the
+            // blocking-teardown veto detaches the body and drops the handle, so a null handle does not imply a finished
+            // body. That body observes only stop_requested, which the restart below clears, and resurrecting it leaves
+            // two pumps sharing one Impl. Whichever exits first publishes worker_exited and lets ~ConfigWatcher free
+            // storage the other still reads. Resetting a null handle is a no-op, so the settled-husk case is unchanged.
             if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
             {
                 gate = m_impl->start_gate.load(std::memory_order_acquire);
@@ -513,10 +511,9 @@ namespace DetourModKit
             const LogLevel startup_threshold = diags.threshold;
 
             // The StoppableWorker body is stored in std::function, so the lambda must stay copyable; we cannot move a
-            // non-copyable
-            // OwnedHandle into it. Instead, open the directory handle on the worker thread and synchronously report
-            // success/failure back to this thread via a shared promise. start() can then return the real status without
-            // polling is_running() in a race.
+            // non-copyable OwnedHandle into it. Instead, open the directory handle on the worker thread and
+            // synchronously report success/failure back to this thread via a shared promise. start() can then return
+            // the real status without polling is_running() in a race.
             auto open_result = std::make_shared<std::promise<bool>>();
             std::future<bool> open_future = open_result->get_future();
             auto startup_gate = std::make_shared<ConfigWatcherStartGate>(diags.threshold);

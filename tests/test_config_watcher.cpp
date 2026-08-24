@@ -474,8 +474,8 @@ namespace
 
     TEST_F(ConfigWatcherTest, ParentDirectoryRemoved_WatcherExitsCleanly)
     {
-        // Parent-dir removal surfaces as ERROR_OPERATION_ABORTED from
-        // GetOverlappedResultEx. The worker must break the pump loop and the destructor must still run cleanly.
+        // Parent-dir removal surfaces as ERROR_OPERATION_ABORTED from GetOverlappedResultEx. The worker must break the
+        // pump loop and the destructor must still run cleanly.
         const std::filesystem::path temp_parent =
             std::filesystem::temp_directory_path() /
             ("dmk_watcher_removetest_" + std::to_string(_getpid()) + "_" + std::to_string(::GetCurrentThreadId()));
@@ -941,9 +941,8 @@ namespace
     TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)
     {
         // Confirms the per-call heap leak path accepts multiple invocations without tripping the single-slot overwrite
-        // hazard that the
-        // Logger::shutdown_internal per-call-cell discipline avoids. Each teardown allocates its own cell via new
-        // (std::nothrow), so prior leaked Impls are never overwritten.
+        // hazard that the Logger::shutdown_internal per-call-cell discipline avoids. Each teardown allocates its own
+        // cell via new (std::nothrow), so prior leaked Impls are never overwritten.
         for (int i = 0; i < 3; ++i)
         {
             DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});

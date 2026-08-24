@@ -2190,9 +2190,9 @@ TEST_F(LoggerTest, FormattedAsyncLog_FitsInlineBufferWithoutHeapAllocation)
     EXPECT_EQ(inline_allocs, 0)
         << "formatting a line that fits the inline buffer must not heap-allocate on the producer thread";
 
-    // Control: a line longer than the inline buffer falls back to a heap std::format string and the
-    // StringPool overflow path, so it must allocate. This proves the probe observes allocations and that
-    // the inline-fit path above genuinely avoided them.
+    // Control: a line longer than the inline buffer falls back to a heap std::format string and the StringPool overflow
+    // path, so it must allocate. This proves the probe observes allocations and that the inline-fit path above
+    // genuinely avoided them.
     const std::string oversized(LOG_INLINE_MESSAGE_SIZE + 64, 'X');
     const long long control_before = dmk_test::thread_new_calls();
     logger.info("{}", oversized);
@@ -2392,9 +2392,9 @@ TEST_F(LoggerTest, EnableAsyncModeRacingShutdownNeverResurrects)
     }
 }
 
-// A reconfigure that changes the timestamp format must reach the live async writer, not just the
-// synchronous banner. enable_async_mode snapshots the format into the writer's private config; reconfigure now pushes
-// the new format so async lines pick it up instead of keeping the stale format for the life of the writer.
+// A reconfigure that changes the timestamp format must reach the live async writer, not just the synchronous banner.
+// enable_async_mode snapshots the format into the writer's private config; reconfigure now pushes the new format so
+// async lines pick it up instead of keeping the stale format for the life of the writer.
 TEST_F(LoggerTest, ReconfigureFormatReachesLiveAsyncWriter)
 {
     const auto file_a = m_test_log_file; // cleaned by TearDown
@@ -3179,10 +3179,10 @@ TEST(LoggerPublicConstants, DefaultsAreStringViewAndStayNulTerminated)
     EXPECT_STREQ(DEFAULT_TIMESTAMP_FORMAT.data(), "%Y-%m-%d %H:%M:%S");
 }
 
-// DEFAULT_TIMESTAMP_FORMAT is the declared default argument of Logger(prefix, file) and of the static
-// configure(prefix, file), so each omitted-argument path must stamp the format the explicit spelling renders. The
-// sink writes "[<strftime>.<ms>] ...", so the default renders the 25-character head "[dddd-dd-dd dd:dd:dd.ddd]",
-// which pins the spelling positionally without comparing volatile digits across lines.
+// DEFAULT_TIMESTAMP_FORMAT is the declared default argument of Logger(prefix, file) and of the static configure(prefix,
+// file), so each omitted-argument path must stamp the format the explicit spelling renders. The sink writes
+// "[<strftime>.<ms>] ...", so the default renders the 25-character head "[dddd-dd-dd dd:dd:dd.ddd]", which pins the
+// spelling positionally without comparing volatile digits across lines.
 TEST_F(LoggerTest, DefaultTimestampFormatArgumentMatchesExplicitSpelling)
 {
     const std::string implicit_path = m_test_log_file.string() + ".implicit_default";

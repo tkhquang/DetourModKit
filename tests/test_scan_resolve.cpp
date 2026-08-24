@@ -182,10 +182,10 @@ namespace
         std::size_t m_size = 0;
     };
 
-    // Synthetic MSVC x64 RTTI layout for the RttiVtable tier, mirroring the dissector fixture in
-    // test_rtti_dissect.cpp. The pool lives in the test executable's data segment so the reverse-RTTI prelude's
-    // owning-module bound check (the COL pSelf RVA must reconstruct the test exe's image base) accepts every synthetic
-    // vtable. Offsets keep the COL, TypeDescriptor, and vtable storage apart from each other and from page boundaries.
+    // Synthetic MSVC x64 RTTI layout for the RttiVtable tier, mirroring the dissector fixture in test_rtti_dissect.cpp.
+    // The pool lives in the test executable's data segment so the reverse-RTTI prelude's owning-module bound check (the
+    // COL pSelf RVA must reconstruct the test exe's image base) accepts every synthetic vtable. Offsets keep the COL,
+    // TypeDescriptor, and vtable storage apart from each other and from page boundaries.
     constexpr std::size_t SR_BUF_SIZE = 4096;
     constexpr std::size_t SR_COL_OFFSET = 256;
     constexpr std::size_t SR_TD_OFFSET = SR_COL_OFFSET + 24; // COL is 24 bytes

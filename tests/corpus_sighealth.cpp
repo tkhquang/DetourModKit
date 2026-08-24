@@ -2,14 +2,14 @@
  * @file corpus_sighealth.cpp
  * @brief Signature-health corpus report (T-SIGHEALTH-CORPUS): estimate vs ground truth over real x64 code.
  *
- * The sighealth expected-match model multiplies per-position selectivity under an independent-byte
- * assumption. Real x64 .text is not independent-byte: canonical MSVC prologues repeat thousands of times,
- * so the model can grade a short prologue pattern far more selective than it is (a false negative for the
- * lint), while a pattern that fixes an operand byte can be unique today and silently volatile across a
- * relink (a hazard the pattern-level model cannot see at all). P1-9 requires this report before any
- * rarity/grade threshold change or any generic prologue/movabs/immediate heuristic: the tool loads a
- * representative corpus of system x64 images plus this executable's own statically linked C++ code, counts
- * ground-truth matches for each probe with a naive masked matcher, and prints estimate-vs-actual per probe.
+ * The sighealth expected-match model multiplies per-position selectivity under an independent-byte assumption. Real x64
+ * .text is not independent-byte: canonical MSVC prologues repeat thousands of times, so the model can grade a short
+ * prologue pattern far more selective than it is (a false negative for the lint), while a pattern that fixes an operand
+ * byte can be unique today and silently volatile across a relink (a hazard the pattern-level model cannot see at all).
+ * P1-9 requires this report before any rarity/grade threshold change or any generic prologue/movabs/immediate
+ * heuristic: the tool loads a representative corpus of system x64 images plus this executable's own statically linked
+ * C++ code, counts ground-truth matches for each probe with a naive masked matcher, and prints estimate-vs-actual per
+ * probe.
  *
  * Probe categories:
  *   - canonical-prologue: common MSVC/GCC function prologues and padding, the false-negative cases.
@@ -18,8 +18,8 @@
  *   - synthetic-unique:   a movabs with an invented imm64, the true-unique control.
  *   - wildcard:           a wildcard-heavy shape, the over-warn (false-positive) direction.
  *
- * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_corpus_sighealth. Output: a per-probe
- * table, #TSV rows, and the gate records described in bench_gate.hpp.
+ * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_corpus_sighealth. Output: a per-probe table, #TSV
+ * rows, and the gate records described in bench_gate.hpp.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -310,9 +310,9 @@ int main()
     }
     gates.fact("corpus.all_probes_compile", all_compiled);
 
-    // Deterministic corpus facts: canonical prologues are common in ANY real x64 Windows image set (the
-    // false-negative direction the report documents), a 10-byte invented immediate matches nothing, and the
-    // frozen-disp site matches at least its own occurrence.
+    // Deterministic corpus facts: canonical prologues are common in ANY real x64 Windows image set (the false-negative
+    // direction the report documents), a 10-byte invented immediate matches nothing, and the frozen-disp site matches
+    // at least its own occurrence.
     gates.fact(
         "corpus.canonical_prologue_exceeds_fail_threshold",
         prologue_actual_per_64mib > sighealth::HealthPolicy{}.fail_expected_matches

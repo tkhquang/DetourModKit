@@ -2,9 +2,9 @@
  * @file bench_footprint.cpp
  * @brief Runtime footprint measurement for the async logger and the profiler, per linked DMK instance.
  *
- * P2-4 requires the actual high-water and resident bytes of the logger/profiler defaults to be measured
- * before any capacity default changes; static footprint estimates alone must not tune them. This benchmark
- * measures, with the counting allocator from bench_alloc.hpp plus OS process counters:
+ * P2-4 requires the actual high-water and resident bytes of the logger/profiler defaults to be measured before any
+ * capacity default changes; static footprint estimates alone must not tune them. This benchmark measures, with the
+ * counting allocator from bench_alloc.hpp plus OS process counters:
  *
  *   [1] AsyncLogger construction at default config: C++ heap delta, private-commit delta, and the transport
  *       slot size the queue multiplies (sizeof LogMessage x queue_capacity).
@@ -15,9 +15,9 @@
  *   [5] Profiler first use: the published ring's resident bytes (capacity x sizeof ProfileSample), the
  *       allocation-free record path, and the export cost per resident sample.
  *
- * Both subsystems are per linked DMK instance, so a host with N DMK-linked mods multiplies these figures.
- * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_footprint. Output: human-readable
- * figures plus #TSV rows and the gate records described in bench_gate.hpp.
+ * Both subsystems are per linked DMK instance, so a host with N DMK-linked mods multiplies these figures. Build with
+ * -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_footprint. Output: human-readable figures plus #TSV rows
+ * and the gate records described in bench_gate.hpp.
  */
 
 #include "DetourModKit/logger.hpp"
@@ -141,10 +141,9 @@ int main()
         config.queue_capacity * sizeof(detail::LogMessage)
     );
 
-    // Phase 2: inline-path streaming. Messages within LOG_INLINE_MESSAGE_SIZE ride in the slot's inline
-    // buffer; the counter delta divided by messages is the whole-system allocation cost per message,
-    // producer and writer combined (the two cannot be split by a global counter, and the writer IS part of
-    // the per-message cost the host pays).
+    // Phase 2: inline-path streaming. Messages within LOG_INLINE_MESSAGE_SIZE ride in the slot's inline buffer; the
+    // counter delta divided by messages is the whole-system allocation cost per message, producer and writer combined
+    // (the two cannot be split by a global counter, and the writer IS part of the per-message cost the host pays).
     constexpr int INLINE_MESSAGES = 200000;
     std::size_t inline_accepted = 0;
     quiesce(*logger);
@@ -201,10 +200,9 @@ int main()
         static_cast<unsigned long long>(logger_retained)
     );
 
-    // Phase 5: profiler. First use publishes the full default ring, which then stays resident for process
-    // life (the instance is deliberately never destroyed). The record path must not allocate: it is the
-    // documented lock-free hot path, so its allocation count is a deterministic gate, measured with no other
-    // thread running.
+    // Phase 5: profiler. First use publishes the full default ring, which then stays resident for process life (the
+    // instance is deliberately never destroyed). The record path must not allocate: it is the documented lock-free hot
+    // path, so its allocation count is a deterministic gate, measured with no other thread running.
     const std::uint64_t live_before_profiler = dmk_alloc::live_bytes();
     Profiler &profiler = Profiler::get_instance();
     const std::uint64_t profiler_bytes = dmk_alloc::live_bytes() - live_before_profiler;

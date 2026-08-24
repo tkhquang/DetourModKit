@@ -116,9 +116,8 @@ namespace
             write_at(SYN_COL_OFFSET + 16, class_desc_rva);
             write_at(SYN_COL_OFFSET + 20, self_rva);
 
-            // TypeDescriptor: pVFTable (8) + spare (8) + zero-terminated
-            // mangled name. The name length is bounded by the available space between SYN_TD_NAME_OFFSET and
-            // SYN_COL_PTR_OFFSET so it cannot overrun the buffer.
+            // TypeDescriptor: pVFTable (8) + spare (8) + zero-terminated mangled name. The name length is bounded by
+            // the available space between SYN_TD_NAME_OFFSET and SYN_COL_PTR_OFFSET so it cannot overrun the buffer.
             const std::size_t max_name = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET - 1;
             const std::size_t name_len = std::min(mangled_name.size(), max_name);
             std::memcpy(m_buf + SYN_TD_NAME_OFFSET, mangled_name.data(), name_len);

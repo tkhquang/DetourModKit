@@ -68,9 +68,8 @@ namespace
                 {
                     for (Park &park : s_parks)
                     {
-                        // Manual reset on both: the host may observe entry after the body already signalled,
-                        // and one release must let every waiter on that channel out rather than just the
-                        // first.
+                        // Manual reset on both: the host may observe entry after the body already signalled, and one
+                        // release must let every waiter on that channel out rather than just the first.
                         park.entered = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
                         park.release = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
                     }

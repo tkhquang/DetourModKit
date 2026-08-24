@@ -5386,8 +5386,8 @@ TEST(HookLedgerTargetSlot, BlocksConcurrentInstallUntilSlotReleased)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
-// The leak path's slot release keeps the target physically represented: release_target_slot frees the
-// serialization sentinel (so later installs proceed) but leaves the creation-order entry, so is_target_hooked and
+// The leak path's slot release keeps the target physically represented: release_target_slot frees the serialization
+// sentinel (so later installs proceed) but leaves the creation-order entry, so is_target_hooked and
 // fail_if_already_hooked keep reporting the leaked-but-installed backend.
 TEST(HookLedgerTargetSlot, ReleaseSlotOnlyKeepsOrderEntry)
 {

@@ -1,7 +1,7 @@
-// Proves the process-lifecycle surface is usable from its own header alone: a consumer that only needs
-// Session / bootstrap / ModInfo can include DetourModKit/session.hpp without pulling in the whole umbrella. This
-// translation unit deliberately includes NOTHING else from DetourModKit, so a missing include in session.hpp would
-// fail this compile: that compile is the real assertion; the runtime body below just anchors a gtest case.
+// Proves the process-lifecycle surface is usable from its own header alone: a consumer that only needs Session /
+// bootstrap / ModInfo can include DetourModKit/session.hpp without pulling in the whole umbrella. This translation unit
+// deliberately includes NOTHING else from DetourModKit, so a missing include in session.hpp would fail this compile:
+// that compile is the real assertion; the runtime body below just anchors a gtest case.
 #include "DetourModKit/session.hpp"
 
 #include <gtest/gtest.h>

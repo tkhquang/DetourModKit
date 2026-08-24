@@ -108,10 +108,10 @@ LEGACY_HEADERS = (
     "include/DetourModKit/dmk.hpp",
     "include/DetourModKit/diagnostics_dump.hpp",
 )
-# Public headers DEMOTED (moved, not deleted): each keeps its capability but leaves
-# the top-level public include set for its new home. It must not reappear at the OLD public path -- that would
-# re-expand the first-class public surface the demotion trimmed. A detail/ home keeps the header installed (a public
-# header or the umbrella still includes it); a src/internal/ home makes it truly private (no public includer).
+# Public headers DEMOTED (moved, not deleted): each keeps its capability but leaves the top-level public include set
+# for its new home. It must not reappear at the OLD public path -- that would re-expand the first-class public surface
+# the demotion trimmed. A detail/ home keeps the header installed (a public header or the umbrella still includes it);
+# a src/internal/ home makes it truly private (no public includer).
 DEMOTED_HEADERS = {
     "include/DetourModKit/async_logger.hpp": "src/internal/async_logger.hpp",
     "include/DetourModKit/worker.hpp": "include/DetourModKit/detail/worker.hpp",
@@ -129,11 +129,11 @@ LEGACY_SCAN_TOKEN = re.compile(
     r'|\bAddrCandidate\b|\bResolveMode\b|\bResolveHit\b|\bCascadeRequest\b|\bCompiledPattern\b)')
 # --- v4 memory clean-break gate ---
 # The legacy memory surface (namespace Memory, MemoryError, the seh_*/read_ptr_* primitives, the
-# ModuleRange family, plausible_userspace_ptr) was reshaped into namespace memory + the unified
-# ErrorCode + the src/internal/ guarded engine. None of these spellings may reappear in this repo's
-# own sources. Matched after comment stripping, so a comment that names an old spelling as prose does not
-# trip the gate. ModuleRangeCache / module_range_cache /
-# module_range_from_handle are NOT matched (no \b ModuleRange \b boundary, lowercase, or distinct name).
+# ModuleRange family, plausible_userspace_ptr) was reshaped into namespace memory + the unified ErrorCode
+# + the src/internal/ guarded engine. None of these spellings may reappear in this repo's own sources.
+# Matched after comment stripping, so a comment that names an old spelling as prose does not trip the
+# gate. ModuleRangeCache / module_range_cache / module_range_from_handle are NOT matched (no \b
+# ModuleRange \b boundary, lowercase, or distinct name).
 LEGACY_MEMORY_TOKEN = re.compile(
     r'(\bMemory::|\bMemoryError\b|\bmemory_error_to_string\b'
     r'|\bseh_read|\bseh_write|\bseh_resolve'

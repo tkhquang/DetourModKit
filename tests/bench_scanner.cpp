@@ -3,9 +3,8 @@
  * @brief Standalone microbenchmark harness for detail::find_pattern.
  *
  * Measures find_pattern throughput across realistic and adversarial pattern shapes, and contrasts the rare-byte anchor
- * heuristic against a "first literal byte" anchor that mimics the simpler scanner described in
- * Otis Inf's blog comment (the original Witcher 3 mod scanner uses an
- * 8-byte XOR+AND verify with pattern[0] as the anchor).
+ * heuristic against a "first literal byte" anchor that mimics the simpler scanner described in Otis Inf's blog comment
+ * (the original Witcher 3 mod scanner uses an 8-byte XOR+AND verify with pattern[0] as the anchor).
  *
  * The benchmark generates one shared 8 MiB buffer with a byte distribution tuned to typical x64 PE .text frequencies
  * (so the common-byte set 0x48, 0x8B, 0xCC, ... is over-represented and rare bytes really are rare). Each pattern is

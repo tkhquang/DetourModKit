@@ -34,9 +34,8 @@ namespace
 
     // A committed RWX page used as a synthetic module image. find_string_xref scans readable pages for the string
     // (phase 1) and execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both masks, so
-    // a single page hosts the whole fixture and the Region spans exactly it. The page is zero-filled by
-    // VirtualAlloc, so an unwritten byte is 0x00, which both terminates a planted string and never starts a
-    // RIP-relative load.
+    // a single page hosts the whole fixture and the Region spans exactly it. The page is zero-filled by VirtualAlloc,
+    // so an unwritten byte is 0x00, which both terminates a planted string and never starts a RIP-relative load.
     class SyntheticImage
     {
     public:
@@ -70,8 +69,7 @@ namespace
         void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
 
         // Plants `<rex> <opcode> <modrm> <disp32>` (a RIP-relative lea/mov) at instr_off whose computed target is
-        // target_off. modrm 0x05 is the
-        // RIP-relative form with rax as the destination register.
+        // target_off. modrm 0x05 is the RIP-relative form with rax as the destination register.
         void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
         {
             std::uint8_t *p = m_base + instr_off;
@@ -427,12 +425,12 @@ namespace
     }
 
     // A committed RWX region with a caller-supplied x64 exception (.pdata) table registered through
-    // RtlAddFunctionTable, so RtlLookupFunctionEntry (and therefore find_string_xref's authoritative
-    // EnclosingFunction path) resolves addresses inside it exactly as inside a normally loaded module. The
-    // SyntheticImage fixtures above deliberately register no table (a raw VirtualAlloc buffer, which
-    // RtlLookupFunctionEntry returns nullptr for), exercising the heuristic fallback; this fixture is the complement
-    // that drives the .pdata path. All RUNTIME_FUNCTION / UNWIND_INFO RVAs are relative to the region base. The table
-    // storage outlives every lookup and is unregistered before the region is freed.
+    // RtlAddFunctionTable, so RtlLookupFunctionEntry (and therefore find_string_xref's authoritative EnclosingFunction
+    // path) resolves addresses inside it exactly as inside a normally loaded module. The SyntheticImage fixtures above
+    // deliberately register no table (a raw VirtualAlloc buffer, which RtlLookupFunctionEntry returns nullptr for),
+    // exercising the heuristic fallback; this fixture is the complement that drives the .pdata path. All
+    // RUNTIME_FUNCTION / UNWIND_INFO RVAs are relative to the region base. The table storage outlives every lookup and
+    // is unregistered before the region is freed.
     class PdataImage
     {
     public:
@@ -1848,8 +1846,7 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     img.write_string(0x40, str, sizeof(str));
 
     // One reference in each window. found_count must accumulate across the window boundary so a hit in window 0 and a
-    // hit in window 1 still report
-    // AmbiguousReference rather than silently resolving the first.
+    // hit in window 1 still report AmbiguousReference rather than silently resolving the first.
     img.plant_lea_window0(0x10, 0x40);
     img.plant_lea_window1(0x10, 0x40);
 
@@ -2308,18 +2305,18 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 }
 
 #if defined(_MSC_VER) || defined(_WIN64)
-// Mirror of the scanner region guard for the string-xref window scans. find_string_xref reads each
-// execute-readable window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and
-// Zydis decoding (broad scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit /
-// reprotect that the per-window VirtualQuery gate cannot close. This test resolves a planted anchor in the first
-// executable window while a second thread decommits and recommits a separate trailing executable window. Every
-// iteration returns either the stable site (no fault landed) or a fail-closed ambiguity verdict (a faulted trailing
-// window is skipped, which taints uniqueness); references collected before a swallowed fault are discarded by the
-// guarded wrappers, so the result is never a wrong address and never a crash. A run where the decommit never lands
-// inside the read window is a valid pass for the fault path; the __except / VEH skip-the-window mechanism is pinned
-// deterministically by MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp.
-// Supported builds enter this block through MSVC SEH or the MinGW x64 vectored guard; 32-bit is rejected by the global
-// architecture gate in defines.hpp.
+// Mirror of the scanner region guard for the string-xref window scans. find_string_xref reads each execute-readable
+// window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and Zydis decoding (broad
+// scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit / reprotect that the
+// per-window VirtualQuery gate cannot close. This test resolves a planted anchor in the first executable window while a
+// second thread decommits and recommits a separate trailing executable window. Every iteration returns either the
+// stable site (no fault landed) or a fail-closed ambiguity verdict (a faulted trailing window is skipped, which taints
+// uniqueness); references collected before a swallowed fault are discarded by the guarded wrappers, so the result is
+// never a wrong address and never a crash. A run where the decommit never lands inside the read window is a valid pass
+// for the fault path; the __except / VEH skip-the-window mechanism is pinned deterministically by
+// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. Supported builds enter
+// this block through MSVC SEH or the MinGW x64 vectored guard; 32-bit is rejected by the global architecture gate in
+// defines.hpp.
 TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 {
     SYSTEM_INFO si{};
@@ -2405,10 +2402,10 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 // read that window while it faults. Every result must therefore be either the unique reference site (no fault landed)
 // or a fail-closed IncompleteScan (a fault was skipped). Crucially, at least one fail-closed result must appear across
 // the run; without the incompleteness gate, the faulted-window skip would only be logged and the lone reference would
-// still be returned as unique. broad_match runs phase 1 plus the narrow and broad phase-2
-// sweeps in a single call, so one loop exercises all three uniqueness gates. This test shares the x64-guard block of
-// the region-guard test above (the vectored guard is x64-only; the architecture gate forbids 32-bit outright, so on
-// every supported build one of these macros is defined).
+// still be returned as unique. broad_match runs phase 1 plus the narrow and broad phase-2 sweeps in a single call, so
+// one loop exercises all three uniqueness gates. This test shares the x64-guard block of the region-guard test above
+// (the vectored guard is x64-only; the architecture gate forbids 32-bit outright, so on every supported build one of
+// these macros is defined).
 TEST(StringXrefIncompleteGate, FaultedWindowForcesIncompleteNeverFalselyUnique)
 {
     SYSTEM_INFO si{};

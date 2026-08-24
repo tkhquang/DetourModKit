@@ -22,8 +22,8 @@
 namespace DetourModKit
 {
     // Forward declaration so the ModuleSpan overload of resolve_col_site can be declared here without pulling the
-    // guarded-memory engine header into this internal header. Both TUs that define or call the overload
-    // (rtti.cpp, rtti_dissect.cpp) already include the full definition via internal/memory_guarded.hpp.
+    // guarded-memory engine header into this internal header. Both TUs that define or call the overload (rtti.cpp,
+    // rtti_dissect.cpp) already include the full definition via internal/memory_guarded.hpp.
     namespace detail
     {
         struct ModuleSpan;

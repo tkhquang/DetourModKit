@@ -1201,12 +1201,12 @@ namespace DetourModKit
             // on_state_change(false) callbacks is race-free.
             m_running.store(false, std::memory_order_release);
 
-            // The poll thread is the sole mask publisher and trampoline reader, so hook teardown now is
-            // race-free. Skipped on the loader-lock path above: hook removal must not run under the loader lock,
-            // so the detours stay installed there. The owner id makes a superseded poller's teardown a no-op.
-            // Close the external-host lease before the local uninstall. A close proves the host holds no pointer from
-            // this generation; it is a no-op for the local backends. uninstall() then tears down XInput and the local
-            // wheel source and revokes the layer owner.
+            // The poll thread is the sole mask publisher and trampoline reader, so hook teardown now is race-free.
+            // Skipped on the loader-lock path above: hook removal must not run under the loader lock, so the detours
+            // stay installed there. The owner id makes a superseded poller's teardown a no-op. Close the external-host
+            // lease before the local uninstall. A close proves the host holds no pointer from this generation; it is a
+            // no-op for the local backends. uninstall() then tears down XInput and the local wheel source and revokes
+            // the layer owner.
             wheel_source_close();
             uninstall(m_intercept_owner);
 
@@ -1838,8 +1838,8 @@ namespace DetourModKit
                 // Capture release callbacks for held entries that this update drops. Otherwise, a Hold consumer remains
                 // held forever after its entry vanishes. The same-name NON-prototype tombstone rejects its staged
                 // release. Therefore, a gate-backed hold always synthesizes the compensatory false, as remove and clear
-                // do. The gate deduplicates, so an unheld drop is a
-                // no-op and the prototype's already-admitted release is not doubled.
+                // do. The gate deduplicates, so an unheld drop is a no-op and the prototype's already-admitted release
+                // is not doubled.
                 hold_releases.reserve(indices.size());
                 for (size_t idx : indices)
                 {
@@ -2045,8 +2045,8 @@ namespace DetourModKit
                 // Capture release callbacks before erasure, then dispatch them after unlock. Logic-DLL retirement
                 // passes invoke_callbacks=false because the callbacks reside in a module near removal. Always capture a
                 // gate-backed hold because the tombstone refuses any staged release. The m_active_states gate strands a
-                // consumer whose release is staged but not dispatched. The gate swallows an
-                // unbalanced released(false). A raw callback keeps the m_active_states gate.
+                // consumer whose release is staged but not dispatched. The gate swallows an unbalanced released(false).
+                // A raw callback keeps the m_active_states gate.
                 if (invoke_callbacks)
                 {
                     hold_releases.reserve(indices.size());
@@ -2121,8 +2121,8 @@ namespace DetourModKit
             }
 
             // invoke_callbacks == false means the caller owns the wait. The loader-lock abandon path must not block.
-            // The typed unload drain bounds the wait on its own deadline. The tombstone is already
-            // published, so an in-flight callback is abandoned rather than waited on. Normal removal drains.
+            // The typed unload drain bounds the wait on its own deadline. The tombstone is already published, so an
+            // in-flight callback is abandoned rather than waited on. Normal removal drains.
             if (invoke_callbacks)
             {
                 drain_rundowns(rundowns);

@@ -618,9 +618,8 @@ if(DMK_BUILD_BENCHMARKS)
   # re-emit libstdc++'s C++20-constrained std::thread/std::tuple linkonce symbol twice (spurious multiple-definition),
   # and an LTO bench against a non-LTO archive is the symmetric hazard. Read the library's single LTO decision
   # (_dmk_apply_lto, resolved once in the top-level CMakeLists.txt before this subdirectory is added) rather than
-  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any
-  # toolchain --
-  # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
+  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any toolchain
+  # -- including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
       DetourModKit_bench_logger DetourModKit_bench_rtti DetourModKit_bench_hook DetourModKit_bench_input

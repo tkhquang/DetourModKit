@@ -750,10 +750,10 @@ TEST_F(RttiDissectTest, Heal_NegativeDrift)
 
 TEST_F(RttiDissectTest, Heal_RecoversWhenNominalHoldsWrongTypedObject)
 {
-    // The realistic post-patch failure: the nominal slot now resolves to a
-    // DIFFERENT (stale) type because another field shifted into it, and the expected field moved a few bytes away. A
-    // read at the old offset would see the wrong object; heal must reject the wrong-typed nominal slot (the
-    // short-circuit only fires on an exact-type match) and recover the expected type at the drifted offset.
+    // The realistic post-patch failure: the nominal slot now resolves to a DIFFERENT (stale) type because another field
+    // shifted into it, and the expected field moved a few bytes away. A read at the old offset would see the wrong
+    // object; heal must reject the wrong-typed nominal slot (the short-circuit only fires on an exact-type match) and
+    // recover the expected type at the drifted offset.
     SyntheticVtable expected(".?AVHealExpected@@");
     SyntheticVtable stale(".?AVHealStale@@");
     SynStruct st;
@@ -778,10 +778,10 @@ TEST_F(RttiDissectTest, Heal_ChainedHealAcrossTwoStructsWithNonUniformDrift)
 {
     // Two pointer links live in DIFFERENT structs and drift by DIFFERENT amounts, so no single uniform delta fits the
     // whole chain (the case solve_fingerprint cannot handle): the outer struct's typed-object pointer shifts +0x30,
-    // while the pointed-to object's own downstream pointer shifts
-    // +0x08. Each link is healed independently and the first heal's resolved object (object_addr) roots the second
-    // heal, confirming object_addr is a usable next-base. The absolute offsets are chosen to keep the window scans
-    // inside the buffers; the differing per-struct deltas are the point.
+    // while the pointed-to object's own downstream pointer shifts +0x08. Each link is healed independently and the
+    // first heal's resolved object (object_addr) roots the second heal, confirming object_addr is a usable next-base.
+    // The absolute offsets are chosen to keep the window scans inside the buffers; the differing per-struct deltas are
+    // the point.
     SyntheticVtable outer_vt(".?AVChainOuterTarget@@");
     SyntheticVtable inner_vt(".?AVChainInnerTarget@@");
 
@@ -1102,9 +1102,8 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
         })
     );
 
-    // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
-    // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
-    // let it through).
+    // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >= MAX_TYPE_NAME_LEN, so this length is the first
+    // rejected one (pins the boundary against an off-by-one that would let it through).
     const std::string at_cap(rtti::MAX_TYPE_NAME_LEN, 'X');
     expect_bad_descriptor(
         rtti::heal_landmark({
@@ -1189,8 +1188,8 @@ TEST_F(RttiDissectTest, Heal_ZeroStrideTreatedAsPointerSize)
 
 TEST_F(RttiDissectTest, Heal_ErrorStringsAreDistinct)
 {
-    // The heal error codes use DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
-    // rendering. Preserve the "distinct, non-empty strings" coverage over the three heal codes.
+    // The heal error codes use DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable rendering.
+    // Preserve the "distinct, non-empty strings" coverage over the three heal codes.
     const auto bad_descriptor = dmk::to_string(ErrorCode::BadDescriptor);
     const auto no_match = dmk::to_string(ErrorCode::HealNoMatch);
     const auto ambiguous = dmk::to_string(ErrorCode::HealAmbiguous);

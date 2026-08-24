@@ -1430,9 +1430,9 @@ TEST(ManifestBindingTest, InvalidBindingStructureFailsClosed)
     bad_width.binding.value_width = 3; // not one of {1, 2, 4, 8}
     EXPECT_FALSE(mf::Signature::compile(bad_width).has_value());
 
-    // and a non-default value in a field the active kind never reads also fails closed: the inert value would fold
-    // into the drift fingerprint yet never serialize, so a recaptured baseline could not survive its own
-    // save/reload. One arm per inert field, each beside an otherwise valid binding.
+    // and a non-default value in a field the active kind never reads also fails closed: the inert value would fold into
+    // the drift fingerprint yet never serialize, so a recaptured baseline could not survive its own save/reload. One
+    // arm per inert field, each beside an otherwise valid binding.
     mf::SignatureRecord inert_width = base;
     inert_width.binding.kind = mf::BindingKind::Address;
     inert_width.binding.value_width = 3;
@@ -2632,8 +2632,8 @@ TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
         )
     );
 
-    // Otherwise the file must target this build's exact contract epoch. A mismatch (an older file, or an
-    // unversioned file under a versioned build) is rejected so the consumer falls back to its in-code defaults.
+    // Otherwise the file must target this build's exact contract epoch. A mismatch (an older file, or an unversioned
+    // file under a versioned build) is rejected so the consumer falls back to its in-code defaults.
     EXPECT_TRUE(
         mf::revision_compatible(
             mf::ManifestHeader{

@@ -2,9 +2,9 @@
  * @file rtti.cpp
  * @brief Implementation of MSVC RTTI introspection primitives.
  *
- * Walks RTTICompleteObjectLocator -> TypeDescriptor -> mangled name through
- * SEH-guarded reads. The COL layout is read in a single batch to minimise the number of guarded-read transitions; on
- * MSVC each __try frame is essentially free, while MinGW enters the VEH fault-containment path for each transition.
+ * Walks RTTICompleteObjectLocator -> TypeDescriptor -> mangled name through SEH-guarded reads. The COL layout is read
+ * in a single batch to minimise the number of guarded-read transitions; on MSVC each __try frame is essentially free,
+ * while MinGW enters the VEH fault-containment path for each transition.
  *
  * Every address derived from a COL field is bound-checked against the vtable's owning module range before being
  * dereferenced. This guarantees that a forged or corrupted COL cannot redirect the walker to read from another loaded
@@ -129,11 +129,10 @@ namespace DetourModKit
             return false;
 
         // Scope is x64 MSVC, where the COL signature is always 1 and carries pSelf, an RVA back to the COL itself.
-        // Reject any other signature
-        // outright: a non-x64 or corrupt signature has no pSelf to cross-check,
-        // so accepting it would skip the forgery guard below and fall through to the loader base unverified. The
-        // canonical IDA/Ghidra technique computes the image base as col_addr - p_self; cross-check that recovered base
-        // against the loader-reported module base so a forged p_self cannot bend the walk to another module.
+        // Reject any other signature outright: a non-x64 or corrupt signature has no pSelf to cross-check, so accepting
+        // it would skip the forgery guard below and fall through to the loader base unverified. The canonical
+        // IDA/Ghidra technique computes the image base as col_addr - p_self; cross-check that recovered base against
+        // the loader-reported module base so a forged p_self cannot bend the walk to another module.
         if (head_opt->signature != COL_SIGNATURE_X64)
             return false;
         if (head_opt->p_self == 0 || col_addr < head_opt->p_self)
@@ -418,8 +417,7 @@ namespace DetourModKit
         if (stride == 0)
             stride = sizeof(std::uintptr_t);
 
-        // Overflow guard on the addressable span. Two failure modes are
-        // possible:
+        // Overflow guard on the addressable span. Two failure modes are possible:
         //   1. (slot_count * stride) overflows std::size_t.
         //   2. (table + span) overflows std::uintptr_t.
         // The first check rejects (1) directly; the second catches (2) by comparing the wrapped sum against the base. A
@@ -681,9 +679,9 @@ namespace DetourModKit
             if (num_sections == 0 || num_sections > 96)
                 return 0;
 
-            // IMAGE_FIRST_SECTION: the section table starts immediately after the
-            // optional header, whose length is SizeOfOptionalHeader. Using sizeof(IMAGE_NT_HEADERS64) instead would
-            // misplace the table whenever the optional-header size differs from the compile-time struct size.
+            // IMAGE_FIRST_SECTION: the section table starts immediately after the optional header, whose length is
+            // SizeOfOptionalHeader. Using sizeof(IMAGE_NT_HEADERS64) instead would misplace the table whenever the
+            // optional-header size differs from the compile-time struct size.
             const std::uintptr_t sec_table =
                 nt_addr + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt->FileHeader.SizeOfOptionalHeader;
 
