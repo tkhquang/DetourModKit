@@ -379,8 +379,11 @@ namespace
                 return fail("soak", "the generation's Init did not bring every subsystem up");
             }
 
-            // The loaded tag rejects a stale pinned predecessor.
-            if (std::strncmp(generation.tag(), tag.c_str(), tag.size()) != 0)
+            // The loaded tag rejects a stale pinned predecessor. The comparison covers every rewritten byte with the
+            // padding rule from stage_copy, so a stale value cannot prefix-match the expected tag.
+            std::string expected_tag = tag.substr(0, staged_gen::TAG_LENGTH);
+            expected_tag.resize(staged_gen::TAG_LENGTH, '0');
+            if (std::memcmp(generation.tag(), expected_tag.data(), staged_gen::TAG_LENGTH) != 0)
             {
                 return fail("soak", "the loaded generation did not run the freshly staged bytes");
             }
