@@ -10,6 +10,8 @@ Rules owned here: `[B-36]`, `[B-37]`, `[B-38]`, `[B-79]`, `[B-80]`.
 
 Registration takes a `mutex`. Setter callbacks run after that lock releases and can re-enter data-plane config calls. A separate pass lock serializes load and reload and refuses unsafe control-plane re-entry.
 
+Config diagnostics use the private record list in `src/internal/config_diagnostics.hpp`. The owner emits each source-stamped record after unlock.
+
 Reload semantics:
 
 - `reload()` re-runs the registered items against the stashed INI path with the same deferred pattern.
