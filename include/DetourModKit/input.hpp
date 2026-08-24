@@ -34,6 +34,10 @@ namespace DetourModKit
         // incomplete here, so BindingToken can grant it friendship (the engine mints and validates tokens against its
         // binding set) and Input's private accessors can hand one back without exposing its layout.
         class InputPoller;
+
+        // Test-only white-box accessor over the Input facade. Defined in the non-installed
+        // src/internal/input_test_seams.hpp, so this installed definition carries no macro-dependent member.
+        struct InputTestSeams;
     } // namespace detail
 
     namespace input
@@ -653,30 +657,11 @@ namespace DetourModKit
              */
             [[nodiscard]] CallbackDrainStatus prepare_logic_dll_unload_all(std::chrono::milliseconds timeout) noexcept;
 
-#ifdef DMK_ENABLE_TEST_SEAMS
-            /// Probe invoked after registration or start admission and before its commit.
-            using CallbackAdmissionCommitSeam = void (*)() noexcept;
-
-            /// Installs the callback-admission commit probe. Null clears it.
-            static void set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept;
-
-            /**
-             * @brief Test-only: grants the live engine the interception layer and republishes its consume rules.
-             * @details A test host has no loaded XInput module to hook, so a case asserting on the published table
-             *          needs this to reach the owning state a real install reaches. Returns false when no engine
-             *          exists or another owner holds the layer. Compiled out of shipping archives.
-             */
-            [[nodiscard]] static bool adopt_intercept_owner_for_test() noexcept;
-
-            /// Locks the facade mutex until the paired test seam releases it.
-            static void lock_facade_mutex_for_test() noexcept;
-            /// Releases the lock taken by lock_facade_mutex_for_test, on the same thread.
-            static void unlock_facade_mutex_for_test() noexcept;
-            /// Clears the test retention latch and reports whether it was set.
-            [[nodiscard]] static bool reclaim_vetoed_impl_for_test() noexcept;
-#endif
-
         private:
+            // Unconditional friend: test access lives outside this installed definition, so its tokens never vary
+            // with a build macro.
+            friend struct detail::InputTestSeams;
+
             Input() noexcept;
             ~Input() noexcept;
 

@@ -21,6 +21,7 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/async_logger.hpp"
+#include "internal/logger_test_seams.hpp"
 
 #include "test_alloc_probe.hpp"
 
@@ -1142,14 +1143,14 @@ TEST_F(LoggerTest, Configure_InvalidPath_KeepsOldSink)
 {
     Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
-    const auto accepted_snapshot = Logger::static_config_for_test();
+    const auto accepted_snapshot = detail::LoggerTestSeams::static_config_for_test();
 
     logger.info("BEFORE_INVALID_CONFIGURE_5t1r");
     logger.flush();
 
     Logger::configure("BAD_CONFIG", "Z:\\nonexistent\\dir\\configure.log", "%H:%M:%S");
 
-    EXPECT_EQ(Logger::static_config_for_test(), accepted_snapshot);
+    EXPECT_EQ(detail::LoggerTestSeams::static_config_for_test(), accepted_snapshot);
     EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_INVALID_CONFIGURE_6h8d"));
     logger.flush();
 
@@ -1179,7 +1180,7 @@ TEST_F(LoggerTest, Configure_AllocationFailureRestoresPublishedSnapshot)
     const long long allocation_count_before = dmk_test::thread_new_calls();
     Logger::configure(prior_prefix, prior_file, prior_timestamp, LogOpenMode::Append);
     const long long publication_allocations = dmk_test::thread_new_calls() - allocation_count_before;
-    const auto prior_snapshot = Logger::static_config_for_test();
+    const auto prior_snapshot = detail::LoggerTestSeams::static_config_for_test();
     ASSERT_GT(publication_allocations, 0);
 
     constexpr long long max_allocation_budget = 64;
@@ -1200,7 +1201,7 @@ TEST_F(LoggerTest, Configure_AllocationFailureRestoresPublishedSnapshot)
 
         if (!completed)
         {
-            EXPECT_EQ(Logger::static_config_for_test(), prior_snapshot)
+            EXPECT_EQ(detail::LoggerTestSeams::static_config_for_test(), prior_snapshot)
                 << "budget " << allow << " left the staged snapshot published after configure threw";
         }
     }
@@ -1208,7 +1209,7 @@ TEST_F(LoggerTest, Configure_AllocationFailureRestoresPublishedSnapshot)
     EXPECT_GT(failures, publication_allocations)
         << "the sweep did not reach a reconfigure allocation after snapshot publication";
     ASSERT_TRUE(completed) << "configure never completed within the allocation budget";
-    const auto committed_snapshot = Logger::static_config_for_test();
+    const auto committed_snapshot = detail::LoggerTestSeams::static_config_for_test();
     ASSERT_NE(committed_snapshot, prior_snapshot) << "configure rejected the final allocation budget";
     EXPECT_EQ(committed_snapshot->log_prefix, target_prefix);
     EXPECT_EQ(committed_snapshot->log_file_name, target_file);
@@ -2555,7 +2556,7 @@ namespace
 
         Logger::configure("DEFAULT_DETACH", log_file.string(), "%H:%M:%S");
         Logger &logger = DetourModKit::log();
-        const auto accepted_snapshot = Logger::static_config_for_test();
+        const auto accepted_snapshot = detail::LoggerTestSeams::static_config_for_test();
         DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
         DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
 
@@ -2571,7 +2572,7 @@ namespace
         logger.disable_async_mode();
         Logger::configure("DEFAULT_RIVAL", rival_file.string(), "%H:%M:%S");
         const bool revived = DetourModKit::log().log(LogLevel::Error, "DEFAULT_DETACH_REVIVED");
-        const bool snapshot_changed = Logger::static_config_for_test() != accepted_snapshot;
+        const bool snapshot_changed = detail::LoggerTestSeams::static_config_for_test() != accepted_snapshot;
         writer_gate.store(false, std::memory_order_release);
         std::_Exit(revived || snapshot_changed || std::filesystem::exists(rival_file) ? 32 : 0);
     }

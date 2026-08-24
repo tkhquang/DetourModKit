@@ -5,6 +5,8 @@
 
 #include "DetourModKit.hpp"
 
+#include "internal/input_test_seams.hpp"
+
 #include <windows.h>
 
 #include <atomic>
@@ -157,7 +159,7 @@ extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_staged() noexcep
  */
 extern "C" __declspec(dllexport) void WINAPI dmk_input_probe_hold_facade_mutex() noexcept
 {
-    DetourModKit::input::Input::lock_facade_mutex_for_test();
+    DetourModKit::detail::InputTestSeams::lock_facade_mutex_for_test();
 }
 
 /// Provides an address in this DLL's image for the host's mapped-state query.

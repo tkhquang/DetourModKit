@@ -118,13 +118,6 @@ namespace DetourModKit
         static_config_atom().store(std::move(config), std::memory_order_release);
     }
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
-    std::shared_ptr<const Logger::StaticConfig> Logger::static_config_for_test()
-    {
-        return get_static_config();
-    }
-#endif
-
     LogLevel string_to_log_level(std::string_view level_str)
     {
         std::string upper_level_str(level_str);

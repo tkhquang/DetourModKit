@@ -5,7 +5,11 @@
  * @file region.hpp
  * @brief The Region value type and the Prot protection flags, the shared range-of-memory vocabulary.
  * @details A Region pairs a base Address with a byte size, so a memory range travels as one value. Each named
- *          factory yields a Region that the caller stores, passes to a scan, and narrows with `sub()`.
+ *          factory yields a Region that the caller stores, passes to a scan, and narrows with `sub()`. Value
+ *          operations (`end`, `contains`, `sub`) are pure arithmetic and allocate nothing. Every factory is
+ *          Setup/control-plane only, and only `module_named()` can allocate among them.
+ * @warning `[B-100]` `host()`, `own()`, and `module_named()` query loader state: never call them under the Windows
+ *          loader lock. `whole_process()` does not query loader state. `RegionLoaderBoundary.*` pins this boundary.
  */
 
 #include "DetourModKit/address.hpp"
@@ -61,7 +65,7 @@ namespace DetourModKit
          * @brief Returns the Region spanning the host process image (the .exe the mod is injected into).
          * @return The host module's mapped image span, or an empty Region if it cannot be resolved.
          * @details The default scope for a cascade that carries no explicit range.
-         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: loader-backed, see the file-level `[B-100]` warning.
          */
         [[nodiscard]] static Region host() noexcept;
 
@@ -72,7 +76,7 @@ namespace DetourModKit
          * @details DetourModKit is a static library, so `own()` resolves to whichever DLL or EXE consumed it. That is
          *          distinct from @ref host(), which is always the process EXE. The lookup resolves the module that
          *          contains this function's own code, so it stays correct however the consumer packaged the library.
-         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: loader-backed, see the file-level `[B-100]` warning.
          */
         [[nodiscard]] static Region own() noexcept;
 
@@ -80,7 +84,8 @@ namespace DetourModKit
          * @brief Returns the Region spanning a named, already-loaded module.
          * @param name UTF-8 module name as the loader knows it (e.g. "kernel32.dll").
          * @return The module's mapped image span, or an empty Region if @p name is empty or the module is not loaded.
-         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: loader-backed, see the file-level `[B-100]` warning. The name conversion
+         *       allocates.
          */
         [[nodiscard]] static Region module_named(std::string_view name) noexcept;
 

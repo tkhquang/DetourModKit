@@ -21,6 +21,7 @@
 #include "internal/input_binding_lifecycle.hpp"
 #include "internal/input_poller.hpp"
 #include "internal/input_intercept.hpp"
+#include "internal/input_test_seams.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_key_cache.hpp"
@@ -660,7 +661,7 @@ TEST_F(InputTest, ConsumeCapacityReflectsTheLivePoller)
     ASSERT_TRUE(mgr.start().has_value());
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
-    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
 
     const auto running = mgr.consume_capacity();
     EXPECT_EQ(running.capacity, detail::MAX_GAMEPAD_CONSUME_RULES);
@@ -806,7 +807,7 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
     );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
-    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
         << "the anonymous consume binding should arm suppression while its guard is live";
@@ -850,7 +851,7 @@ TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
     );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
-    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
     ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
     scope.abandon();
@@ -927,7 +928,7 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
     );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
-    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
     ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
     scope.clear();
@@ -3879,7 +3880,7 @@ namespace
             detail::g_input_key_state_probe = nullptr;
             detail::g_input_post_stage_probe = nullptr;
             detail::g_input_pre_dispatch_probe = nullptr;
-            input::Input::set_callback_admission_commit_seam_for_test(nullptr);
+            detail::InputTestSeams::set_callback_admission_commit_seam_for_test(nullptr);
             detail::resolve_input_callback_drain();
             (void)detail::open_input_callback_admission();
         }
@@ -4350,7 +4351,7 @@ TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsNa
 
     s_callback_commit_parked.store(false, std::memory_order_release);
     s_release_callback_commit.store(false, std::memory_order_release);
-    input::Input::set_callback_admission_commit_seam_for_test(&park_callback_commit);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(&park_callback_commit);
 
     std::atomic<bool> registration_succeeded{false};
     std::thread registrar(
@@ -4433,7 +4434,7 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
 
     s_callback_commit_parked.store(false, std::memory_order_release);
     s_release_callback_commit.store(false, std::memory_order_release);
-    input::Input::set_callback_admission_commit_seam_for_test(&park_callback_commit);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(&park_callback_commit);
 
     std::atomic<bool> start_succeeded{true};
     ErrorCode start_error = ErrorCode::Unknown;
@@ -4476,7 +4477,7 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
     EXPECT_EQ(start_error, ErrorCode::ShutdownInProgress);
     EXPECT_FALSE(detail::input_callback_admission_open());
 
-    input::Input::set_callback_admission_commit_seam_for_test(nullptr);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(nullptr);
     EXPECT_EQ(manager.prepare_logic_dll_unload_all(std::chrono::seconds{2}), input::CallbackDrainStatus::Drained);
     ASSERT_TRUE(manager.start().has_value());
     auto rearmed = input::register_combo(

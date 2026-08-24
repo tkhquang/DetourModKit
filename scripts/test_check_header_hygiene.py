@@ -22,6 +22,7 @@ UNPARENTHESIZED_LIMITS = _module.UNPARENTHESIZED_LIMITS
 ASYNC_INTERNAL_HEADER = _module.ASYNC_INTERNAL_HEADER
 string_pool_destructor_violations = _module.string_pool_destructor_violations
 unguarded_libc_memory_calls = _module.unguarded_libc_memory_calls
+installed_test_macro_violations = _module.installed_test_macro_violations
 
 
 def _expect(condition, message):
@@ -234,6 +235,50 @@ def test_scanner_gate_does_not_match_the_engines_own_memchr():
     # rule must not read it as the thing it bans.
     source = "    const unsigned char *p = dmk_memchr(hay, needle, n);\n"
     _expect(unguarded_libc_memory_calls(source) == [], "the engine's self-provided memchr was misread as libc")
+
+
+def test_token_stability_rule_flags_a_macro_gated_class_member():
+    # The defect shape the rule exists for: a member of an installed class definition that exists only when a private
+    # test macro is defined, so translation units with and without the macro disagree on the class tokens.
+    source = strip_comments(
+        "class Input\n{\n#ifdef DMK_ENABLE_TEST_SEAMS\n    static void probe_for_test() noexcept;\n#endif\n};\n")
+    _expect(installed_test_macro_violations(source) == [(3, "DMK_ENABLE_TEST_SEAMS")],
+            "a DMK_ENABLE_TEST_SEAMS-gated class member was not flagged")
+
+
+def test_token_stability_rule_flags_the_compound_dispatcher_shape():
+    # Both macros in one condition report the first mention. A second gated line reports again.
+    source = strip_comments(
+        "#if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING) && defined(DMK_ENABLE_TEST_SEAMS)\n"
+        "long debug_snapshot_use_count() const noexcept;\n"
+        "#endif\n")
+    violations = installed_test_macro_violations(source)
+    _expect(violations == [(1, "DMK_EVENT_DISPATCHER_INTERNAL_TESTING")],
+            "the compound two-macro conditional was not flagged at its condition line")
+
+
+def test_token_stability_rule_accepts_a_macro_free_definition_as_identical_on_and_off():
+    # The fixed shape: an unconditional friend keeps the definition's token stream identical with the macro defined
+    # and undefined, so the rule stays silent.
+    source = strip_comments(
+        "class Input\n{\nprivate:\n    friend struct detail::InputTestSeams;\n};\n")
+    _expect(installed_test_macro_violations(source) == [],
+            "a token-stable installed definition was wrongly flagged")
+
+
+def test_token_stability_rule_matches_a_macro_split_by_a_line_splice():
+    # Translation phase 2 deletes each backslash-newline before tokenization, so a spliced name is the same macro
+    # dependence. The hit reports the physical line where the spliced directive starts.
+    source = strip_comments("class Logger\n{\n#ifdef DMK_ENABLE_TEST_\\\nSEAMS\n    void probe();\n#endif\n};\n")
+    _expect(installed_test_macro_violations(source) == [(3, "DMK_ENABLE_TEST_SEAMS")],
+            "a macro name split by a backslash-newline splice was not matched")
+
+
+def test_token_stability_rule_ignores_comment_mentions():
+    # The scan runs on stripped text, so prose that names the macro (a doc pointer, a rationale) is not dependence.
+    source = strip_comments("// Compiled only when DMK_ENABLE_TEST_SEAMS is defined.\nclass Logger\n{\n};\n")
+    _expect(installed_test_macro_violations(source) == [],
+            "a comment mention of the private test macro was misread as macro dependence")
 
 
 def main():

@@ -133,6 +133,13 @@ namespace DetourModKit::detail
      *          very thread running it. A wrong "it can be here" only costs a refusal.
      */
     [[nodiscard]] Rundown drain_gate(EntryGate &gate, const void *dispatcher) noexcept;
+
+    /**
+     * @brief Test-only white-box accessor over EventDispatcher privates.
+     * @details Declared here so the dispatcher can befriend it unconditionally. Only the dispatcher test translation
+     *          unit defines it, so the installed class definition stays token-stable under every build macro.
+     */
+    template <typename Event> struct EventDispatcherTestAccess;
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -629,22 +636,11 @@ namespace DetourModKit
             return result;
         }
 
-#if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING) && defined(DMK_ENABLE_TEST_SEAMS)
-        /**
-         * @brief Test-only diagnostic: outstanding references to the current handler snapshot, excluding this call's
-         *        own temporary. 1 means the dispatcher's atomic is the sole holder. Compiled only when both
-         *        DMK_EVENT_DISPATCHER_INTERNAL_TESTING and DMK_ENABLE_TEST_SEAMS are defined.
-         */
-        [[nodiscard]] long debug_snapshot_use_count() const noexcept
-        {
-            // load() returns a shared_ptr copy that bumps the refcount by 1 for its own lifetime; subtract that so the
-            // reported count reflects only the other holders (the dispatcher atomic and any in-flight emit snapshots).
-            auto snap = this->m_handlers.load(std::memory_order_acquire);
-            return snap.use_count() - 1;
-        }
-#endif // DMK_EVENT_DISPATCHER_INTERNAL_TESTING && DMK_ENABLE_TEST_SEAMS
-
     private:
+        // Unconditional friend: test access lives outside this installed definition, so its tokens never vary with a
+        // build macro.
+        friend struct detail::EventDispatcherTestAccess<Event>;
+
         /**
          * @brief Reclaims the list slot of an already-retired entry.
          * @details Physical compaction only: the handler is dead before this runs, so every outcome here is a

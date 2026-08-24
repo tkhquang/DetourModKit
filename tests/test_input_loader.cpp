@@ -16,6 +16,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
 
+#include "internal/input_test_seams.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "fixtures/loader_lock_scope.hpp"
@@ -92,13 +93,13 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
     std::thread holder(
         [&]
         {
-            input::Input::lock_facade_mutex_for_test();
+            detail::InputTestSeams::lock_facade_mutex_for_test();
             mutex_held.store(true, std::memory_order_release);
             while (!release_mutex.load(std::memory_order_acquire))
             {
                 std::this_thread::yield();
             }
-            input::Input::unlock_facade_mutex_for_test();
+            detail::InputTestSeams::unlock_facade_mutex_for_test();
         }
     );
     while (!mutex_held.load(std::memory_order_acquire))
@@ -134,7 +135,7 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Input), leaks_before + 1)
         << "the vetoed retention must be recorded as an intentional leak";
 
-    ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::reclaim_vetoed_impl_for_test());
     EXPECT_EQ(mgr.binding_count(), 1u) << "the retained owner must still hold the staged binding";
 
     s_witness_armed.store(false, std::memory_order_release);
@@ -176,7 +177,7 @@ TEST(InputLoaderLock, VetoedShutdownStopsThePollLoopWithoutJoining)
     EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::XInputKeepalive), xinput_pins)
         << "a poller abandonment must not book the XInput keepalive reason";
 
-    ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::reclaim_vetoed_impl_for_test());
     mgr.shutdown();
 }
 
@@ -200,7 +201,7 @@ TEST(InputLoaderLock, ForcedFreeProbeNeverAuthorizesAForbiddenPhase)
 
     EXPECT_EQ(s_witness_destructions.load(std::memory_order_acquire), 0)
         << "a forced-free probe authorized capture destruction inside a loader-detach phase";
-    ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::reclaim_vetoed_impl_for_test());
 
     s_witness_armed.store(false, std::memory_order_release);
     mgr.shutdown();
@@ -213,7 +214,7 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
 
     s_commit_seam_entered.store(false, std::memory_order_release);
     s_release_commit_seam.store(false, std::memory_order_release);
-    input::Input::set_callback_admission_commit_seam_for_test(&park_admission_commit);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(&park_admission_commit);
 
     std::unique_ptr<Result<input::BindingGuard>> registration;
     std::thread registrar(
@@ -244,7 +245,7 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
 
     s_release_commit_seam.store(true, std::memory_order_release);
     registrar.join();
-    input::Input::set_callback_admission_commit_seam_for_test(nullptr);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(nullptr);
 
     if (!entry_parked)
     {
@@ -259,7 +260,7 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
     ASSERT_TRUE(registration->has_value()) << registration->error().message();
     EXPECT_EQ(mgr.binding_count(), 0u) << "new facade calls must fail closed while retention is latched";
 
-    ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
+    ASSERT_TRUE(detail::InputTestSeams::reclaim_vetoed_impl_for_test());
     EXPECT_EQ(mgr.binding_count(), 1u)
         << "the already-admitted call must commit through the same retained facade owner";
     registration->value().release();
