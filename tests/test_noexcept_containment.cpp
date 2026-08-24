@@ -15,7 +15,6 @@
 
 #include <gtest/gtest.h>
 
-#include <functional>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -41,10 +40,6 @@ namespace
     static_assert(
         std::is_nothrow_move_assignable_v<std::vector<DetourModKit::input::BindingGuard>>,
         "the hotkey guard list must use a no-throw move"
-    );
-    static_assert(
-        std::is_nothrow_move_assignable_v<std::function<void(bool)>>,
-        "the persisted reload callback must use a no-throw move"
     );
     static_assert(
         std::is_nothrow_move_assignable_v<std::shared_ptr<void>>,

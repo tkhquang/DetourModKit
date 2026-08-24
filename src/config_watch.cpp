@@ -707,7 +707,10 @@ namespace DetourModKit
                 {
                     out.watcher = std::move(get_config_watcher());
                     out.servicer = std::move(get_reload_servicer());
-                    out.callback = std::move(get_reload_user_callback());
+                    // std::function move assignment has no standard noexcept guarantee. Stage through the noexcept
+                    // move constructor, then commit with the noexcept member swap.
+                    std::function<void(bool)> detached_callback(std::move(get_reload_user_callback()));
+                    out.callback.swap(detached_callback);
                     out.guards = std::move(get_reload_hotkey_guards());
                     ++get_watcher_disable_generation();
                     return WatchDrainState::Detached;
