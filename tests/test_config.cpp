@@ -22,6 +22,8 @@
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_intercept.hpp"
 #include "internal/lifecycle_context.hpp"
+#include "internal/config_diagnostics.hpp"
+#include "internal/config_watcher.hpp"
 #include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
@@ -45,6 +47,13 @@ namespace DetourModKit::detail
     void lock_config_watcher_mutex_for_test() noexcept;
     extern std::atomic<bool> g_config_read_seektell_fail;
     extern std::atomic<bool> g_config_parse_fail_once;
+    extern void (*g_logger_record_probe)(DetourModKit::LogLevel, std::string_view) noexcept;
+    extern void (*g_worker_post_thread_start_seam)();
+    extern void (*g_config_watcher_prehandshake_seam)();
+    extern bool (*g_config_watcher_create_event_failure_seam)() noexcept;
+    extern bool (*g_config_watcher_initial_read_failure_seam)() noexcept;
+    bool config_registry_mutex_free_for_test() noexcept;
+    bool config_watcher_mutex_free_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -120,6 +129,112 @@ namespace
             s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire)
         };
     }
+    std::atomic<unsigned> s_diagnostic_probe_config_records{0};
+    std::atomic<unsigned> s_diagnostic_probe_locked_emissions{0};
+    std::atomic<unsigned> s_diagnostic_probe_watcher_starts{0};
+    std::atomic<unsigned> s_diagnostic_probe_servicer_starts{0};
+    std::atomic<unsigned> s_diagnostic_probe_worker_start_sources{0};
+    std::atomic<unsigned> s_diagnostic_probe_start_failures{0};
+    std::atomic<unsigned> s_diagnostic_probe_prehandshake_exceptions{0};
+    std::atomic<unsigned> s_diagnostic_probe_worker_start_failures{0};
+    std::mutex s_diagnostic_probe_mutex;
+    std::string s_diagnostic_probe_first_locked_record;
+    std::string s_deferred_source_record;
+
+    // A separate contender tests both mutexes, so the emitter never calls try_lock on a mutex it owns.
+    void observe_logger_record(DetourModKit::LogLevel, std::string_view message) noexcept
+    {
+        const bool watcher_start = message.find("StoppableWorker 'ConfigWatcher' started.") != std::string_view::npos;
+        const bool servicer_start =
+            message.find("StoppableWorker 'ConfigReloadServicer' started.") != std::string_view::npos;
+        const bool start_failure = message.find("ConfigWatcher '") != std::string_view::npos &&
+                                   message.find("failed (GLE=") != std::string_view::npos;
+        const bool prehandshake_exception =
+            message.find("StoppableWorker 'ConfigWatcher': unhandled exception:") != std::string_view::npos;
+        const bool worker_start_failure = message.find("ConfigWatcher '") != std::string_view::npos &&
+                                          message.find("failed to start worker:") != std::string_view::npos;
+        const bool config_record = message.find("Config:") != std::string_view::npos ||
+                                   message.find("ConfigWatcher:") != std::string_view::npos ||
+                                   message.find("ConfigWatcher '") != std::string_view::npos || watcher_start ||
+                                   servicer_start || prehandshake_exception;
+        if (!config_record)
+        {
+            return;
+        }
+
+        s_diagnostic_probe_config_records.fetch_add(1, std::memory_order_acq_rel);
+        if (watcher_start)
+        {
+            s_diagnostic_probe_watcher_starts.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if (servicer_start)
+        {
+            s_diagnostic_probe_servicer_starts.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if ((watcher_start || servicer_start) && message.find("[worker.cpp:") != std::string_view::npos)
+        {
+            s_diagnostic_probe_worker_start_sources.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if (start_failure)
+        {
+            s_diagnostic_probe_start_failures.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if (prehandshake_exception)
+        {
+            s_diagnostic_probe_prehandshake_exceptions.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if (worker_start_failure)
+        {
+            s_diagnostic_probe_worker_start_failures.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        bool locks_free = false;
+        try
+        {
+            const std::jthread lock_probe(
+                [&locks_free]
+                {
+                    locks_free = DetourModKit::detail::config_registry_mutex_free_for_test() &&
+                                 DetourModKit::detail::config_watcher_mutex_free_for_test();
+                }
+            );
+        }
+        catch (...)
+        {
+            locks_free = false;
+        }
+        if (locks_free)
+        {
+            return;
+        }
+        if (s_diagnostic_probe_locked_emissions.fetch_add(1, std::memory_order_acq_rel) == 0)
+        {
+            try
+            {
+                std::lock_guard<std::mutex> lock(s_diagnostic_probe_mutex);
+                s_diagnostic_probe_first_locked_record.assign(message);
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+
+    void observe_deferred_source(DetourModKit::LogLevel, std::string_view message) noexcept
+    {
+        if (message.find("DEFERRED_SOURCE_MARKER") == std::string_view::npos)
+        {
+            return;
+        }
+        try
+        {
+            std::lock_guard<std::mutex> lock(s_diagnostic_probe_mutex);
+            s_deferred_source_record.assign(message);
+        }
+        catch (...)
+        {
+        }
+    }
 } // namespace
 
 class ConfigTest : public ::testing::Test
@@ -139,6 +254,11 @@ protected:
         DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
         DetourModKit::detail::g_config_read_seektell_fail.store(false, std::memory_order_release);
         DetourModKit::detail::g_config_parse_fail_once.store(false, std::memory_order_release);
+        DetourModKit::detail::g_logger_record_probe = nullptr;
+        DetourModKit::detail::g_worker_post_thread_start_seam = nullptr;
+        DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
+        DetourModKit::detail::g_config_watcher_create_event_failure_seam = nullptr;
+        DetourModKit::detail::g_config_watcher_initial_read_failure_seam = nullptr;
         config::clear();
         if (std::filesystem::exists(m_test_ini_file))
         {
@@ -571,6 +691,137 @@ TEST_F(ConfigTest, ClearRegisteredItems_Empty)
 TEST_F(ConfigTest, LogAll_Empty)
 {
     EXPECT_NO_THROW(config::log_all());
+}
+
+TEST_F(ConfigTest, DeferredDiagnosticsDoNotReenterRegistryMutex)
+{
+    const LogLevel previous_level = DetourModKit::log().get_log_level();
+    DetourModKit::log().set_log_level(LogLevel::Trace);
+
+    s_diagnostic_probe_config_records.store(0, std::memory_order_release);
+    s_diagnostic_probe_locked_emissions.store(0, std::memory_order_release);
+    s_diagnostic_probe_watcher_starts.store(0, std::memory_order_release);
+    s_diagnostic_probe_servicer_starts.store(0, std::memory_order_release);
+    s_diagnostic_probe_worker_start_sources.store(0, std::memory_order_release);
+    s_diagnostic_probe_start_failures.store(0, std::memory_order_release);
+    s_diagnostic_probe_prehandshake_exceptions.store(0, std::memory_order_release);
+    s_diagnostic_probe_worker_start_failures.store(0, std::memory_order_release);
+    s_diagnostic_probe_first_locked_record.clear();
+    DetourModKit::detail::g_logger_record_probe = &observe_logger_record;
+
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    ini_file << "BadInt=not_a_number\n";
+    ini_file << "BadFloat=also_not_a_number\n";
+    ini_file << "BadBool=perhaps\n";
+    ini_file << "BadCombo=NotAKeyName\n";
+    ini_file.close();
+
+    config::bind_int("TestSection", "BadInt", "bad_int", [](int) {}, 7);
+    config::bind_float("TestSection", "BadFloat", "bad_float", [](float) {}, 1.5f);
+    config::bind_bool("TestSection", "BadBool", "bad_bool", [](bool) {}, true);
+    config::bind_combos("TestSection", "BadCombo", "bad_combo", [](const input::KeyComboList &) {}, "F5");
+
+    config::load(m_test_ini_file.string());
+
+    {
+        std::ofstream updated_ini(m_test_ini_file);
+        updated_ini << "[TestSection]\n";
+        updated_ini << "BadInt=8\n";
+        updated_ini << "BadFloat=2.5\n";
+        updated_ini << "BadBool=false\n";
+        updated_ini << "BadCombo=F6\n";
+    }
+    EXPECT_TRUE(config::reload());
+    config::log_all();
+
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::AlreadyRunning);
+    config::disable_auto_reload();
+
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = []() noexcept { return true; };
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = nullptr;
+    DetourModKit::detail::g_config_watcher_initial_read_failure_seam = []() noexcept { return true; };
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+    DetourModKit::detail::g_config_watcher_initial_read_failure_seam = nullptr;
+
+    DetourModKit::detail::g_config_watcher_prehandshake_seam = [] { throw std::runtime_error("pre-handshake"); };
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+    DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
+
+    DetourModKit::detail::g_worker_post_thread_start_seam = [] { throw std::runtime_error("post-thread-start"); };
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+    DetourModKit::detail::g_worker_post_thread_start_seam = nullptr;
+
+    EXPECT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    const std::filesystem::path missing_ini =
+        std::filesystem::temp_directory_path() / ("missing_config_watch_" + std::to_string(_getpid())) / "config.ini";
+    config::load(missing_ini.string());
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+
+    config::clear();
+    config::log_all();
+
+    DetourModKit::detail::g_logger_record_probe = nullptr;
+    DetourModKit::log().set_log_level(previous_level);
+
+    EXPECT_GT(s_diagnostic_probe_config_records.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(s_diagnostic_probe_watcher_starts.load(std::memory_order_acquire), 5u);
+    EXPECT_EQ(s_diagnostic_probe_servicer_starts.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_diagnostic_probe_worker_start_sources.load(std::memory_order_acquire), 6u);
+    EXPECT_EQ(s_diagnostic_probe_start_failures.load(std::memory_order_acquire), 3u);
+    EXPECT_EQ(s_diagnostic_probe_prehandshake_exceptions.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_diagnostic_probe_worker_start_failures.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_diagnostic_probe_locked_emissions.load(std::memory_order_acquire), 0u)
+        << "a config diagnostic reached the sink while a config lock was held: "
+        << s_diagnostic_probe_first_locked_record;
+}
+
+TEST_F(ConfigTest, DeferredDiagnosticsPreserveProducerSource)
+{
+    const LogLevel previous_level = DetourModKit::log().get_log_level();
+    DetourModKit::log().set_log_level(LogLevel::Trace);
+    s_deferred_source_record.clear();
+    DetourModKit::detail::g_logger_record_probe = &observe_deferred_source;
+
+    config::detail::DeferredDiagnostics diags = config::detail::open_deferred_diagnostics();
+    const auto expected_line = __LINE__ + 1;
+    config::detail::defer_diagnostic(diags, LogLevel::Info, "DEFERRED_SOURCE_MARKER");
+    config::detail::emit_deferred_diagnostics(diags);
+
+    DetourModKit::detail::g_logger_record_probe = nullptr;
+    DetourModKit::log().set_log_level(previous_level);
+
+    const std::string expected_stamp = "[test_config.cpp:" + std::to_string(expected_line) + "]";
+    EXPECT_NE(s_deferred_source_record.find(expected_stamp), std::string::npos) << s_deferred_source_record;
+    EXPECT_EQ(s_deferred_source_record.find("[config_diagnostics.cpp:"), std::string::npos);
+}
+
+TEST_F(ConfigTest, ReloadServicerPostThreadFailureStopsWorker)
+{
+    DetourModKit::detail::g_worker_post_thread_start_seam = [] { throw std::runtime_error("post-thread-start"); };
+
+    const auto start_time = std::chrono::steady_clock::now();
+    EXPECT_THROW((void)config::reload_hotkey("ReloadConfig", "F5"), std::runtime_error);
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds{250})
+        << "a post-thread failure must stop the worker before the constructor joins";
+}
+
+TEST_F(ConfigTest, ConfigWatcherPostThreadFailureStopsWorker)
+{
+    DetourModKit::detail::g_worker_post_thread_start_seam = [] { throw std::runtime_error("post-thread-start"); };
+    DetourModKit::detail::ConfigWatcher watcher(m_test_ini_file.string(), std::chrono::milliseconds{50}, []() {});
+
+    const auto start_time = std::chrono::steady_clock::now();
+    EXPECT_FALSE(watcher.start());
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds{250})
+        << "a post-thread failure must cancel the startup wait before the constructor joins";
 }
 
 TEST_F(ConfigTest, LoadNonExistentFile)

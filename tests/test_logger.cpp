@@ -26,6 +26,67 @@
 
 using namespace DetourModKit;
 
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_level_transition_probe)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<unsigned> s_level_transition_arrivals{0};
+    std::atomic<bool> s_level_transition_release{false};
+    std::atomic<bool> s_level_transition_timed_out{false};
+
+    void rendezvous_level_transition() noexcept
+    {
+        if (s_level_transition_arrivals.fetch_add(1, std::memory_order_acq_rel) + 1 == 2)
+        {
+            s_level_transition_release.store(true, std::memory_order_release);
+            s_level_transition_release.notify_all();
+            return;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (!s_level_transition_release.load(std::memory_order_acquire))
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                s_level_transition_timed_out.store(true, std::memory_order_release);
+                s_level_transition_release.store(true, std::memory_order_release);
+                s_level_transition_release.notify_all();
+                return;
+            }
+            std::this_thread::yield();
+        }
+    }
+
+    class LevelTransitionProbeScope
+    {
+    public:
+        LevelTransitionProbeScope() noexcept
+        {
+            s_level_transition_arrivals.store(0, std::memory_order_release);
+            s_level_transition_release.store(false, std::memory_order_release);
+            s_level_transition_timed_out.store(false, std::memory_order_release);
+            DetourModKit::detail::g_logger_level_transition_probe = &rendezvous_level_transition;
+        }
+
+        ~LevelTransitionProbeScope() noexcept
+        {
+            s_level_transition_release.store(true, std::memory_order_release);
+            s_level_transition_release.notify_all();
+            DetourModKit::detail::g_logger_level_transition_probe = nullptr;
+        }
+
+        LevelTransitionProbeScope(const LevelTransitionProbeScope &) = delete;
+        LevelTransitionProbeScope &operator=(const LevelTransitionProbeScope &) = delete;
+
+        [[nodiscard]] bool timed_out() const noexcept
+        {
+            return s_level_transition_timed_out.load(std::memory_order_acquire);
+        }
+    };
+} // namespace
+
 // The loader-lock path in Logger::shutdown_internal and disable_async_mode() drops the facade's handle and leaves the
 // writer standing on the retention root it was published with. Both are noexcept teardowns, so pin that neither the
 // copy that arms the root nor the reset that drops the handle can throw.
@@ -1742,6 +1803,147 @@ TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
     auto marker_pos = content.find("MARKER_BEFORE_SAME_a7k2");
     auto change_after = content.find("Log level changed", marker_pos);
     EXPECT_EQ(change_after, std::string::npos) << "set_log_level with same level should not produce a log message";
+}
+
+TEST_F(LoggerTest, SetLogLevel_ChangedThresholdsEmitInfoControlRecord)
+{
+    // The control route keeps each upward threshold change visible.
+    Logger &logger = log();
+
+    logger.set_log_level(LogLevel::Info);
+    logger.set_log_level(LogLevel::Warning);
+    logger.set_log_level(LogLevel::Info);
+    logger.set_log_level(LogLevel::Error);
+    logger.set_log_level(LogLevel::Warning);
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    const auto count_records = [&](std::string_view text) -> std::size_t
+    {
+        std::size_t count = 0;
+        for (std::size_t pos = 0; (pos = content.find(text, pos)) != std::string::npos; pos += text.size())
+        {
+            ++count;
+        }
+        return count;
+    };
+
+    EXPECT_EQ(count_records("Log level changed from INFO to WARNING"), 1u);
+    EXPECT_EQ(count_records("Log level changed from INFO to ERROR"), 1u);
+    EXPECT_EQ(count_records("Log level changed from ERROR to WARNING"), 1u);
+
+    // The control record carries the Info level, not the new threshold.
+    std::string record_line;
+    std::istringstream lines(content);
+    for (std::string line; std::getline(lines, line);)
+    {
+        if (line.find("Log level changed from INFO to ERROR") != std::string::npos)
+        {
+            record_line = line;
+            break;
+        }
+    }
+    ASSERT_FALSE(record_line.empty());
+    EXPECT_NE(record_line.find("[INFO   ] ::"), std::string::npos) << "control record line: " << record_line;
+    EXPECT_NE(record_line.find("] :: [logger.cpp:"), std::string::npos) << "control record line: " << record_line;
+
+    logger.set_log_level(LogLevel::Info);
+}
+
+TEST_F(LoggerTest, SetLogLevel_ConcurrentSameTargetEmitsOneControlRecord)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("MARKER_BEFORE_SAME_TARGET_f3q9");
+
+    bool rendezvous_timed_out = false;
+    {
+        std::jthread first;
+        std::jthread second;
+        LevelTransitionProbeScope probe;
+        first = std::jthread([&logger] { logger.set_log_level(LogLevel::Warning); });
+        second = std::jthread([&logger] { logger.set_log_level(LogLevel::Warning); });
+        first.join();
+        second.join();
+        rendezvous_timed_out = probe.timed_out();
+    }
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    const std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    const std::size_t marker_pos = content.find("MARKER_BEFORE_SAME_TARGET_f3q9");
+    ASSERT_NE(marker_pos, std::string::npos);
+
+    std::size_t count = 0;
+    constexpr std::string_view transition = "Log level changed";
+    for (std::size_t pos = marker_pos; (pos = content.find(transition, pos)) != std::string::npos;
+         pos += transition.size())
+    {
+        ++count;
+    }
+    EXPECT_FALSE(rendezvous_timed_out);
+    EXPECT_EQ(count, 1u);
+    EXPECT_EQ(logger.get_log_level(), LogLevel::Warning);
+
+    logger.set_log_level(LogLevel::Info);
+}
+
+TEST_F(LoggerTest, SetLogLevel_ConcurrentDifferentTargetsCommitBothTransitions)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("MARKER_BEFORE_DIFFERENT_TARGETS_j6m4");
+
+    bool rendezvous_timed_out = false;
+    {
+        std::jthread first;
+        std::jthread second;
+        LevelTransitionProbeScope probe;
+        first = std::jthread([&logger] { logger.set_log_level(LogLevel::Warning); });
+        second = std::jthread([&logger] { logger.set_log_level(LogLevel::Error); });
+        first.join();
+        second.join();
+        rendezvous_timed_out = probe.timed_out();
+    }
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    const std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    const std::size_t marker_pos = content.find("MARKER_BEFORE_DIFFERENT_TARGETS_j6m4");
+    ASSERT_NE(marker_pos, std::string::npos);
+    const std::string_view transitions{content.data() + marker_pos, content.size() - marker_pos};
+
+    const auto count_records = [&](std::string_view text) -> std::size_t
+    {
+        std::size_t count = 0;
+        for (std::size_t pos = 0; (pos = transitions.find(text, pos)) != std::string::npos; pos += text.size())
+        {
+            ++count;
+        }
+        return count;
+    };
+
+    EXPECT_FALSE(rendezvous_timed_out);
+    const LogLevel final_level = logger.get_log_level();
+    if (final_level == LogLevel::Error)
+    {
+        EXPECT_EQ(count_records("Log level changed from INFO to WARNING"), 1u);
+        EXPECT_EQ(count_records("Log level changed from WARNING to ERROR"), 1u);
+    }
+    else
+    {
+        ASSERT_EQ(final_level, LogLevel::Warning);
+        EXPECT_EQ(count_records("Log level changed from INFO to ERROR"), 1u);
+        EXPECT_EQ(count_records("Log level changed from ERROR to WARNING"), 1u);
+    }
+    EXPECT_EQ(count_records("Log level changed"), 2u);
+
+    logger.set_log_level(LogLevel::Info);
 }
 
 TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)

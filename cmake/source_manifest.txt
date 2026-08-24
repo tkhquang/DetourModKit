@@ -48,6 +48,7 @@ src/sighealth.cpp
 src/worker.cpp
 
 src/internal/async_logger.cpp
+src/internal/config_diagnostics.cpp
 src/internal/config_reload.cpp
 src/internal/config_watcher.cpp
 src/internal/drain_backoff.cpp

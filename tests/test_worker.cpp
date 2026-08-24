@@ -12,6 +12,7 @@
 
 #include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
+#include "DetourModKit/logger.hpp"
 
 // Neither header is seam-gated, and the reaper cases below are not either: the reaper is ordinary library code and
 // the allocation probe is a plain test helper. Only the StoppableWorker seam probes further down need the gate.
@@ -19,6 +20,29 @@
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
+
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_record_probe)(DetourModKit::LogLevel, std::string_view) noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<unsigned> s_worker_start_records{0};
+    std::atomic<bool> s_worker_start_has_source{false};
+
+    void observe_worker_start(DetourModKit::LogLevel, std::string_view message) noexcept
+    {
+        if (message.find("StoppableWorker 'worker-start-proof' started.") != std::string_view::npos)
+        {
+            s_worker_start_records.fetch_add(1, std::memory_order_acq_rel);
+            s_worker_start_has_source.store(
+                message.find("[worker.cpp:") != std::string_view::npos,
+                std::memory_order_release
+            );
+        }
+    }
+} // namespace
 
 TEST(StoppableWorker, RunsAndStops)
 {
@@ -39,6 +63,25 @@ TEST(StoppableWorker, RunsAndStops)
         EXPECT_TRUE(w.is_running());
     }
     EXPECT_GT(counter.load(), 0);
+}
+
+TEST(StoppableWorker, SuccessfulConstructionEmitsOneStartRecord)
+{
+    Logger &logger = log();
+    const LogLevel previous_level = logger.get_log_level();
+    logger.set_log_level(LogLevel::Trace);
+    s_worker_start_records.store(0, std::memory_order_release);
+    s_worker_start_has_source.store(false, std::memory_order_release);
+    DetourModKit::detail::g_logger_record_probe = &observe_worker_start;
+
+    {
+        StoppableWorker worker("worker-start-proof", [](std::stop_token) {});
+    }
+
+    DetourModKit::detail::g_logger_record_probe = nullptr;
+    logger.set_log_level(previous_level);
+    EXPECT_EQ(s_worker_start_records.load(std::memory_order_acquire), 1u);
+    EXPECT_TRUE(s_worker_start_has_source.load(std::memory_order_acquire));
 }
 
 // Tearing a worker down from inside its own body is a self-join. shutdown() must detect that the current thread is the

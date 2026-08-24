@@ -9,6 +9,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/detail/worker.hpp"
 #include "lifecycle_context.hpp"
+#include "worker_start_log.hpp"
 
 #include <windows.h>
 
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -23,6 +25,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -33,12 +36,66 @@ namespace DetourModKit
 {
     namespace detail
     {
+        enum class ConfigWatcherStartWait : std::uint8_t
+        {
+            Pending,
+            Released,
+            Cancelled,
+        };
+
+        struct ConfigWatcherStartGate
+        {
+            explicit ConfigWatcherStartGate(LogLevel threshold)
+                : diags{
+                      .threshold = threshold,
+                      .records = {},
+                  },
+                  late_diags{
+                      .threshold = threshold,
+                      .records = {},
+                  }
+            {
+            }
+
+            std::mutex mutex;
+            config::detail::DeferredDiagnostics diags;
+            config::detail::DeferredDiagnostics late_diags;
+            bool complete{false};
+            bool emitted{false};
+            std::atomic<ConfigWatcherStartWait> wait{ConfigWatcherStartWait::Pending};
+        };
+
+        namespace
+        {
+            void cancel_start_wait(const std::shared_ptr<ConfigWatcherStartGate> &gate) noexcept
+            {
+                if (!gate)
+                {
+                    return;
+                }
+                auto expected = ConfigWatcherStartWait::Pending;
+                if (gate->wait.compare_exchange_strong(
+                        expected,
+                        ConfigWatcherStartWait::Cancelled,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire
+                    ))
+                {
+                    gate->wait.notify_all();
+                }
+            }
+        } // anonymous namespace
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // Overrides loader-lock detection so teardown retention can be exercised from a normal test thread.
         bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
 
         // A throwing probe exercises failure before the startup promise has been settled.
         void (*g_config_watcher_prehandshake_seam)() = nullptr;
+
+        // These probes inject CreateEventW and initial ReadDirectoryChangesW failures.
+        bool (*g_config_watcher_create_event_failure_seam)() noexcept = nullptr;
+        bool (*g_config_watcher_initial_read_failure_seam)() noexcept = nullptr;
 
         // Published from the pump body's exit guard. A husked watcher's Impl is leaked, so worker_exited is no longer
         // reachable through the ConfigWatcher shell; this is the only channel that can observe a detached pump
@@ -203,6 +260,7 @@ namespace DetourModKit
 
             std::mutex start_mutex;
             std::unique_ptr<StoppableWorker> worker;
+            std::atomic<StartGate> start_gate;
             std::atomic<std::thread::id> worker_thread_id{};
             std::atomic<bool> worker_exited{true};
             std::atomic<bool> stop_requested{false};
@@ -279,6 +337,7 @@ namespace DetourModKit
                     // watcher's independent lock-free cancellation flag first; its I/O pump observes it on a bounded
                     // cadence after any in-flight call returns. shutdown() then detaches without joining.
                     m_impl->stop_requested.store(true, std::memory_order_release);
+                    cancel_start_wait(m_impl->start_gate.load(std::memory_order_acquire));
                     m_impl->worker->shutdown();
                 }
 
@@ -353,6 +412,49 @@ namespace DetourModKit
 
         bool ConfigWatcher::start()
         {
+            config::detail::DeferredDiagnostics diags = config::detail::open_deferred_diagnostics();
+            StartGate gate;
+            bool started = false;
+            try
+            {
+                started = start(diags, gate);
+            }
+            catch (...)
+            {
+                release_start_gate(gate);
+                throw;
+            }
+            config::detail::emit_deferred_diagnostics(diags);
+            release_start_gate(gate);
+            return started;
+        }
+
+        void ConfigWatcher::release_start_gate(const StartGate &gate) noexcept
+        {
+            if (!gate)
+            {
+                return;
+            }
+            config::detail::DeferredDiagnostics to_emit;
+            config::detail::DeferredDiagnostics late_to_emit;
+            {
+                std::lock_guard<std::mutex> lock(gate->mutex);
+                gate->wait.store(ConfigWatcherStartWait::Released, std::memory_order_release);
+                if (gate->complete && !gate->emitted)
+                {
+                    gate->emitted = true;
+                    to_emit = std::move(gate->diags);
+                    late_to_emit = std::move(gate->late_diags);
+                }
+            }
+            gate->wait.notify_all();
+            config::detail::emit_deferred_diagnostics(to_emit);
+            config::detail::emit_deferred_diagnostics(late_to_emit);
+        }
+
+        bool ConfigWatcher::start(config::detail::DeferredDiagnostics &diags, StartGate &gate)
+        {
+            gate.reset();
             if (!m_impl)
             {
                 // Spent watcher: a prior start() timed out and leaked the Impl (see the leak-on-timeout branch below).
@@ -384,13 +486,19 @@ namespace DetourModKit
             // handle is a no-op, so the settled-husk case is unchanged.
             if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
             {
+                gate = m_impl->start_gate.load(std::memory_order_acquire);
                 return true;
             }
             m_impl->worker.reset();
 
             if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
             {
-                log().error("ConfigWatcher: invalid INI path '{}'; cannot start.", m_impl->ini_path_utf8);
+                config::detail::defer_diagnostic(
+                    diags,
+                    LogLevel::Error,
+                    "ConfigWatcher: invalid INI path '{}'; cannot start.",
+                    m_impl->ini_path_utf8
+                );
                 return false;
             }
             m_impl->stop_requested.store(false, std::memory_order_release);
@@ -402,6 +510,7 @@ namespace DetourModKit
             auto debounce_ms = m_impl->debounce;
             auto callback = m_impl->on_reload;
             auto label = m_impl->ini_path_utf8;
+            const LogLevel startup_threshold = diags.threshold;
 
             // The StoppableWorker body is stored in std::function, so the lambda must stay copyable; we cannot move a
             // non-copyable
@@ -410,6 +519,9 @@ namespace DetourModKit
             // polling is_running() in a race.
             auto open_result = std::make_shared<std::promise<bool>>();
             std::future<bool> open_future = open_result->get_future();
+            auto startup_gate = std::make_shared<ConfigWatcherStartGate>(diags.threshold);
+            m_impl->start_gate.store(startup_gate, std::memory_order_release);
+            gate = startup_gate;
 
             // Pointers to the Impl's atomic slots. Raw pointers rather than a captured m_impl reference: the lambda
             // may outlive this stack frame via the StoppableWorker detach path, and a detached body keeps reading all
@@ -426,11 +538,17 @@ namespace DetourModKit
                                 callback = std::move(callback),
                                 label = std::move(label),
                                 open_result,
+                                startup_gate,
+                                startup_threshold,
                                 worker_id_slot,
                                 worker_exited_slot,
                                 stop_requested_slot](const std::stop_token &st) -> void
             {
                 const WorkerExitGuard worker_exit_guard{*worker_exited_slot};
+                config::detail::DeferredDiagnostics startup_diags{
+                    .threshold = startup_threshold,
+                    .records = {},
+                };
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
                 // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
                 // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
@@ -489,58 +607,161 @@ namespace DetourModKit
                     bool &m_settled;
                 } settle_guard{open_result, handshake_settled};
 
-                if (stop_requested_slot->load(std::memory_order_acquire))
+                const auto wait_for_release = [&]() noexcept
                 {
+                    auto state = startup_gate->wait.load(std::memory_order_acquire);
+                    while (state == ConfigWatcherStartWait::Pending)
+                    {
+                        startup_gate->wait.wait(ConfigWatcherStartWait::Pending, std::memory_order_acquire);
+                        state = startup_gate->wait.load(std::memory_order_acquire);
+                    }
+                };
+
+                const auto complete_startup = [&](bool ok) noexcept
+                {
+                    config::detail::DeferredDiagnostics to_emit;
+                    {
+                        std::lock_guard<std::mutex> channel_lock(startup_gate->mutex);
+                        startup_gate->diags = std::move(startup_diags);
+                        startup_gate->complete = true;
+                        if (startup_gate->wait.load(std::memory_order_acquire) == ConfigWatcherStartWait::Released &&
+                            !startup_gate->emitted)
+                        {
+                            startup_gate->emitted = true;
+                            to_emit = std::move(startup_gate->diags);
+                        }
+                    }
+                    settle(ok);
+                    config::detail::emit_deferred_diagnostics(to_emit);
+                };
+
+                const auto fail_startup = [&](std::string_view message) noexcept
+                {
+                    try
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "StoppableWorker '{}': unhandled exception: {}",
+                            "ConfigWatcher",
+                            message
+                        );
+                    }
+                    catch (...)
+                    {
+                        DetourModKit::detail::LoggerDropAccess::record(log());
+                    }
+                    complete_startup(false);
+                };
+
+                const auto fail_startup_unknown = [&]() noexcept
+                {
+                    try
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "StoppableWorker '{}': unknown exception escaped body.",
+                            "ConfigWatcher"
+                        );
+                    }
+                    catch (...)
+                    {
+                        DetourModKit::detail::LoggerDropAccess::record(log());
+                    }
+                    complete_startup(false);
+                };
+
+                const std::stop_callback stop_wait_callback(
+                    st,
+                    [startup_gate]() noexcept { cancel_start_wait(startup_gate); }
+                );
+
+                if (st.stop_requested() || stop_requested_slot->load(std::memory_order_acquire))
+                {
+                    complete_startup(false);
                     return;
                 }
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *seam = g_config_watcher_prehandshake_seam)
+                std::unique_ptr<WatchIoState> io;
+                try
                 {
-                    seam();
-                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *seam = g_config_watcher_prehandshake_seam)
+                    {
+                        seam();
+                    }
 #endif
 
-                auto io = std::make_unique<WatchIoState>();
-                io->buffer.resize(BUFFER_BYTES);
+                    io = std::make_unique<WatchIoState>();
+                    io->buffer.resize(BUFFER_BYTES);
 
-                // Reference aliases keep the pump body below unchanged while the backing storage lives on the heap,
-                // so the stop-path drain can leak the whole bundle in one move if a notify IRP cannot be confirmed
-                // complete (see the drain at worker exit for why that matters). The references stay valid even
-                // after io.release(): the object is leaked, not destroyed.
+                    io->dir_handle = OwnedHandle(
+                        ::CreateFileW(
+                            directory.c_str(),
+                            FILE_LIST_DIRECTORY,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr,
+                            OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                            nullptr
+                        )
+                    );
+
+                    if (!io->dir_handle.valid())
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': CreateFileW failed (GLE={}).",
+                            label,
+                            ::GetLastError()
+                        );
+                        complete_startup(false);
+                        return;
+                    }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    const bool force_event_failure = g_config_watcher_create_event_failure_seam != nullptr &&
+                                                     g_config_watcher_create_event_failure_seam();
+#else
+                    constexpr bool force_event_failure = false;
+#endif
+                    if (!force_event_failure)
+                    {
+                        io->event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+                    }
+                    if (force_event_failure || !io->event_handle.valid())
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': CreateEventW failed (GLE={}).",
+                            label,
+                            force_event_failure ? ERROR_GEN_FAILURE : ::GetLastError()
+                        );
+                        complete_startup(false);
+                        return;
+                    }
+
+                    io->overlapped.hEvent = io->event_handle.h;
+                }
+                catch (const std::exception &e)
+                {
+                    fail_startup(e.what());
+                    return;
+                }
+                catch (...)
+                {
+                    fail_startup_unknown();
+                    return;
+                }
+
+                // These aliases keep the pump unchanged while its storage remains heap-owned for the drain.
                 OwnedHandle &dir_handle = io->dir_handle;
                 OwnedHandle &event_handle = io->event_handle;
                 std::vector<BYTE> &buffer = io->buffer;
                 OVERLAPPED &overlapped = io->overlapped;
-
-                dir_handle = OwnedHandle(
-                    ::CreateFileW(
-                        directory.c_str(),
-                        FILE_LIST_DIRECTORY,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        nullptr,
-                        OPEN_EXISTING,
-                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                        nullptr
-                    )
-                );
-
-                if (!dir_handle.valid())
-                {
-                    log().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label, ::GetLastError());
-                    settle(false);
-                    return;
-                }
-
-                event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
-                if (!event_handle.valid())
-                {
-                    log().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label, ::GetLastError());
-                    settle(false);
-                    return;
-                }
-
-                overlapped.hEvent = event_handle.h;
 
                 // Debounce bookkeeping: once we observe a matching change, mark it pending and defer the callback
                 // until no matching change has arrived for `debounce_ms`. Using steady_clock to survive wall-clock
@@ -552,14 +773,8 @@ namespace DetourModKit
                 // subsequent hits stay silent at DEBUG level to avoid log spam.
                 bool overflow_logged = false;
 
-                // Invoke the user reload callback with exception containment. Honoring the header's "a throwing
-                // callback is caught and the watcher keeps running" promise here is a hard memory-safety requirement:
-                // if a throw were allowed to unwind out of this worker body it would run WatchIoState's destructor,
-                // freeing the OVERLAPPED and the notification buffer while the pending ReadDirectoryChangesW notify IRP
-                // may still reference them. That IRP is drained after the pump loop; an unwinding exception would skip
-                // that drain and could let the kernel complete the cancelled I/O into freed heap. try_log keeps the
-                // handlers non-throwing, and the noexcept marker turns "the drain is always reached" into a structural
-                // guarantee rather than a comment.
+                // The callback boundary is noexcept because a thrown callback before the drain can free storage that
+                // the pending I/O still uses. try_log keeps both catch handlers within that boundary.
                 auto fire_reload = [&]() noexcept
                 {
                     if (!callback)
@@ -585,14 +800,8 @@ namespace DetourModKit
                     }
                 };
 
-                // Evaluate the debounce deadline once per pump iteration, independent of which branch handled the last
-                // wait. The library's own rotating log file typically shares the watched directory, so a burst of
-                // sub-debounce log writes keeps GetOverlappedResultEx completing with (non-matching) events and the
-                // loop never reaches its idle WAIT_TIMEOUT branch. If the deadline check lived only on that branch a
-                // genuinely pending target reload would be starved until the first quiet gap. A non-matching change
-                // never advances last_event (only a filename match does, in the walk below), so hoisting the check
-                // preserves debounce coalescing exactly while guaranteeing the reload fires once the target's quiet
-                // window elapses even under continuous foreign churn.
+                // Check the debounce deadline before every wait. Foreign file events can prevent WAIT_TIMEOUT while
+                // they leave last_event unchanged. This placement fires the reload after the target quiet window.
                 auto maybe_fire_debounced = [&]() noexcept
                 {
                     if (pending && std::chrono::steady_clock::now() - last_event >= debounce_ms)
@@ -604,6 +813,20 @@ namespace DetourModKit
 
                 auto issue_read = [&]() -> bool
                 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (!handshake_settled && g_config_watcher_initial_read_failure_seam != nullptr &&
+                        g_config_watcher_initial_read_failure_seam())
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                            label,
+                            ERROR_GEN_FAILURE
+                        );
+                        return false;
+                    }
+#endif
                     ::ResetEvent(event_handle.h);
                     DWORD bytes_returned = 0;
                     const BOOL ok = ::ReadDirectoryChangesW(
@@ -618,31 +841,57 @@ namespace DetourModKit
                     );
                     if (!ok)
                     {
-                        log().error(
-                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                            label,
-                            ::GetLastError()
-                        );
+                        if (!handshake_settled)
+                        {
+                            config::detail::defer_diagnostic(
+                                startup_diags,
+                                LogLevel::Error,
+                                "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                                label,
+                                ::GetLastError()
+                            );
+                        }
+                        else
+                        {
+                            (void)log().try_log(
+                                LogLevel::Error,
+                                "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                                label,
+                                ::GetLastError()
+                            );
+                        }
                         return false;
                     }
                     return true;
                 };
 
-                if (!issue_read())
+                try
                 {
-                    settle(false);
+                    if (!issue_read())
+                    {
+                        complete_startup(false);
+                        return;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    fail_startup(e.what());
+                    return;
+                }
+                catch (...)
+                {
+                    fail_startup_unknown();
                     return;
                 }
 
                 // First overlapped read is queued successfully; signal start() that the watcher is ready. From here
                 // on any failure is post-startup and reported only via the log.
-                settle(true);
+                complete_startup(true);
+                wait_for_release();
 
                 while (!st.stop_requested() && !stop_requested_slot->load(std::memory_order_acquire))
                 {
-                    // Evaluate the debounce deadline once per iteration, before every wait, so it is honored no matter
-                    // which branch handled the previous completion. See maybe_fire_debounced above for why a per-branch
-                    // (WAIT_TIMEOUT-only) check would starve a pending reload under sustained foreign-file churn.
+                    // Check the debounce deadline before every wait. Foreign file traffic can prevent WAIT_TIMEOUT.
                     maybe_fire_debounced();
 
                     DWORD bytes_transferred = 0;
@@ -655,9 +904,7 @@ namespace DetourModKit
 
                         if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
                         {
-                            // No I/O completed this tick. The debounce deadline is evaluated at the top of the loop, so
-                            // a pending reload whose quiet window has elapsed has already fired; just re-enter the
-                            // wait.
+                            // No I/O completed this tick. The loop already checked the debounce deadline.
                             continue;
                         }
 
@@ -666,7 +913,8 @@ namespace DetourModKit
                             // Directory handle closed or I/O cancelled externally (e.g. the watched parent
                             // directory was removed or renamed). We cannot recover a handle to a vanished directory
                             // here; surface the event at warning level so users notice.
-                            log().warning(
+                            (void)log().try_log(
+                                LogLevel::Warning,
                                 "ConfigWatcher '{}': directory handle "
                                 "invalidated (parent removed/renamed); "
                                 "watcher thread exiting.",
@@ -682,7 +930,8 @@ namespace DetourModKit
                             // coalesced match, re-issue the read, and let debounce deduplicate.
                             if (!overflow_logged)
                             {
-                                log().debug(
+                                (void)log().try_log(
+                                    LogLevel::Debug,
                                     "ConfigWatcher '{}': notification "
                                     "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
                                     "coalescing dropped events.",
@@ -703,7 +952,12 @@ namespace DetourModKit
                             continue;
                         }
 
-                        log().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).", label, err);
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).",
+                            label,
+                            err
+                        );
                         break;
                     }
 
@@ -716,7 +970,8 @@ namespace DetourModKit
                         // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
                         if (!overflow_logged)
                         {
-                            log().debug(
+                            (void)log().try_log(
+                                LogLevel::Debug,
                                 "ConfigWatcher '{}': notification buffer "
                                 "overflowed (zero-byte completion); "
                                 "coalescing dropped events.",
@@ -854,19 +1109,42 @@ namespace DetourModKit
 
                 if (!drained)
                 {
-                    log().warning(
-                        "ConfigWatcher '{}': pending directory notification did "
-                        "not drain after cancel + handle close; leaking the watch "
-                        "buffer to stay memory-safe.",
-                        label
-                    );
+                    config::detail::DeferredDiagnostics late_diags{
+                        .threshold = startup_threshold,
+                        .records = {},
+                    };
+                    try
+                    {
+                        config::detail::defer_diagnostic(
+                            late_diags,
+                            LogLevel::Warning,
+                            "ConfigWatcher '{}': pending directory notification did not drain after cancel + "
+                            "handle close; leaking the watch buffer to stay memory-safe.",
+                            label
+                        );
+                        config::detail::DeferredDiagnostics to_emit;
+                        {
+                            std::lock_guard<std::mutex> channel_lock(startup_gate->mutex);
+                            if (startup_gate->wait.load(std::memory_order_acquire) == ConfigWatcherStartWait::Released)
+                            {
+                                to_emit = std::move(late_diags);
+                            }
+                            else
+                            {
+                                startup_gate->late_diags = std::move(late_diags);
+                            }
+                        }
+                        config::detail::emit_deferred_diagnostics(to_emit);
+                    }
+                    catch (...)
+                    {
+                        DetourModKit::detail::LoggerDropAccess::record(log());
+                    }
                     (void)io.release();
                 }
 
-                // Flush a final debounced callback if we are exiting with a pending change. This intentionally
-                // fires during stop() as well. An edit that arrived inside the debounce window is otherwise
-                // silently dropped. Routed through the same guarded fire_reload so a throw on this final edge cannot
-                // escape the worker body after the drain either.
+                // A final pending change fires during stop() so the debounce window does not discard it.
+                // fire_reload contains callback exceptions after the I/O drain.
                 if (pending)
                 {
                     fire_reload();
@@ -876,18 +1154,33 @@ namespace DetourModKit
             try
             {
                 m_impl->worker_exited.store(false, std::memory_order_release);
+                const WorkerStartLogDeferral start_log_deferral{
+                    &diags,
+                    &config::detail::defer_worker_start_diagnostic,
+                };
                 m_impl->worker = std::make_unique<StoppableWorker>("ConfigWatcher", std::move(worker_body));
             }
             catch (const std::exception &e)
             {
                 m_impl->worker_exited.store(true, std::memory_order_release);
-                log().error("ConfigWatcher '{}': failed to start worker: {}", m_impl->ini_path_utf8, e.what());
+                config::detail::defer_diagnostic(
+                    diags,
+                    LogLevel::Error,
+                    "ConfigWatcher '{}': failed to start worker: {}",
+                    m_impl->ini_path_utf8,
+                    e.what()
+                );
                 return false;
             }
             catch (...)
             {
                 m_impl->worker_exited.store(true, std::memory_order_release);
-                log().error("ConfigWatcher '{}': failed to start worker: unknown exception.", m_impl->ini_path_utf8);
+                config::detail::defer_diagnostic(
+                    diags,
+                    LogLevel::Error,
+                    "ConfigWatcher '{}': failed to start worker: unknown exception.",
+                    m_impl->ini_path_utf8
+                );
                 return false;
             }
 
@@ -912,12 +1205,14 @@ namespace DetourModKit
                 }
                 else
                 {
-                    log().warning(
+                    handshake_timed_out = true;
+                    config::detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
                         "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
                         m_impl->ini_path_utf8
                     );
                     started = false;
-                    handshake_timed_out = true;
                 }
             }
             catch (...)
@@ -971,6 +1266,7 @@ namespace DetourModKit
             // exit signal at all while ~Impl frees the members it keeps reading. Harmless on the join path: the worker
             // is being stopped either way.
             m_impl->stop_requested.store(true, std::memory_order_release);
+            cancel_start_wait(m_impl->start_gate.load(std::memory_order_acquire));
 
             std::unique_ptr<StoppableWorker> to_drop;
             {
@@ -993,6 +1289,7 @@ namespace DetourModKit
             // The worker observes this within its 100 ms I/O pump interval. This must not take start_mutex: start()
             // may be inside its 5 s hostile-call handshake, while safe-unload preparation owns a shorter deadline.
             m_impl->stop_requested.store(true, std::memory_order_release);
+            cancel_start_wait(m_impl->start_gate.load(std::memory_order_acquire));
         }
 
         bool ConfigWatcher::has_exited() const noexcept
