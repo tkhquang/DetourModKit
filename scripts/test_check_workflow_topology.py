@@ -77,6 +77,7 @@ PINNED_STEPS = (
     (PR_CHECK, "build-test", "Run Tests"),
     (PR_CHECK, "build-test", "Check Coverage Threshold (80%)"),
     (PR_CHECK, "msvc-build-test", "Run Tests"),
+    (PR_CHECK, "gtest-routes", "Build proof targets"),
     (PR_CHECK, "gtest-routes", "Run proof cases (fault, lifecycle, timeout control)"),
 )
 

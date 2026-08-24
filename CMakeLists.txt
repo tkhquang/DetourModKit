@@ -25,7 +25,7 @@ endif()
 # root instead of lib/, bin/, include/. The install rules and the package-config block below all depend on it.
 include(GNUInstallDirs)
 
-# --- Standard and Compiler Options ---
+# Standard and Compiler Options
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -43,7 +43,7 @@ if(PROJECT_IS_TOP_LEVEL AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
-# --- Compiler Flags ---
+# Compiler Flags
 option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # Optional build components; their test/benchmark wiring lives next to add_subdirectory(tests). Neither option may
@@ -91,12 +91,12 @@ include(DMKCoverage)
 include(DMKTesting)
 include(DMKBackendPatch)
 
-# --- C++23 standard-library feature probes ---
+# C++23 standard-library feature probes
 # DetourModKit's public contract is built directly on three C++23 *library* facilities:
-#   * std::expected           (<expected>)   -- the Result<T> error-as-value type every fallible API returns.
-#   * std::move_only_function (<functional>) -- the type-erased, move-only callback storage in the Session
+#   * std::expected           (<expected>)   - the Result<T> error-as-value type every fallible API returns.
+#   * std::move_only_function (<functional>) - the type-erased, move-only callback storage in the Session
 #                                               bootstrap surface and the RTTI dissection visitors.
-#   * std::format             (<format>)     -- the formatting layer beneath the logger and diagnostics.
+#   * std::format             (<format>)     - the formatting layer beneath the logger and diagnostics.
 # target_compile_features(... cxx_std_23) below enforces the *language* level, but a toolchain can accept
 # -std=c++23 while shipping a standard library that predates one of these headers; older libstdc++/libc++
 # pairings do exactly that. Without an explicit gate such a toolchain fails deep inside the first public
@@ -133,7 +133,7 @@ _dmk_require_library_feature(expected   __cpp_lib_expected           "std::expec
 _dmk_require_library_feature(functional __cpp_lib_move_only_function "std::move_only_function" "GCC 12+ or MSVC 19.32+ (VS 2022 17.2)")
 _dmk_require_library_feature(format     __cpp_lib_format             "std::format"             "GCC 14+, MSVC 19.29+ (VS 2019 16.10), or libc++ 17+")
 
-# --- Dependencies ---
+# Dependencies
 # SimpleIni will be added as an include directory directly to the DetourModKit target.
 
 # SafetyHook (built from submodule using add_subdirectory)
@@ -161,8 +161,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   endif()
 
   # Pin the fetched Zydis to the immutable commit behind its v4.1.0 tag. SafetyHook's CPM fetch names the mutable
-  # tag; FetchContent honours the FIRST declaration of a content name, so declaring it here -- above the
-  # add_subdirectory -- decides what that fetch downloads without editing vendored source. A commit hash cannot be
+  # tag; FetchContent honours the FIRST declaration of a content name, so declaring it here - above the
+  # add_subdirectory - decides what that fetch downloads without editing vendored source. A commit hash cannot be
   # moved the way a tag can, and Zycore rides along as a submodule gitlink of this exact Zydis commit. No
   # GIT_SHALLOW: shallow fetch of an arbitrary commit is not reliably served. Inert when SAFETYHOOK_FETCH_ZYDIS is
   # OFF (the declaration is never made available).
@@ -172,7 +172,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
     GIT_TAG 569320ad3c4856da13b9dbf1f0d9e20bda63870e # v4.1.0
     EXCLUDE_FROM_ALL SYSTEM)
 
-  # --- Compile Definitions (before add_subdirectory so SafetyHook sees them) ---
+  # Compile Definitions (before add_subdirectory so SafetyHook sees them)
   # These are intentionally global (not target-scoped) because SafetyHook's
   # public headers use these macros in #ifdef guards for DLL export/import
   # decorations. If scoped only to DetourModKit, SafetyHook's own compilation
@@ -278,19 +278,19 @@ else()
     "'git submodule update --init --recursive'")
 endif()
 
-# --- Version Header Generation ---
+# Version Header Generation
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/version.hpp.in"
   "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   @ONLY
 )
 
-# --- Static analysis (clang-tidy, opt-in advisory) ---
+# Static analysis (clang-tidy, opt-in advisory)
 # The curated .clang-tidy at the repo root is advisory: it never fails a build (WarningsAsErrors: '') and confines
 # header diagnostics to include/DetourModKit via HeaderFilterRegex. This option wires it into the build so clang-tidy
 # runs alongside compilation of DetourModKit's own sources (and the tests). Off by default so normal consumer and CI
-# builds are unaffected; CI runs it in a continue-on-error lane. Set here -- after the external submodules are added
-# above and before the library and test targets below -- so only this project's targets inherit the launcher
+# builds are unaffected; CI runs it in a continue-on-error lane. Set here - after the external submodules are added
+# above and before the library and test targets below - so only this project's targets inherit the launcher
 # and SafetyHook / Zydis / Zycore are never analysed.
 option(DMK_ENABLE_CLANG_TIDY "Run clang-tidy on DetourModKit sources during the build (advisory)" OFF)
 
@@ -318,7 +318,7 @@ if(DMK_ENABLE_CLANG_TIDY)
   endif()
 endif()
 
-# --- DetourModKit Library Target Definition ---
+# DetourModKit Library Target Definition
 # Glob source files. CONFIGURE_DEPENDS re-globs on CMakeLists changes so a newly added src/*.cpp is picked up without a
 # manual re-run on the generators that honour it (Ninja, Makefiles). The glob result is then cross-checked against a
 # checked-in manifest below so the source set can never silently drift.
@@ -333,7 +333,7 @@ if(NOT DETOURMODKIT_SOURCE_FILES)
 endif()
 
 # Cross-check the globbed source set against the reviewed manifest and fail the configure closed on any drift. A bare
-# file(GLOB) is invisible in review -- a new translation unit changes no tracked CMake text, so a reviewer never sees it
+# file(GLOB) is invisible in review - a new translation unit changes no tracked CMake text, so a reviewer never sees it
 # was added, and a stale CONFIGURE_DEPENDS cache (or a generator that ignores it) can silently drop it, surfacing only
 # as a consumer-side LNK2019 against the missing symbol. Pinning the set to cmake/source_manifest.txt makes every
 # add/remove a reviewable diff. The manifest is authored repo-relative with forward slashes; normalize the glob the same
@@ -416,7 +416,7 @@ if(DMK_BUILD_TESTS)
   target_compile_definitions(DetourModKit PRIVATE DMK_ENABLE_TEST_SEAMS)
 endif()
 
-# --- Target-Scoped Release Optimizations ---
+# Target-Scoped Release Optimizations
 # Applied per-target so they do not leak into external subdirectory targets.
 if(MSVC)
   # /Gy: function-level linking, /Gw: global data optimization.
@@ -479,7 +479,7 @@ else()
   message(STATUS "Non-MSVC: Default library prefixing will apply (e.g., 'lib' for libDetourModKit.a).")
 endif()
 
-# --- Include Directories for DetourModKit ---
+# Include Directories for DetourModKit
 target_include_directories(DetourModKit
   PUBLIC
 
@@ -528,7 +528,7 @@ if(DMK_INSTALL_DIRECTXMATH)
   )
 endif()
 
-# --- Linking Dependencies for DetourModKit ---
+# Linking Dependencies for DetourModKit
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
   # The backend link is PRIVATE: only DMK's own sources compile against SafetyHook, so its include directories and
   # macros must never reach a consumer's compile line (tests/package_build_tree asserts they do not). Because
@@ -596,7 +596,7 @@ if(WIN32)
   endif()
 endif()
 
-# --- Installation Rules ---
+# Installation Rules
 # Define common install component names for clarity and potential partial installs.
 set(DETOURMODKIT_LIB_COMPONENT lib) # For the library files (.a, .lib)
 set(DETOURMODKIT_DEV_COMPONENT dev) # For development files (headers, CMake config)
@@ -768,7 +768,7 @@ else()
   message(STATUS "DirectXMath re-export disabled (DMK_INSTALL_DIRECTXMATH=OFF); the prefix will not ship DirectXMath headers.")
 endif()
 
-# --- CMake Package Configuration for Consumers ---
+# CMake Package Configuration for Consumers
 include(CMakePackageConfigHelpers) # Provides helper macros (GNUInstallDirs is included near the top of this file)
 
 # Define a variable for the CMake package configuration install directory.
@@ -962,8 +962,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
     COMPONENT ${DETOURMODKIT_DOCS_COMPONENT})
 endif()
 
-# --- Summary Message (Optional) ---
-message(STATUS "---------------------------------------------------------------------")
+# Configuration summary
 message(STATUS "DetourModKit (${PROJECT_VERSION}) Configuration Summary:")
 message(STATUS "  Generator:                   ${CMAKE_GENERATOR}")
 message(STATUS "  Build Type (single-config):  ${CMAKE_BUILD_TYPE}")
@@ -973,9 +972,8 @@ message(STATUS "  Install Include Dir:         ${CMAKE_INSTALL_INCLUDEDIR} (rela
 message(STATUS "  Install CMake Config Dir:    ${DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR} (potentially relative to prefix)")
 message(STATUS "  Install Docs Dir:            ${CMAKE_INSTALL_DOCDIR} (standard path)")
 message(STATUS "  DirectXMath Include Dir:    ${DIRECTXMATH_INCLUDE_DIR}")
-message(STATUS "---------------------------------------------------------------------")
 
-# --- Profiling ---
+# Profiling
 option(DMK_ENABLE_PROFILING "Enable profiling instrumentation (opt-in, zero cost when OFF)" OFF)
 
 if(DMK_ENABLE_PROFILING)
@@ -983,10 +981,10 @@ if(DMK_ENABLE_PROFILING)
   message(STATUS "Profiling instrumentation enabled")
 endif()
 
-# --- AVX-512 scanner verify tier ---
+# AVX-512 scanner verify tier
 # Opt-in, off by default. When ON, the scanner compiles an AVX-512F + AVX-512BW verify tier (64 bytes per iteration)
 # selected at runtime behind a CPUID + XGETBV gate. The intrinsics are confined to that one tier via a per-function
-# target attribute (GCC/Clang) so the rest of the library stays AVX2-only -- no global /arch:AVX512 or -mavx512 is
+# target attribute (GCC/Clang) so the rest of the library stays AVX2-only - no global /arch:AVX512 or -mavx512 is
 # added, and the produced library still runs on CPUs without AVX-512 (the tier is simply never selected). The runtime
 # >= 30% throughput gate for this tier can only be measured on an AVX-512 host (see docs/analysis/avx512_verify_icount).
 option(DMK_ENABLE_AVX512 "Compile the opt-in AVX-512 scanner verify tier (runtime-gated)" OFF)
@@ -996,7 +994,7 @@ if(DMK_ENABLE_AVX512)
   message(STATUS "AVX-512 scanner verify tier enabled (runtime-gated by cpu_has_avx512())")
 endif()
 
-# --- Sanitizers ---
+# Sanitizers
 option(DMK_ENABLE_SANITIZERS "Enable AddressSanitizer (and UBSan on GCC/Clang)" OFF)
 
 if(DMK_ENABLE_SANITIZERS)
@@ -1044,21 +1042,21 @@ if(DMK_ENABLE_SANITIZERS)
   endif()
 endif()
 
-# --- Link-Time Optimization ---
+# Link-Time Optimization
 # LTO enables cross-translation-unit optimization and dead code elimination in Release builds. Applied per-target to
 # avoid inflating build times for external subdirectory targets (SafetyHook, Zydis, Zycore).
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported LANGUAGES CXX OUTPUT _ipo_error)
 
-# LTO bakes TOOLSET-LOCKED intermediate code into the archive -- MSVC /GL LTCG IL, GCC GIMPLE bytecode -- that the
+# LTO bakes TOOLSET-LOCKED intermediate code into the archive - MSVC /GL LTCG IL, GCC GIMPLE bytecode - that the
 # CONSUMER's linker must recompile at its own final link. That IL is excluded from MSVC's v140..v143 binary-compatibility
 # guarantee, so an installed DetourModKit.lib built with /GL fails a consumer whose Visual Studio toolset differs from
 # the one that built it (even a 17.x point update) with C1047 / LNK1257; on GCC it forces every consumer to run a
 # matching lto1. A shipped BINARY archive must therefore be plain objects, not IL. An in-tree consumer that pulls DMK in
 # via add_subdirectory, by contrast, recompiles it from source with their OWN toolchain, so there is no cross-toolset
 # archive to mismatch and LTO is a safe win there. Split the default on exactly that axis: LTO defaults OFF when DMK is
-# the top-level project (a standalone build -- what gets installed and packaged, so it must stay portable) and ON when
-# DMK is a subproject (add_subdirectory -- recompiled by the consumer, so the lock hazard cannot arise). A consumer can
+# the top-level project (a standalone build - what gets installed and packaged, so it must stay portable) and ON when
+# DMK is a subproject (add_subdirectory - recompiled by the consumer, so the lock hazard cannot arise). A consumer can
 # override the default explicitly either way.
 if(PROJECT_IS_TOP_LEVEL)
   set(_dmk_lto_default OFF)
@@ -1084,7 +1082,7 @@ endif()
 # of re-spelling the condition. The benchmarks link the DetourModKit archive and must be in the identical LTO state as
 # it: a mixed LTO/non-LTO link fails both ways (a non-LTO object against an LTO archive double-emits libstdc++'s
 # constrained linkonce symbols; an LTO object against a non-LTO archive is the symmetric hazard). A second,
-# independently spelled gate is exactly what drifts -- so the library target and the bench targets both key off
+# independently spelled gate is exactly what drifts - so the library target and the bench targets both key off
 # _dmk_apply_lto rather than each restating "DMK_ENABLE_LTO AND _ipo_supported AND NOT _dmk_lto_broken". Enable only
 # when the option is on, the toolchain supports IPO, and the compiler is not a known-broken LTO toolchain.
 set(_dmk_apply_lto OFF)
@@ -1107,7 +1105,7 @@ else()
   message(STATUS "LTO disabled (DMK_ENABLE_LTO=OFF); shipping portable, toolset-agnostic objects")
 endif()
 
-# --- Unit Tests and Benchmarks ---
+# Unit Tests and Benchmarks
 # DMK_BUILD_TESTS and DMK_BUILD_BENCHMARKS are declared before the library target because DMK_BUILD_TESTS controls its
 # private test-seam definition. DMK_BUILD_BENCHMARKS is the opt-in for the microbenchmark executables (e.g.
 # DetourModKit_bench), gated so a normal consumer build produces no extra targets; the bench sources

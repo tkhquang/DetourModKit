@@ -213,7 +213,7 @@ Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`
 A test that must observe a guarded primitive contain a real hardware fault needs a committed `PAGE_NOACCESS` page held until process teardown. [The must-fault page rule](../design/testing.md#a-must-fault-test-holds-a-committed-page_noaccess-page) owns the lifetime rationale. These fixtures do NOT join the `tests/test_*.cpp` glob. [docs/design/testing.md](../design/testing.md) owns the placement rule and the no-toolchain-gate rule.
 
 - Reusable fixtures live in [`tests/fixtures/fault_injection.hpp`](../../tests/fixtures/fault_injection.hpp): `dmk_test::NoAccessPage`, `dmk_test::ProtectedPage`, and `dmk_test::ExecutablePage`, a zero-filled RWX page usable as a synthetic module image, with helpers to plant a literal and a RIP-relative `lea`. The must-fault page rule describes the first two.
-- Fault TUs live in `tests/fault/test_*.cpp`. [`tests/fault/CMakeLists.txt`](../../tests/fault/CMakeLists.txt) compiles them into the `fault_tests` proof target. Build and run the complete set with `bash scripts/run_fault_tests.sh` (any configured tests-ON tree), or build `fault_tests` plus `fault_scanner_escape_probe` and run `ctest -L fault-proof` directly.
+- Fault TUs live in `tests/fault/test_*.cpp`. [`tests/fault/CMakeLists.txt`](../../tests/fault/CMakeLists.txt) compiles them into the `fault_tests` proof target. Build and run the complete set with `bash scripts/run_fault_tests.sh` (any configured tests-ON tree), or build the `dmk_fault_proof_hosts` aggregate and run `ctest -L fault-proof` directly.
 - Inject the fault into the FOREIGN target that a guard arms, not a write's caller-owned source. The [inject-faults rule](../design/testing.md#inject-faults-into-the-foreign-target-the-guard-arms) owns the rationale.
 
 `tests/fault/test_fault_containment.cpp` proves that guarded read, pointer-chain walk, and `write_in_place` all fail closed against a no-access page. It also proves the deterministic escalating write slow-path protection restore and containment of a RIP snapshot tail that crosses into `PAGE_NOACCESS`. It proves that an enclosing guard still holds after a nested guarded read returns.
@@ -235,7 +235,7 @@ A proof that needs a real loader transition or a controlled static-teardown orde
 
 [`tests/lifecycle/CMakeLists.txt`](../../tests/lifecycle/CMakeLists.txt) builds each proof as a CMake-owned target and registers it as a `lifecycle-proof` -labeled ctest whose verdict is the process exit code. Zero is a pass. Any other code is a proof or setup failure, identified by the returned code and a message on stderr. A proof whose subject is not present on every host must declare `SKIP_RETURN_CODE` on its `dmk_add_raw_proof` call and return that code from its unavailable branch. ctest then reports Skipped. The XInput rundown proofs use skip code 77.
 
-Build and run with `bash scripts/run_lifecycle_proofs.sh`, or build the lifecycle targets and run `ctest -L lifecycle-proof` directly.
+Build and run with `bash scripts/run_lifecycle_proofs.sh`, or build the `dmk_lifecycle_proof_hosts` aggregate and run `ctest -L lifecycle-proof` directly.
 
 The proof hosts:
 
