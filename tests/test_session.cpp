@@ -25,6 +25,7 @@
 
 #include "internal/input_intercept.hpp"
 #include "internal/input_delivery_scope.hpp"
+#include "internal/input_test_seams.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "fixtures/intercept_lease.hpp"
@@ -843,7 +844,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         );
         // The engine publishes its consume rules only while it owns the interception layer, which a headless test
         // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
-        ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
+        ASSERT_TRUE(DetourModKit::detail::InputTestSeams::adopt_intercept_owner_for_test());
         ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
         s.abandon();

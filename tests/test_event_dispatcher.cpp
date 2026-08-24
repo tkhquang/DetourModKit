@@ -1,10 +1,5 @@
 #include <gtest/gtest.h>
 
-// Opts this translation unit into the test-only debug_snapshot_use_count() diagnostic on the dispatcher. The seam also
-// requires DMK_ENABLE_TEST_SEAMS, which the DetourModKit_tests target defines; both must be set, so the installed
-// header never exposes the seam to a consumer build. Defined before the header include so it affects only this TU.
-#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
-
 #include "DetourModKit/detail/event_dispatcher.hpp"
 
 #include "internal/drain_backoff.hpp"
@@ -24,12 +19,43 @@
 
 using namespace DetourModKit;
 
+namespace DetourModKit::detail
+{
+    /**
+     * @brief Completes the friend the dispatcher declares, so this suite reads the private snapshot without a
+     *        macro-dependent member in the installed class definition.
+     */
+    template <typename Event> struct EventDispatcherTestAccess
+    {
+        /**
+         * @brief Returns the reference count after it omits this call's temporary.
+         * @return 1 when the dispatcher's atomic is the sole holder.
+         */
+        [[nodiscard]] static long snapshot_use_count(const EventDispatcher<Event> &dispatcher) noexcept
+        {
+            // load() returns a shared_ptr copy and adds one reference for its lifetime.
+            // Subtract one so the result counts only the atomic and active emit snapshots.
+            auto snap = dispatcher.m_handlers.load(std::memory_order_acquire);
+            return snap.use_count() - 1;
+        }
+    };
+} // namespace DetourModKit::detail
+
 // Test event types
 
 struct SimpleEvent
 {
     int value{0};
 };
+
+namespace
+{
+    /// Suite-local shorthand over the friend accessor.
+    [[nodiscard]] long snapshot_use_count(const EventDispatcher<SimpleEvent> &dispatcher) noexcept
+    {
+        return detail::EventDispatcherTestAccess<SimpleEvent>::snapshot_use_count(dispatcher);
+    }
+} // namespace
 
 struct StringEvent
 {
@@ -736,7 +762,7 @@ TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
 
     // Record the dispatcher's own reference to its handler snapshot before any emit. If the fast path really skips the
     // snapshot load, emit() should not leave any residual references alive afterwards.
-    const long use_count_before = dispatcher.debug_snapshot_use_count();
+    const long use_count_before = snapshot_use_count(dispatcher);
     EXPECT_EQ(use_count_before, 1);
 
     for (int i = 0; i < 1000; ++i)
@@ -747,7 +773,7 @@ TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
 
     EXPECT_TRUE(dispatcher.empty());
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
-    EXPECT_EQ(dispatcher.debug_snapshot_use_count(), use_count_before);
+    EXPECT_EQ(snapshot_use_count(dispatcher), use_count_before);
 }
 
 // Snapshot stability: in-flight emit sees pre-subscribe snapshot
@@ -837,9 +863,8 @@ TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
 
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
     EXPECT_TRUE(dispatcher.empty());
-    EXPECT_EQ(dispatcher.debug_snapshot_use_count(), 1)
-        << "Dispatcher should hold exactly one reference to its snapshot "
-           "after all subscriptions are released";
+    EXPECT_EQ(snapshot_use_count(dispatcher), 1) << "Dispatcher must hold exactly one reference to its snapshot "
+                                                    "after all subscriptions are released";
 }
 
 // std::atomic<std::shared_ptr<T>> is NOT lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL

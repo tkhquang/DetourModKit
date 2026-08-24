@@ -15,6 +15,9 @@
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/region.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
 
 // DMK_TRY / DMK_TRY_VOID propagation. The mere existence of these helpers is half the test: this translation unit
@@ -24,6 +27,15 @@ using namespace DetourModKit;
 
 namespace
 {
+    int s_region_loader_probe_calls{0};
+
+    /// Records a loader-state probe and returns the held verdict.
+    [[nodiscard]] bool record_region_loader_probe() noexcept
+    {
+        ++s_region_loader_probe_calls;
+        return true;
+    }
+
     // A fallible producer that, on failure, stamps both raw context slots so the propagation tests can prove the
     // Error travels through DMK_TRY byte-for-byte rather than being reconstructed.
     [[nodiscard]] Result<int> produce_int(bool succeed)
@@ -323,6 +335,75 @@ TEST(FoundationRegion, ModuleNamedResolvesLoadedAndFailsClosed)
     // An empty name and an unloaded module both fail closed to an empty Region.
     EXPECT_EQ(Region::module_named("").size, 0U);
     EXPECT_EQ(Region::module_named("a_module_that_is_not_loaded_zzzz.dll").size, 0U);
+}
+
+// [B-100] Region boundary. Value operations use pure arithmetic and allocate no heap memory under the loader lock.
+// Among the loader-backed factories, only module_named() allocates for the UTF-8 to UTF-16 name conversion.
+TEST(RegionLoaderBoundary, ValueOperationsAreAllocationFreeWhileNamedLookupIsSetupOnly)
+{
+    // Warm the guarded PE-header route before the allocation window.
+    (void)Region::host();
+
+    constexpr Region region{Address{0x1000}, 0x100};
+    Address end_address{};
+    bool contained = false;
+    Region inner{};
+    long long value_allocations = -1;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+        const long long before = dmk_test::thread_new_calls();
+        end_address = region.end();
+        contained = region.contains(Address{0x1080});
+        inner = region.sub(0x10, 0x20);
+        value_allocations = dmk_test::thread_new_calls() - before;
+    }
+
+    EXPECT_EQ(value_allocations, 0LL) << "Region value operations must stay heap-free under the loader lock";
+    EXPECT_EQ(end_address.raw(), 0x1100U);
+    EXPECT_TRUE(contained);
+    EXPECT_EQ(inner.base.raw(), 0x1010U);
+
+    const long long before_factories = dmk_test::thread_new_calls();
+    const Region host = Region::host();
+    const Region own = Region::own();
+    const long long factory_allocations = dmk_test::thread_new_calls() - before_factories;
+    EXPECT_EQ(factory_allocations, 0LL) << "host() and own() resolve without heap traffic";
+    EXPECT_TRUE(static_cast<bool>(host.base));
+    EXPECT_TRUE(static_cast<bool>(own.base));
+
+    // Use a long name to bypass small-string storage on both shipped STLs.
+    // The conversion allocates before the lookup can fail closed.
+    const long long before_named = dmk_test::thread_new_calls();
+    const Region named = Region::module_named("a_module_name_long_enough_to_force_heap_conversion.dll");
+    const long long named_allocations = dmk_test::thread_new_calls() - before_named;
+    EXPECT_GT(named_allocations, 0LL) << "module_named() owns the only factory allocation, so it stays setup-tier";
+    EXPECT_EQ(named.size, 0U);
+}
+
+// [B-100] Region boundary. whole_process() reads the SYSTEM_INFO application window and no loader state.
+// A forced loader verdict does not change the exact OS span.
+TEST(RegionLoaderBoundary, WholeProcessDoesNotQueryLoaderState)
+{
+    SYSTEM_INFO system_info{};
+    ::GetSystemInfo(&system_info);
+    const auto minimum = reinterpret_cast<std::uintptr_t>(system_info.lpMinimumApplicationAddress);
+    const auto maximum = reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress);
+
+    Region whole{};
+    long long allocations = -1;
+    s_region_loader_probe_calls = 0;
+    {
+        const dmk_test::ForcedLoaderProbe held{&record_region_loader_probe};
+        const long long before = dmk_test::thread_new_calls();
+        whole = Region::whole_process();
+        allocations = dmk_test::thread_new_calls() - before;
+    }
+
+    EXPECT_EQ(s_region_loader_probe_calls, 0);
+    EXPECT_EQ(allocations, 0LL) << "whole_process() must stay heap-free";
+    EXPECT_EQ(whole.base.raw(), minimum);
+    EXPECT_EQ(whole.end().raw(), maximum + 1U);
 }
 
 static_assert((Prot::R | Prot::W) == Prot::RW);

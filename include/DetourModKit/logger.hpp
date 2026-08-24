@@ -34,6 +34,7 @@ namespace DetourModKit
         // in logger.cpp.
         class WinFileStream;
         class LoggerDropAccess;
+        class LoggerTestSeams;
     } // namespace detail
 
     /**
@@ -479,13 +480,11 @@ namespace DetourModKit
             }
         };
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
-        /// Returns the current process-default snapshot for failure-atomicity tests.
-        [[nodiscard]] static std::shared_ptr<const StaticConfig> static_config_for_test();
-#endif
-
     private:
         friend class detail::LoggerDropAccess;
+        // Unconditional friend: test access lives in the non-installed src/internal/logger_test_seams.hpp, so this
+        // installed definition carries no macro-dependent member.
+        friend class detail::LoggerTestSeams;
 
         /// Constructs the process-default logger from the published StaticConfig; reached only through log().
         Logger();
