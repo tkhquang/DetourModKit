@@ -167,11 +167,12 @@ Keep IPO OFF for any install-destined build. `DMK_ENABLE_LTO` defaults OFF when 
 
 ### [B-94]
 
-`scripts/check_mechanical_style.py` reads every tracked C/C++ source without exclusions in the blocking `mechanical-style` quality job and rejects three machine-decidable violations:
+`scripts/check_mechanical_style.py` reads every tracked C/C++ source without exclusions. The mandatory `mechanical-style` quality job rejects four machine-decidable violations:
 
 - a unicode em (U+2014) or en (U+2013) dash, whose house replacement is a single `-`,
 - an object- or function-like macro whose name is not `UPPER_SNAKE_CASE`,
-- a namespace-closer comment that names a namespace but matches no house form (a named `} // namespace <Qualified::Name>`, or an anonymous `} // namespace` / `} // anonymous namespace`).
+- a namespace-closer comment that names a namespace but matches no house form (a named `} // namespace <Qualified::Name>`, or an anonymous `} // namespace` / `} // anonymous namespace`),
+- a macro in `include/DetourModKit/abi/wheel_host.h` outside its settled partition. `DMK_WHEEL_*` names direction indices, consume-mask bits, and capture flags. Other wheel-host macros use `DMK_WHEELHOST_*`. AGENTS.md, "Project layout", owns the exception.
 
 The probe decides nothing that needs brace matching, scope analysis, or aesthetic judgement. Local `const` / `constexpr` naming, over-120-column lines, mandatory braces, and normalization between the two anonymous forms stay outside this gate. `scripts/test_check_mechanical_style.py` (the `MechanicalStyleCheckerSelfTest` ctest, `script-lint` label) pins each rule with a positive fixture and negative controls, and mirrors `[B-86]`'s emit-TLS gate.
 

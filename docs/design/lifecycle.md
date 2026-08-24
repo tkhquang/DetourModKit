@@ -32,6 +32,7 @@ Every such leak must meet these terms:
 - `Lifecycle.FullLifecycleExit` pins process exit with every subsystem live.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
 - `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs.
+- `RegionLoaderBoundary.*` pins the Region boundary: allocation-free value operations, the loader-backed factories, and the loader-free `whole_process()`.
 - `RttiLoaderBoundary.*` pins the RTTI boundary.
 - `RttiDissectLoaderBoundary.*` pins the RTTI dissect boundary.
 - `ScanLoaderBoundary.*` pins the scan boundary.

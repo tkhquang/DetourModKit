@@ -22,6 +22,12 @@ def expect(text: str, expected: int) -> None:
         raise AssertionError(f"expected {expected} violation(s), got {problems}")
 
 
+def expect_wheel(text: str, expected: int) -> None:
+    problems = MODULE.scan_text(text, MODULE.WHEEL_HOST_HEADER)
+    if len(problems) != expected:
+        raise AssertionError(f"expected {expected} wheel violation(s), got {problems}")
+
+
 def test_em_dash_is_rejected() -> None:
     # chr() so the fixture carries the banned codepoint without this file spelling it literally.
     expect("// a wide " + chr(0x2014) + " gap", 1)
@@ -111,6 +117,54 @@ def test_clean_snippet_has_no_violations() -> None:
         ]
     )
     expect(fixture, 0)
+
+
+def test_wheel_partition_accepts_the_settled_vocabulary() -> None:
+    fixture = "\n".join(
+        [
+            "#define DETOURMODKIT_WHEEL_HOST_H",
+            "#define DMK_WHEELHOST_CALL __stdcall",
+            "#define DMK_WHEELHOST_ABI_VERSION 2u",
+            "#define DMK_WHEELHOST_ERR_ABI (-1)",
+            "#define DMK_WHEEL_UP 0",
+            "#define DMK_WHEEL_DIRECTIONS 4",
+            "#define DMK_WHEEL_CONSUME_UP (1u << DMK_WHEEL_UP)",
+            "#define DMK_WHEEL_CAPTURE_ENABLED 1u",
+        ]
+    )
+    expect_wheel(fixture, 0)
+
+
+def test_wheel_partition_rejects_a_mechanic_on_the_data_stem() -> None:
+    # A status or mechanic macro on DMK_WHEEL_ violates the partition.
+    expect_wheel("#define DMK_WHEEL_ERR_BUSY (-3)", 1)
+
+
+def test_wheel_partition_rejects_a_foreign_stem() -> None:
+    expect_wheel("#define DMK_HOST_STATUS_OK 0", 1)
+
+
+def test_wheel_partition_is_scoped_to_the_wheel_host_header() -> None:
+    # The same define in any other file answers only to the generic UPPER_SNAKE_CASE rule.
+    expect("#define DMK_WHEEL_ERR_BUSY (-3)", 0)
+
+
+def test_tracked_sources_requests_c_sources() -> None:
+    original = MODULE.subprocess.check_output
+    arguments = []
+
+    def fake_check_output(command, text):
+        arguments.append(command)
+        return "probe.c\n"
+
+    MODULE.subprocess.check_output = fake_check_output
+    try:
+        paths = MODULE.tracked_sources()
+    finally:
+        MODULE.subprocess.check_output = original
+
+    if paths != ["probe.c"] or "*.c" not in arguments[0]:
+        raise AssertionError(f"C sources are absent from the tracked path set: {arguments}")
 
 
 def main() -> int:

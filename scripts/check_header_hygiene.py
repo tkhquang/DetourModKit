@@ -24,6 +24,10 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
      (one-definition check). StringPool is a never-destroyed singleton, so its canonical header must carry one deleted
      destructor sentinel and no teardown-only declaration or implementation may exist elsewhere.
 
+  4. Installed definitions are token-stable under private test macros. No header under include/ may name
+     DMK_ENABLE_TEST_SEAMS or DMK_EVENT_DISPATCHER_INTERNAL_TESTING, so one program cannot hold two spellings of an
+     installed class definition (see installed_test_macro_violations).
+
 The check enumerates this repository's own C++ sources from the filesystem (so newly added but
 not-yet-committed headers are covered too) and excludes vendored trees under external/ and any
 build directory. Exit status is 1 with offenders printed when any rule is violated, else 0.
@@ -213,6 +217,41 @@ LEGACY_RTTI_TOKEN = re.compile(
 LEGACY_MANIFEST_TOKEN = re.compile(r'(\bManifestError\b|\bmanifest_error_to_string\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
+# The installed-definition token-stability gate.
+# A private test macro in an installed header lets one Debug program hold two spellings of one class definition:
+# the seam-enabled archive and test binary define the macro, while examples and consumers do not. That is a formal
+# ODR violation. The token ban makes every installed definition token-identical with each
+# macro on and off (a token stream can only vary through a conditional that names the macro, and comment mentions are
+# stripped before this scan). Test access to installed-class privates goes through the unconditional internal friend
+# accessors instead (src/internal/logger_test_seams.hpp, src/internal/input_test_seams.hpp, and the dispatcher test's
+# EventDispatcherTestAccess).
+PRIVATE_TEST_MACRO = re.compile(r"\b(DMK_ENABLE_TEST_SEAMS|DMK_EVENT_DISPATCHER_INTERNAL_TESTING)\b")
+
+
+def installed_test_macro_violations(text):
+    """Return (line, macro) pairs for each private test macro named by installed-header code in @p text.
+
+    Pass comment-stripped text. Each code mention is macro-dependence: a conditional arm, a defined() operand, or
+    dead test vocabulary that must not ship either way. Zero mentions prove the header's token stream is identical
+    with the macro defined and undefined, which is the token-stability invariant this gate owns.
+
+    Translation phase 2 deletes each backslash-newline before tokenization, so the scan joins spliced physical
+    lines into one logical line first; a hit reports the physical line where its logical line starts."""
+    hits = []
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        first = index + 1
+        logical = lines[index]
+        while logical.endswith("\\") and index + 1 < len(lines):
+            logical = logical[:-1] + lines[index + 1]
+            index += 1
+        match = PRIVATE_TEST_MACRO.search(logical)
+        if match:
+            hits.append((first, match.group(1)))
+        index += 1
+    return hits
+
 # include/DetourModKit/detail/ is allowlisted. A detail/ header is installed (it ships with the package), so it
 # is reserved for compile-visible support a PUBLIC header still needs across the include boundary: either tiny
 # must-ship layout/parser support (pattern_core), or a header a public header / the DetourModKit.hpp umbrella still includes
@@ -501,6 +540,15 @@ def main():
             for n, line in enumerate(lines, 1):
                 if INTERNAL_INCLUDE.search(line):
                     violations.append(f"{rel}:{n}: public header includes the private engine (src/internal/)")
+
+        # Rule 4: installed definitions stay token-stable under private test macros (every file under include/ is
+        # installed, the C ABI headers included).
+        if rel.startswith("include/"):
+            for number, macro in installed_test_macro_violations(text):
+                violations.append(
+                    f"{rel}:{number}: installed header names the private test macro {macro}. Installed definitions "
+                    "must be token-identical with the macro on and off (route test access through an internal friend "
+                    "accessor)")
 
         # v4 scan gate D: no legacy scan symbol survives in this repo's own sources (headers, sources, or tests).
         for n, line in enumerate(lines, 1):

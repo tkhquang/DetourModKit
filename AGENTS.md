@@ -170,6 +170,7 @@ The project builds the main static library and the standalone wheel-host static 
   - Use `.hpp` for C++ headers.
   - Keep `.h` and `.hpp` files in separate directories.
   - Prefix ABI macros with `DMK_<MODULE>_`.
+  - One settled exception in `wheel_host.h`: `DMK_WHEEL_*` names the direction indices, the consume-mask bits, and the capture flags. Every other wheel-host macro uses `DMK_WHEELHOST_*`. The `[B-94]` gate encodes this partition.
   - Name exported ABI functions with snake_case module stems, such as `wheel_host_start`.
   - Name ABI types with PascalCase module stems, such as `WheelHostTable`.
   - Do not use opaque project abbreviations in ABI identifiers.

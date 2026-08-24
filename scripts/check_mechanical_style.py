@@ -19,6 +19,10 @@ inference, or aesthetic judgement:
     namespace``. A closer whose comment names a namespace but matches no house
     form (``// end namespace``, ``//namespace``, a stray trailing token) is
     flagged.
+  - The wheel-host ABI macro partition (AGENTS.md, "Project layout"): in
+    ``include/DetourModKit/abi/wheel_host.h``, ``DMK_WHEEL_*`` names only the
+    direction indices, consume-mask bits, and capture flags. Every other macro
+    uses the ``DMK_WHEELHOST_`` stem (the include guard excepted).
 
 The scope is every C/C++ file this repository tracks (``git ls-files`` never
 lists submodule contents, so ``external/`` is excluded without a filter). Pass
@@ -46,11 +50,18 @@ NAMESPACE_HOUSE_FORM = re.compile(
     r"(?:namespace(?:\s+[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)?|anonymous namespace)"
     r"[ \t\r]*$"
 )
+# The wheel-host ABI header and its settled macro partition (AGENTS.md, "Project layout"). DMK_WHEEL_ carries only
+# the direction indices, the consume-mask bits, and the capture flags. Every other macro in the header uses the
+# DMK_WHEELHOST_ stem. The include guard is the one non-DMK define.
+WHEEL_HOST_HEADER = "include/DetourModKit/abi/wheel_host.h"
+WHEEL_HOST_GUARD = "DETOURMODKIT_WHEEL_HOST_H"
+WHEEL_DATA_MACRO = re.compile(r"^DMK_WHEEL_(?:UP|DOWN|LEFT|RIGHT|DIRECTIONS|CONSUME_[A-Z0-9_]+|CAPTURE_[A-Z0-9_]+)$")
 
 
 def scan_text(text: str, path: str):
     """Return the list of rule violations in one file's text, most specific first."""
     problems = []
+    is_wheel_host = path.replace("\\", "/").endswith(WHEEL_HOST_HEADER)
     for number, line in enumerate(text.split("\n"), 1):
         if UNICODE_DASH.search(line):
             problems.append(f"{path}:{number}: unicode em/en dash (use a single - instead)")
@@ -58,6 +69,17 @@ def scan_text(text: str, path: str):
         macro = MACRO_DEFINE.match(line)
         if macro and not UPPER_SNAKE.match(macro.group(1)):
             problems.append(f"{path}:{number}: macro {macro.group(1)} is not UPPER_SNAKE_CASE")
+
+        if macro and is_wheel_host:
+            name = macro.group(1)
+            if name.startswith("DMK_WHEEL_") and not WHEEL_DATA_MACRO.match(name):
+                problems.append(
+                    f"{path}:{number}: wheel macro {name} is outside the DMK_WHEEL_ partition (direction indices, "
+                    "consume-mask bits, capture flags). Use the DMK_WHEELHOST_ stem")
+            elif not name.startswith(("DMK_WHEEL_", "DMK_WHEELHOST_")) and name != WHEEL_HOST_GUARD:
+                problems.append(
+                    f"{path}:{number}: wheel-host macro {name} must use the DMK_WHEELHOST_ stem (DMK_WHEEL_ is "
+                    "reserved for direction indices, consume-mask bits, and capture flags)")
 
         closer = NAMESPACE_CLOSER.match(line)
         if closer:
@@ -76,7 +98,7 @@ def scan_file(path: str):
 
 
 def tracked_sources():
-    output = subprocess.check_output(["git", "ls-files", "*.cpp", "*.hpp", "*.h"], text=True)
+    output = subprocess.check_output(["git", "ls-files", "*.c", "*.cpp", "*.hpp", "*.h"], text=True)
     return output.split()
 
 

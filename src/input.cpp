@@ -16,6 +16,7 @@
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
+#include "internal/input_test_seams.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
 
@@ -201,7 +202,7 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
         namespace
         {
-            std::atomic<Input::CallbackAdmissionCommitSeam> s_callback_admission_commit_seam{nullptr};
+            std::atomic<detail::InputTestSeams::CallbackAdmissionCommitSeam> s_callback_admission_commit_seam{nullptr};
             // Input members cast this test-only retained-owner identity through void*.
             std::atomic<void *> s_vetoed_retained_impl{nullptr};
             // The unlock seam uses the owner identity captured before a test veto.
@@ -458,7 +459,7 @@ namespace DetourModKit
                 }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-                if (const CallbackAdmissionCommitSeam seam =
+                if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
                         s_callback_admission_commit_seam.load(std::memory_order_acquire);
                     seam != nullptr)
                 {
@@ -535,7 +536,7 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
             }
 #if defined(DMK_ENABLE_TEST_SEAMS)
-            if (const CallbackAdmissionCommitSeam seam =
+            if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
                     s_callback_admission_commit_seam.load(std::memory_order_acquire);
                 seam != nullptr)
             {
@@ -894,65 +895,6 @@ namespace DetourModKit
             const auto active_poller = poller_snapshot();
             return active_poller ? active_poller->wheel_source_health() : WheelSourceHealth::Inactive;
         }
-
-#ifdef DMK_ENABLE_TEST_SEAMS
-        void Input::set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept
-        {
-            s_callback_admission_commit_seam.store(seam, std::memory_order_release);
-        }
-
-        void Input::lock_facade_mutex_for_test() noexcept
-        {
-            Impl *const impl = instance().m_impl.get();
-            s_test_locked_impl = impl;
-            impl->m_mutex.lock();
-        }
-
-        void Input::unlock_facade_mutex_for_test() noexcept
-        {
-            static_cast<Impl *>(s_test_locked_impl)->m_mutex.unlock();
-            s_test_locked_impl = nullptr;
-        }
-
-        bool Input::reclaim_vetoed_impl_for_test() noexcept
-        {
-            void *const retained = s_vetoed_retained_impl.exchange(nullptr, std::memory_order_acq_rel);
-            if (retained == nullptr)
-            {
-                return false;
-            }
-            Input &self = instance();
-            auto *const impl = static_cast<Impl *>(retained);
-            if (self.m_impl.get() != impl)
-            {
-                return false;
-            }
-            bool vetoed = true;
-            return impl->m_vetoed_retained
-                .compare_exchange_strong(vetoed, false, std::memory_order_acq_rel, std::memory_order_acquire);
-        }
-
-        bool Input::adopt_intercept_owner_for_test() noexcept
-        {
-            Input &self = instance();
-            std::shared_ptr<detail::InputPoller> live_poller;
-            if (!self.is_inert())
-            {
-                std::lock_guard lock(self.m_impl->m_mutex);
-                live_poller = self.m_impl->m_poller;
-            }
-            if (!live_poller)
-            {
-                return false;
-            }
-            if (!detail::adopt_owner_for_test(live_poller->intercept_owner_for_test()))
-            {
-                return false;
-            }
-            live_poller->publish_consume_rules_for_test();
-            return true;
-        }
-#endif
 
         bool Input::is_inert() const noexcept
         {
@@ -1495,3 +1437,67 @@ namespace DetourModKit
         }
     } // namespace input
 } // namespace DetourModKit
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    // Friend-accessor bodies live beside the facade state they reach. The unnamed-namespace seam objects above are
+    // reachable through the input namespace by qualified lookup.
+    void InputTestSeams::set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept
+    {
+        input::s_callback_admission_commit_seam.store(seam, std::memory_order_release);
+    }
+
+    void InputTestSeams::lock_facade_mutex_for_test() noexcept
+    {
+        input::Input::Impl *const impl = input::Input::instance().m_impl.get();
+        input::s_test_locked_impl = impl;
+        impl->m_mutex.lock();
+    }
+
+    void InputTestSeams::unlock_facade_mutex_for_test() noexcept
+    {
+        static_cast<input::Input::Impl *>(input::s_test_locked_impl)->m_mutex.unlock();
+        input::s_test_locked_impl = nullptr;
+    }
+
+    bool InputTestSeams::reclaim_vetoed_impl_for_test() noexcept
+    {
+        void *const retained = input::s_vetoed_retained_impl.exchange(nullptr, std::memory_order_acq_rel);
+        if (retained == nullptr)
+        {
+            return false;
+        }
+        input::Input &self = input::Input::instance();
+        auto *const impl = static_cast<input::Input::Impl *>(retained);
+        if (self.m_impl.get() != impl)
+        {
+            return false;
+        }
+        bool vetoed = true;
+        return impl->m_vetoed_retained
+            .compare_exchange_strong(vetoed, false, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
+    bool InputTestSeams::adopt_intercept_owner_for_test() noexcept
+    {
+        input::Input &self = input::Input::instance();
+        std::shared_ptr<InputPoller> live_poller;
+        if (!self.is_inert())
+        {
+            std::lock_guard lock(self.m_impl->m_mutex);
+            live_poller = self.m_impl->m_poller;
+        }
+        if (!live_poller)
+        {
+            return false;
+        }
+        if (!adopt_owner_for_test(live_poller->intercept_owner_for_test()))
+        {
+            return false;
+        }
+        live_poller->publish_consume_rules_for_test();
+        return true;
+    }
+} // namespace DetourModKit::detail
+#endif // DMK_ENABLE_TEST_SEAMS

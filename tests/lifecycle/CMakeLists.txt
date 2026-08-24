@@ -902,7 +902,9 @@ dmk_add_raw_proof(NAME Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex
 add_library(input_loader_probe SHARED input_loader_detach_dll.cpp)
 set_target_properties(input_loader_probe PROPERTIES PREFIX "" OUTPUT_NAME "input_loader_probe")
 target_link_libraries(input_loader_probe PRIVATE DetourModKit dmk_coverage)
-target_include_directories(input_loader_probe PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(input_loader_probe PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
 # The exported facade-mutex hold routes through the DMK_ENABLE_TEST_SEAMS-gated seam in the archive.
 target_compile_definitions(input_loader_probe PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_loader_probe SHARED)
