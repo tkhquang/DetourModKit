@@ -253,7 +253,19 @@ namespace
         {
             return false;
         }
-        std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        // One bulk read. A per-character read of the coverage-instrumented copy costs seconds per generation.
+        file.seekg(0, std::ios::end);
+        const std::streamoff staged_size = file.tellg();
+        if (staged_size <= 0)
+        {
+            return false;
+        }
+        file.seekg(0, std::ios::beg);
+        std::vector<char> bytes(static_cast<std::size_t>(staged_size));
+        if (!file.read(bytes.data(), staged_size))
+        {
+            return false;
+        }
         const std::string_view needle{staged_gen::TAG_MARKER};
         const auto found = std::string_view{bytes.data(), bytes.size()}.find(needle);
         if (found == std::string_view::npos)
@@ -367,8 +379,11 @@ namespace
                 return fail("soak", "the generation's Init did not bring every subsystem up");
             }
 
-            // The loaded tag rejects a stale pinned predecessor.
-            if (std::strncmp(generation.tag(), tag.c_str(), tag.size()) != 0)
+            // The loaded tag rejects a stale pinned predecessor. The comparison covers every rewritten byte with the
+            // padding rule from stage_copy, so a stale value cannot prefix-match the expected tag.
+            std::string expected_tag = tag.substr(0, staged_gen::TAG_LENGTH);
+            expected_tag.resize(staged_gen::TAG_LENGTH, '0');
+            if (std::memcmp(generation.tag(), expected_tag.data(), staged_gen::TAG_LENGTH) != 0)
             {
                 return fail("soak", "the loaded generation did not run the freshly staged bytes");
             }
