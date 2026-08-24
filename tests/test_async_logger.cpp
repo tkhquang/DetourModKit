@@ -670,11 +670,11 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
 TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
-    // try_pop_batch is called from the writer thread's noexcept frame, so a
-    // throwing reserve would std::terminate the host under memory pressure. It must instead fail closed: catch the
-    // allocation failure and pop only within the vector's existing spare capacity. Here the destination vector has zero
-    // capacity, so the injected reserve failure leaves no headroom and the call pops nothing rather than
-    // terminating, and the queued messages survive for a later, non-failing drain.
+    // try_pop_batch is called from the writer thread's noexcept frame, so a throwing reserve would std::terminate the
+    // host under memory pressure. It must instead fail closed: catch the allocation failure and pop only within the
+    // vector's existing spare capacity. Here the destination vector has zero capacity, so the injected reserve failure
+    // leaves no headroom and the call pops nothing rather than terminating, and the queued messages survive for a
+    // later, non-failing drain.
     DynamicMPMCQueue queue(8);
 
     // Seed short (inline-stored) messages before injection is armed, so these pushes do not allocate on the heap.
@@ -1612,9 +1612,8 @@ TEST(StringPoolTest, GrowsAcrossMultipleAlignedBlocks)
 TEST(StringPoolTest, AllocationChainIsNoThrow)
 {
     // The logging hot path crosses noexcept boundaries (AsyncLogger::enqueue is noexcept), so every link of the
-    // StringPool allocation chain must be
-    // no-throw: an out-of-memory condition has to drop the message, never let
-    // an exception escape and terminate the host.
+    // StringPool allocation chain must be no-throw: an out-of-memory condition has to drop the message, never let an
+    // exception escape and terminate the host.
     auto &pool = StringPool::instance();
     EXPECT_TRUE(noexcept(StringPool::instance()));
     EXPECT_TRUE(noexcept(pool.allocate(0)));
@@ -1880,13 +1879,12 @@ TEST_F(AsyncLoggerTest, EnqueueWakesParkedWriterPromptly)
 
 TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
 {
-    // Regression for the producer->writer lost wakeup. With batch_size 1 and a long flush interval the
-    // writer drains a single message and re-parks after almost every enqueue, so each iteration
-    // exercises the window where a push can race the writer's pre-park predicate check. Before the
-    // pending-count/writer-waiting handshake, a push landing in that window slept until the flush-interval
-    // timeout and the per-iteration flush would time out. With the handshake every push is either seen
-    // by the writer's predicate or wakes the parked writer, so each message drains far below the
-    // interval.
+    // Regression for the producer->writer lost wakeup. With batch_size 1 and a long flush interval the writer drains a
+    // single message and re-parks after almost every enqueue, so each iteration exercises the window where a push can
+    // race the writer's pre-park predicate check. Before the pending-count/writer-waiting handshake, a push landing in
+    // that window slept until the flush-interval timeout and the per-iteration flush would time out. With the handshake
+    // every push is either seen by the writer's predicate or wakes the parked writer, so each message drains far below
+    // the interval.
     AsyncLoggerConfig config;
     config.batch_size = 1;
     config.queue_capacity = 1024;
@@ -1897,10 +1895,9 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
     constexpr int ITERATIONS = 128;
-    // Well below flush_interval, with wide margin on both sides: a lost wakeup waits the full interval
-    // (2000 ms), so a 1000 ms budget still catches it, while the headroom above the sub-millisecond normal
-    // drain absorbs a one-off synchronous-flush or scheduler stall on a loaded runner (batch_size 1 flushes
-    // the file per message).
+    // Well below flush_interval, with wide margin on both sides: a lost wakeup waits the full interval (2000 ms), so a
+    // 1000 ms budget still catches it, while the headroom above the sub-millisecond normal drain absorbs a one-off
+    // synchronous-flush or scheduler stall on a loaded runner (batch_size 1 flushes the file per message).
     const auto flush_budget = std::chrono::milliseconds{1000};
     auto worst = std::chrono::steady_clock::duration::zero();
 

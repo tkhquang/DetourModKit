@@ -725,10 +725,10 @@ TEST_F(HealSchedulerHealTest, HealIntoKeepsNominalOnMissThenHealsWhenTargetAppea
 
 TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
 {
-    // Seed the slot's nominal to point at a readable but WRONG-typed object (dangerous: a
-    // slot-only consumer would happily dereference it), then heal a REQUIRED landmark for a type absent from the
-    // window. The slot must publish Invalid, and every DMK-provided checked accessor must reject it: a null-only
-    // fixture would not prove this, since a dangerous readable value survives.
+    // Seed the slot's nominal to point at a readable but WRONG-typed object (dangerous: a slot-only consumer would
+    // happily dereference it), then heal a REQUIRED landmark for a type absent from the window. The slot must publish
+    // Invalid, and every DMK-provided checked accessor must reject it: a null-only fixture would not prove this, since
+    // a dangerous readable value survives.
     SyntheticVtable decoy(".?AVHealDecoyType@@");
     SynStruct st;
     constexpr std::ptrdiff_t nominal = 0x80;

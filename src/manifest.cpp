@@ -94,8 +94,8 @@ namespace DetourModKit::manifest
         }
 
         // The whole token must match. A garbage suffix such as "0x1G" or "12abc" causes rejection instead of prefix
-        // truncation. Magnitude is parsed unsigned then signed at the end so a value like INT64_MIN
-        // (whose magnitude does not fit a signed type) still round-trips.
+        // truncation. Magnitude is parsed unsigned then signed at the end so a value like INT64_MIN (whose magnitude
+        // does not fit a signed type) still round-trips.
 
         [[nodiscard]] std::optional<unsigned long long> parse_magnitude(std::string_view body) noexcept
         {

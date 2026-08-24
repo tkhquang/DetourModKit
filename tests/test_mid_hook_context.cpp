@@ -36,20 +36,19 @@ using namespace DetourModKit::hook;
 
 // Mid-hook captured-context save/restore semantics.
 //
-// A mid-hook detour receives the CPU register state captured at the hook point as a MidContext (a
-// reinterpret_cast view onto the backend's Context64). The mid-hook stub saves the full context at the hook
-// point, calls the detour, then reloads every GPR/XMM/rflags and resumes via a `ret` that pops the
-// (possibly-modified) rip slot. These tests confirm, against the real backend, the exact operations a
-// mid-hook detour relies on:
+// A mid-hook detour receives the CPU register state captured at the hook point as a MidContext (a reinterpret_cast view
+// onto the backend's Context64). The mid-hook stub saves the full context at the hook point, calls the detour, then
+// reloads every GPR/XMM/rflags and resumes via a `ret` that pops the (possibly-modified) rip slot. These tests confirm,
+// against the real backend, the exact operations a mid-hook detour relies on:
 //   * GPR READS  (rcx/rdx/r8/...): the detour observes the live argument registers.
 //   * GPR WRITES (r8):             an overwritten general-purpose register survives the trampoline resume;
 //                                  the gating case (gate-skip with r8=1, or redirect a source pointer).
 //   * a real rsp:                  the captured stack pointer is a genuine pointer into the live stack.
 //   * rip redirect:                a context-modified rip is honored on resume.
 //
-// Win64 integer-arg ABI (MinGW and MSVC both target it on Windows): 1st=rcx, 2nd=rdx, 3rd=r8, 4th=r9. The
-// hook is installed at the function ENTRY, so the detour runs before the prologue homes the argument
-// registers, and a write to a captured register is therefore observed by the resumed body.
+// Win64 integer-arg ABI (MinGW and MSVC both target it on Windows): 1st=rcx, 2nd=rdx, 3rd=r8, 4th=r9. The hook is
+// installed at the function ENTRY, so the detour runs before the prologue homes the argument registers, and a write to
+// a captured register is therefore observed by the resumed body.
 
 namespace
 {
@@ -296,9 +295,9 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
     EXPECT_EQ(got, 3.5f) << "detour did not observe the live xmm0 float argument";
 }
 
-// Opt-in probe for the xmm() XMM0-15 preservation warning in hook.hpp: it proves callback entry and XMM0
-// restoration after a deliberate clobber. It is a capability probe rather than a per-run regression gate, so it
-// runs only under --gtest_also_run_disabled_tests.
+// Opt-in probe for the xmm() XMM0-15 preservation warning in hook.hpp: it proves callback entry and XMM0 restoration
+// after a deliberate clobber. It is a capability probe rather than a per-run regression gate, so it runs only under
+// --gtest_also_run_disabled_tests.
 TEST_F(MidHookContextTest, DISABLED_MidHookVectorFrame)
 {
 #if !defined(__x86_64__) && !defined(_M_X64)

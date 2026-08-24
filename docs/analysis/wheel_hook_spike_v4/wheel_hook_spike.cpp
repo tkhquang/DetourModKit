@@ -1,9 +1,9 @@
 // PR-15 Stage 0 semantic spike: thread-scoped WH_GETMESSAGE wheel capture.
 //
-// Standalone harness. It edits no production source. It proves or refutes the message-hook semantics
-// that the PR-15 production architecture assumes (rollout plan, section "PR-15", Stage 0 cases 2 to 7 and 9,
-// plus the synthetic half of case 1). Cases 1 (real game pump) and 8 (gameoverlayrenderer64) need a live
-// game session and stay open in the analysis record.
+// Standalone harness. It edits no production source. It proves or refutes the message-hook semantics that the PR-15
+// production architecture assumes (rollout plan, section "PR-15", Stage 0 cases 2 to 7 and 9, plus the synthetic half
+// of case 1). Cases 1 (real game pump) and 8 (gameoverlayrenderer64) need a live game session and stay open in the
+// analysis record.
 //
 // The resident hook below implements the planned production message-hook behavior:
 //   - Process only HC_ACTION wheel messages.
@@ -11,18 +11,17 @@
 //   - On PM_NOREMOVE, observe without changing counters or remainders.
 //   - Save the original fields, write WM_NULL before CallNextHookEx, re-assert WM_NULL after it returns.
 //   - Call CallNextHookEx exactly once.
-// The fold arithmetic replicates src/internal/input_intercept.cpp accumulate_wheel_remainder:
-// total = prior + delta; notches = total / WHEEL_DELTA (truncation toward zero); remainder = total % WHEEL_DELTA.
-// Direction mapping: vertical positive = Up, vertical negative = Down, horizontal positive = Right,
-// horizontal negative = Left. The production (epoch, owned) tagging is lease state machinery, not message
-// semantics, and is out of spike scope.
+// The fold arithmetic replicates src/internal/input_intercept.cpp accumulate_wheel_remainder: total = prior + delta;
+// notches = total / WHEEL_DELTA (truncation toward zero); remainder = total % WHEEL_DELTA. Direction mapping: vertical
+// positive = Up, vertical negative = Down, horizontal positive = Right, horizontal negative = Left. The production
+// (epoch, owned) tagging is lease state machinery, not message semantics, and is out of spike scope.
 //
 // Build (Debug, both toolchains):
 //   MinGW: g++ -std=c++23 -g -O0 -Wall -Wextra wheel_hook_spike.cpp -o wheel_hook_spike.exe -luser32
 //   MSVC:  cl /std:c++latest /EHsc /W4 /Zi wheel_hook_spike.cpp user32.lib
 //
-// Output: TAP-style "ok"/"not ok" lines plus per-case event traces. Exit code 0 only when every
-// non-skipped gate passes.
+// Output: TAP-style "ok"/"not ok" lines plus per-case event traces. Exit code 0 only when every non-skipped gate
+// passes.
 
 #include <windows.h>
 

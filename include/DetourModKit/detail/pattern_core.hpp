@@ -15,8 +15,8 @@
  *
  *          The byte/mask encoding, the match semantics, and the rarest-byte anchor heuristic are shared with the
  *          heap-backed runtime scan engine so every parser entry point resolves the same DSL identically; the engine's
- *          runtime haystack-frequency selection can override this compile-time anchor, which serves as the fallback when
- *          no haystack histogram is available.
+ *          runtime haystack-frequency selection can override this compile-time anchor, which serves as the fallback
+ *          when no haystack histogram is available.
  * @note Unlike the other detail/ headers, both axes line up here: scan.hpp needs this implementation support at
  *       compile time, so it sits in the detail/ directory and declares its types in the ::detail namespace. Directory
  *       placement and namespace placement are independent.
@@ -49,10 +49,10 @@ namespace DetourModKit::detail
     /**
      * @brief Maximum number of bounded-jump gaps a single pattern may carry.
      * @details A bounded jump (`[X-Y]`) splits the fixed byte stream into segments; each jump records one gap between
-     *          two fixed runs. `PatternBuffer::jumps` is a fixed `std::array` sized to this cap, and every value Pattern
-     *          (and every Candidate that holds one) carries it inline, so the cap is kept to a small handful of gaps: a
-     *          real signature anchors on a few stable points and rarely needs more than one or two gaps. A pattern that
-     *          names more gaps fails closed at parse with TooManyJumps rather than silently truncating.
+     *          two fixed runs. `PatternBuffer::jumps` is a fixed `std::array` sized to this cap, and every value
+     *          Pattern (and every Candidate that holds one) carries it inline, so the cap is kept to a small handful of
+     *          gaps: a real signature anchors on a few stable points and rarely needs more than one or two gaps. A
+     *          pattern that names more gaps fails closed at parse with TooManyJumps rather than silently truncating.
      */
     inline constexpr std::size_t MAX_PATTERN_JUMPS = 8;
 
@@ -71,9 +71,9 @@ namespace DetourModKit::detail
      * @details The segmented matcher is deliberately simple and unmemoized: on a miss it may try every skip value of
      *          every gap, so a pathological all-wildcard, wide-gap pattern can approach the product of the gap spans at
      *          one start position. This budget converts that per-position product into a fixed ceiling while preserving
-     *          the region-level linear sweep. Exhausting the budget fails the current placement closed (no match) rather
-     *          than hanging. The assertion keeps the budget above the linear per-position work of a well-formed pattern,
-     *          so ordinary literal-anchored signatures finish before the cap.
+     *          the region-level linear sweep. Exhausting the budget fails the current placement closed (no match)
+     *          rather than hanging. The assertion keeps the budget above the linear per-position work of a well-formed
+     *          pattern, so ordinary literal-anchored signatures finish before the cap.
      */
     inline constexpr std::size_t SEGMENT_MATCH_STEP_BUDGET = 1u << 16;
     static_assert(
@@ -85,11 +85,11 @@ namespace DetourModKit::detail
      * @struct PatternJump
      * @brief One bounded gap between two fixed byte runs (segments) of a compiled pattern.
      * @details A jump lets a pattern tolerate a variable-length span between two stable anchors (an instruction whose
-     *          encoding size shifts when the compiler's output moves), which a fixed run of wildcards cannot: `?? ?? ??`
-     *          matches exactly three bytes, while `[2-5]` matches any two-to-five-byte gap. @ref position is the index in
-     *          the concatenated fixed byte stream that the gap precedes (strictly inside `(0, length)`, since a jump can
-     *          neither lead nor trail the pattern nor sit adjacent to another jump). @ref min_skip / @ref max_skip bound
-     *          the gap; `min_skip == max_skip` is an exact `[N]` jump.
+     *          encoding size shifts when the compiler's output moves), which a fixed run of wildcards cannot:
+     *          `?? ?? ??` matches exactly three bytes, while `[2-5]` matches any two-to-five-byte gap. @ref position is
+     *          the index in the concatenated fixed byte stream that the gap precedes (strictly inside `(0, length)`,
+     *          since a jump can neither lead nor trail the pattern nor sit adjacent to another jump). @ref min_skip /
+     *          @ref max_skip bound the gap; `min_skip == max_skip` is an exact `[N]` jump.
      */
     struct PatternJump
     {
@@ -133,10 +133,10 @@ namespace DetourModKit::detail
      *
      *          A pattern with bounded jumps splits its fixed byte stream into segments. @ref bytes / @ref mask hold the
      *          segments concatenated with no gap bytes; @ref jumps records where a gap sits and how wide it may be. A
-     *          jump-free pattern has @ref jump_count == 0 and takes the same single fixed-width match path. The anchor is
-     *          deliberately confined to segment 0 (the bytes before the first jump), because the matcher locates that
-     *          first fixed run and then extends across the variable gaps: a byte in a later segment sits at an address
-     *          that shifts with the gap, so it cannot drive the memchr prefilter.
+     *          jump-free pattern has @ref jump_count == 0 and takes the same single fixed-width match path. The anchor
+     *          is deliberately confined to segment 0 (the bytes before the first jump), because the matcher locates
+     *          that first fixed run and then extends across the variable gaps: a byte in a later segment sits at an
+     *          address that shifts with the gap, so it cannot drive the memchr prefilter.
      */
     struct PatternBuffer
     {
@@ -241,8 +241,8 @@ namespace DetourModKit::detail
      *          search for a partial nibble. The search is confined to segment 0 (the fixed run before the first bounded
      *          jump): the matcher finds that run first and extends across the variable gaps, so a byte in a later
      *          segment lands at a gap-dependent address the memchr prefilter cannot target. The scan keeps the
-     *          lowest-scoring candidate seen so far and stops early once it finds a rarest-class byte (score 0), since no
-     *          later byte can beat it.
+     *          lowest-scoring candidate seen so far and stops early once it finds a rarest-class byte (score 0), since
+     *          no later byte can beat it.
      */
     [[nodiscard]] constexpr std::size_t select_anchor(const PatternBuffer &buffer) noexcept
     {
@@ -364,9 +364,9 @@ namespace DetourModKit::detail
      * @brief The fixed-array storage sink for the compile-time parse: caps at MAX_PATTERN_BYTES / MAX_PATTERN_JUMPS.
      * @details The compile-time Pattern must be a literal type a consteval result can return, so its byte / mask / jump
      *          storage is a fixed array and appending past the cap fails (a TooLong / TooManyJumps parse). The shared
-     *          parser (@ref parse_pattern_into) writes every token through a sink so the grammar has one implementation;
-     *          the runtime engine supplies its own heap-backed sink with no byte cap, which is why the same grammar
-     *          serves both without imposing the literal-storage cap on runtime patterns.
+     *          parser (@ref parse_pattern_into) writes every token through a sink so the grammar has one
+     *          implementation; the runtime engine supplies its own heap-backed sink with no byte cap, which is why the
+     *          same grammar serves both without imposing the literal-storage cap on runtime patterns.
      */
     struct PatternBufferSink
     {
@@ -423,8 +423,8 @@ namespace DetourModKit::detail
      *                                           segment; splits the pattern into segments recorded as jumps
      *          - `|`                         -> offset marker: records the position of the NEXT byte (or the length
      *                                           when trailing) as the result offset; permitted at most once
-     *          Any other token shape fails with InvalidToken. An input with no byte tokens fails with Empty. A sink that
-     *          rejects an append fails with TooLong (byte cap) or TooManyJumps (jump cap).
+     *          Any other token shape fails with InvalidToken. An input with no byte tokens fails with Empty. A sink
+     *          that rejects an append fails with TooLong (byte cap) or TooManyJumps (jump cap).
      *
      *          Every segment must be a non-empty fixed run, so a jump must not lead or trail the pattern and two
      *          jumps must not be adjacent. A violation is InvalidJump. The `|` marker records a position in the fixed
@@ -638,8 +638,8 @@ namespace DetourModKit::detail
      * @param body_end One-past-last fixed-byte index of the run.
      * @return True when the run fits in the window from @p window_pos and every masked byte agrees.
      * @details The per-byte test is the same `(memory ^ pattern) & mask == 0` the scan engine uses, so a wildcard byte
-     *          always agrees and a nibble mask compares only its fixed nibble. A run that would read past the window end
-     *          cannot match.
+     *          always agrees and a nibble mask compares only its fixed nibble. A run that would read past the window
+     *          end cannot match.
      */
     [[nodiscard]] constexpr bool run_matches_at(
         const PatternBuffer &buffer,
@@ -670,9 +670,10 @@ namespace DetourModKit::detail
      * @brief Backtracking segment match: does segment @p segment_index (and all that follow) match at @p window_pos?
      * @details Matches the segment's fixed run, then for the gap that follows tries every skip in [min, max] in
      *          ascending order, recursing into the next segment. Ascending-skip order makes the overall match the
-     *          leftmost feasible placement. Backtracking is required because a greedy choice for one segment can strand a
-     *          later one: an earlier gap position that lets the tail match must be found even if a nearer position fails.
-     *          Recursion DEPTH is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1), and total WORK is bounded by
+     *          leftmost feasible placement. Backtracking is required because a greedy choice for one segment can strand
+     *          a later one: an earlier gap position that lets the tail match must be found even if a nearer position
+     *          fails. Recursion DEPTH is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1), and total WORK is
+     *          bounded by
      *          @p steps, a shared node-visit counter for this one placement tree. On budget exhaustion the placement
      *          fails closed. In practice each segment run fails fast on its first literal byte, so a real signature
      *          (few gaps, literal-anchored segments) prunes to near-linear and never approaches the budget.

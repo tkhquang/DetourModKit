@@ -70,8 +70,8 @@ namespace DetourModKit::detail
     }
 
     // The test-only acquire_hook_self_ref() override lets the suite drive the otherwise-unreachable acquire failure
-    // branch. The override must SetLastError before a nullptr return to satisfy error.hpp's
-    // `detail = GetLastError()` contract.
+    // branch. The override must SetLastError before a nullptr return to satisfy error.hpp's `detail = GetLastError()`
+    // contract.
     HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
 
     // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch. The suite can then
@@ -1152,9 +1152,9 @@ namespace DetourModKit
             if (newer > 0)
             {
                 // For out-of-order, oldest-first teardown, leak this backend instead of a restore. This preserves the
-                // newer layer chain into this trampoline. The Impl module reference remains held, so the
-                // trampoline pages stay mapped. release_target_slot keeps the ledger order entry: the target remains
-                // physically hooked and must not be reported clean.
+                // newer layer chain into this trampoline. The Impl module reference remains held, so the trampoline
+                // pages stay mapped. release_target_slot keeps the ledger order entry: the target remains physically
+                // hooked and must not be reported clean.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 ledger.release_target_slot(target, ledger_id);

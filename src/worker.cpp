@@ -94,11 +94,10 @@ namespace DetourModKit
         }
         catch (...)
         {
-            // A throw after the thread was created (the test seam, or any would-be publication step). The
-            // thread can be running: request stop and join it (this runs on the constructing thread, never
-            // the worker's own and never under the loader lock), then release the module reference so
-            // acquire/release stay balanced. No thread is ever left behind, and m_self_ref was not yet set,
-            // so nothing is double-released.
+            // A throw after the thread was created (the test seam, or any would-be publication step). The thread can be
+            // running: request stop and join it (this runs on the constructing thread, never the worker's own and never
+            // under the loader lock), then release the module reference so acquire/release stay balanced. No thread is
+            // ever left behind, and m_self_ref was not yet set, so nothing is double-released.
             if (m_thread != nullptr && m_thread->joinable())
             {
                 m_thread->request_stop();
@@ -124,9 +123,9 @@ namespace DetourModKit
 
     void StoppableWorker::request_stop() noexcept
     {
-        // Signal the copied stop_source while the body may still observe it. Stopping/Stopped already
-        // requested stop; Exited has no body left to notify. Reading the shared state never touches m_thread,
-        // so this stays race-free against a concurrent shutdown() join/detach.
+        // Signal the copied stop_source while the body may still observe it. Stopping/Stopped already requested stop;
+        // Exited has no body left to notify. Reading the shared state never touches m_thread, so this stays race-free
+        // against a concurrent shutdown() join/detach.
         const State s = m_state->load(std::memory_order_acquire);
         if (s == State::Starting || s == State::Running)
         {

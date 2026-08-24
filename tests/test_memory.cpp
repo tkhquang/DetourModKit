@@ -2214,8 +2214,8 @@ TEST_F(MemoryTest, ReadPtrUnsafe_AfterCachePrime)
     uintptr_t value = 0xDEADBEEF;
     auto addr = reinterpret_cast<uintptr_t>(&value);
 
-    // Prime the cache with a readable check. read consults no cache (the fault guard makes a probe
-    // unnecessary), so this only confirms a primed region still reads back its value through the guarded path.
+    // Prime the cache with a readable check. read consults no cache (the fault guard makes a probe unnecessary), so
+    // this only confirms a primed region still reads back its value through the guarded path.
     EXPECT_TRUE(is_readable(&value, sizeof(uintptr_t)));
 
     uintptr_t result = guarded_ptr_or_zero(addr, 0);

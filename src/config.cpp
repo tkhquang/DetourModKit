@@ -1387,8 +1387,7 @@ namespace DetourModKit
                     {
                         // A read can fail when another process locks the file mid-save. Clear the cached hash so an
                         // identical-byte retry cannot hash-skip. Return before the setter pass. item->load against the
-                        // unpopulated
-                        // CSimpleIniA replaces live state with defaults.
+                        // unpopulated CSimpleIniA replaces live state with defaults.
                         get_last_loaded_ini_hash() = std::nullopt;
                         defer_diagnostic(
                             diags,

@@ -520,9 +520,9 @@ TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
 }
 
 // A record's grade cannot exceed its compilability. The resolver only sees a record Signature::compile accepts, whose
-// constraints the pattern-only rung analysis does not model: here a RipRelative rung whose layout is
-// malformed. compile rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would
-// certify a signature the trust gate could never build; the record is floored to Unusable and names the reason.
+// constraints the pattern-only rung analysis does not model: here a RipRelative rung whose layout is malformed. compile
+// rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would certify a signature the
+// trust gate could never build; the record is floored to Unusable and names the reason.
 TEST(SigHealthRecord, GradeCannotExceedCompilability)
 {
     mf::SignatureRecord record;

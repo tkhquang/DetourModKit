@@ -99,9 +99,9 @@ namespace DetourModKit
                 return s_generation;
             }
 
-            // Compares two resolved INI paths without case sensitivity. Separators and normalization already match.
-            // An ordinal ASCII fold is correct for case-insensitive Windows paths. A locale fold is
-            // deliberately avoided, per the watcher's ordinal filename match.
+            // Compares two resolved INI paths without case sensitivity. Separators and normalization already match. An
+            // ordinal ASCII fold is correct for case-insensitive Windows paths. A locale fold is deliberately avoided,
+            // per the watcher's ordinal filename match.
             [[nodiscard]] bool resolved_paths_equivalent(std::string_view a, std::string_view b) noexcept
             {
                 if (a.size() != b.size())
@@ -123,9 +123,8 @@ namespace DetourModKit
                 return true;
             }
 
-            // Keeps reload-hotkey BindingGuards alive for the process lifetime. ~BindingGuard disables the binding,
-            // so a dropped returned guard makes the hotkey a silent no-op forever. Guarded by
-            // get_watcher_mutex().
+            // Keeps reload-hotkey BindingGuards alive for the process lifetime. ~BindingGuard disables the binding, so
+            // a dropped returned guard makes the hotkey a silent no-op forever. Guarded by get_watcher_mutex().
             std::vector<input::BindingGuard> &get_reload_hotkey_guards() noexcept
             {
                 static std::vector<input::BindingGuard> s_guards;

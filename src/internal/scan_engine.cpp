@@ -338,11 +338,11 @@ namespace DetourModKit
     {
         // Heap-backed storage sink for the runtime AOB parse. It drives the one shared grammar
         // (detail::parse_pattern_into) so the runtime engine and the compile-time scan::Pattern can never diverge on
-        // the DSL, but, unlike the fixed-array compile-time sink, it imposes no byte cap: the growable
-        // EnginePattern has none, so a long runtime pattern (for example the byte pattern find_string_xref builds from
-        // a long search string) compiles here even though the same length would overflow the literal Pattern's
-        // MAX_PATTERN_BYTES inline storage. The jump count is still capped at MAX_PATTERN_JUMPS because the segmented
-        // matcher indexes a fixed-size segment-start array bounded by it.
+        // the DSL, but, unlike the fixed-array compile-time sink, it imposes no byte cap: the growable EnginePattern
+        // has none, so a long runtime pattern (for example the byte pattern find_string_xref builds from a long search
+        // string) compiles here even though the same length would overflow the literal Pattern's MAX_PATTERN_BYTES
+        // inline storage. The jump count is still capped at MAX_PATTERN_JUMPS because the segmented matcher indexes a
+        // fixed-size segment-start array bounded by it.
         struct EnginePatternSink
         {
             detail::EnginePattern pattern;
@@ -425,10 +425,10 @@ namespace DetourModKit
         // x86-64 baseline and needs no runtime gate. The AVX2 body (32 bytes per iteration) is selected at runtime
         // through the same cpu_has_avx2() gate the verify tier uses. Each SIMD body broadcasts the needle into every
         // lane, compares a whole vector against it with one PCMPEQB, and collapses the per-byte result to a movemask
-        // bitmask. The first set bit in a nonzero mask gives the lane index of the first match, so the
-        // search keeps libc memchr's "lowest address wins" contract. A scalar byte loop finishes the sub-vector tail.
-        // None of the tiers call into libc, so the ASan interceptor never sees the read. The explicit intrinsics also
-        // use unaligned loads, so there is no type-punned qword load that clang-cl TBAA can miscompile.
+        // bitmask. The first set bit in a nonzero mask gives the lane index of the first match, so the search keeps
+        // libc memchr's "lowest address wins" contract. A scalar byte loop finishes the sub-vector tail. None of the
+        // tiers call into libc, so the ASan interceptor never sees the read. The explicit intrinsics also use unaligned
+        // loads, so there is no type-punned qword load that clang-cl TBAA can miscompile.
 
         /// Count-trailing-zeros over a known-nonzero movemask result; yields the first matching byte's lane index.
         inline unsigned dmk_movemask_first_index(unsigned int mask) noexcept
@@ -547,8 +547,8 @@ namespace DetourModKit
         }
 
         // Anchor selection: parse_aob() pre-populates pattern.anchor, so the common path is a single load. Manually
-        // constructed patterns fall back to inline selection without mutating the input (preserves the
-        // const-by-design contract).
+        // constructed patterns fall back to inline selection without mutating the input (preserves the const-by-design
+        // contract).
         const std::size_t best_anchor =
             (pattern.anchor <= pattern_size) ? pattern.anchor : select_pattern_anchor(pattern);
 
