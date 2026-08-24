@@ -642,7 +642,14 @@ WORKFLOWS = {
                         ),
                         Step("Configure (route = ${{ matrix.route }})", shell="bash"),
                         Step("Assert the intended route resolved", shell="bash"),
-                        Step("Build proof targets", shell="bash"),
+                        Step(
+                            "Build proof targets",
+                            shell="bash",
+                            program=(
+                                "cmake --build build/mingw-debug "
+                                "--target dmk_fault_proof_hosts dmk_lifecycle_proof_hosts --parallel 4",
+                            ),
+                        ),
                         Step(
                             "Run proof cases (fault, lifecycle, timeout control)",
                             shell="bash",
@@ -828,7 +835,7 @@ WORKFLOWS = {
 WORKFLOW_SOURCE_SHA256 = {
     ARCH_GATE: "4f307412bc640b90f87f7809f21d961b705de5bf3db7e551d42b8bae1ce66f48",
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
-    PR_CHECK: "05c5e5392867766751a8f97a3b4646b399ee70c4512bc5c27e224ce29cf2e511",
+    PR_CHECK: "2603b1f617b250f8da4313a106a07ea97c30f43be89e19b2e08d2ccdab149264",
     QUALITY: "2a0c3cef8480b6446f4c3068a0f9675e048581de96152bd008adb158633f54ab",
     RELEASE: "069396585b7b5c686bc8320d3f7c3de3206a8fdea509a5f3e76ce35a1ac452b7",
     SANITIZERS: "7d53176e985a113cd496e59bce3fec5a2585fb15f1deed7928d0b09fd9a55d57",

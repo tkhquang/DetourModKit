@@ -475,24 +475,10 @@ jobs:
         shell: bash
 
       - name: Build proof targets
-        # Must cover every target whose test carries a fault-proof / lifecycle-proof / timeout-control label, because
-        # the run step below invokes them all by label and a missing executable fails as "could not find executable".
-        # dmk_add_raw_proof registers a ctest but declares no build dependency, so a host that is not named here is
-        # registered and never built. Keep in sync with tests/lifecycle/CMakeLists.txt and tests/fault/ (add_executable);
-        # add_dependencies pulls in the probe/kit DLLs a host loads at runtime. The fault-proof label also carries
-        # FaultProof.LabelInventoryIsComplete, which fails the run if any of it went missing.
-        run: >-
-          cmake --build build/mingw-debug
-          --target
-          fault_tests fault_scanner_escape_probe dmk_timeout_probe fast_fail_probe hook_static_order
-          logger_first_use_oom vmt_late_static_owner
-          hook_instance_scope dispatch_cow input_gate_abba input_tls_exhaustion input_loader_detach
-          config_servicer_self_retire input_self_shutdown input_reshape_retirement
-          input_first_use_oom xinput_detour_rundown xinput_forwarding_guard profiler_late_uaf profiler_first_use_oom
-          diagnostics_late_emitter diagnostics_first_use_oom bootstrap_module_ref full_lifecycle logic_dll_unload
-          logger_writer_batch_oom logger_generation_log trap_closed_window session_detach_terminal
-          staged_generation_soak
-          --parallel 4
+        # A registered proof declares no build dependency on its host, so the label run below needs every host built
+        # first. The two aggregates own the host inventory beside each declaration. Both label inventory gates reject
+        # a lost case.
+        run: cmake --build build/mingw-debug --target dmk_fault_proof_hosts dmk_lifecycle_proof_hosts --parallel 4
         shell: bash
 
       - name: Run proof cases (fault, lifecycle, timeout control)

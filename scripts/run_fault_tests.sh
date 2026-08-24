@@ -48,8 +48,8 @@ if [[ -n "$RUNTIME_DIR" ]]; then
   export PATH="$RUNTIME_DIR:$PATH"
 fi
 
-# Both hosts, because the label selects cases from each and CTest reports a missing executable as a failure that looks
-# nothing like the containment regression this wrapper exists to surface. The label's own inventory gate is registered
-# under fault-proof too, so the run below refuses a selection that lost a case rather than reporting an empty success.
-cmake --build "$BUILD_DIR" --target fault_tests fault_scanner_escape_probe --parallel 4
+# The aggregate in tests/fault/CMakeLists.txt owns the host inventory beside each declaration. The label's own
+# inventory gate is registered under fault-proof too, so the run below refuses a selection that lost a case rather
+# than reporting an empty success.
+cmake --build "$BUILD_DIR" --target dmk_fault_proof_hosts --parallel 4
 ctest --test-dir "$BUILD_DIR" -L fault-proof --output-on-failure "${@:2}"
