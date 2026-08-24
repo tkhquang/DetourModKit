@@ -266,6 +266,14 @@ def test_token_stability_rule_accepts_a_macro_free_definition_as_identical_on_an
             "a token-stable installed definition was wrongly flagged")
 
 
+def test_token_stability_rule_matches_a_macro_split_by_a_line_splice():
+    # Translation phase 2 deletes each backslash-newline before tokenization, so a spliced name is the same macro
+    # dependence. The hit reports the physical line where the spliced directive starts.
+    source = strip_comments("class Logger\n{\n#ifdef DMK_ENABLE_TEST_\\\nSEAMS\n    void probe();\n#endif\n};\n")
+    _expect(installed_test_macro_violations(source) == [(3, "DMK_ENABLE_TEST_SEAMS")],
+            "a macro name split by a backslash-newline splice was not matched")
+
+
 def test_token_stability_rule_ignores_comment_mentions():
     # The scan runs on stripped text, so prose that names the macro (a doc pointer, a rationale) is not dependence.
     source = strip_comments("// Compiled only when DMK_ENABLE_TEST_SEAMS is defined.\nclass Logger\n{\n};\n")

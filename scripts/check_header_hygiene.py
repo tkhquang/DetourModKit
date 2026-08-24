@@ -233,12 +233,23 @@ def installed_test_macro_violations(text):
 
     Pass comment-stripped text. Each code mention is macro-dependence: a conditional arm, a defined() operand, or
     dead test vocabulary that must not ship either way. Zero mentions prove the header's token stream is identical
-    with the macro defined and undefined, which is the token-stability invariant this gate owns."""
+    with the macro defined and undefined, which is the token-stability invariant this gate owns.
+
+    Translation phase 2 deletes each backslash-newline before tokenization, so the scan joins spliced physical
+    lines into one logical line first; a hit reports the physical line where its logical line starts."""
     hits = []
-    for number, line in enumerate(text.split("\n"), 1):
-        match = PRIVATE_TEST_MACRO.search(line)
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        first = index + 1
+        logical = lines[index]
+        while logical.endswith("\\") and index + 1 < len(lines):
+            logical = logical[:-1] + lines[index + 1]
+            index += 1
+        match = PRIVATE_TEST_MACRO.search(logical)
         if match:
-            hits.append((number, match.group(1)))
+            hits.append((first, match.group(1)))
+        index += 1
     return hits
 
 # include/DetourModKit/detail/ is allowlisted. A detail/ header is installed (it ships with the package), so it
