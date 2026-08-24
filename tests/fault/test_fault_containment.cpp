@@ -5,11 +5,11 @@
 //
 // SCOPE (important). Both fault guards arm only the FOREIGN range an operation explicitly touches: the target of a
 // read/walk/write. That is exactly the untrusted memory the primitive must survive. A write's SOURCE span is
-// caller-owned and trusted, so a fault reading the source is NOT contained on either toolchain: it is a
-// caller-contract violation, like passing a dangling span. These tests therefore inject faults into the FOREIGN target
-// only, which is the behavior the library actually guarantees. This is also why the escalating writer's slow-path
-// COPY-fault arm is not deterministic single-threaded:
-// once the slow path has made the target writable, only a concurrent reprotect (a second thread) can fault the copy.
+// caller-owned and trusted, so a fault reading the source is NOT contained on either toolchain: it is a caller-contract
+// violation, like passing a dangling span. These tests therefore inject faults into the FOREIGN target only, which is
+// the behavior the library actually guarantees. This is also why the escalating writer's slow-path COPY-fault arm is
+// not deterministic single-threaded: once the slow path has made the target writable, only a concurrent reprotect (a
+// second thread) can fault the copy.
 //
 // TOOLCHAINS. Every case runs on both. A case whose subject is a public memory:: contract, or the scanner's own guard,
 // is toolchain-neutral by construction; only the nesting case names a fault frame directly, so only it carries a

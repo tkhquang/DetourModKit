@@ -2077,8 +2077,8 @@ namespace DetourModKit::detail
         if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
         {
             // A game thread can hold this trampoline and nothing here can drain it. Retain the created, disabled
-            // ordinal-100 member too. Recovery must arm that retained object rather than treat an empty
-            // slot as the absent/alias exemption.
+            // ordinal-100 member too. Recovery must arm that retained object rather than treat an empty slot as the
+            // absent/alias exemption.
             const XInputPublishedChains published_chains{
                 s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
                 s_xinput_ex_original.load(std::memory_order_seq_cst) != nullptr

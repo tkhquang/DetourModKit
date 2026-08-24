@@ -82,9 +82,8 @@ int main()
         return 1;
     }
 
-    // Exercise the lifecycle surface end to end: start a Session for the current process (no gate, no
-    // single-instance guard), then let it destruct to run the ordered teardown. This links the whole Session +
-    // subsystem-teardown path.
+    // Exercise the lifecycle surface end to end: start a Session for the current process (no gate, no single-instance
+    // guard), then let it destruct to run the ordered teardown. This links the whole Session + subsystem-teardown path.
     if (auto session = DetourModKit::Session::start(DetourModKit::ModInfo{}); !session.has_value())
     {
         return 2;

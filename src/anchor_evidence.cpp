@@ -2,8 +2,8 @@
  * @file anchor_evidence.cpp
  * @brief This TU owns anchor evidence identity: the drift fingerprints and the quorum independence atoms.
  *
- * The resolution engine stays in anchor.cpp and reaches the independence gate through
- * internal/anchor_evidence.hpp. Fingerprint results stay stable across runs and builds.
+ * The resolution engine stays in anchor.cpp and reaches the independence gate through internal/anchor_evidence.hpp.
+ * Fingerprint results stay stable across runs and builds.
  */
 
 #include "DetourModKit/anchor.hpp"

@@ -89,11 +89,11 @@ namespace DetourModKit
             }
         } // namespace
 
-        // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type. The
-        // guarded span may cross a protection seam, so the original protection of each VirtualQuery region it covers is
-        // captured separately and restored per region. Restoring the whole span to one value flattens an
-        // executable region adjacent to a read-only seam. The segment array is embedded (not heap-grown) so make() can
-        // keep its allocate-before-protect discipline: the storage exists before any VirtualProtect runs.
+        // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type. The guarded
+        // span may cross a protection seam, so the original protection of each VirtualQuery region it covers is
+        // captured separately and restored per region. Restoring the whole span to one value flattens an executable
+        // region adjacent to a read-only seam. The segment array is embedded (not heap-grown) so make() can keep its
+        // allocate-before-protect discipline: the storage exists before any VirtualProtect runs.
         struct ProtectGuard::Impl
         {
             ProtectionSegment segments[MAX_PROTECTION_SEGMENTS];

@@ -1,6 +1,6 @@
-// An add_subdirectory consumer's compile line must carry no trace of the vendored backend or of DMK-internal
-// macro choices: no backend header discoverable, no backend static-build macro, no NOMINMAX, no
-// platform-version defines. Checked before any include so only this project's own command line can satisfy it.
+// An add_subdirectory consumer's compile line must carry no trace of the vendored backend or of DMK-internal macro
+// choices: no backend header discoverable, no backend static-build macro, no NOMINMAX, no platform-version defines.
+// Checked before any include so only this project's own command line can satisfy it.
 #if __has_include(<safetyhook.hpp>) || __has_include(<safetyhook/safetyhook.hpp>)
 #error "SafetyHook headers are discoverable from a build-tree consumer's include paths."
 #endif

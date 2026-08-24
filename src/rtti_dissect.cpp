@@ -265,13 +265,13 @@ namespace DetourModKit
         std::uintptr_t vtable = 0;
 
         // Resolve the candidate vtable's owning-module span once and reuse it across both shape attempts when the
-        // second candidate lives in the same module. resolve_col_site's single-argument overload calls
-        // the live-module resolver (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt
-        // probe below otherwise takes the loader lock up to twice per slot. The common direct-object case (an
-        // object's vtable and its first virtual function both live in the class-defining module) then costs a single
-        // acquisition. A genuinely cross-module second candidate (identify_pointee resolves an object whose vtable
-        // lives in a different DLL than the struct) still falls back to a fresh module_of, so the cross-DLL capability
-        // is preserved rather than regressed.
+        // second candidate lives in the same module. resolve_col_site's single-argument overload calls the live-module
+        // resolver (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt probe below
+        // otherwise takes the loader lock up to twice per slot. The common direct-object case (an object's vtable and
+        // its first virtual function both live in the class-defining module) then costs a single acquisition. A
+        // genuinely cross-module second candidate (identify_pointee resolves an object whose vtable lives in a
+        // different DLL than the struct) still falls back to a fresh module_of, so the cross-DLL capability is
+        // preserved rather than regressed.
         DetourModKit::detail::ModuleSpan first_span;
         bool first_span_resolved = false;
 

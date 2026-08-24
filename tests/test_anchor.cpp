@@ -2137,8 +2137,8 @@ TEST(AnchorTest, QuorumRejectsCrossKindStringEvidence)
 
 // Regression guard for the canonicalization: two StringXref members on DIFFERENT literals are genuinely independent
 // evidence and MUST pass the gate. With no matching reference to corroborate, the quorum then fails to reach its
-// threshold (Failed), but it must never be rejected as QuorumNotIndependent. That would prove the gate
-// over-collapses distinct literals into one signal and would kill legitimate cross-string corroboration.
+// threshold (Failed), but it must never be rejected as QuorumNotIndependent. That would prove the gate over-collapses
+// distinct literals into one signal and would kill legitimate cross-string corroboration.
 TEST(AnchorTest, QuorumAcceptsDifferentLiteralsAsIndependent)
 {
     an::Anchor sub_a{};
@@ -3588,9 +3588,9 @@ TEST(AnchorFingerprintTest, QuorumDefaultThresholdMatchesExplicitUnanimous)
 TEST(AnchorFingerprintTest, QuorumFingerprintDistinguishesMemberMultiplicity)
 {
     // Two anchors with identical evidence (same kind + inputs) hash to the same member evidence, so the quorum
-    // fingerprint must fold each evidence value once PER member, not once per distinct value. Otherwise {A, A, B}
-    // and {A, B, B} (the same distinct set at different multiplicity) would collide. This locks the
-    // duplicate-counting step of the allocation-free sorted fold.
+    // fingerprint must fold each evidence value once PER member, not once per distinct value. Otherwise {A, A, B} and
+    // {A, B, B} (the same distinct set at different multiplicity) would collide. This locks the duplicate-counting step
+    // of the allocation-free sorted fold.
     an::Anchor a{};
     a.kind = an::AnchorKind::VtableIdentity;
     a.mangled = ".?AVA@@";

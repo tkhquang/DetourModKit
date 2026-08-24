@@ -353,11 +353,11 @@ namespace DetourModKit
             // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads
             // complete would otherwise fault the host. Both arms claim a fault only inside the gated window bytes,
             // [window.base, window.base + window.span): on MSVC through detail::guarded_range_fault_filter, on MinGW
-            // x64 through the process-wide vectored read guard the guarded_read paths use
-            // (detail::run_guarded_region), armed over the same span. A fault outside it did not come from this
-            // window's reads, so it reaches the host's handlers rather than being recorded as a faulted window,
-            // exactly as the broad sibling below already does. A 32-bit build is rejected by the defines.hpp
-            // architecture gate, so only the two x64 arms exist. Returns true when a fault was swallowed.
+            // x64 through the process-wide vectored read guard the guarded_read paths use (detail::run_guarded_region),
+            // armed over the same span. A fault outside it did not come from this window's reads, so it reaches the
+            // host's handlers rather than being recorded as a faulted window, exactly as the broad sibling below
+            // already does. A 32-bit build is rejected by the defines.hpp architecture gate, so only the two x64 arms
+            // exist. Returns true when a fault was swallowed.
             bool scan_window_narrow_guarded(
                 const detail::ExecutableWindow &window,
                 std::uintptr_t string_addr,
@@ -518,13 +518,13 @@ namespace DetourModKit
                 return (found_count == 1) ? first_site : 0;
             }
 
-            // The store-slot scan decodes forward after `lea reg, [rip+string]`. It accepts the first
-            // `REX.W MOV [rip+disp32], reg64` store within the caller's tight window.
+            // The store-slot scan decodes forward after `lea reg, [rip+string]`.
+            // It accepts the first `REX.W MOV [rip+disp32], reg64` store within the caller's tight window.
             //
             // Zydis does not classify INT3 or UD2 as a return or unconditional branch. Explicit stops keep the cursor
-            // inside the current function. NOP and conditional branches retain valid fall-through
-            // paths. The StringXrefTest.StringPointerSlotStopsAt* and
-            // StringPointerSlotContinuesPastConditionalBranch cases pin these choices.
+            // inside the current function. NOP and conditional branches retain valid fall-through paths. The
+            // StringXrefTest.StringPointerSlotStopsAt* and StringPointerSlotContinuesPastConditionalBranch cases pin
+            // these choices.
             //
             // store_end marks one past the accepted store. The complete decoded span forms the evidence for selector
             // failure-domain overlap.

@@ -1607,10 +1607,10 @@ namespace DetourModKit
             stats.on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
             stats.lifecycle_violations = s_lifecycle_violations.load(std::memory_order_relaxed);
 
-            // Capture the config fields and entry totals behind the reader guard and the same seq_cst lifecycle
-            // gate that permission readers use. A plain acquire of s_shard_count alone lets a concurrent
-            // shutdown free the array between a stale non-zero count and the loop. Every field stays at its zero
-            // default while the cache is down.
+            // Capture the config fields and entry totals behind the reader guard and the same seq_cst lifecycle gate
+            // that permission readers use. A plain acquire of s_shard_count alone lets a concurrent shutdown free the
+            // array between a stale non-zero count and the loop. Every field stays at its zero default while the cache
+            // is down.
             {
                 ActiveReaderGuard reader_guard;
                 if (cache_is_running())

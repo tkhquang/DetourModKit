@@ -90,10 +90,10 @@ namespace DetourModKit
         // is reaped or detached while the body still runs. is_running()/request_stop()/shutdown() read and
         // write it without touching the jthread handle.
         std::shared_ptr<std::atomic<State>> m_state;
-        // Counted reference on the module this worker's code lives in, taken before thread creation while the
-        // module is mapped. shutdown() releases it after a clean join, hands it to the reaper on
-        // self-shutdown, or leaks it on a loader-lock detach. void* keeps this installed header free of
-        // <windows.h>; it holds an HMODULE. See detail::acquire_module_ref.
+        // Counted reference on the module this worker's code lives in, taken before thread creation while the module is
+        // mapped. shutdown() releases it after a clean join, hands it to the reaper on self-shutdown, or leaks it on a
+        // loader-lock detach. void* keeps this installed header free of <windows.h>; it holds an HMODULE. See
+        // detail::acquire_module_ref.
         void *m_self_ref{nullptr};
     };
 } // namespace DetourModKit

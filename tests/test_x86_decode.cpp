@@ -140,9 +140,9 @@ TEST(X86DecodeTest, DecodeFf25Indirect_WrongSecondByteRejected)
 
 TEST(X86DecodeTest, DecodeFf25Indirect_UnreadableSlotRejected)
 {
-    // Reserve two adjacent pages, commit only the first, then place the
-    // FF 25 instruction at the end of the committed page. The disp32 is chosen to point the slot into the uncommitted
-    // second page, which the SEH-guarded slot read rejects deterministically (no reliance on ambient process layout).
+    // Reserve two adjacent pages, commit only the first, then place the FF 25 instruction at the end of the committed
+    // page. The disp32 is chosen to point the slot into the uncommitted second page, which the SEH-guarded slot read
+    // rejects deterministically (no reliance on ambient process layout).
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     const SIZE_T page = si.dwPageSize;

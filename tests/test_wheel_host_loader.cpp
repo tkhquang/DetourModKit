@@ -623,9 +623,8 @@ TEST(WheelHostLoader, UnknownBackendRefusesStart)
     auto &mgr = input::Input::instance();
     mgr.shutdown();
 
-    // Both an out-of-range value and reserved slot 0 are rejected as unknown. Each iteration
-    // re-stages a binding, because a start() with an empty pending set is a no-op success that never reaches backend
-    // validation.
+    // Both an out-of-range value and reserved slot 0 are rejected as unknown. Each iteration re-stages a binding,
+    // because a start() with an empty pending set is a no-op success that never reaches backend validation.
     for (const std::uint8_t value : {std::uint8_t{255}, std::uint8_t{0}})
     {
         Result<input::BindingGuard> iteration_guard = stage_wheel_binding("wheelhost_unknown_backend");

@@ -16,8 +16,7 @@
  *   - write_bytes (8 bytes)                  (VirtualProtect x2 + Flush + invalidate)
  *
  * Scenario studies (each letter is annotated with the [N] phase marker the program prints; the basic per-call cost
- * tables are the unlettered phases
- * [1]-[3], so the lettered scenario studies start at (D)):
+ * tables are the unlettered phases [1]-[3], so the lettered scenario studies start at (D)):
  *   (D) [Phase 4] VirtualQuery cost vs VAD-tree size (reserve N regions, then
  *       re-time) to show whether process address-space size inflates the miss cost.
  *   (E) [Phase 5] is_readable latency p50/p99/max under 1/2/4 threads forcing
@@ -38,10 +37,9 @@
  *   (J) [Phase 12] Allocations and retained bytes through the executable's counting operator new/delete:
  *       init_cache, warm-fill, churn steady state, and shutdown_cache release, each as counter deltas.
  *
- * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_memory
- * Output: human-readable tables plus a TSV block on stdout, and the gate records described in bench_gate.hpp. A setup
- * allocation that fails, or a pointer chain that does not resolve exactly, fails the process instead of printing a
- * shorter table.
+ * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_memory Output: human-readable tables plus a TSV
+ * block on stdout, and the gate records described in bench_gate.hpp. A setup allocation that fails, or a pointer chain
+ * that does not resolve exactly, fails the process instead of printing a shorter table.
  */
 
 #include "DetourModKit/address.hpp"
@@ -163,8 +161,7 @@ namespace
     }
 
     // Reserve (not commit) `count` regions to inflate the process VAD tree. Reserve-only keeps RAM cost near zero while
-    // still creating VAD nodes that
-    // VirtualQuery's tree lookup must traverse.
+    // still creating VAD nodes that VirtualQuery's tree lookup must traverse.
     void grow_vad(dmk_bench::GateLedger &gates, std::size_t count)
     {
         std::size_t reserved = 0;
@@ -351,10 +348,9 @@ namespace
     // GATED puts is_readable(addr, size) in front of every read. On a hot path that touches many distinct objects,
     // those addresses are mostly cache misses (one new page per object thrashes the fixed-size cache), so each gated
     // read pays a VirtualQuery plus a shard lock. DIRECT drops the predicate and does a raw volatile dereference per
-    // read (no guarded-read call, no
-    // __try frame), which isolates the predicate cost. On MSVC a guarded direct read (read<T>) costs about the same,
-    // since the SEH frame is table-driven and free on the no-fault path (Phase 3). This measures both, per-probe,
-    // including the tail.
+    // read (no guarded-read call, no __try frame), which isolates the predicate cost. On MSVC a guarded direct read
+    // (read<T>) costs about the same, since the SEH frame is table-driven and free on the no-fault path (Phase 3). This
+    // measures both, per-probe, including the tail.
     //
     // reads_per_obj models how many of the K reads land on the same page (same object) before the walk jumps to a new
     // object: the first read of each object misses; the rest hit within the cache TTL. With K=8 and reads_per_obj=3 a
@@ -620,9 +616,9 @@ int main()
         100.0 * (gated.max / 1.0e6) / 16.667
     );
 
-    // Contrast: the light case is a handful of validations per frame on a few
-    // stable (cached) addresses. With warm hits that is sub-microsecond per frame, which is why a low-frequency
-    // validated path is imperceptible while the high-frequency probe path above is not.
+    // Contrast: the light case is a handful of validations per frame on a few stable (cached) addresses. With warm hits
+    // that is sub-microsecond per frame, which is why a low-frequency validated path is imperceptible while the
+    // high-frequency probe path above is not.
     std::printf("  contrast (2 warm validations/frame): %.4f ms/frame\n", (ns_isr_hit + ns_isw_hit) / 1.0e6);
 
     // Phase 8: pointer-chain primitives. Walk a stable in-process chain (warm cache, the favorable case for the

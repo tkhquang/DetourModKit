@@ -2568,9 +2568,8 @@ TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMu
 
 TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
 {
-    // Regression guard: config::reload_hotkey() must retain the
-    // input::BindingGuard so the binding's enabled flag stays true. If the guard were discarded, ~BindingGuard would
-    // release the flag and the bound callback could never fire.
+    // Regression guard: config::reload_hotkey() must retain the input::BindingGuard so the binding's enabled flag stays
+    // true. If the guard were discarded, ~BindingGuard would release the flag and the bound callback could never fire.
     //
     // The input facade has no press-injection hook from user code, so we prove the callback path indirectly: after
     // registration the binding's enabled flag must still be true. We cannot peek the flag directly, so we call
@@ -3423,8 +3422,8 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsSettersRanFalse)
     ) << "Watcher never reported setters_ran=true for the changed-bytes replace.";
 
     // The true hit means the stored hash now matches the on-disk bytes, and the atomic replace guarantees no torn
-    // intermediate content was ever observable, so every reload after this point, whether driven by the
-    // identical-bytes replace below or injected by foreign directory churn, must hash-skip and report false.
+    // intermediate content was ever observable, so every reload after this point, whether driven by the identical-bytes
+    // replace below or injected by foreign directory churn, must hash-skip and report false.
     std::size_t settled_count = 0;
     {
         std::lock_guard<std::mutex> lock(hits_mutex);
@@ -4441,8 +4440,8 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
         ini_file << "[Camera]\nZoomKey=Gamepad_A\nZoomKey.Consume=true\n";
     }
 
-    // Register with the consume facet defaulting to false; load() must then apply the INI-sourced
-    // "<ini_key>.Consume = true" through the combo helper's consume item so the published rule masks the button.
+    // Register with the consume facet defaulting to false; load() must then apply the INI-sourced "<ini_key>.Consume =
+    // true" through the combo helper's consume item so the published rule masks the button.
     auto guard = config::hold_combo(
         "Camera",
         "ZoomKey",
@@ -4468,9 +4467,9 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     input::Input::instance().shutdown();
 }
 
-// ~ReloadServicer must survive a bare-FreeLibrary teardown, which runs under the loader lock at static
-// destruction. The real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only
-// override, mirroring g_config_watcher_loader_lock_override.
+// ~ReloadServicer must survive a bare-FreeLibrary teardown, which runs under the loader lock at static destruction. The
+// real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only override, mirroring
+// g_config_watcher_loader_lock_override.
 //
 // ~ReloadServicer's other detach-and-leak trigger is destruction on the servicer's OWN worker thread (a reload setter
 // that runs config::clear() while executing on the servicer thread). That trigger is not driven here: the branch is

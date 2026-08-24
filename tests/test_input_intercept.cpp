@@ -433,11 +433,11 @@ TEST(GamepadSuppressTest, PreArmedTriggerSuppressedAtLeadingEdge)
     const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
     const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
 
-    // Pre-arm: the poll loop claims the consume trigger as soon as the chord's
-    // modifier is held, so owned_now carries the D-pad bit a cycle before the
-    // D-pad is physically down (true_buttons has LB only). The returned mask must already include the trigger so the
-    // game's independent, usually faster XInput poll cannot read the trigger's leading edge before the mask catches up.
-    // Masking a bit that is not yet down is a no-op for the game, but it closes the race.
+    // Pre-arm: the poll loop claims the consume trigger as soon as the chord's modifier is held, so owned_now carries
+    // the D-pad bit a cycle before the D-pad is physically down (true_buttons has LB only). The returned mask must
+    // already include the trigger so the game's independent, usually faster XInput poll cannot read the trigger's
+    // leading edge before the mask catches up. Masking a bit that is not yet down is a no-op for the game, but it
+    // closes the race.
     EXPECT_EQ(step_gamepad_suppress(state, dpad, lb, 1000, GRACE_MS), dpad);
 
     // Trigger now goes down with the modifier still held: the leading edge is already covered, so it stays masked.
@@ -860,9 +860,9 @@ TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
 
 namespace
 {
-    // A single process-lifetime window class; registering once avoids the
-    // ERROR_CLASS_ALREADY_EXISTS that repeated per-test registration would hit. The class is intentionally never
-    // unregistered: the OS reclaims it at process exit, and a test process owns no other consumers of the atom.
+    // A single process-lifetime window class; registering once avoids the ERROR_CLASS_ALREADY_EXISTS that repeated
+    // per-test registration would hit. The class is intentionally never unregistered: the OS reclaims it at process
+    // exit, and a test process owns no other consumers of the atom.
     constexpr const wchar_t *TEST_WINDOW_CLASS = L"DMKInterceptTestWindow";
 
     void ensure_test_window_class_registered() noexcept

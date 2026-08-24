@@ -602,17 +602,14 @@ set(DETOURMODKIT_LIB_COMPONENT lib) # For the library files (.a, .lib)
 set(DETOURMODKIT_DEV_COMPONENT dev) # For development files (headers, CMake config)
 set(DETOURMODKIT_DOCS_COMPONENT docs) # For documentation (LICENSE, README)
 
-# DetourModKit is a STATIC library and does not absorb the object code of the
-# static dependencies it links (safetyhook -> Zydis -> Zycore); a find_package
-# consumer must link those archives too. The dependency targets register their
-# own install/export sets, and CMake forbids a transitively-required target from
-# living in more than one export set, so they cannot be folded into
-# DetourModKitTargets. Instead ship their archives as plain files and expose
-# them to consumers through the DetourModKit::deps imported target the package
-# config defines (see cmake/DetourModKitConfig.cmake.in). Install each archive
-# here and record its installed file name for the config template. Resolve
-# aliases and imported package targets so fetched and system-Zydis builds
-# produce the same self-contained prefix.
+# DetourModKit is a STATIC library and does not absorb the object code of the static dependencies it links (safetyhook
+# -> Zydis -> Zycore); a find_package consumer must link those archives too. The dependency targets register their own
+# install/export sets, and CMake forbids a transitively-required target from living in more than one export set, so
+# they cannot be folded into DetourModKitTargets. Instead ship their archives as plain files and expose them to
+# consumers through the DetourModKit::deps imported target the package config defines (see
+# cmake/DetourModKitConfig.cmake.in). Install each archive here and record its installed file name for the config
+# template. Resolve aliases and imported package targets so fetched and system-Zydis builds produce the same
+# self-contained prefix.
 # Order matters: a dependent precedes its dependency for single-pass linkers.
 # Configuration-specific dependency archives. A dual-config prefix installs Debug and Release side by side; a
 # config-invariant name would let the second `cmake --install --config` overwrite the first, after which a consumer

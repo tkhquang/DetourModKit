@@ -79,9 +79,9 @@ namespace DetourModKit
         }
 
         // The mid-hook assembly stub stores each captured register at a fixed offset. These assertions pin the C++
-        // layout to the complete frame ABI, with the XMM prefix and integer/resume tail (T-XMM). Pointer
-        // arithmetic from &xmm0 across distinct members is undefined C++. Layout assertions do not legalize it, so the
-        // switch below uses explicit member selection.
+        // layout to the complete frame ABI, with the XMM prefix and integer/resume tail (T-XMM). Pointer arithmetic
+        // from &xmm0 across distinct members is undefined C++. Layout assertions do not legalize it, so the switch
+        // below uses explicit member selection.
         static_assert(sizeof(safetyhook::Xmm) == 16);
         static_assert(offsetof(safetyhook::Context64, xmm0) == 0);
         static_assert(offsetof(safetyhook::Context64, xmm1) == 16);

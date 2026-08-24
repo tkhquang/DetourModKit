@@ -207,8 +207,8 @@ TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
     detail::seed_wheel_notches_for_test({3, 2, 0, 0});
 
     // Registering the first wheel binding flips m_has_wheel_bindings false -> true. The interception layer stays live,
-    // so without recompute's transition discard the poll loop's
-    // next drain would replay this backlog as a burst of phantom Press edges for scrolls that happened while unbound.
+    // so without recompute's transition discard the poll loop's next drain would replay this backlog as a burst of
+    // phantom Press edges for scrolls that happened while unbound.
     detail::InputBinding wheel;
     wheel.name = "wheel_action";
     wheel.keys = {mouse_wheel(WheelCode::Up)};
@@ -3499,8 +3499,8 @@ TEST(InputPollerPollLoopSafety, BindingGrowthPastStartupReserveKeepsPollThreadAl
     im.set_require_focus(true);
 }
 
-// remove_bindings_by_name must carry surviving entries' atomic states forward; is_active(name) must stay
-// consistent across the reshape with no torn reads against bindings_.size().
+// remove_bindings_by_name must carry surviving entries' atomic states forward; is_active(name) must stay consistent
+// across the reshape with no torn reads against bindings_.size().
 TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
 {
     auto &im = input::Input::instance();
