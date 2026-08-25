@@ -172,6 +172,11 @@ namespace DetourModKit
         UnreadableDisplacement,
         /// RIP resolve: the resolved target was not a plausible address.
         ImplausibleTarget,
+        /**
+         * @brief RIP resolve: the last matched prefix resolved plausibly to an unreadable target.
+         * @details `Error::detail` holds the last unreadable target address.
+         */
+        UnreadableTarget,
         /// String xref: the query text was empty.
         EmptyQuery,
         /// String xref: the literal was not found in any readable page.
@@ -479,6 +484,8 @@ namespace DetourModKit
             return "UnreadableDisplacement";
         case ErrorCode::ImplausibleTarget:
             return "ImplausibleTarget";
+        case ErrorCode::UnreadableTarget:
+            return "UnreadableTarget";
         case ErrorCode::EmptyQuery:
             return "EmptyQuery";
         case ErrorCode::StringNotFound:

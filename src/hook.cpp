@@ -19,6 +19,7 @@
 #include "internal/drain_backoff.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/mid_hook_adapter.hpp"
+#include "internal/scan_pages.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
@@ -694,7 +695,10 @@ namespace DetourModKit
                 {
                     return std::nullopt;
                 }
-                if (!safetyhook::is_executable(reinterpret_cast<std::uint8_t *>(*slot)))
+                // detail::is_executable_address classifies the slot from VirtualQuery page state alone (B-66): the
+                // backend's executable query parses the owning module's PE headers unguarded and faults the host
+                // when that header page is unreadable. Lifecycle.VmtUnreadableModuleHeader pins the contract.
+                if (!detail::is_executable_address(*slot))
                 {
                     return count;
                 }
@@ -742,8 +746,8 @@ namespace DetourModKit
             // between those steps. The backend bounds-checks no slot write, and hook_method admits any index below the
             // count published here. A count for slots absent from the clone therefore causes an out-of-bounds write.
             std::size_t cloned_slots = 0;
-            while (cloned_slots < slot_budget &&
-                   safetyhook::is_executable(reinterpret_cast<std::uint8_t *>(snapshot[header_count + cloned_slots])))
+            // Page-state classification only; see count_vmt_method_slots (B-66).
+            while (cloned_slots < slot_budget && detail::is_executable_address(snapshot[header_count + cloned_slots]))
             {
                 ++cloned_slots;
             }

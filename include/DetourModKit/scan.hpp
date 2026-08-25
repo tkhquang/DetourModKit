@@ -1210,10 +1210,13 @@ namespace DetourModKit::scan
      * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32
      *        that follows @p opcode_prefix.
      * @return The resolved absolute address, or an Error.
-     * @details The first resolvable prefix wins. An occurrence whose disp32 resolves to an implausible or unreadable
-     *          target is a coincidental decoy, so the scan skips it and continues. The scan fails only after it
-     *          exhausts the region, and then reports the last decode failure. The prefix search reads @p search
-     *          directly with no page filter, so the caller must guarantee that the region is committed and readable.
+     * @details The first resolvable prefix wins. A matched occurrence is a coincidental decoy when its disp32
+     *          resolves to an implausible target, or when the first byte of the resolved target is not readable at
+     *          scan time. The scan skips each decoy and continues. The scan fails only after it exhausts the region,
+     *          and then reports the last concrete failure, for example @ref ErrorCode::ImplausibleTarget or
+     *          @ref ErrorCode::UnreadableTarget for a plausible target on an unreadable page. The prefix search
+     *          reads @p search directly with no page filter, so the caller must guarantee that the region is
+     *          committed and readable.
      *          To resolve one instruction whose address is uncertain, use @ref resolve_rip_relative, whose
      *          displacement read is guarded. For the `FF 15` and `FF 25` indirect forms the returned address is the
      *          pointer slot, not the final target. The same ImplausibleTarget gate applies. For an ambiguous

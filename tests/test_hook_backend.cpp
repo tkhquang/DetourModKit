@@ -16,14 +16,18 @@
 #endif
 #include <windows.h>
 
+#include <process.h>
+
 #include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/error.hpp"
@@ -59,6 +63,7 @@ namespace DetourModKit::detail
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
     extern void (*g_hook_backend_disable_probe)() noexcept;
     extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
+    extern void (*g_vmt_before_capture_probe)() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -2181,6 +2186,224 @@ TEST(HookLifecycleName, RollbackFailureEnableEventNameSurvivesSubscriberDestroyi
     EXPECT_EQ(probe.mismatches, 0u);
     EXPECT_FALSE(probe.hook.has_value());
     EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+namespace
+{
+    /// In-module slot body for the VMT classification race: its page outlives the racing fixture DLL.
+    int vmt_race_slot_zero_body() noexcept
+    {
+        return 7;
+    }
+
+    int vmt_race_detour(void *) noexcept
+    {
+        return 0;
+    }
+
+    /// RAII owner for a private on-disk copy of the fixture DLL, so this test controls the only load reference.
+    class PrivateFixtureDll final
+    {
+    public:
+        PrivateFixtureDll() = default;
+        [[nodiscard]] bool load()
+        {
+            // The fixture lands beside the test executable, so anchor both the copy source and the private copy
+            // there rather than in the current working directory.
+            char exe_path[MAX_PATH]{};
+            const DWORD length = ::GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+            if (length == 0 || length >= MAX_PATH)
+            {
+                return false;
+            }
+            std::string directory(exe_path, length);
+            directory.erase(directory.find_last_of('\\') + 1);
+
+            static int s_copy_counter = 0;
+            char name[64]{};
+            (void)std::snprintf(name, sizeof(name), "hook_target_lib_vmtrace_%d_%d.dll", _getpid(), s_copy_counter++);
+            m_path = directory + name;
+            if (::CopyFileA((directory + "hook_target_lib.dll").c_str(), m_path.c_str(), FALSE) == 0)
+            {
+                m_path.clear();
+                return false;
+            }
+            m_handle = ::LoadLibraryA(m_path.c_str());
+            return m_handle != nullptr;
+        }
+
+        [[nodiscard]] FARPROC symbol(const char *name) const noexcept { return ::GetProcAddress(m_handle, name); }
+
+        [[nodiscard]] HMODULE release() noexcept
+        {
+            HMODULE handle = m_handle;
+            m_handle = nullptr;
+            return handle;
+        }
+
+        [[nodiscard]] bool make_header_unreadable() noexcept
+        {
+            SYSTEM_INFO sys_info{};
+            ::GetSystemInfo(&sys_info);
+            DWORD previous_protection = 0;
+            if (::VirtualProtect(m_handle, sys_info.dwPageSize, PAGE_NOACCESS, &previous_protection) == 0)
+            {
+                return false;
+            }
+            m_page_size = sys_info.dwPageSize;
+            m_previous_protection = previous_protection;
+            m_header_unreadable = true;
+            return true;
+        }
+
+        [[nodiscard]] bool restore_header() noexcept
+        {
+            if (!m_header_unreadable)
+            {
+                return true;
+            }
+            DWORD ignored = 0;
+            if (::VirtualProtect(m_handle, m_page_size, m_previous_protection, &ignored) == 0)
+            {
+                return false;
+            }
+            m_header_unreadable = false;
+            return true;
+        }
+
+        ~PrivateFixtureDll() noexcept
+        {
+            const bool header_readable = restore_header();
+            if (header_readable && m_handle != nullptr)
+            {
+                (void)::FreeLibrary(m_handle);
+            }
+            if (!m_path.empty())
+            {
+                (void)::DeleteFileA(m_path.c_str());
+            }
+        }
+
+        PrivateFixtureDll(const PrivateFixtureDll &) = delete;
+        PrivateFixtureDll &operator=(const PrivateFixtureDll &) = delete;
+        PrivateFixtureDll(PrivateFixtureDll &&) = delete;
+        PrivateFixtureDll &operator=(PrivateFixtureDll &&) = delete;
+
+    private:
+        std::string m_path;
+        HMODULE m_handle = nullptr;
+        SIZE_T m_page_size = 0;
+        DWORD m_previous_protection = 0;
+        bool m_header_unreadable = false;
+    };
+
+    static_assert(!std::is_copy_constructible_v<PrivateFixtureDll>);
+    static_assert(!std::is_move_constructible_v<PrivateFixtureDll>);
+
+    HMODULE s_vmt_race_dll = nullptr;
+    PrivateFixtureDll *s_vmt_header_fixture = nullptr;
+    bool s_vmt_header_protection_changed = false;
+
+    /// Models a foreign FreeLibrary landing between vmt_for's slot pre-count and its guarded capture.
+    void unload_vmt_race_dll_before_capture() noexcept
+    {
+        if (s_vmt_race_dll != nullptr)
+        {
+            (void)::FreeLibrary(s_vmt_race_dll);
+            s_vmt_race_dll = nullptr;
+        }
+    }
+
+    void protect_vmt_race_header_before_capture() noexcept
+    {
+        s_vmt_header_protection_changed =
+            s_vmt_header_fixture != nullptr && s_vmt_header_fixture->make_header_unreadable();
+    }
+} // namespace
+
+// Module-lifetime race proof for VMT slot classification (B-66): a slot target's owning module unloads between the
+// pre-count walk and the guarded capture. The clone-sizing walk must classify the dead slot from page state without
+// faulting, and the published method_count must cover only the slots the clone actually carries, so no admissible
+// index can reach an out-of-bounds backend slot write.
+TEST(HookBackendVmtClassification, ModuleUnloadBetweenPrecountAndCaptureNormalizesTheSlotCount)
+{
+    PrivateFixtureDll dll;
+    ASSERT_TRUE(dll.load()) << "private fixture DLL copy/load failed, error " << ::GetLastError();
+    auto *dll_fn = reinterpret_cast<void *>(dll.symbol("compute_damage"));
+    ASSERT_NE(dll_fn, nullptr);
+
+    // Two header words cover the widest ABI RTTI prefix the capture reads; the trailing zero terminates the walk.
+    std::array<std::uintptr_t, 5> vtable_storage{
+        0,
+        0,
+        reinterpret_cast<std::uintptr_t>(&vmt_race_slot_zero_body),
+        reinterpret_cast<std::uintptr_t>(dll_fn),
+        0,
+    };
+    struct FakeObject
+    {
+        std::uintptr_t vptr;
+    } object{reinterpret_cast<std::uintptr_t>(&vtable_storage[2])};
+    const std::uintptr_t original_vptr = object.vptr;
+
+    s_vmt_race_dll = dll.release();
+    DetourModKit::detail::g_vmt_before_capture_probe = &unload_vmt_race_dll_before_capture;
+    Result<DetourModKit::hook::VmtHook> cloned = DetourModKit::hook::vmt_for("VmtCaptureModuleUnloadRace", &object);
+    DetourModKit::detail::g_vmt_before_capture_probe = nullptr;
+    EXPECT_EQ(s_vmt_race_dll, nullptr) << "the unload probe did not fire";
+
+    // The pre-count saw two executable slots; the clone walk saw the unmapped second slot and normalized to one.
+    ASSERT_TRUE(cloned.has_value()) << cloned.error().message();
+    {
+        DetourModKit::hook::VmtHook vmt = std::move(*cloned);
+        EXPECT_TRUE(vmt.hook_method(0, &vmt_race_detour).has_value());
+        Result<void> past_count = vmt.hook_method(1, &vmt_race_detour);
+        ASSERT_FALSE(past_count.has_value());
+        EXPECT_EQ(past_count.error().code, ErrorCode::InvalidArg);
+    }
+    EXPECT_EQ(object.vptr, original_vptr) << "teardown must restore the seed object's vptr";
+}
+
+TEST(HookBackendVmtClassification, UnreadableHeaderBetweenPrecountAndCaptureAvoidsBackendParser)
+{
+    PrivateFixtureDll dll;
+    ASSERT_TRUE(dll.load()) << "private fixture DLL copy/load failed, error " << ::GetLastError();
+    auto *dll_fn = reinterpret_cast<void *>(dll.symbol("compute_damage"));
+    ASSERT_NE(dll_fn, nullptr);
+
+    std::array<std::uintptr_t, 5> vtable_storage{
+        0,
+        0,
+        reinterpret_cast<std::uintptr_t>(&vmt_race_slot_zero_body),
+        reinterpret_cast<std::uintptr_t>(dll_fn),
+        0,
+    };
+    struct FakeObject
+    {
+        std::uintptr_t vptr;
+    } object{reinterpret_cast<std::uintptr_t>(&vtable_storage[2])};
+    const std::uintptr_t original_vptr = object.vptr;
+
+    s_vmt_header_fixture = &dll;
+    s_vmt_header_protection_changed = false;
+    DetourModKit::detail::g_vmt_before_capture_probe = &protect_vmt_race_header_before_capture;
+    Result<DetourModKit::hook::VmtHook> cloned = DetourModKit::hook::vmt_for("VmtCaptureUnreadableHeader", &object);
+    DetourModKit::detail::g_vmt_before_capture_probe = nullptr;
+    s_vmt_header_fixture = nullptr;
+    const bool header_restored = dll.restore_header();
+
+    ASSERT_TRUE(s_vmt_header_protection_changed) << "the header-protection probe did not arm";
+    ASSERT_TRUE(header_restored) << "the fixture DLL header protection did not restore";
+    ASSERT_TRUE(cloned.has_value()) << cloned.error().message();
+    {
+        DetourModKit::hook::VmtHook vmt = std::move(*cloned);
+        EXPECT_TRUE(vmt.hook_method(0, &vmt_race_detour).has_value());
+        EXPECT_TRUE(vmt.hook_method(1, &vmt_race_detour).has_value());
+        Result<void> past_count = vmt.hook_method(2, &vmt_race_detour);
+        ASSERT_FALSE(past_count.has_value());
+        EXPECT_EQ(past_count.error().code, ErrorCode::InvalidArg);
+    }
+    EXPECT_EQ(object.vptr, original_vptr) << "teardown must restore the seed object's vptr";
 }
 
 #endif // DMK_ENABLE_TEST_SEAMS
