@@ -4,10 +4,9 @@
 /**
  * @file memory.hpp
  * @brief The guarded-memory surface: fault-tolerant reads, writes, pointer-chain walks, and a protection guard.
- * @details A guarded access turns a fault into a `Result` error instead of a host termination. An unmapped page, a
- *          `PAGE_NOACCESS` or guard page, and a page reprotected under a stale pointer all report as an `Error`. The
- *          Structured Exception Handling that makes that possible, the MSVC `__try` and the MinGW vectored handler,
- *          lives entirely in the engine translation unit, so this header pulls in no `<windows.h>` and no SEH.
+ * @details A guarded access turns a fault into a `Result` error instead of a host termination. The fault guard (MSVC
+ *          `__try`, MinGW vectored handler) lives entirely in the engine translation unit, so this header pulls in no
+ *          `<windows.h>` and no SEH.
  *
  *          The surface is layered by safety:
  *          - `read`, `read_into`, `write`, `write_bytes`, and `walk` are GUARDED. They validate, fault-protect, and
@@ -47,13 +46,11 @@ namespace DetourModKit
         /**
          * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
          *        `std::basic_string_view`.
-         * @details A view is trivially copyable, so an unconstrained typed `write<T>` / `write_in_place<T>` would bind
-         *          `write(addr, my_view)` exactly and store the view's pointer and length instead of the bytes it
-         *          views. Excluding views sends a byte span to the byte-span sink and turns any other view into a
-         *          compile error steering the caller to `write_bytes`. Constraint sites inspect
-         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past. Lives in
-         *          DetourModKit::detail, not memory::detail, so it never shadows the engine detail namespace the
-         *          memory:: TUs reference.
+         * @details `[B-21]` A view is trivially copyable. An unconstrained typed `write<T>` / `write_in_place<T>` binds
+         *          `write(addr, my_view)` exactly and stores the view's pointer and length instead of its bytes. The
+         *          exclusion sends a byte span to the byte-span sink. It turns any other view into a
+         *          compile error that directs the caller to `write_bytes`. Constraint sites inspect
+         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past.
          */
         template <class T> inline constexpr bool is_non_owning_view_v = false;
         template <class U, std::size_t Extent> inline constexpr bool is_non_owning_view_v<std::span<U, Extent>> = true;
@@ -81,10 +78,8 @@ namespace DetourModKit
         /**
          * @brief True when @p E is an enumeration with a fixed underlying type.
          * @details [dcl.enum]/8 gives such an enumeration the value range of its underlying type, so every bit pattern
-         *          of that type is a valid enumerator value. An unscoped enumeration with no fixed base instead takes
-         *          the range of the smallest bit-field holding its enumerators, and a foreign byte outside that range
-         *          is not a valid value. The two are told apart by direct-list-initialization from the underlying type,
-         *          which C++17 permits only for the fixed case; a scoped enumeration always qualifies.
+         *          of that type is a valid enumerator value. Direct-list-initialization from the underlying type is
+         *          well-formed only for the fixed case, which is the detection this concept uses.
          */
         template <class E>
         concept fixed_underlying_enum = std::is_enum_v<E> && requires { E{std::underlying_type_t<E>{}}; };
@@ -92,11 +87,8 @@ namespace DetourModKit
         /**
          * @brief True when @p F is a binary floating-point type whose object representation carries no padding bits.
          * @details Padding bits have no defined value, so a foreign byte pattern read into such a type is not
-         *          necessarily a valid object representation. A binary interchange format stores one sign bit, an
-         *          exponent field wide enough to encode `max_exponent`, and `digits - 1` stored significand bits with
-         *          the leading bit implicit; when that total equals the object size the format is dense. The x87
-         *          extended type MinGW spells `long double` reports `is_iec559`, yet occupies 16 bytes for an 80-bit
-         *          format, so `is_iec559` alone is not the test. MSVC's `long double` is `double` and qualifies.
+         *          necessarily a valid object representation. The bit-count test is required because `is_iec559` alone
+         *          is not enough: MinGW's 16-byte x87 `long double` reports `is_iec559` for an 80-bit format.
          */
         template <class F> [[nodiscard]] constexpr bool padding_free_binary_float() noexcept
         {
@@ -216,17 +208,15 @@ namespace DetourModKit
     {
         /**
          * @brief Inclusive lower bound of the canonical x64 user-mode address window.
-         * @details The low 64 KiB is the reserved null-dereference region and is never a live pointer, so any value
-         *          below this bound cannot be a valid object pointer. Paired with @ref USERSPACE_PTR_MAX it rejects
-         *          stale or sentinel values with no syscall and no memory access.
+         * @details The low 64 KiB is the reserved null-dereference region, so any value below this bound cannot be a
+         *          valid object pointer.
          */
         inline constexpr std::uintptr_t USERSPACE_PTR_MIN = 0x10000;
 
         /**
          * @brief Exclusive upper bound of the canonical x64 user-mode address window.
-         * @details Mapped user addresses sit below the 47-bit canonical split at 0x0000'8000'0000'0000; a value at or
-         *          above this bound is a kernel-range or non-canonical address and cannot be a valid user-mode object
-         *          pointer. Paired with @ref USERSPACE_PTR_MIN.
+         * @details Mapped user addresses sit below the 47-bit canonical split, so a value at or above this bound is a
+         *          kernel-range or non-canonical address.
          */
         inline constexpr std::uintptr_t USERSPACE_PTR_MAX = 0x0000800000000000ULL;
 
@@ -248,13 +238,10 @@ namespace DetourModKit
          * @brief Structural plausibility test for an x64 user-mode pointer.
          * @param address The address to test.
          * @return True only when @p address lies in [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX).
-         * @details A pure arithmetic guard with no memory access and no syscall: the first-class pointer-sanity gate
-         *          meant to terminate pointer-chain traversals early on obviously bad values (null, small enum-shaped
-         *          integers, non-canonical addresses) before paying for a guarded read. It does NOT prove the pointer
-         *          is mapped or that the target object is the expected type; pair it with a module range check
-         *          (@ref module_of) and a guarded @ref read for full validation. It is `constexpr`, so it can gate
-         *          compile-time checks.
-         * @note Callback-safe: pure arithmetic with no memory access, lock, or syscall.
+         * @details Rejects obviously bad values (null, small enum-shaped integers, non-canonical addresses) before a
+         *          guarded read pays for a fault. It does NOT prove the pointer is mapped or that the target object is
+         *          the expected type. Pair it with @ref module_of and a guarded @ref read for full validation.
+         * @note Callback-safe: pure `constexpr` arithmetic with no memory access, lock, or syscall.
          */
         [[nodiscard]] inline constexpr bool is_plausible_ptr(Address address) noexcept
         {
@@ -275,11 +262,10 @@ namespace DetourModKit
          *         region. A span rejected before any access, and the MinGW fallback that validates through
          *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
-         *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span, including a
-         *          multi-region read that crosses into unmapped or protected memory, is swallowed and reported rather
-         *          than terminating the host. An address below @ref USERSPACE_PTR_MIN, or a span whose end wraps the
-         *          address space or passes @ref USERSPACE_PTR_MAX, is rejected without a read so a stale or sentinel
-         *          pointer cannot raise a first-chance exception. On failure the contents of @p out are unspecified.
+         *          fault guard, so it reports a fault anywhere in the span without host termination. The function
+         *          rejects an address below @ref USERSPACE_PTR_MIN. It also rejects a span whose end wraps the address
+         *          space or passes @ref USERSPACE_PTR_MAX. The rejection prevents a first-chance exception from a stale
+         *          or sentinel pointer. On failure the contents of @p out are unspecified.
          * @note Callback-safe: allocates nothing, takes no lock, and on the established hot path issues no syscall.
          */
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;
@@ -364,10 +350,8 @@ namespace DetourModKit
          * @param value Value whose object representation is written.
          * @return The propagated @ref write_bytes result.
          * @details Forwards to @ref write_bytes, so the same fast-path-then-unprotect policy and fault guard apply.
-         * @note Constrained against any non-owning view (@ref detail::is_non_owning_view_v): `write` has no byte-span
-         *       overload, so `write(addr, span)` or `write(addr, string_view)` is intentionally ill-formed and directs
-         *       the caller to @ref write_bytes rather than silently bit-copying the view object. The typed form only
-         *       ever writes a genuine value.
+         * @note Constrained against any non-owning view. A view argument is a compile error instead of a silent
+         *       bit-copy of the view object. @ref detail::is_non_owning_view_v owns the rationale.
          * @note Callback-safe on the fast path (see @ref write_bytes).
          */
         template <class T>
@@ -381,8 +365,7 @@ namespace DetourModKit
         /**
          * @brief Guarded code patch: writes @p source at @p address and flushes the instruction cache for the target.
          * @param address Destination code address.
-         * @param source Bytes to write. An empty span is a successful no-op, but the null-target check runs first:
-         *               a null @p address fails with `NullTargetAddress` even for an empty span.
+         * @param source Bytes to write. Empty-span and null-target rules match @ref write_bytes.
          * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` /
          *         `OverlappingRanges` (@p source intersects the target range) for a rejected argument,
          *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (the changed
@@ -405,8 +388,7 @@ namespace DetourModKit
         /**
          * @brief Strict guarded write of a byte span that NEVER changes page protection.
          * @param address Destination address.
-         * @param source Source byte span. An empty span is a successful no-op, but the null-target check runs
-         *               first: a null @p address fails with `NullTargetAddress` even for an empty span.
+         * @param source Source byte span. Empty-span and null-target rules match @ref write_bytes.
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
          *         (over @ref MAX_WRITE_SIZE) / `OverlappingRanges` (@p source intersects the target range) for a
          *         rejected argument; `ErrorCode::WriteFaulted` when the target's first byte was not writable and
@@ -433,18 +415,12 @@ namespace DetourModKit
          * @param address Destination address.
          * @param value Value whose object representation is written.
          * @return The propagated @ref write_in_place result.
-         * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract
-         *          applies. This is the typed per-frame store; see @ref write_in_place for when to prefer it over
-         *          @ref write.
-         * @note Constrained against any non-owning view (@ref detail::is_non_owning_view_v) so a mutable
-         *       `std::span<std::byte>` routes to the byte-span overload above instead of exact-matching this template
-         *       and copying the view object into the target; a `std::span<int>` / `std::string_view`, which has no
-         *       byte-span sink, is a deliberate compile error rather than a silent scalar bit-copy. The typed form only
-         *       ever writes a genuine value.
+         * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract and
+         *          seam warning apply. This is the typed per-frame store.
+         * @note Constrained against any non-owning view. A mutable `std::span<std::byte>` routes to the byte-span
+         *       overload above. Any other view is a compile error instead of a silent bit-copy of the view object.
+         *       @ref detail::is_non_owning_view_v owns the rationale.
          * @note Callback-safe (see @ref write_in_place).
-         * @warning Not atomic across a writability seam.
-         *          A store across that seam returns `ErrorCode::WriteMayBePartial`. Its changed prefix is indeterminate
-         *          (see @ref ErrorCode::WriteMayBePartial).
          */
         template <class T>
             requires std::is_trivially_copyable_v<T> && (!detail::is_non_owning_view_v<std::remove_cvref_t<T>>)
@@ -508,10 +484,8 @@ namespace DetourModKit
          *          offset list and applies the default plausibility floor to each dereferenced link. It is exactly the
          *          @ref ChainStep overload with every `min_valid` defaulted.
          * @note Callback-safe (see @ref read_into): it builds the step list on a fixed 32-entry stack buffer and never
-         *       allocates. A chain longer than 32 hops therefore fails closed with `ErrorCode::SizeTooLarge` rather
-         *       than reaching for the heap; route such a chain through the @ref ChainStep overload, whose caller owns
-         *       the step storage. Real game pointer paths are far shorter than 32 hops, so the cap never binds in
-         *       practice.
+         *       allocates. A chain longer than 32 hops therefore fails closed with `ErrorCode::SizeTooLarge`. Route
+         *       such a chain through the @ref ChainStep overload, whose caller owns the step storage.
          */
         [[nodiscard]] Result<Address>
         walk(Address base, std::span<const std::ptrdiff_t> offsets, std::span<Address> trace = {}) noexcept;
@@ -521,11 +495,10 @@ namespace DetourModKit
          * @brief Move-only RAII page-protection change: applies a @ref Prot to a @ref Region and restores it on scope
          *        exit.
          * @details Built only through @ref make, so a guard cannot exist without a successful protection change to
-         *          unwind. Hold one over a region that is patched or written repeatedly. Construction captures the
-         *          original protection and the destructor restores it. When the applied @ref Prot includes
-         *          @ref Prot::W, every @ref write_bytes inside the guarded window stays on the cheap no-reprotect
-         *          fast path. Destructor restoration is best-effort, because a destructor cannot report failure. To
-         *          observe the restore result, call @ref restore before the guard dies.
+         *          unwind. Hold one over a region that is patched or written repeatedly. If the applied @ref Prot
+         *          includes @ref Prot::W, every @ref write_bytes inside the guarded window uses the cheap no-reprotect
+         *          fast path. Destructor restoration is best-effort. To observe the restore result, call @ref restore
+         *          before the guard dies.
          * @note The guard captures each VirtualQuery region's own prior protection across the span and restores every
          *       region to its own value, so a guard laid over a .rdata/.text seam does not flatten the executable
          *       region to PAGE_READONLY on restore. A span that crosses an unrealistically large number of distinct
@@ -582,12 +555,9 @@ namespace DetourModKit
              * @return An empty `Result` on success; `ErrorCode::ProtectionRestoreFailed` (OS error in `Error::extra`)
              *         when a region could not be restored. A moved-from, released, or already-restored guard returns
              *         success. There is nothing left to restore.
-             * @details The explicit, observable counterpart to the best-effort destructor: a caller that must KNOW the
-             *          protection was put back calls this instead of relying on the destructor, whose failure it cannot
-             *          see. Idempotent: it disarms the guard, so the destructor then does nothing and a second call is
-             *          a success no-op. On failure the guard is still disarmed (retrying the same call cannot recover
-             *          the OS state), and the range is dropped from the protection cache exactly as the destructor
-             *          does.
+             * @details The observable counterpart to the best-effort destructor. Idempotent: it disarms the guard, so
+             *          the destructor then does nothing. On failure the guard is still disarmed, and the range is
+             *          dropped from the protection cache exactly as the destructor does.
              * @note Setup/control-plane only: the restore issues VirtualProtect syscalls.
              */
             [[nodiscard]] Result<void> restore() noexcept;
@@ -621,7 +591,6 @@ namespace DetourModKit
          *                         ignores case.
          * @return True when a loaded module's base name matches @p basename.
          *         A path longer than `MAX_PATH` does not change either answer.
-         *         Proof: MemoryTest.IsModuleLoadedExactCaseLongPath.
          * @note Setup/control-plane only: the query reaches the loader. An exact-case request fails closed under the
          *       loader lock, because it requires a counted module reference.
          */
@@ -683,9 +652,7 @@ namespace DetourModKit
          *          A successful start creates the cleanup thread when the platform permits it.
          *          Otherwise, the cache uses on-demand cleanup.
          *          MinGW also installs the process fault handler for guarded reads.
-         * @note Setup/control-plane only.
-         *       Every cache setup failure appears in the return value.
-         *       Proof: MemoryTest.InitCacheRejectsWrappingAndThrowingSizes.
+         * @note Setup/control-plane only. Every cache setup failure appears in the return value.
          */
         [[nodiscard]] bool init_cache(
             std::size_t cache_size = DEFAULT_CACHE_SIZE,
@@ -815,20 +782,18 @@ namespace DetourModKit
              *                 readable; this performs NO validation and a violation faults the host process.
              * @return The value at @p address. A top-level bounded built-in array is returned as the equivalent nested
              *         `std::array`, because C++ functions cannot return a built-in array by value.
-             * @details The fastest possible read: a single inlined copy with no SEH, no VirtualQuery, and no cache
-             *          lookup. Use it only for pointers the caller has proven are alive this frame (for example a game
-             *          object known to be live). For anything that may be stale, use the guarded @ref read.
+             * @details A single inlined copy with no SEH, no VirtualQuery, and no cache lookup. Use it only for
+             *          pointers that the caller proves are live for the current frame. For anything that can be stale,
+             *          use the guarded @ref read.
              * @note Callback-safe by construction (it does nothing but copy), but UNSAFE on an invalid address.
-             * @note An `assert(is_readable(...))` trips a violated precondition at the offending call site in a Debug
-             *       build. It is compiled out under NDEBUG, so a Release build has NO diagnostic and an invalid
-             *       address simply faults the host.
+             * @note An `assert(is_readable(...))` trips a violated precondition in a Debug build. It is compiled out
+             *       under NDEBUG, so a Release build has NO diagnostic and an invalid address faults the host.
              */
             template <class T>
                 requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
             [[nodiscard]] detail::representation_read_value_t<T> read(Address address) noexcept
             {
-                // is_readable() consults the protection cache and may issue a VirtualQuery, so it must not survive into
-                // Release; assert() discards the whole call under NDEBUG, leaving the fast path a bare copy.
+                // The is_readable() probe must not survive into Release. assert() discards it under NDEBUG.
                 assert(
                     is_readable(Region{address, sizeof(T)}) &&
                     "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated"

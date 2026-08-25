@@ -10,7 +10,6 @@
  *          DMK instance).
  * @warning `[B-100]` Run registration and Input::start() outside the loader lock. Registration allocates, and start()
  *          creates the poll thread. The loader-lock shutdown path vetoes the join and detaches the thread.
- *          `InputLoaderLock.*` pins the boundary.
  */
 
 #include "DetourModKit/error.hpp"
@@ -33,13 +32,12 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // The poll/edge-detection engine. Defined in the non-installed src/internal/input_poller.hpp and left
-        // incomplete here, so BindingToken can grant it friendship (the engine mints and validates tokens against its
-        // binding set) and Input's private accessors can hand one back without exposing its layout.
+        // The poll/edge-detection engine (src/internal/input_poller.hpp). It stays incomplete so BindingToken can grant
+        // it friendship. Input's private accessors can return one while its layout stays hidden.
         class InputPoller;
 
-        // Test-only white-box accessor over the Input facade. Defined in the non-installed
-        // src/internal/input_test_seams.hpp, so this installed definition carries no macro-dependent member.
+        // Test-only white-box accessor over the Input facade (src/internal/input_test_seams.hpp), so this installed
+        // definition carries no macro-dependent member.
         struct InputTestSeams;
     } // namespace detail
 
@@ -151,22 +149,19 @@ namespace DetourModKit
 
             /**
              * @brief Opt-in passthrough suppression that hides the trigger from the game while the guard is held.
-             * @details Honored only for digital gamepad buttons (XInputGetState hook) and the mouse wheel
-             *          (queue message hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
-             *          cannot be masked. Suppression lasts exactly as long as the guard is held. Wheel consume is
-             *          best effort by mechanism: a hook installed after DMK can restore the wheel message after DMK
-             *          returns.
+             * @details Honored only for digital gamepad buttons (XInputGetState hook) and the mouse wheel (queue
+             *          message hook). Analog triggers, stick directions, keyboard keys, and mouse buttons cannot be
+             *          masked. Wheel consume is best effort by mechanism: a hook installed after DMK can restore the
+             *          wheel message after DMK returns.
              *
              *          Gamepad suppression has two tiers. Every consume chord gets the reactive mask, which hides the
              *          trigger once the poll thread observes the chord. Same-frame suppression, which also closes the
              *          window where a modifier and its trigger go down inside one poll interval, comes from a
-             *          fixed-size table. Chord shapes beyond that table keep only the reactive mask, and
-             *          Input::consume_capacity reports whether any did.
-             *
-             *          Gamepad suppression is all-or-nothing across the pad entry points and fails open: if any entry
-             *          point stops being covered, masking stops on all of them until coverage is whole again.
-             *          Best-effort by contract: it may lapse without notice, and a binding must not depend on the game
-             *          never seeing its trigger.
+             *          fixed-size table. Shapes beyond it keep only the reactive mask, and Input::consume_capacity
+             *          reports whether any did. Suppression is all-or-nothing across the pad entry points and fails
+             *          open. If coverage of any entry point stops, suppression stops on all entry points until the
+             *          complete coverage returns. Best-effort by contract: it may lapse without notice. A binding
+             *          must tolerate game access to its trigger.
              */
             bool consume = false;
 
@@ -495,8 +490,8 @@ namespace DetourModKit
              *          That path is idempotent, and the facade can start again.
              * @note DLL_PROCESS_DETACH callers retain the owner before the first wait. A veto takes no mutex and
              *       destroys no staged callable. It stops a running poll loop by detach, never a join, except at
-             *       process exit. It retains the facade owner, module references, and detours.
-             *       T-INPUT-LOADER proves this rule. A failed join retains the same owner set.
+             *       process exit. It retains the facade owner, module references, and detours. A failed join retains
+             *       the same owner set.
              * @note Callable from a binding callback. Such a call is asynchronous: is_running() reads false, callbacks
              *       already staged for the current cycle still complete, and the join, detour removal, and final
              *       on_state_change(false) run on a background retirement thread. If that thread cannot take the
@@ -582,9 +577,8 @@ namespace DetourModKit
              * @details A non-zero @ref ConsumeCapacity::rejected reports that the table bound left some eligible
              *          consume chords on the reactive mask alone. Every field reads zero whenever no engine is live.
              * @return The live occupancy.
-             * @note Callback-safe and allocation-free, but not lock-free: like every facade query it first takes an
-             *       atomic<shared_ptr> snapshot of the live poller, which is a bounded internal critical section on
-             *       both shipped toolchains. The occupancy itself is one relaxed atomic load.
+             * @note Callback-safe and allocation-free, but not lock-free. The facade query takes the bounded
+             *       atomic<shared_ptr> poller snapshot. The occupancy itself is one relaxed atomic load.
              */
             [[nodiscard]] ConsumeCapacity consume_capacity() const noexcept;
 
@@ -674,15 +668,14 @@ namespace DetourModKit
             Input(Input &&) = delete;
             Input &operator=(Input &&) = delete;
 
-            // Identity-keyed consume clear used by a consume binding's guard teardown. Not part of the public surface:
-            // callers address bindings by name, but a guard owns the exact registration and must clear it even when its
-            // name is empty (and therefore unresolvable through set_consume). Routes live-or-pending like set_consume.
+            // This identity-keyed consume clear supports a consume binding's guard teardown. A guard owns the exact
+            // registration and must clear it even when its name is empty. The function routes to the live or pending
+            // binding set, like set_consume.
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
-            // Retires the delivery gates of the selected bindings, live or pending, before the unload drain removes
-            // them. every_binding ignores binding_names and covers the whole engine. Returns false when a gate was
-            // still delivering at the deadline or the gate handles were not collectable (out-of-memory). The drain
-            // maps either to TimedOut because neither establishes that the callbacks are gone.
+            // Retires the delivery gates of the selected bindings before the unload drain removes them.
+            // every_binding covers the whole engine. Returns false when a gate remained active at the deadline or the
+            // gate handles were not collectable. The drain maps either result to TimedOut.
             [[nodiscard]] bool retire_gates_for_unload(
                 std::span<const std::string_view> binding_names,
                 bool every_binding,

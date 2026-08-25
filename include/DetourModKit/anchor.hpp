@@ -44,8 +44,7 @@ namespace DetourModKit
             CodeOperand,
             /**
              * @brief The instruction (or enclosing function) that references an immutable string literal, via
-             *        @ref scan::find_string_xref. The most update-resilient kind that anchors on in-image content; an
-             *        @ref ExportName is more resilient still where the target is a named export.
+             *        @ref scan::find_string_xref.
              */
             StringXref,
             /// A pinned literal with no backend; reported as at-risk because it cannot self-heal.
@@ -58,24 +57,19 @@ namespace DetourModKit
             CallArgHome,
             /**
              * @brief A corroborated value accepted only when at least N of M independent sub-anchors resolve and agree
-             *        (N-of-M voting). Corroboration survives a patch that breaks some of the M signals as long as N of
-             *        them still agree, which a single backend cannot.
+             *        (N-of-M voting).
              */
             Quorum,
             /**
              * @brief A named export resolved by walking its module's PE Export Address Table, via
-             *        @ref scan::resolve_export. The most update-resilient kind: an export name is a module's documented
-             *        ABI and survives a game patch better than any in-image byte, string, or address the other backends
-             *        key on. Uses @ref Anchor::export_name and the optional @ref Anchor::export_module (an empty module
-             *        resolves within the resolve scope).
+             *        @ref scan::resolve_export. Uses @ref Anchor::export_name and the optional
+             *        @ref Anchor::export_module (an empty module resolves within the resolve scope).
              */
             ExportName,
             /**
              * @brief No backend: the fail-closed default for an anchor whose @ref Anchor::kind was never set. An
-             *        aggregate table authored with designated initializers that omits @ref Anchor::kind lands here
-             *        rather than on a resolvable kind, so a misdeclared entry reports @ref AnchorStatus::Failed instead
-             *        of resolving as a trusted address 0. Declaring it is always a mistake; it exists so the mistake
-             *        fails safe.
+             *        aggregate table entry that omits the kind reports @ref AnchorStatus::Failed instead of a trusted
+             *        address 0.
              */
             Unset
         };
@@ -98,10 +92,8 @@ namespace DetourModKit
             ExactValue,
             /**
              * @brief Two member values agree when their gap is at most @ref Anchor::quorum_tolerance; a negative
-             *        tolerance fails closed (never accepts). Because a near-match is looser than an exact one, it is
-             *        confined to content-independent members (the fail-closed pairwise-independence gate all quorums
-             *        run), so a cluster of near values can never be an artifact of two members decoding adjacent bytes
-             *        of one site.
+             *        tolerance fails closed (never accepts). The pairwise-independence gate prevents a false
+             *        near-value cluster from two members that decode adjacent bytes.
              */
             WithinTolerance
         };
@@ -127,8 +119,8 @@ namespace DetourModKit
             QuorumNotIndependent,
             /**
              * @brief A quorum reached its threshold for two or more values that do not agree with each other, so no
-             *        single value is corroborated. Declaration order must not silently pick a winner, so the vote fails
-             *        closed rather than trusting whichever qualifying cluster happened to be listed first.
+             *        single value is corroborated. Declaration order must not silently pick a winner, so the vote
+             *        fails closed.
              */
             QuorumAmbiguous
         };
@@ -223,11 +215,9 @@ namespace DetourModKit
              *        the quorum closed rather than degrading to a single signal.
              * @details Vote semantics: each resolved member value is a candidate center, and a center qualifies when
              *          at least N resolved votes agree with it. Two qualified centers that disagree yield
-             *          @ref AnchorStatus::QuorumAmbiguous. Otherwise the vote commits the smallest qualified center.
-             *          Under @ref QuorumMatch::WithinTolerance agreement is measured against that center, so the
-             *          accepted members can span up to two tolerances.
-             *          AnchorTest.QuorumWithinToleranceCommitsTheCanonicalCenterForEveryMemberOrder proves the
-             *          commit is order-independent.
+             *          @ref AnchorStatus::QuorumAmbiguous. Otherwise the vote commits the smallest qualified center,
+             *          independent of member order. Under @ref QuorumMatch::WithinTolerance agreement is measured
+             *          against that center, so the accepted members can span up to two tolerances.
              */
             std::size_t quorum_threshold = 0;
             /// Quorum: how two resolved member values must relate for a vote to count them as agreeing.
@@ -236,14 +226,11 @@ namespace DetourModKit
             std::int64_t quorum_tolerance = 0;
 
             /**
-             * @brief RipGlobal: page-protection class the byte-tier ladder scans. Defaults to
-             *        @ref scan::Pages::Readable so a Direct rung resolving a plain global address in `.rdata` / `.data`
-             *        still matches. Set
-             *        @ref scan::Pages::Executable when every rung anchors on an in-image instruction (a RIP-relative
-             *        reference whose pattern is code), so a coincidental byte twin in a data page cannot alias the site
-             *        and demote a unique resolve to a fail-closed ambiguity. Ignored by CodeOperand, whose final
-             *        instruction site is always checked executable by @ref scan::read_code_constant, and by non-scan
-             *        kinds.
+             * @brief RipGlobal: page-protection class the byte-tier ladder scans. The @ref scan::Pages::Readable
+             *        default lets a Direct rung resolve a plain global in `.rdata` / `.data`. Set
+             *        @ref scan::Pages::Executable when every rung anchors on an in-image instruction. A byte twin in a
+             *        data page then cannot demote a unique resolve to a fail-closed ambiguity. Ignored by CodeOperand
+             *        and non-scan kinds.
              */
             scan::Pages pages = scan::Pages::Readable;
 
@@ -404,9 +391,8 @@ namespace DetourModKit
         /**
          * @enum GateVerdict
          * @brief The startup decision a drift report yields: enable, enable-with-caution, or safe-disable.
-         * @details Drift telemetry on its own only describes health; this is the verdict that lets a mod act on it --
-         *          turn a feature off before it runs on unverified addresses instead of logging the low quality and
-         *          patching the game's memory anyway.
+         * @details `[B-51]` The verdict lets a mod disable a feature before it uses unverified addresses. It prevents a
+         *          low-quality log followed by a game-memory patch.
          */
         enum class GateVerdict : std::uint8_t
         {
@@ -463,15 +449,12 @@ namespace DetourModKit
          * @return @ref GateVerdict::Fail when the report is below the threshold (safe-disable the feature), @ref
          *         GateVerdict::Degraded when it resolved but carries a soft risk, else @ref GateVerdict::Pass.
          * @details For feature-granular gating, gate a sub-span of a shared report. The ratio denominator excludes
-         *          the unsupported @ref AnchorKind::CallArgHome kind, which has no resolver, so a forward-compatible
-         *          kind never drags a healthy manifest below the threshold. Everything that could resolve but did
-         *          not, which covers a Failed anchor, a QuorumNotIndependent one, and an untouched Unresolved slot,
+         *          the unsupported @ref AnchorKind::CallArgHome kind, which has no resolver. Every resolvable entry
+         *          that did not resolve (a Failed anchor, a QuorumNotIndependent one, an untouched Unresolved slot)
          *          stays in the denominator, so a partial resolve fails closed. A report with nothing to assess is
          *          @ref GateVerdict::Degraded, never a false Pass. A hand-built @ref AnchorQuality whose status
-         *          counts exceed @ref AnchorQuality::total is internally inconsistent and fails closed to
-         *          @ref GateVerdict::Fail, so a caller cannot inflate the resolved count past a threshold.
-         *          Allocation-free and side-effect-free.
-         * @note Callback-safe: pure threshold arithmetic over @p quality.
+         *          counts exceed @ref AnchorQuality::total fails closed to @ref GateVerdict::Fail.
+         * @note Callback-safe: pure threshold arithmetic over @p quality, allocation-free and side-effect-free.
          */
         [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
 
@@ -591,14 +574,12 @@ namespace DetourModKit
          * @param anchor The anchor to fingerprint.
          * @return A 64-bit FNV-1a hash of the declarative inputs the backend uses.
          * @details The fingerprint excludes the resolved address, the cosmetic @ref Anchor::label, and the candidate
-         *          names, so it stays stable when only the address drifts. Persist it next to each resolved value.
-         *          A matching fingerprint with a moved value is expected drift that the anchor self-healed. A changed
-         *          fingerprint means that the signature itself was rewritten, and that entry needs a re-review. The
-         *          evidence is content-derived, so a byte tier hashes the compiled Pattern's bytes, mask, and decode
-         *          parameters, and the value stays stable across runs and builds on one platform. A Quorum combines
-         *          every member's evidence order-independently, because voting is symmetric, and folds in the
-         *          effective vote threshold, agreement mode, and tolerance. It reads only the declarative views,
-         *          resolves nothing, and allocates nothing.
+         *          names, so it stays stable when only the address drifts. Persist it next to each resolved value. A
+         *          moved value with the same fingerprint is self-healed drift. A changed fingerprint means that the
+         *          signature itself changed and needs a new review. A byte tier hashes the
+         *          compiled Pattern's bytes, mask, and decode parameters. A Quorum combines every member's evidence
+         *          order-independently and folds in the effective vote threshold, agreement mode, and tolerance. It
+         *          reads only the declarative views, resolves nothing, and allocates nothing.
          * @note Callback-safe: allocation-free and side-effect-free (see @ref anchor_trust_fingerprint).
          */
         [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
@@ -632,8 +613,7 @@ namespace DetourModKit
          *         executable pages (else a DataAddress), and a Quorum the single specific domain its members agree on
          *         (Unknown when they conflict, or for CallArgHome / Unset). @ref ResolvedAnchor::domain follows the
          *         live page class instead: a code-site kind committed at a non-executable address is stamped
-         *         @ref ResultDomain::DataAddress. AnchorDomainTest.ExportNameDomainFollowsResolvedPageClass proves the
-         *         downgrade. Allocation-free and side-effect-free.
+         *         @ref ResultDomain::DataAddress. Allocation-free and side-effect-free.
          */
         [[nodiscard]] ResultDomain declared_domain(const Anchor &anchor) noexcept;
 

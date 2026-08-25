@@ -41,11 +41,11 @@ jobs:
     # work is a cold MinGW install plus two -fsyntax-only header compiles, so 15 minutes is generous
     # headroom that still fails fast on a hang.
     timeout-minutes: 15
-    # Not advisory. DetourModKit is x86-64 (Win64) only by design (an Address is a 64-bit pointer;
-    # the scan / hook engines assume the x86-64 register file and instruction encodings). A
-    # regression that let a non-x64 target slip past the single defines.hpp #error -- or buried that
-    # one clear message under an engine static_assert cascade -- must fail the PR, so this job carries
-    # no continue-on-error, matching the header-encapsulation gate in quality.yml.
+    # This gate is not advisory. DetourModKit supports only x86-64 (Win64). Address stores a 64-bit pointer.
+    # The scan and hook engines assume the x86-64 register file and instruction encodings.
+    # This job rejects a non-x64 target that bypasses the defines.hpp #error.
+    # It also rejects an engine static_assert cascade that hides the clear error.
+    # The job has no continue-on-error, like the header-encapsulation gate in quality.yml.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,8 +86,8 @@ jobs:
         shell: powershell
 
       - name: Run x86-64 architecture-gate check
-        # Simulates a non-x86-64 target by clearing the compiler's __x86_64__ predefine and asserts
-        # translation halts at the single, human-readable defines.hpp #error -- never an opaque engine
-        # static_assert cascade -- while a native x64 syntax check of the same headers stays clean.
+        # Clear the compiler's __x86_64__ predefine to simulate a non-x86-64 target.
+        # Require the clear defines.hpp #error instead of an opaque engine static_assert cascade.
+        # Also require a clean native x64 syntax check of the same headers.
         run: bash scripts/check_arch_gate.sh
         shell: bash

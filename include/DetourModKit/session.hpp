@@ -3,11 +3,7 @@
 
 /**
  * @file session.hpp
- * @brief The process-lifecycle surface: the RAII Session, the ModInfo descriptor, and the DllMain bootstrap entry
- *        points that own a mod's process lifetime.
- * @note This header does not include <windows.h>. The Win32 module handle is exposed through the opaque
- *       DetourModKit::ModuleHandle alias. A consumer translation unit that needs <windows.h> for its own DllMain must
- *       include it directly.
+ * @brief Process-lifecycle surface: the RAII Session, the ModInfo descriptor, and the DllMain bootstrap entry points.
  */
 
 #include "DetourModKit/async_logger_config.hpp"
@@ -22,16 +18,15 @@
 #include <span>
 #include <string_view>
 
-// HMODULE is `struct HINSTANCE__ *`. Forward-declaring the incomplete tag exposes the module-handle type without
-// pulling <windows.h> into every consumer translation unit. A TU that also includes <windows.h> sees the identical
-// type, so a real HMODULE binds with no cast.
+// HMODULE is `struct HINSTANCE__ *`. The incomplete tag exposes the handle type without <windows.h>.
 struct HINSTANCE__;
 
 namespace DetourModKit
 {
     /**
-     * @brief Opaque Win32 module handle, identical to HMODULE (which is `struct HINSTANCE__ *`).
-     * @details Aliased so the public surface needs no <windows.h>; a real HMODULE binds to it with no cast.
+     * @brief Opaque Win32 module handle, identical to HMODULE.
+     * @details This header does not include <windows.h>, so a real HMODULE binds to this alias with no cast. A
+     *          consumer translation unit that needs <windows.h> for its own DllMain must include it directly.
      */
     using ModuleHandle = ::HINSTANCE__ *;
 
@@ -43,16 +38,12 @@ namespace DetourModKit
     /**
      * @struct ModInfo
      * @brief Identity, single-instance gating, process gating, and async-logger settings for a mod.
-     * @details Every entry copies or borrows each field before return. A ModInfo built from string literals suffices.
-     *          @p name also supplies the logger prefix and mod identity.
-     *
-     *          @p game_process_name, when non-empty, is compared (case-insensitive) against the running executable's
-     *          basename; a mismatch makes start() return ErrorCode::ProcessMismatch so the DLL can decline to load in
-     *          the wrong process. @p instance_mutex_prefix, when non-empty, creates a per-PID named mutex so a second
-     *          load of the same mod bails out with ErrorCode::InstanceAlreadyRunning.
-     *
-     *          There is no ini path here: the config registry is bind-then-load, so a mod loads its INI from on_ready
-     *          via session.ini().load(path) AFTER its binds exist.
+     * @details Every entry copies or borrows each field before return, so string literals suffice. @p name also
+     *          supplies the logger prefix and mod identity. A non-empty @p game_process_name must match the process
+     *          executable's basename (case-insensitive) or start() returns ErrorCode::ProcessMismatch. A non-empty
+     *          @p instance_mutex_prefix creates a per-PID named mutex, so a second load of the same mod fails with
+     *          ErrorCode::InstanceAlreadyRunning. There is no INI path here: the config registry is bind-then-load,
+     *          so load the INI from on_ready via session.ini().load(path) after the binds exist.
      */
     struct ModInfo
     {
@@ -70,39 +61,25 @@ namespace DetourModKit
 
     /**
      * @class Session
-     * @brief RAII owner of a mod's process lifetime: single-instance guard, logger configuration, its input binding
-     *        scope, and the correctly ordered teardown of every process-wide subsystem.
-     * @details Constructed two ways:
-     *
-     *          - Session::start(ModInfo): the synchronous, directly-held path. It runs the process gate, acquires the
-     *            single-instance mutex, and configures the logger, then returns a live Session by value.
-     *          - bootstrap_attach(ModInfo, on_ready): the hosted path. See its loader-boundary contract below.
-     *
-     *          Teardown ordering lives in exactly one place, the ~Session body: scope().clear() releases this
-     *          session's input bindings first (reverse insertion order), then the process-wide subsystems tear down
-     *          in reverse dependency order - the config auto-reload watcher, the input poll thread, the memory
-     *          cache, the config registry, and the logger LAST (every prior step may still log). Each subsystem
-     *          shutdown applies its own blocking-teardown gate: join when the caller is authorized and the
-     *          loader-lock probe does not veto, otherwise abandon and retain.
-     *
-     *          Hooks are NOT owned by the Session: each hook lives in a caller-held Hook handle and unhooks when that
-     *          handle drops.
-     *
-     * @note A Session is move-only. A moved-from (or abandon()ed) Session is inert: its destructor does nothing, so a
-     *       double-drop never double-tears-down. A mod DLL has one process lifetime, so only one Session is active at a
-     *       time. A second start() returns ErrorCode::SessionAlreadyActive. A second bootstrap entry returns the code
-     *       that identifies the current bootstrap slot owner. See bootstrap_attach().
+     * @brief RAII owner of a mod's process lifetime: single-instance guard, logger configuration, input binding scope,
+     *        and the ordered teardown of every process-wide subsystem.
+     * @details Session::start(ModInfo) is the synchronous, directly-held path. bootstrap_attach(ModInfo, on_ready) is
+     *          the hosted path. The ~Session body owns the teardown order. scope().clear() releases this
+     *          session's input bindings first, in reverse insertion order. The process-wide subsystems then tear down
+     *          in reverse dependency order. The order is the config auto-reload watcher, the input poll thread, the
+     *          memory cache, the config registry, and the logger. The logger stays last because every prior step can
+     *          still log. Each subsystem shutdown applies
+     *          its own teardown gate: join when the caller is authorized and the loader-lock probe does not
+     *          veto, otherwise abandon and retain. Hooks are not owned by the Session: each hook lives in a
+     *          caller-held Hook handle and unhooks when that handle drops.
+     * @note A Session is move-only. A moved-from or abandon()ed Session is inert: its destructor does nothing. One
+     *       Session is active at a time. A second start() returns ErrorCode::SessionAlreadyActive, and a second
+     *       bootstrap entry returns the code that identifies the current bootstrap slot owner.
      * @note Session::start, on_ready, ~Session, and abandon() run single-threaded on the init/teardown thread. Do not
      *       call them from a hook, an input callback, or a config-reload callback.
      * @warning `[B-100]` Run Session::start, ~Session, and active move-assignment off the loader lock. Teardown invokes
      *          consumer release callbacks and joins worker threads. A DllMain caller must route both phases through
      *          bootstrap_attach and bootstrap_detach. See abandon() for the process-termination-only escape.
-     *
-     *          These tests pin the routes:
-     *
-     *          - Lifecycle.StagedGenerationSoakReloadsWithFreshBytes pins the direct route.
-     *          - Lifecycle.BootstrapWorkerDrainedUnloads pins clean bootstrap teardown.
-     *          - Lifecycle.BootstrapProcessExitWithLiveWorker pins bootstrap process exit.
      */
     class Session
     {
@@ -114,8 +91,6 @@ namespace DetourModKit
          *         InstanceAlreadyRunning (a duplicate load holds the mutex), SessionAlreadyActive (a session already
          *         exists in this process), SystemCallFailed (a Win32 lifecycle operation failed; Error::detail =
          *         GetLastError()), OutOfMemory (setup threw std::bad_alloc), or Unknown (setup threw anything else).
-         *         Allocation failure and an unclassified throw are reported distinctly; a caller may retry the first
-         *         but not the second.
          * @note Setup/control-plane only. Each exception maps to a Result failure.
          * @warning See the class `[B-100]` loader-lock warning.
          */
@@ -181,14 +156,11 @@ namespace DetourModKit
     private:
         friend struct detail::SessionBootstrapAccess;
 
-        // Both start() and the bootstrap access bridge build the Session here, so the single-instance mutex is always
-        // Session-owned and released in exactly one place (~Session); @p instance_mutex is null when ModInfo requested
-        // no single-instance guard.
+        // start() and the bootstrap access bridge both build the Session here, so the single-instance mutex is
+        // Session-owned and released only in ~Session. @p instance_mutex is null when ModInfo requested no guard.
         explicit Session(void *instance_mutex) noexcept;
 
-        // The ordered teardown, factored out so ~Session and move-assignment (which must end the session it overwrites)
-        // share exactly one implementation. A no-op on an inert Session, and idempotent.
-        // See the class `[B-100]` loader-lock warning.
+        // The one ordered-teardown implementation shared by ~Session and move-assignment. Idempotent, inert-safe.
         void release() noexcept;
 
         // The mod's input bindings; cleared first in ~Session. Move-only, default-constructible: keeps Session movable.
@@ -205,26 +177,19 @@ namespace DetourModKit
 
     /**
      * @brief DllMain DLL_PROCESS_ATTACH entry point: publishes a minimal attach, then starts the Session on a worker.
-     * @details Auto-captures the calling module (DetourModKit links statically into the mod DLL, so its code address
-     *          resolves to the mod's HMODULE), calls DisableThreadLibraryCalls, performs the process and
-     *          single-instance gates without heap allocation, copies the logger inputs into fixed bootstrap storage,
-     *          and creates the shutdown event and worker. The worker cannot enter while the loader is delivering attach
-     *          notifications; once it runs it:
-     *            1. configures the logger and runs @p on_ready(session) off the loader lock (so it may allocate, load
-     *               INIs, install hooks, and register bindings into session.scope() freely),
-     *            2. blocks on the shutdown event until bootstrap_detach(), request_shutdown(), or shutdown_and_wait()
-     *               wakes it,
-     *            3. destroys the Session off the loader lock, so every subsystem leaf may join cleanly.
-     *
-     *          @p on_ready returns Result<void>. The worker logs an init failure as a value.
-     *
+     * @details Auto-captures the module that contains the call because DetourModKit links statically into the mod DLL.
+     *          It calls DisableThreadLibraryCalls and performs the process and single-instance gates without heap
+     *          allocation. It copies the logger inputs into fixed bootstrap storage and creates the shutdown event and
+     *          worker. The worker configures the logger and runs @p on_ready(session) off the loader lock. There it may
+     *          allocate, load INIs, install hooks, and register bindings into session.scope(). It then blocks on the
+     *          event until bootstrap_detach(), request_shutdown(), or shutdown_and_wait() wakes it, and destroys the
+     *          Session off the loader lock. The worker logs an @p on_ready failure as a value.
      * @param info Mod identity, gating, and async-logger settings.
      * @param on_ready Called once on the worker thread with the live Session. A null value registers no callback.
      * @return An empty Result once the worker is published, or ProcessMismatch, InstanceAlreadyRunning,
      *         SessionAlreadyActive, InvalidArg, SessionShutdownInProgress, SessionShutdownUnavailable, or
      *         SystemCallFailed. Pre-publication failures roll back the mutex and lifecycle slot.
      * @note The synchronous phase calls no logger, callback, or wait. No exception crosses the loader lock.
-     *       T-BOOTSTRAP proves this contract.
      * @note Setup/control-plane only: the DllMain attach entry point.
      */
     [[nodiscard]] Result<void> bootstrap_attach(const ModInfo &info, BootstrapReadyFn on_ready) noexcept;
@@ -244,23 +209,18 @@ namespace DetourModKit
 
     /**
      * @brief DllMain DLL_PROCESS_DETACH entry point. Routes by @p reserved (DllMain's lpvReserved).
-     * @details Two paths, both loader-lock-safe:
+     * @details Two paths, both loader-lock-safe (neither waits nor joins):
      *
-     *          - @p reserved == NULL (explicit FreeLibrary): publishes LoaderDetach and returns without waiting,
-     *            joining, or destroying callback state. The worker's counted module reference prevents a bare
-     *            FreeLibrary from reaching this notification while the worker remains active. A mod that needs a
-     *            guaranteed-drained unload must call shutdown_and_wait() before FreeLibrary.
+     *          - @p reserved == NULL (explicit FreeLibrary): publishes LoaderDetach and returns without a wait, join,
+     *            or callback-state destruction. The worker's counted module reference blocks this notification from
+     *            a bare FreeLibrary while the worker is live. A mod that needs a guaranteed-drained
+     *            unload must call shutdown_and_wait() before FreeLibrary.
      *          - @p reserved != NULL (process termination): the OS has already killed the worker, so this takes the
-     *            abandon path - no teardown, no unhook, no flush, no join. Handles are closed without waiting and the
-     *            OS reclaims the rest.
+     *            abandon path - no teardown, no unhook, no flush, no join.
      *
      *          Idempotent: subsequent calls are no-ops.
      * @param reserved DllMain's lpvReserved (NULL for FreeLibrary, non-NULL for process exit).
-     * @note Setup/control-plane only: call it solely from DllMain's DLL_PROCESS_DETACH path. Loader-lock-safe (it never
-     *       waits or joins under the loader lock). A bare FreeLibrary only drops the caller's module reference and does
-     *       not reach this notification while the worker is live. The final unload needs request_shutdown() or
-     *       shutdown_and_wait() first. Lifecycle.BootstrapBareFreeLibraryStaysMappedUntilSignaledShutdown proves the
-     *       bare-FreeLibrary path.
+     * @note Setup/control-plane only: call it solely from DllMain's DLL_PROCESS_DETACH path.
      */
     void bootstrap_detach(void *reserved) noexcept;
 

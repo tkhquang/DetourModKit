@@ -414,21 +414,12 @@ namespace DetourModKit
 
     namespace
     {
-        // Self-provided memchr over [haystack, haystack + n) for the anchor byte. Routing the prefilter through libc
-        // memchr works in release, but under AddressSanitizer the runtime interceptor inspects the whole range against
-        // ASan's shadow and reports a false overflow when the scanner walks this process's own committed, readable
-        // memory (the poisoned shadow around stack locals and instrumented globals). The runtime interceptor bypasses
-        // any no_sanitize_address attribute on the caller, so a per-function escape hatch is not enough: the function
-        // itself must do the byte comparisons.
-        //
-        // The needle search is tiered the same way the verify path is. The SSE2 body (16 bytes per iteration) is the
-        // x86-64 baseline and needs no runtime gate. The AVX2 body (32 bytes per iteration) is selected at runtime
-        // through the same cpu_has_avx2() gate the verify tier uses. Each SIMD body broadcasts the needle into every
-        // lane, compares a whole vector against it with one PCMPEQB, and collapses the per-byte result to a movemask
-        // bitmask. The first set bit in a nonzero mask gives the lane index of the first match, so the search keeps
-        // libc memchr's "lowest address wins" contract. A scalar byte loop finishes the sub-vector tail. None of the
-        // tiers call into libc, so the ASan interceptor never sees the read. The explicit intrinsics also use unaligned
-        // loads, so there is no type-punned qword load that clang-cl TBAA can miscompile.
+        // Self-provided memchr over [haystack, haystack + n) for the anchor byte. libc memchr works in release. ASan's
+        // runtime interceptor checks the whole range against shadow and reports a false overflow on this process's own
+        // committed memory. The interceptor bypasses no_sanitize_address on the caller, so the function itself must do
+        // the byte comparisons. The needle search uses the same tiers as the verify path: SSE2 baseline and AVX2 behind
+        // cpu_has_avx2(). It keeps libc memchr's "lowest address wins" contract and never calls into libc. Unaligned
+        // loads prevent a type-punned qword load that clang-cl TBAA can miscompile.
 
         /// Count-trailing-zeros over a known-nonzero movemask result; yields the first matching byte's lane index.
         inline unsigned dmk_movemask_first_index(unsigned int mask) noexcept
