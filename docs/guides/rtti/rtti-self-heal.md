@@ -192,7 +192,7 @@ auto registered = sched.add_group(
     // gate (optional): a cheap per-frame precondition. false -> skip silently, do NOT spend the interval.
     []() noexcept { return player_is_seated(); });
 
-// On the render thread, once per frame:
+// ... check registered, then on the render thread, once per frame:
 sched.tick();
 ```
 
