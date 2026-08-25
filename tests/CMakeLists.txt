@@ -416,7 +416,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.BootstrapWorkerStaysMapped
     Lifecycle.BootstrapAttachPerformsNoHeapSetup
     Lifecycle.BootstrapWorkerDrainedUnloads
-    Lifecycle.BootstrapBareFreeLibrarySelfDrains
+    Lifecycle.BootstrapBareFreeLibraryStaysMappedUntilSignaledShutdown
     Lifecycle.BootstrapProcessExitWithLiveWorker
     Lifecycle.DetachAfterDrainRevokesBlockingAuthorization
     Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex

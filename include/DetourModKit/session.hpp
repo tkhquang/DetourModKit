@@ -257,8 +257,10 @@ namespace DetourModKit
      *          Idempotent: subsequent calls are no-ops.
      * @param reserved DllMain's lpvReserved (NULL for FreeLibrary, non-NULL for process exit).
      * @note Setup/control-plane only: call it solely from DllMain's DLL_PROCESS_DETACH path. Loader-lock-safe (it never
-     *       waits or joins under the loader lock); best-effort on a bare FreeLibrary, where the worker drains
-     *       asynchronously.
+     *       waits or joins under the loader lock). A bare FreeLibrary only drops the caller's module reference and does
+     *       not reach this notification while the worker is live. The final unload needs request_shutdown() or
+     *       shutdown_and_wait() first. Lifecycle.BootstrapBareFreeLibraryStaysMappedUntilSignaledShutdown proves the
+     *       bare-FreeLibrary path.
      */
     void bootstrap_detach(void *reserved) noexcept;
 

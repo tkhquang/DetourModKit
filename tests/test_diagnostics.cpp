@@ -19,6 +19,9 @@
 #include "internal/lifecycle_reaper.hpp"
 #include "platform.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
 using DetourModKit::diagnostics::LeakSubsystem;
 namespace diag = DetourModKit::diagnostics;
@@ -173,6 +176,37 @@ TEST_F(DiagnosticsTest, ResetZeroesEverySubsystem)
 }
 
 // Diagnostic event bus: scanner-fault / hook-lifecycle dispatchers
+
+// [B-100] Diagnostics boundary. Counter queries and recorders touch only static atomics, so they stay heap-free under
+// the loader lock, while dispatcher subscription allocates and stays setup-tier.
+class DiagnosticsLoaderBoundary : public DiagnosticsTest
+{
+};
+
+TEST_F(DiagnosticsLoaderBoundary, CounterSurfaceIsAllocationFreeWhileSubscriptionIsSetupTier)
+{
+    (void)diag::scanner_faults();
+    (void)diag::hook_lifecycle();
+
+    long long counter_allocations = -1;
+    {
+        const dmk_test::ForcedLoaderProbe held;
+        const long long before = dmk_test::thread_new_calls();
+        diag::record_intentional_leak(LeakSubsystem::Logger);
+        (void)diag::intentional_leak_count(LeakSubsystem::Logger);
+        (void)diag::total_intentional_leaks();
+        (void)diag::module_pin_count(diag::ModulePinReason::Bootstrap);
+        (void)diag::total_module_pins();
+        (void)diag::lifecycle_counters();
+        counter_allocations = dmk_test::thread_new_calls() - before;
+    }
+    EXPECT_EQ(counter_allocations, 0LL) << "counters and recorders must stay heap-free under the loader lock";
+
+    const long long before_subscribe = dmk_test::thread_new_calls();
+    auto subscription = diag::scanner_faults().subscribe([](const diag::ScannerFaultEvent &) {});
+    const long long subscribe_allocations = dmk_test::thread_new_calls() - before_subscribe;
+    EXPECT_GT(subscribe_allocations, 0LL) << "subscription allocates, so it stays setup-tier";
+}
 
 TEST(DiagnosticsEventBusTest, ScannerFaultDispatcherIsStable)
 {

@@ -92,6 +92,41 @@ TEST(InputCodeTest, FactoryFunctions)
     EXPECT_EQ(wheel.code, WheelCode::Up);
 }
 
+// Both public spellings of every input-code constant name one value (input_codes.hpp file contract).
+TEST(InputCodeTest, UpperSnakeSpellingsNameTheSameValues)
+{
+    static_assert(GamepadCode::DPAD_UP == GamepadCode::DpadUp);
+    static_assert(GamepadCode::DPAD_DOWN == GamepadCode::DpadDown);
+    static_assert(GamepadCode::DPAD_LEFT == GamepadCode::DpadLeft);
+    static_assert(GamepadCode::DPAD_RIGHT == GamepadCode::DpadRight);
+    static_assert(GamepadCode::START == GamepadCode::Start);
+    static_assert(GamepadCode::BACK == GamepadCode::Back);
+    static_assert(GamepadCode::LEFT_STICK == GamepadCode::LeftStick);
+    static_assert(GamepadCode::RIGHT_STICK == GamepadCode::RightStick);
+    static_assert(GamepadCode::LEFT_BUMPER == GamepadCode::LeftBumper);
+    static_assert(GamepadCode::RIGHT_BUMPER == GamepadCode::RightBumper);
+    static_assert(GamepadCode::LEFT_TRIGGER == GamepadCode::LeftTrigger);
+    static_assert(GamepadCode::RIGHT_TRIGGER == GamepadCode::RightTrigger);
+    static_assert(GamepadCode::LEFT_STICK_UP == GamepadCode::LeftStickUp);
+    static_assert(GamepadCode::LEFT_STICK_DOWN == GamepadCode::LeftStickDown);
+    static_assert(GamepadCode::LEFT_STICK_LEFT == GamepadCode::LeftStickLeft);
+    static_assert(GamepadCode::LEFT_STICK_RIGHT == GamepadCode::LeftStickRight);
+    static_assert(GamepadCode::RIGHT_STICK_UP == GamepadCode::RightStickUp);
+    static_assert(GamepadCode::RIGHT_STICK_DOWN == GamepadCode::RightStickDown);
+    static_assert(GamepadCode::RIGHT_STICK_LEFT == GamepadCode::RightStickLeft);
+    static_assert(GamepadCode::RIGHT_STICK_RIGHT == GamepadCode::RightStickRight);
+    static_assert(GamepadCode::TRIGGER_THRESHOLD == GamepadCode::TriggerThreshold);
+    static_assert(GamepadCode::STICK_THRESHOLD == GamepadCode::StickThreshold);
+    static_assert(WheelCode::UP == WheelCode::Up);
+    static_assert(WheelCode::DOWN == WheelCode::Down);
+    static_assert(WheelCode::LEFT == WheelCode::Left);
+    static_assert(WheelCode::RIGHT == WheelCode::Right);
+
+    // A runtime witness so the case reports through ctest rather than only at compile time.
+    EXPECT_EQ(gamepad_button(GamepadCode::DPAD_UP), gamepad_button(GamepadCode::DpadUp));
+    EXPECT_EQ(mouse_wheel(WheelCode::UP), mouse_wheel(WheelCode::Up));
+}
+
 // Mouse-wheel name resolution
 
 TEST(WheelNameTest, ParseWheelNames)

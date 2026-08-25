@@ -89,6 +89,10 @@ namespace DetourModKit
          */
         std::string timestamp_format{};
 
+        /**
+         * @brief Reports whether every field satisfies its documented bound.
+         * @return true when queue_capacity is a power of two of at least 2 and each duration or count is positive.
+         */
         [[nodiscard]] constexpr bool validate() const noexcept
         {
             if (queue_capacity < 2 || (queue_capacity & (queue_capacity - 1)) != 0)

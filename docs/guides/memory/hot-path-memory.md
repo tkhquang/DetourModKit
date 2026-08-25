@@ -112,7 +112,7 @@ if (const auto slot = mem::walk(Address{base}, std::array<std::ptrdiff_t, 3>{0x1
 
 ## Writing in hot paths
 
-Writes follow the same rule as reads. A pointer the hook was handed is live by definition, so write through it directly (the anti-patterns below show why a gate on that write is pointless). A value written through a *resolved* address needs the same fault guard a read does. Such an address is a scanned base plus a pointer chain that can go stale between frames, and the terminal slot can be unmapped the instant the chain is wrong.
+Writes follow the same rule as reads. A pointer the hook was handed is live for the duration of that callback invocation, so write through it directly (the anti-patterns below show why a gate on that write is pointless). A value written through a *resolved* address needs the same fault guard a read does. Such an address is a scanned base plus a pointer chain that can go stale between frames, and the terminal slot can be unmapped the instant the chain is wrong.
 
 There are two guarded write families, split by what happens when the target is not already writable.
 
@@ -187,7 +187,7 @@ A top-level built-in array request returns the equivalent nested `std::array`, b
 
 | You have | You want | Use |
 |----------|----------|-----|
-| A pointer the hook was handed | To read or write it | Direct access. It is live by definition. Use a guarded `memory::read` only if it can be stale by the time you run. |
+| A pointer the hook was handed | To read or write it | Direct access. It is live for the current invocation. Use a guarded `memory::read` only if it can be stale by the time you run. |
 | A single address that can be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
 | A single address, a raw byte range | One range read that cannot fault | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
 | A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})`. `InvalidRepresentation` for a byte other than 0/1 |

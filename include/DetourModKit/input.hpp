@@ -8,6 +8,9 @@
  *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
  *          and the interception layer (one XInput hook plus one thread-scoped wheel message hook, shared per linked
  *          DMK instance).
+ * @warning `[B-100]` Run registration and Input::start() outside the loader lock. Registration allocates, and start()
+ *          creates the poll thread. The loader-lock shutdown path vetoes the join and detaches the thread.
+ *          `InputLoaderLock.*` pins the boundary.
  */
 
 #include "DetourModKit/error.hpp"

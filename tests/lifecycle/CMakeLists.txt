@@ -910,7 +910,7 @@ dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerDrainedUnloads
   COMMAND $<TARGET_FILE:bootstrap_module_ref> unload
   WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
   LABELS "lifecycle-proof")
-dmk_add_raw_proof(NAME Lifecycle.BootstrapBareFreeLibrarySelfDrains
+dmk_add_raw_proof(NAME Lifecycle.BootstrapBareFreeLibraryStaysMappedUntilSignaledShutdown
   COMMAND $<TARGET_FILE:bootstrap_module_ref> bare
   WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
   LABELS "lifecycle-proof")

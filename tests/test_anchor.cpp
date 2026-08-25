@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -1840,6 +1841,49 @@ TEST(AnchorTest, QuorumWithinToleranceRejectsDistantValues)
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+// With votes {0, 4, 8}, threshold 3, and tolerance 4, only center 4 has three votes in range. Check every member order
+// and the two-tolerance span.
+TEST(AnchorTest, QuorumWithinToleranceCommitsTheCanonicalCenterForEveryMemberOrder)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0x00, 0x00, 0x00, 0x00});       // add rax, 0x0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0x04, 0x00, 0x00, 0x00}); // add rcx, 0x4
+    page.put(0x180, {0x48, 0x81, 0xC2, 0x08, 0x00, 0x00, 0x00}); // add rdx, 0x8
+    const sc::Candidate site_a[] = {sc::Candidate::direct("add-rax", aob("48 05 00 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 04 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("add-rdx", aob("48 81 C2 08 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 1;
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::CodeOperand;
+    sub_c.site = site_c;
+    sub_c.operand_index = 1;
+
+    std::array<const an::Anchor *, 3> members{&sub_a, &sub_b, &sub_c};
+    std::sort(members.begin(), members.end());
+    do
+    {
+        an::Anchor quorum{};
+        quorum.kind = an::AnchorKind::Quorum;
+        quorum.quorum_members = std::span<const an::Anchor *const>{members};
+        quorum.quorum_threshold = 3;
+        quorum.quorum_match = an::QuorumMatch::WithinTolerance;
+        quorum.quorum_tolerance = 4;
+
+        const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+        EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+        EXPECT_EQ(result.value, 4);
+    } while (std::next_permutation(members.begin(), members.end()));
 }
 
 TEST(AnchorTest, QuorumRejectsNegativeTolerance)
