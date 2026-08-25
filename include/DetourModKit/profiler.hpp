@@ -8,6 +8,9 @@
  * @details Compiles to nothing unless DMK_ENABLE_PROFILING is defined (directly, or through -DDMK_ENABLE_PROFILING=ON).
  *          When enabled, scoped measurements land in a fixed-capacity lock-free ring and export as Chrome Tracing JSON
  *          (chrome://tracing, https://ui.perfetto.dev).
+ * @warning `[B-100]` Run first use of Profiler::get_instance() and the export routes outside the loader lock. First
+ *          use allocates the ring. The export routes can allocate, and export_to_file() writes a file. A warm record()
+ *          is allocation-free from any thread. `ProfilerLoaderBoundary.*` pins the boundary.
  */
 
 #include "DetourModKit/detail/profile_ring.hpp"

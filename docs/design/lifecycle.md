@@ -25,6 +25,9 @@ Every such leak must meet these terms:
 - `ConfigWatcherLoaderLockTest.*` pins the config watcher boundary.
 - `LoggerTest.LoaderLock*` pins the logger boundary.
 - `AsyncLoggerTest.*LoaderLock*` pins the asynchronous logger boundary.
+- `FilesystemLoaderBoundary.*` pins the filesystem boundary.
+- `ProfilerLoaderBoundary.*` pins the profiler boundary.
+- `DiagnosticsLoaderBoundary.*` pins the diagnostics boundary.
 - `WheelHostProof.*` pins the WheelHost install, drain, and stop boundary.
 - `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` pins the Session direct route.
 - `Lifecycle.BootstrapWorkerDrainedUnloads` pins clean Session bootstrap teardown.

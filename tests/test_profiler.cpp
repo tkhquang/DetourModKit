@@ -2,6 +2,9 @@
 
 #include "DetourModKit/profiler.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 #include <windows.h>
 #include <atomic>
 #include <charconv>
@@ -105,6 +108,31 @@ TEST(ProfilerTest, RecordDoesNotDropWithoutContention)
     profiler.record("uncontended", 0, 10, 1);
     EXPECT_EQ(profiler.dropped_samples(), 0u);
     EXPECT_EQ(profiler.available_samples(), 1u);
+    profiler.reset();
+}
+
+// [B-100] Profiler boundary. After first use constructs the instance and its ring, record() is allocation-free from
+// any thread, while the export routes allocate and stay setup-tier.
+TEST(ProfilerLoaderBoundary, WarmRecordIsAllocationFreeWhileExportAllocates)
+{
+    auto &profiler = Profiler::get_instance();
+    profiler.reset();
+
+    long long record_allocations = -1;
+    {
+        const dmk_test::ForcedLoaderProbe held;
+        const long long before = dmk_test::thread_new_calls();
+        profiler.record("loader-boundary", 0, 10, 1);
+        record_allocations = dmk_test::thread_new_calls() - before;
+    }
+    EXPECT_EQ(record_allocations, 0LL) << "record() must stay heap-free under the loader lock";
+    EXPECT_EQ(profiler.available_samples(), 1u);
+
+    const long long before_export = dmk_test::thread_new_calls();
+    const std::string json = profiler.export_chrome_json();
+    const long long export_allocations = dmk_test::thread_new_calls() - before_export;
+    EXPECT_GT(export_allocations, 0LL) << "export allocates, so it stays setup-tier";
+    EXPECT_NE(json, "[]");
     profiler.reset();
 }
 

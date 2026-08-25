@@ -6,7 +6,8 @@
  * @brief Unified input code types for keyboard, mouse, and gamepad inputs.
  * @details Provides a tagged InputCode type that identifies both the device source and button/key code, along with
  *          named key resolution for human-readable configuration strings. Gamepad codes correspond to XInput button
- *          masks.
+ *          masks. Each PascalCase constant in GamepadCode and WheelCode also has an UPPER_SNAKE_CASE spelling with
+ *          the same value. Both spellings are public API.
  */
 
 #include <cstdint>
@@ -167,6 +168,30 @@ namespace DetourModKit
          * @details Matches XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE (7849).
          */
         inline constexpr int StickThreshold = 7849;
+
+        // UPPER_SNAKE_CASE spellings of the constants above (A, B, X, Y are identical in both spellings).
+        inline constexpr int DPAD_UP = DpadUp;
+        inline constexpr int DPAD_DOWN = DpadDown;
+        inline constexpr int DPAD_LEFT = DpadLeft;
+        inline constexpr int DPAD_RIGHT = DpadRight;
+        inline constexpr int START = Start;
+        inline constexpr int BACK = Back;
+        inline constexpr int LEFT_STICK = LeftStick;
+        inline constexpr int RIGHT_STICK = RightStick;
+        inline constexpr int LEFT_BUMPER = LeftBumper;
+        inline constexpr int RIGHT_BUMPER = RightBumper;
+        inline constexpr int LEFT_TRIGGER = LeftTrigger;
+        inline constexpr int RIGHT_TRIGGER = RightTrigger;
+        inline constexpr int LEFT_STICK_UP = LeftStickUp;
+        inline constexpr int LEFT_STICK_DOWN = LeftStickDown;
+        inline constexpr int LEFT_STICK_LEFT = LeftStickLeft;
+        inline constexpr int LEFT_STICK_RIGHT = LeftStickRight;
+        inline constexpr int RIGHT_STICK_UP = RightStickUp;
+        inline constexpr int RIGHT_STICK_DOWN = RightStickDown;
+        inline constexpr int RIGHT_STICK_LEFT = RightStickLeft;
+        inline constexpr int RIGHT_STICK_RIGHT = RightStickRight;
+        inline constexpr int TRIGGER_THRESHOLD = TriggerThreshold;
+        inline constexpr int STICK_THRESHOLD = StickThreshold;
     } // namespace GamepadCode
 
     /**
@@ -181,6 +206,12 @@ namespace DetourModKit
         inline constexpr int Down = 2;
         inline constexpr int Left = 3;
         inline constexpr int Right = 4;
+
+        // UPPER_SNAKE_CASE spellings of the constants above.
+        inline constexpr int UP = Up;
+        inline constexpr int DOWN = Down;
+        inline constexpr int LEFT = Left;
+        inline constexpr int RIGHT = Right;
     } // namespace WheelCode
 
     /**

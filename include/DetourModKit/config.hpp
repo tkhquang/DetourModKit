@@ -18,6 +18,9 @@
  *       whole read + content-hash + setter phase. load(), reload(), and disable_auto_reload() called by a bound
  *       setter are refused rather than allowed to deadlock. clear() is also refused except on the reload-servicer
  *       thread.
+ * @warning `[B-100]` Run load(), reload(), registration, and enable_auto_reload() outside the loader lock. These
+ *          routes allocate, and enable_auto_reload() creates the watcher thread. The loader-lock teardown path
+ *          detaches the watcher without a wait. `ConfigWatcherLoaderLockTest.*` pins the boundary.
  */
 
 #include "DetourModKit/input.hpp"

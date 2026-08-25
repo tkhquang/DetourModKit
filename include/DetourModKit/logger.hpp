@@ -8,6 +8,9 @@
  *          free log() returns the process-default instance. Formatted records auto-stamp their call site through
  *          LocatedFormat. Logging is FAIL-SOFT: a dropped or filtered line is a best-effort bool, never a Result. The
  *          async transport stays behind the AsyncLogger pimpl.
+ * @warning `[B-100]` Run Logger construction, first use of log(), and enable_async_mode() outside the loader lock.
+ *          These routes allocate. enable_async_mode() can create the writer thread. The loader-lock teardown path
+ *          detaches the writer without a wait. `LoggerTest.LoaderLock*` pins the boundary.
  */
 
 #include "DetourModKit/async_logger_config.hpp"
