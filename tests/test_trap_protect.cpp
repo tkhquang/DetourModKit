@@ -42,6 +42,7 @@ namespace DetourModKit::detail
     void set_backend_trap_segment_restore_failure_target_for_test(void *segment_address) noexcept;
     [[nodiscard]] std::size_t backend_trap_restore_trace_size_for_test() noexcept;
     [[nodiscard]] void *backend_trap_restore_trace_address_for_test(std::size_t index) noexcept;
+    [[nodiscard]] void *backend_non_executable_transaction_marker_for_test() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -319,5 +320,82 @@ TEST(TrapProtect, SharedPageChangesAndRestoresOnce)
     EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);
     EXPECT_EQ(calls_after - calls_before, 2U);
     EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_EXECUTE_READ));
+}
+
+TEST(TrapProtect, RefusesMultiBytePatchWhenTheTransactionCodePageMustStayExecutable)
+{
+    ScratchTrampoline trampoline;
+    ASSERT_TRUE(trampoline.ok());
+    const SeamGuard guard;
+    void *const marker = DetourModKit::detail::backend_non_executable_transaction_marker_for_test();
+    ASSERT_NE(marker, nullptr);
+
+    bool mutation_ran = false;
+    const std::size_t calls_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
+    const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
+        marker,
+        trampoline.base(),
+        PATCH_LEN,
+        [&] { mutation_ran = true; }
+    );
+    const std::size_t calls_after = DetourModKit::detail::backend_trap_protect_calls_for_test();
+
+    EXPECT_EQ(outcome, TrapTransactionOutcome::ReportedFailure);
+    EXPECT_FALSE(mutation_ran);
+    EXPECT_EQ(calls_after, calls_before);
+}
+
+TEST(TrapProtect, PreservesSingleByteTransactionOnTheRequiredCodePage)
+{
+    ScratchTrampoline trampoline;
+    ASSERT_TRUE(trampoline.ok());
+    const SeamGuard guard;
+    void *const marker = DetourModKit::detail::backend_non_executable_transaction_marker_for_test();
+    ASSERT_NE(marker, nullptr);
+
+    bool mutation_ran = false;
+    const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
+        marker,
+        trampoline.base(),
+        1,
+        [&] { mutation_ran = true; }
+    );
+
+    EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);
+    EXPECT_TRUE(mutation_ran);
+}
+
+TEST(TrapProtect, RefusesMultiBytePatchOnTheWindowFlushCodePages)
+{
+    // The backend guards the addresses its own dllimport thunks resolve to: the real kernel32 exports. Taking
+    // &FlushInstructionCache in this TU yields a local jump thunk on a different page, so the guarded address is
+    // resolved by name to match what trap_threads holds in required_code.
+    HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    ASSERT_NE(kernel32, nullptr);
+    void *const flush_code = reinterpret_cast<void *>(::GetProcAddress(kernel32, "FlushInstructionCache"));
+    void *const process_code = reinterpret_cast<void *>(::GetProcAddress(kernel32, "GetCurrentProcess"));
+    ASSERT_NE(flush_code, nullptr);
+    ASSERT_NE(process_code, nullptr);
+
+    ScratchTrampoline trampoline;
+    ASSERT_TRUE(trampoline.ok());
+    const SeamGuard guard;
+
+    for (void *const window_code : {flush_code, process_code})
+    {
+        bool mutation_ran = false;
+        const std::size_t calls_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
+        const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
+            window_code,
+            trampoline.base(),
+            PATCH_LEN,
+            [&] { mutation_ran = true; }
+        );
+        const std::size_t calls_after = DetourModKit::detail::backend_trap_protect_calls_for_test();
+
+        EXPECT_EQ(outcome, TrapTransactionOutcome::ReportedFailure);
+        EXPECT_FALSE(mutation_ran);
+        EXPECT_EQ(calls_after, calls_before);
+    }
 }
 #endif // DMK_ENABLE_TEST_SEAMS
