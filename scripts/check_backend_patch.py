@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "76d2c01ab8e8c53b130e14a1f2675b9230591a59103c2e0505061c7a23291d74"
+EXPECTED_PATCH_SHA256 = "020125d09d358785259c1a9f40da1b3e9973d13604614a5ca53f30c2cd5f5669"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -179,13 +179,25 @@ PROTECTION_TRANSACTION_SENTINELS = [
     "for (size_t i = changed; i-- > 0;)",
     "for (size_t i = segment_count; i-- > 0;)",
     "bool all_restored",
-    "overlaps_virtual_protect(to_page_start",
+    "overlaps_page(to_page_start",
     "g_trap_change_failure_override",
     "g_trap_segment_restore_failure_override",
     "trap_restore_trace_address_for_test",
 ]
 
 REQUIRED_SENTINELS += PROTECTION_TRANSACTION_SENTINELS
+
+PR2_SENTINELS = [
+    "vm_flush_instruction_cache(m_trampoline.data()",  # generated inline code flushes before publication
+    "vm_flush_instruction_cache(m_route_gateway.data()",  # routed code flushes before unwind publication
+    "vm_flush_instruction_cache(m_stub.data()",  # generated mid code flushes after its final pointer stores
+    "vm_flush_instruction_cache(m_target",  # target commits flush inside the protection transaction
+    "std::vector<InstructionBoundary>",  # E9 setup retains one original-to-trampoline boundary map
+    "boundary.trampoline_offset",  # relocation and trap redirection consume the completed map
+    "NON_EXECUTABLE_TRANSACTION_UNAVAILABLE",  # unsafe multi-byte transactions refuse before protection changes
+]
+
+REQUIRED_SENTINELS += PR2_SENTINELS
 
 # The VMT move constructor can allocate on MSVC and must propagate that failure.
 VMT_SENTINELS = ["VmtHook(VmtHook&& other);"]

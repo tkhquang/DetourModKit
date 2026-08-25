@@ -39,6 +39,23 @@ namespace DetourModKit::detail
     void set_backend_reprotect_failure_target(void *target) noexcept;
     void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
     [[nodiscard]] std::size_t backend_toggle_exception_catches_for_test() noexcept;
+    [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+    struct BackendInstructionFlushObservation
+    {
+        void *address;
+        std::size_t size;
+        std::size_t protect_calls_before;
+        bool succeeded;
+    };
+    void reset_backend_instruction_flush_trace_for_test() noexcept;
+    void set_backend_instruction_flush_failure_call_for_test(std::size_t call) noexcept;
+    [[nodiscard]] std::size_t backend_instruction_flush_trace_size_for_test() noexcept;
+    [[nodiscard]] BackendInstructionFlushObservation
+    backend_instruction_flush_trace_for_test(std::size_t index) noexcept;
+    void force_backend_ff_hook_for_test(bool force) noexcept;
+    [[nodiscard]] std::size_t backend_instruction_boundary_trace_size_for_test() noexcept;
+    [[nodiscard]] std::array<std::size_t, 2> backend_instruction_boundary_trace_for_test(std::size_t index) noexcept;
+    [[nodiscard]] std::uint8_t backend_last_inline_error_type_for_test() noexcept;
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
     extern void (*g_hook_backend_disable_probe)() noexcept;
     extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
@@ -57,6 +74,8 @@ namespace
     using DetourModKit::hook::mid_at;
     using DetourModKit::hook::MidContext;
     using DetourModKit::hook::MidRequest;
+    using DetourModKit::hook::Options;
+    using DetourModKit::hook::Prologue;
 
     using LeafFn = int (*)();
 
@@ -914,6 +933,172 @@ namespace
 } // namespace
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+
+TEST(HookBackendCacheFlush, GeneratedE9FfRouteAndMidRangesFlushBeforePublication)
+{
+    dmk_test::ScratchPage e9_page;
+    ASSERT_TRUE(e9_page.ok());
+    plant_leaf(e9_page);
+    DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+    Result<Hook> e9_installed = install_leaf(e9_page, "CacheFlushE9");
+    ASSERT_TRUE(e9_installed.has_value()) << e9_installed.error().message();
+    Hook e9_hook = std::move(*e9_installed);
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 1U);
+    const auto e9_flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(0);
+    EXPECT_EQ(e9_flush.address, reinterpret_cast<void *>(e9_hook.original<LeafFn>()));
+    EXPECT_GT(e9_flush.size, 0U);
+    EXPECT_TRUE(e9_flush.succeeded);
+
+    dmk_test::ScratchPage ff_page;
+    ASSERT_TRUE(ff_page.ok());
+    plant_leaf(ff_page);
+    DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+    DetourModKit::detail::force_backend_ff_hook_for_test(true);
+    Result<Hook> ff_installed = install_leaf(ff_page, "CacheFlushFF");
+    ASSERT_TRUE(ff_installed.has_value()) << ff_installed.error().message();
+    Hook ff_hook = std::move(*ff_installed);
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 1U);
+    const auto ff_flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(0);
+    EXPECT_EQ(ff_flush.address, reinterpret_cast<void *>(ff_hook.original<LeafFn>()));
+    EXPECT_GT(ff_flush.size, e9_flush.size);
+    EXPECT_TRUE(ff_flush.succeeded);
+
+    dmk_test::ScratchPage mid_page;
+    ASSERT_TRUE(mid_page.ok());
+    plant_leaf(mid_page);
+    DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+    Result<Hook> mid_installed = install_mid_leaf(mid_page, "CacheFlushMid");
+    ASSERT_TRUE(mid_installed.has_value()) << mid_installed.error().message();
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 3U);
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        const auto flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(i);
+        EXPECT_NE(flush.address, nullptr);
+        EXPECT_GT(flush.size, 0U);
+        EXPECT_TRUE(flush.succeeded);
+    }
+}
+
+TEST(HookBackendCacheFlush, TargetCommitFlushesBeforeProtectionRestoreInBothDirections)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = install_leaf(page, "CacheFlushCommitOrder");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+
+    const auto verify_commit = [&](const auto &toggle)
+    {
+        DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+        const std::size_t protects_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
+        ASSERT_TRUE(toggle().has_value());
+        const std::size_t protects_after = DetourModKit::detail::backend_trap_protect_calls_for_test();
+        ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 1U);
+        const auto flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(0);
+        EXPECT_EQ(flush.address, reinterpret_cast<void *>(page.addr(0)));
+        EXPECT_GT(flush.size, 0U);
+        EXPECT_TRUE(flush.succeeded);
+        EXPECT_GT(flush.protect_calls_before, protects_before);
+        EXPECT_LT(flush.protect_calls_before, protects_after);
+    };
+
+    verify_commit([&hook] { return hook.enable(); });
+    verify_commit([&hook] { return hook.disable(); });
+}
+
+TEST(HookBackendCacheFlush, GenerationFailureRefusesEveryExecutableRangeBeforePublication)
+{
+    const auto verify_refusal = [](const char *name, bool mid, bool force_ff, std::size_t failure_call)
+    {
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+        DetourModKit::detail::force_backend_ff_hook_for_test(force_ff);
+        DetourModKit::detail::set_backend_instruction_flush_failure_call_for_test(failure_call);
+
+        Result<Hook> installed = mid ? install_mid_leaf(page, name) : install_leaf(page, name);
+        EXPECT_FALSE(installed.has_value());
+        ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), failure_call);
+        for (std::size_t i = 0; i + 1 < failure_call; ++i)
+        {
+            EXPECT_TRUE(DetourModKit::detail::backend_instruction_flush_trace_for_test(i).succeeded);
+        }
+        EXPECT_FALSE(DetourModKit::detail::backend_instruction_flush_trace_for_test(failure_call - 1).succeeded);
+        EXPECT_EQ(call_target(page), LEAF_RESULT);
+    };
+
+    verify_refusal("CacheFlushE9Failure", false, false, 1);
+    verify_refusal("CacheFlushFFFailure", false, true, 1);
+    verify_refusal("CacheFlushRouteFailure", true, false, 2);
+    verify_refusal("CacheFlushMidFailure", true, false, 3);
+}
+
+TEST(HookBackendCacheFlush, RestoreFailureOutranksACommittedFlushFailure)
+{
+    dmk_test::ScratchPage flush_page;
+    ASSERT_TRUE(flush_page.ok());
+    plant_leaf(flush_page);
+    Result<Hook> flush_installed = install_leaf(flush_page, "CacheFlushFailureType");
+    ASSERT_TRUE(flush_installed.has_value()) << flush_installed.error().message();
+    Hook flush_hook = std::move(*flush_installed);
+    DetourModKit::detail::set_backend_instruction_flush_failure_call_for_test(1);
+    EXPECT_FALSE(flush_hook.enable().has_value());
+    const std::uint8_t flush_error_type = DetourModKit::detail::backend_last_inline_error_type_for_test();
+    ASSERT_TRUE(flush_hook.is_enabled());
+    DetourModKit::detail::set_backend_instruction_flush_failure_call_for_test(1);
+    EXPECT_FALSE(flush_hook.disable().has_value());
+    EXPECT_FALSE(flush_hook.is_enabled());
+    EXPECT_EQ(call_target(flush_page), LEAF_RESULT);
+
+    dmk_test::ScratchPage restore_page;
+    ASSERT_TRUE(restore_page.ok());
+    plant_leaf(restore_page);
+    Result<Hook> restore_installed = install_leaf(restore_page, "CacheFlushRestorePrecedence");
+    ASSERT_TRUE(restore_installed.has_value()) << restore_installed.error().message();
+    Hook restore_hook = std::move(*restore_installed);
+    DetourModKit::detail::set_backend_instruction_flush_failure_call_for_test(1);
+    DetourModKit::detail::set_backend_reprotect_failure_target(reinterpret_cast<void *>(restore_page.addr(0)));
+    EXPECT_FALSE(restore_hook.enable().has_value());
+    DetourModKit::detail::set_backend_reprotect_failure_target(nullptr);
+    const std::uint8_t combined_error_type = DetourModKit::detail::backend_last_inline_error_type_for_test();
+    EXPECT_NE(combined_error_type, flush_error_type);
+    EXPECT_TRUE(restore_hook.is_enabled());
+    EXPECT_TRUE(restore_hook.disable().has_value());
+}
+
+TEST(HookBackendRelocation, TwoWidenedShortBranchesUseTheCompletedBoundaryMap)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0, {0xEB, 0x02, 0xEB, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
+
+    Result<Hook> installed = inline_at(
+        InlineRequest{
+            .name = "TwoWidenedShortBranches",
+            .target = Address{page.addr(0)},
+            .options = Options{.prologue = Prologue::Relocate},
+        },
+        reinterpret_cast<void (*)()>(&detour_leaf)
+    );
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_boundary_trace_size_for_test(), 3U);
+    EXPECT_EQ(DetourModKit::detail::backend_instruction_boundary_trace_for_test(0), (std::array<std::size_t, 2>{0, 0}));
+    EXPECT_EQ(DetourModKit::detail::backend_instruction_boundary_trace_for_test(1), (std::array<std::size_t, 2>{2, 5}));
+    EXPECT_EQ(
+        DetourModKit::detail::backend_instruction_boundary_trace_for_test(2),
+        (std::array<std::size_t, 2>{4, 10})
+    );
+
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    const Result<int> original = hook.try_call<int>();
+    ASSERT_TRUE(original.has_value()) << original.error().message();
+    EXPECT_EQ(*original, LEAF_RESULT);
+    EXPECT_TRUE(hook.disable().has_value());
+}
 
 TEST(HookTogglePublicationOrder, StateAndPopulationChangeBeforeCallGateUnlock)
 {
