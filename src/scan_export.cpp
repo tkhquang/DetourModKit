@@ -1,26 +1,12 @@
 /**
  * @file scan_export.cpp
  * @brief The named-export resolver: maps a module + export name to an address by walking the PE Export Address Table.
- * @details A named export is the most update-resilient anchor a mod can hold. The export table is a module's documented
- *          ABI, so an exported name survives a game patch far better than the code bytes, string literals, or absolute
- *          addresses a byte scan keys on: an internal function may move or be rewritten every build, but an exported
- *          entry point keeps its name across versions.
- *
- *          The walk is deterministic and loader-free. It parses the mapped image's own IMAGE_EXPORT_DIRECTORY rather
- *          than calling GetProcAddress, so it never invokes the loader, never triggers a DllMain, and resolves from a
- *          module range alone - the same self-healing contract the other scan backends share. Every RVA is
- *          bound-checked against the image before it is dereferenced and every read goes through the guarded
- *          (fault-trapping) path, so a truncated or hostile export section yields a fail-closed Error rather than a
- *          host fault or an out-of-image read. Forwarded exports (whose function RVA points back inside the export
- *          directory, naming another DLL's symbol as an ASCII string instead of code here) are rejected rather than
- *          returned. The test is whether a function RVA lands inside the export directory's own
- *          [VirtualAddress, VirtualAddress + Size) window, the same range check the Windows loader uses to classify a
- *          forwarder, so any forwarder a module actually declares is never handed back as a code anchor to hook or
- *          read through.
- *
- *          The walk lives in `detail::resolve_export_with_provenance` and the public entry point is a thin wrapper,
- *          because the address alone cannot answer whether two names reached one function: only the slot and RVA the
- *          walk actually read can. See internal/export_resolution.hpp.
+ * @details The walk parses the mapped image's own IMAGE_EXPORT_DIRECTORY. It never calls GetProcAddress, enters the
+ *          loader, or triggers DllMain. It bound-checks every RVA and reads through the guarded path. scan.hpp's
+ *          resolve_export owns the public contract. A forwarder is classified by the loader's own range check: a
+ *          function RVA inside the export directory's [VirtualAddress, VirtualAddress + Size) window. The walk lives
+ *          in `detail::resolve_export_with_provenance`. The public entry point is a thin wrapper because only the walk
+ *          knows the slot and RVA that resolved a name.
  */
 
 #include "DetourModKit/scan.hpp"

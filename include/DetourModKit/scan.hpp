@@ -60,9 +60,8 @@ namespace DetourModKit::scan
          * @brief Compiles a runtime AOB DSL string.
          * @param dsl The whitespace-separated pattern, e.g. "48 8B 05 ?? ?? ?? ??".
          * @return A Pattern on success, or Error{ErrorCode::BadPattern} when the string is malformed/empty/over-cap.
-         * @details Never undefined behaviour on bad input: a parse failure becomes a recoverable Error. The specific
-         *          parse status is stashed in the Error's extra slot so a caller can distinguish, for example, an
-         *          over-long pattern from an invalid token without the resolver surface growing more error codes.
+         * @details Never undefined behaviour on bad input: a parse failure becomes a recoverable Error, with the
+         *          specific parse status in the Error's extra slot.
          * @note Setup/control-plane only: compile patterns at init, not inside a hot callback.
          */
         [[nodiscard]] static Result<Pattern> compile(std::string_view dsl)
@@ -81,11 +80,8 @@ namespace DetourModKit::scan
          * @brief Compiles an in-source AOB DSL literal at compile time.
          * @param dsl A constant-expression pattern string.
          * @return The compiled Pattern by value.
-         * @details consteval, so a malformed literal is a compile error rather than a runtime Result to deref. On any
-         *          non-Ok parse status the throw below is evaluated during constant evaluation, which makes the call a
-         *          non-constant expression and fails the build at the offending literal site. A valid literal never
-         *          reaches the throw and compiles to a plain Pattern value, keeping hard-coded candidate ladders
-         *          constexpr-friendly.
+         * @details consteval, so a malformed literal causes a compile error at that literal. The throw below becomes a
+         *          non-constant expression during constant evaluation, instead of a runtime Result to deref.
          * @note Compile-time only: consteval, so it runs during compilation and has no runtime call site to classify.
          */
         [[nodiscard]] static consteval Pattern literal(std::string_view dsl)
@@ -159,7 +155,6 @@ namespace DetourModKit::scan
          * @return True only when the bounded search finds a complete placement at the window start.
          *         It returns false when the search finds no placement or exhausts its per-position budget before it
          *         checks every candidate placement. A false result is not proof of absence.
-         *         PatternJumps.MatchesAtBudgetExhaustionIsFailClosed pins the exhausted case.
          * @details A byte agrees when (memory ^ pattern) & mask is zero. A mask of 0x00 accepts every byte.
          *          Masks 0xF0 and 0x0F compare only the fixed nibble. The search tries gaps from smallest to largest.
          * @note Callback-safe: the bounded search allocates no memory, performs no I/O, and takes no lock.
@@ -196,12 +191,9 @@ namespace DetourModKit::scan
     /**
      * @enum Pages
      * @brief Which page-protection class a page-gated scan accepts.
-     * @details A scan over arbitrary process memory must walk the OS page map and skip pages it cannot safely read.
-     *          This flag selects how wide that acceptance is. Readable accepts every committed readable page (.text +
-     *          .rdata / .data + read-only heaps), so one pass covers both code and data candidates. Executable narrows
-     *          to committed execute-readable code pages only, which is the correct, lower-false-positive choice when a
-     *          signature must land on code (a function prologue, an instruction site); a match in a data page is then
-     *          a coincidence the narrower gate rejects outright.
+     * @details Readable accepts every committed readable page, so one pass covers both code and data candidates.
+     *          Executable narrows to committed execute-readable code pages only, the lower-false-positive choice when
+     *          a signature must land on code.
      */
     enum class Pages : std::uint8_t
     {
@@ -331,11 +323,9 @@ namespace DetourModKit::scan
      * @struct StringRefQuery
      * @brief A string-reference anchor query, with the string text borrowed for the duration of the call.
      * @details Anchors a target on an immutable string literal in the image's read-only data, then resolves the unique
-     *          RIP-relative reference to it. Strings survive game updates far better than the code bytes around them,
-     *          so a string xref is the most update-resilient anchor source. @ref text is a non-owning view into caller
-     *          storage; this query is for the immediate find_string_xref() call. A stored string-xref Candidate owns
-     *          its literal independently (see Candidate::string_xref) and rebuilds a view of this shape at resolve
-     *          time.
+     *          RIP-relative reference to it. @ref text is a non-owning view into caller storage. This query is for the
+     *          immediate find_string_xref() call. A stored string-xref Candidate owns its literal independently (see
+     *          Candidate::string_xref).
      */
     struct StringRefQuery
     {
@@ -433,12 +423,10 @@ namespace DetourModKit::scan
     /**
      * @enum Mode
      * @brief The resolution strategy a Candidate uses to turn a signature into an address.
-     * @details The mode is data on the Candidate (the active std::variant alternative), not a function name, so a
-     *          ladder can interleave the tiers freely and the resolver dispatches on the active payload. The two byte
-     *          tiers (Direct, RipRelative) scan a compiled Pattern; the two text tiers (RttiVtable, StringXref) resolve
-     *          a name/literal through a dedicated backend and are unique-only by construction (they fail closed on
-     *          ambiguity regardless of the request's require_unique). The enumerator order matches the Candidate
-     *          variant alternative order, so Candidate::mode() is a cast of the active index.
+     * @details The mode is data on the Candidate (the active std::variant alternative), so a ladder can interleave
+     *          the tiers freely. The two byte tiers (Direct, RipRelative) scan a compiled Pattern. The two text tiers
+     *          (RttiVtable, StringXref) resolve a name or literal through a dedicated backend. They are unique-only by
+     *          construction and fail closed on ambiguity regardless of the request's require_unique.
      */
     enum class Mode : std::uint8_t
     {
@@ -455,12 +443,10 @@ namespace DetourModKit::scan
     /**
      * @enum CandidateOrder
      * @brief How a ScanRequest's ladder is ordered before the resolver tries it.
-     * @details AsDeclared preserves the caller's array order. UniqueFirst promotes the tiers least likely to
-     *          mis-resolve so a confident hit is reached before a looser fallback is consulted: the unique-only text
-     *          tiers (RttiVtable, StringXref) lead, then anchored byte patterns (a fully-known rarest byte makes a
-     *          Pattern far more selective), then the remaining byte patterns. Reordering never changes which addresses
-     *          are valid: every candidate is still verified (unique-in-scope when required, in-scope, plausibly
-     *          resolved), so a promoted candidate can only be tried earlier, never accepted on weaker evidence.
+     * @details AsDeclared preserves the caller's array order. UniqueFirst promotes the unique-only text tiers, then
+     *          anchored byte patterns, then the other byte patterns. @ref resolve returns the first candidate that
+     *          resolves successfully. The changed order can alter the returned @ref Hit when valid candidates resolve
+     *          to different addresses. Every candidate retains the same verification and validity rules.
      */
     enum class CandidateOrder : std::uint8_t
     {
@@ -553,13 +539,9 @@ namespace DetourModKit::scan
      * @class Candidate
      * @brief One resilience tier in a resolution ladder: a strategy plus the signature it resolves, owning its strings.
      * @details The payload is a std::variant over the four typed tiers, so the (mode, payload) pairing is coherent by
-     *          construction: a Direct candidate cannot accidentally carry a string-xref query, and there are no
-     *          parallel optional fields that can drift out of sync. The four factories are the only way to build one
-     *          (the default
-     *          constructor and the variant-taking constructor are private, the payload is private, and the class is not
-     *          an aggregate), so a Candidate can only exist with a valid alternative. Every owned string (the name, the
-     *          RttiVtable mangled name, the StringXref literal) is copied in, so a winning Hit or a stored ladder never
-     *          aliases caller storage that later goes out of scope.
+     *          construction. The four factories are the only way to build one, so a Candidate can only exist with a
+     *          valid alternative. The candidate copies every owned string: the name, the RttiVtable mangled name, and
+     *          the StringXref literal. A returned Hit or a stored ladder therefore never aliases caller storage.
      */
     class Candidate
     {
@@ -736,10 +718,9 @@ namespace DetourModKit::scan
      *          @ref CodeConstant::kind or @ref CodeConstant::byte_width returns @ref ErrorCode::InvalidArg before site
      *          resolution. A RIP-relative memory operand is resolved to its absolute target without narrowing.
      *          The value decodes from a fresh snapshot after site resolution.
-     *          A byte rung must still match its physical span and resolve the decoded site at that epoch.
+     *          A byte rung must still match its physical span and resolve the decoded site at that epoch (`[B-75]`).
      *          Otherwise, the function returns @ref ErrorCode::EvidenceMismatch.
      *          A wildcarded operand byte at the selected site may drift. The function returns its current value.
-     *          T-CODE-EPOCH supplies the permanent proof.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t>
@@ -849,14 +830,10 @@ namespace DetourModKit::scan
     /**
      * @enum FallbackPolicy
      * @brief How strictly hooked-prologue recovery confirms the identity of a recovered target.
-     * @details Hooked-prologue recovery rebuilds a Direct candidate's prologue as an inline-hook jump shape and
-     *          resolves the single site that uniquely matches. That structural gate (a unique rebuilt match, a decoded
-     *          redirect into executable memory, an in-scope walk-back) is strong but address-blind: a game reshape can
-     *          leave a different function whose surviving literal tail coincidentally matches and which is itself
-     *          inline-hooked, so the rebuilt pattern resolves uniquely to the wrong near-twin. FallbackPolicy chooses
-     *          what happens after structural recovery, mirroring the anchor validator discipline
-     *          (@ref anchor::Anchor::require_validator): pair a @ref FallbackWitness with RequireIdentity to fail
-     *          closed on an unconfirmed site instead of trusting a possibly-wrong one.
+     * @details `[B-53]` Hooked-prologue recovery rebuilds a Direct candidate's prologue as an inline-hook jump shape
+     *          and resolves the single site that uniquely matches. That structural gate is strong but address-blind: a
+     *          game reshape can leave an inline-hooked near-twin with a coincidental match. Pair a
+     *          @ref FallbackWitness with RequireIdentity to fail closed on an unconfirmed site.
      */
     enum class FallbackPolicy : std::uint8_t
     {
@@ -870,10 +847,8 @@ namespace DetourModKit::scan
 
     /**
      * @brief A post-recovery identity check for hooked-prologue recovery.
-     * @details Signature-compatible with @ref anchor::AnchorValidator (a plain function pointer, so one predicate shape
-     *          serves the resolver), kept as its own alias because anchor.hpp already includes this header and the
-     *          dependency cannot run the other way without a cycle. The recovered absolute address is passed as @p
-     *          value; return false to reject it as a coincidental near-twin.
+     * @details Signature-compatible with @ref anchor::AnchorValidator. The recovered absolute address is passed as
+     *          @p value. Return false to reject it as a coincidental near-twin.
      * @param value The recovered absolute address, as a signed integer (a hook target is a code address).
      * @param context The opaque @ref FallbackWitness::context pointer, forwarded verbatim (nullptr if unused).
      */
@@ -977,8 +952,7 @@ namespace DetourModKit::scan
      *          @ref borrow.
      * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
      *       allocation. The default scope query is setup/control-plane only. For a stored or deferred request, copy
-     *       the fields onto an OwnedScanRequest (Pages::Executable, require_executable_result, UniqueFirst, a WarnOnly
-     *       fallback policy) so the ladder is owned.
+     *       the same fields onto an OwnedScanRequest so the ladder is owned.
      */
     [[nodiscard]] ScanRequest borrow_code_target(
         std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
@@ -1294,9 +1268,8 @@ namespace DetourModKit::scan
 
     /**
      * @brief Flattens a resolve Result to its address, or a null Address on failure.
-     * @details The single blessed convenience for the address-or-nothing shape. It is a convenience adapter, not the
-     *          primary contract: new code resolves through Result and handles the Error. or_null on a happy path is a
-     *          smell. Header-inline because Hit and Result<Hit> are complete here.
+     * @details A convenience adapter, not the primary contract: new code resolves through Result and handles the
+     *          Error.
      * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
      */
     [[nodiscard]] inline Address or_null(const Result<Hit> &result) noexcept
@@ -1324,9 +1297,8 @@ namespace DetourModKit::scan
          * @param occurrence Which match to return (1-based). 1 = first match. 0 returns nullptr.
          * @return A pointer to the Nth match (adjusted by the Pattern's `|` offset), or nullptr if not found.
          * @details The unsafe twin of scan(): it performs no page filtering and uses raw SIMD/memchr loads, so an
-         *          unreadable byte in @p region faults the host. It is quarantined in `unchecked` precisely because its
-         *          contract is "caller proved readability"; the return is a raw pointer, not a Result, because there is
-         *          no recoverable error to report. noexcept; an allocation failure preparing the scan returns nullptr.
+         *          unreadable byte in @p region faults the host. The return is a raw pointer, not a Result, because
+         *          there is no recoverable error to report. noexcept. A pattern allocation failure returns nullptr.
          * @note Setup/control-plane only: prepares the engine pattern and performs a raw, page-unfiltered scan.
          */
         [[nodiscard]] const std::byte *
