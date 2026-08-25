@@ -826,6 +826,67 @@ TEST_F(RttiTest, TypeNameChecked_ReportsFailedOnBadVtable)
     EXPECT_EQ(out[0], '\0'); // failure clears the buffer
 }
 
+// The zero-written matrix: a complete empty name and a first-byte read fault must report the same status at every
+// capacity. Before the always-probe fix, only out_len == 1 probed the first byte, so an empty name read Ok at
+// capacity 1 but Failed at 2 and 8.
+
+TEST_F(RttiTest, TypeNameChecked_EmptyNameReportsOkAtEveryCapacity)
+{
+    SyntheticVtable v("");
+    for (const std::size_t capacity : {std::size_t{1}, std::size_t{2}, std::size_t{8}})
+    {
+        char out[8];
+        std::memset(out, 'x', sizeof(out));
+        const rtti::NameRead r = rtti::type_name_checked(Address{v.vtable()}, out, capacity);
+        EXPECT_EQ(r.status, rtti::NameStatus::Ok) << "capacity " << capacity;
+        EXPECT_EQ(r.written, 0u) << "capacity " << capacity;
+        EXPECT_EQ(out[0], '\0') << "capacity " << capacity;
+    }
+}
+
+TEST_F(RttiTest, TypeNameChecked_NameReadFaultReportsFailedAtEveryCapacity)
+{
+    // Construct a resolvable COL whose TypeDescriptor RVA targets a page that this test makes unreadable.
+    // resolve_col_site computes the name address without a TypeDescriptor read. The name read and first-byte probe then
+    // fault. The target page lies inside the pool, so it stays inside the test executable's image and the
+    // in-module bound checks pass; the second pad fixture keeps the whole protected page inside pool storage.
+    SyntheticVtable v(".?AVFaultHost@@");
+    SyntheticVtable pad_a("");
+    SyntheticVtable pad_b("");
+    ASSERT_NE(v.vtable(), 0u);
+    ASSERT_NE(pad_a.vtable(), 0u);
+    ASSERT_NE(pad_b.vtable(), 0u);
+
+    const std::uintptr_t pad_base = pad_a.vtable() - SYN_VTABLE_OFFSET;
+    const std::uintptr_t page = (pad_base + 0xFFF) & ~static_cast<std::uintptr_t>(0xFFF);
+    const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    ASSERT_GT(page, exe_base);
+    v.poison_type_descriptor_rva(static_cast<std::uint32_t>(page - exe_base));
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(reinterpret_cast<void *>(page), 0x1000, PAGE_NOACCESS, &old_protect));
+    rtti::NameRead reads[3];
+    char first_bytes[3];
+    const std::size_t capacities[] = {1, 2, 8};
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        char out[8];
+        std::memset(out, 'x', sizeof(out));
+        reads[i] = rtti::type_name_checked(Address{v.vtable()}, out, capacities[i]);
+        first_bytes[i] = out[0];
+    }
+    DWORD restore_protect = 0;
+    // Restore before any assertion so a failed expectation cannot strand an unreadable pool page for later tests.
+    ASSERT_TRUE(VirtualProtect(reinterpret_cast<void *>(page), 0x1000, old_protect, &restore_protect));
+
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        EXPECT_EQ(reads[i].status, rtti::NameStatus::Failed) << "capacity " << capacities[i];
+        EXPECT_EQ(reads[i].written, 0u) << "capacity " << capacities[i];
+        EXPECT_EQ(first_bytes[i], '\0') << "capacity " << capacities[i];
+    }
+}
+
 // The public image_generation contract promises a new token when a same-base replacement changes an identity-bearing
 // PE field. These cases drive that through the real loader with two variants that agree on base, SizeOfImage, and
 // TimeDateStamp, so nothing but the image's own section identity can separate them. That is the exact shape an identity

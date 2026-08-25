@@ -648,11 +648,14 @@ namespace DetourModKit
              * @param gate Optional per-frame precondition, evaluated before the interval countdown. When it returns
              *             false the group is skipped silently and the interval budget is not spent, so a not-yet-live
              *             target is polled cheaply every frame until it appears.
-             * @note An empty @p work is ignored (no group is registered). A re-entrant call from within @ref tick
-             *       defers the new group to the next tick. The group counts as registered from this call, so
-             *       @ref all_resolved reports false until it latches.
+             * @return Empty on success. Returns @ref ErrorCode::OutOfMemory when the registration allocation fails.
+             *         The scheduler is unchanged and no group is registered.
+             * @note An empty @p work is ignored (no group is registered, reported as success). A re-entrant call from
+             *       within @ref tick defers the new group to the next tick. A registered group counts from this call,
+             *       so @ref all_resolved reports false until it latches.
+             * @note Setup/control-plane only: registration can allocate and mutate scheduler state.
              */
-            void add_group(Work work, Gate gate = {});
+            [[nodiscard]] Result<void> add_group(Work work, Gate gate = {}) noexcept;
 
             /**
              * @brief Advances the scheduler by one frame: scans every un-latched, gate-passing, interval-due group.

@@ -617,19 +617,28 @@ namespace DetourModKit
     rtti::HealScheduler &rtti::HealScheduler::operator=(HealScheduler &&) noexcept = default;
     rtti::HealScheduler::~HealScheduler() noexcept = default;
 
-    void rtti::HealScheduler::add_group(Work work, Gate gate)
+    Result<void> rtti::HealScheduler::add_group(Work work, Gate gate) noexcept
     {
         if (!m_impl)
-            return;
+            return {};
         // A group with no heal work can never resolve; ignore an empty callback rather than let it reach tick(), where
         // invoking an empty std::move_only_function would be undefined behavior.
         if (!work)
-            return;
+            return {};
         // Defer a group added from within a running tick (a work/gate callback re-entering add_group) so tick's
         // range-for reference into `groups` is never invalidated by a reallocation mid-iteration; it starts scanning on
         // the next tick.
         std::vector<Impl::Group> &target = m_impl->tick_depth != 0 ? m_impl->pending : m_impl->groups;
-        target.push_back(Impl::Group{std::move(work), std::move(gate), false, 0});
+        try
+        {
+            target.push_back(Impl::Group{std::move(work), std::move(gate), false, 0});
+        }
+        catch (...)
+        {
+            // push_back's strong guarantee leaves the vector unchanged, so a failed registration commits no state.
+            return std::unexpected(Error{ErrorCode::OutOfMemory, "rtti::HealScheduler::add_group"});
+        }
+        return {};
     }
 
     void rtti::HealScheduler::tick() noexcept

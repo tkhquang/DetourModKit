@@ -3816,6 +3816,47 @@ TEST_F(InputTest, BindingTokenStaleAfterConsumeToggle)
     mgr.set_require_focus(true);
 }
 
+TEST_F(InputTest, BindingTokenStaysCurrentAfterRedundantConsumeSet)
+{
+    // A consume set that re-applies the current flag value is a no-op: no cache rebuild, no generation advance, no
+    // token invalidation. Only a real transition reshapes, exactly as set_consume_by_owner already behaved.
+    auto &mgr = input::Input::instance();
+    mgr.set_require_focus(false);
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "redundant_consume",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
+
+    // false -> false: the default flag value re-applied.
+    const input::BindingToken token_false = mgr.acquire_token("redundant_consume");
+    ASSERT_TRUE(token_false.valid());
+    ASSERT_TRUE(mgr.token_current(token_false));
+    mgr.set_consume("redundant_consume", false);
+    EXPECT_TRUE(mgr.token_current(token_false)) << "a redundant consume(false) must not invalidate live tokens";
+
+    // A real transition still reshapes and invalidates.
+    mgr.set_consume("redundant_consume", true);
+    EXPECT_FALSE(mgr.token_current(token_false));
+
+    // true -> true: redundant in the other flag value.
+    const input::BindingToken token_true = mgr.acquire_token("redundant_consume");
+    ASSERT_TRUE(token_true.valid());
+    ASSERT_TRUE(mgr.token_current(token_true));
+    mgr.set_consume("redundant_consume", true);
+    EXPECT_TRUE(mgr.token_current(token_true)) << "a redundant consume(true) must not invalidate live tokens";
+
+    mgr.set_require_focus(true);
+}
+
 TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
 {
     auto &mgr = input::Input::instance();
@@ -6505,6 +6546,123 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
     EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
 
     detail::uninstall(poller.intercept_owner_for_test());
+}
+
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_record_probe)(DetourModKit::LogLevel, std::string_view) noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<bool> s_consume_warning_entered{false};
+    std::atomic<bool> s_consume_warning_release{false};
+
+    // Parks the emitter thread inside the sink at the consume-capacity warning. The test can then check what the
+    // emitter still holds while the sink is blocked.
+    void block_on_consume_warning(DetourModKit::LogLevel, std::string_view message) noexcept
+    {
+        if (message.find("gamepad consume chords exceed") == std::string_view::npos)
+        {
+            return;
+        }
+        s_consume_warning_entered.store(true, std::memory_order_release);
+        while (!s_consume_warning_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+} // namespace
+
+// The deferred-diagnostics order for the input engine: diagnostics are collected under m_bindings_rw_mutex and
+// emitted after release, so sink latency never extends into the callback-safe queries that share the lock. The probe
+// blocks the sink at the exact overflow warning; the query must complete while the sink stays blocked.
+TEST_F(InputPollerTest, CallbackSafeQueryCompletesWhileConsumeDiagnosticSinkIsBlocked)
+{
+    dmk_test::reset_published_consume_rules();
+    const LogLevel previous_level = DetourModKit::log().get_log_level();
+    DetourModKit::log().set_log_level(LogLevel::Warning);
+
+    // MAX_GAMEPAD_CONSUME_RULES in-table chords plus one late chord: the late transition to consume=true republishes
+    // one rule past the table bound and latches the one-per-engine overflow warning.
+    std::vector<detail::InputBinding> bindings;
+    const int mod_pool[] = {
+        GamepadCode::LeftBumper,
+        GamepadCode::RightBumper,
+        GamepadCode::DpadUp,
+        GamepadCode::DpadDown,
+        GamepadCode::DpadLeft,
+        GamepadCode::DpadRight,
+    };
+    for (std::size_t i = 0; i < detail::MAX_GAMEPAD_CONSUME_RULES; ++i)
+    {
+        detail::InputBinding chord;
+        chord.name = "table_chord_" + std::to_string(i);
+        chord.keys = {gamepad_button(GamepadCode::A)};
+        for (std::size_t bit = 0; bit < 6; ++bit)
+        {
+            if (((i + 1) >> bit) & 1)
+            {
+                chord.modifiers.push_back(gamepad_button(mod_pool[bit]));
+            }
+        }
+        chord.consume = true;
+        bindings.push_back(std::move(chord));
+    }
+    detail::InputBinding late;
+    late.name = "late_chord";
+    late.keys = {gamepad_button(GamepadCode::B)};
+    bindings.push_back(std::move(late));
+
+    detail::InputPoller poller(std::move(bindings));
+    ASSERT_TRUE(detail::adopt_owner_for_test(poller.intercept_owner_for_test()));
+
+    s_consume_warning_entered.store(false, std::memory_order_release);
+    s_consume_warning_release.store(false, std::memory_order_release);
+    DetourModKit::detail::g_logger_record_probe = &block_on_consume_warning;
+
+    std::thread setter([&poller] { poller.set_consume("late_chord", true); });
+
+    const auto entry_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!s_consume_warning_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entry_deadline)
+    {
+        std::this_thread::yield();
+    }
+    const bool sink_entered = s_consume_warning_entered.load(std::memory_order_acquire);
+
+    if (sink_entered)
+    {
+        std::atomic<bool> query_done{false};
+        std::thread query(
+            [&poller, &query_done]
+            {
+                (void)poller.is_binding_active(0);
+                query_done.store(true, std::memory_order_release);
+            }
+        );
+        const auto query_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!query_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < query_deadline)
+        {
+            std::this_thread::yield();
+        }
+        const bool query_completed = query_done.load(std::memory_order_acquire);
+        s_consume_warning_release.store(true, std::memory_order_release);
+        query.join();
+        EXPECT_TRUE(query_completed) << "a callback-safe query must complete while the diagnostic sink stays blocked";
+    }
+    else
+    {
+        s_consume_warning_release.store(true, std::memory_order_release);
+    }
+    setter.join();
+    DetourModKit::detail::g_logger_record_probe = nullptr;
+    DetourModKit::log().set_log_level(previous_level);
+
+    EXPECT_TRUE(sink_entered) << "the consume-capacity warning never reached the sink";
+
+    detail::uninstall(poller.intercept_owner_for_test());
+    dmk_test::reset_published_consume_rules();
 }
 
 // A caller that already reshaped m_bindings cannot retain stale caches because their indices may address past the new

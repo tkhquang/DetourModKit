@@ -2146,6 +2146,70 @@ TEST(StringXrefTest, StringPointerSlotStopsAtUd2)
     EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
+// SYSRET ends the function's straight-line flow exactly as RET does: control leaves for user mode and never falls
+// through to the next instruction. A store after it belongs to unreachable or foreign bytes, so the terminal predicate
+// must stop attribution at the SYSRET category (`[B-76]`).
+TEST(StringXrefTest, StringPointerSlotStopsAtSysret)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotSysretAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);             // lea rax, [rip+string]
+    const std::uint8_t sysret[] = {0x48, 0x0F, 0x07}; // sysretq: no fall-through path
+    img.write(0x17, sysret, sizeof(sysret));
+    img.plant_rip_store(0x1A, 0x200, 0); // mov [rip+slot], rax past the sysret
+
+    const auto result = scan::find_string_xref(slot_query("SlotSysretAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// SYSEXIT shares SYSRET's category and equally never falls through; the category stop must cover it without a
+// per-mnemonic case.
+TEST(StringXrefTest, StringPointerSlotStopsAtSysexit)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotSysexitAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);        // lea rax, [rip+string]
+    const std::uint8_t sysexit[] = {0x0F, 0x35}; // sysexit: no fall-through path
+    img.write(0x17, sysexit, sizeof(sysexit));
+    img.plant_rip_store(0x19, 0x200, 0); // mov [rip+slot], rax past the sysexit
+
+    const auto result = scan::find_string_xref(slot_query("SlotSysexitAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// UIRET (user-interrupt return) ends straight-line flow like RET but Zydis files it under the UINTR category, so the
+// predicate stops it by mnemonic.
+TEST(StringXrefTest, StringPointerSlotStopsAtUiret)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotUiretAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);                  // lea rax, [rip+string]
+    const std::uint8_t uiret[] = {0xF3, 0x0F, 0x01, 0xEC}; // uiret: no fall-through path
+    img.write(0x17, uiret, sizeof(uiret));
+    img.plant_rip_store(0x1B, 0x200, 0); // mov [rip+slot], rax past the uiret
+
+    const auto result = scan::find_string_xref(slot_query("SlotUiretAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
 // A CONDITIONAL branch (Jcc) is NOT a control-flow stop. Its fall-through path can legitimately reach the caching
 // store. The scan must continue past it and still resolve the slot, so the scan distinguishes an unconditional transfer
 // (stop) from a conditional one (continue) and drops no capability.
