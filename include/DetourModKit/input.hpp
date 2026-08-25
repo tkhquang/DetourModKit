@@ -202,12 +202,13 @@ namespace DetourModKit
         /**
          * @class BindingToken
          * @brief Generation-checked handle to a named binding's resolved entry set for low-overhead repeated queries.
-         * @details A reshape that alters the binding SET (register, name-based rebind, name-based removal, clear, or
-         *          a consume-flag change) advances the generation, so a stale token fails closed and reads inactive.
-         *          A plain guard release does NOT advance it. A consume binding's release advances it through the
-         *          consume-flag change. The counter is process-wide and monotonic, so a token cannot alias a different
-         *          engine after a shutdown / start cycle. Default, unknown-name, and allocation-failed tokens are all
-         *          invalid and always read inactive.
+         * @details A reshape that alters the binding SET advances the generation. These reshapes are register,
+         *          name-based rebind, name-based removal, clear, or a real consume-flag transition. A stale token then
+         *          fails closed and reads inactive. A consume set that re-applies the current flag value is a no-op and
+         *          keeps every live token current. A plain guard release does NOT advance it. A consume binding's
+         *          release advances it through the consume-flag transition. The counter is process-wide and monotonic,
+         *          so a token cannot alias a different engine after a shutdown / start cycle. Default, unknown-name,
+         *          and allocation-failed tokens are all invalid and always read inactive.
          */
         class BindingToken
         {

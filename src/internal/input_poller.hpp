@@ -421,16 +421,46 @@ namespace DetourModKit
                 Retain
             };
 
-            void recompute_modifier_caches_locked(CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe) noexcept;
-            void record_consume_capacity(std::size_t active, std::size_t rejected) noexcept;
+            /**
+             * @struct DeferredDiagnostics
+             * @brief Diagnostics collected under m_bindings_rw_mutex and emitted after release.
+             * @details The failure paths collect each diagnostic in fixed storage because collection must not allocate.
+             *          Release m_bindings_rw_mutex before @ref emit.
+             *          Emission under the exclusive lock extends sink latency into every callback-safe query that
+             *          shares the lock. InputPollerTest.CallbackSafeQueryCompletesWhileConsumeDiagnosticSinkIsBlocked
+             *          pins the order.
+             */
+            struct DeferredDiagnostics
+            {
+                bool cache_rebuild_retained = false;
+                bool cache_rebuild_cleared = false;
+                bool add_binding_oom = false;
+                bool add_bindings_oom = false;
+                bool consume_bound = false;
+                std::size_t consume_rejected = 0;
+                std::size_t consume_total = 0;
+
+                /// Emits every latched message. Call after m_bindings_rw_mutex is released.
+                void emit() const noexcept;
+            };
+
+            void recompute_modifier_caches_locked(
+                DeferredDiagnostics &diagnostics,
+                CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe
+            ) noexcept;
+            void record_consume_capacity(
+                std::size_t active,
+                std::size_t rejected,
+                DeferredDiagnostics &diagnostics
+            ) noexcept;
 
             /**
              * @brief Offers @ref m_consume_rules to the interception layer and records the resulting occupancy.
              * @details Requires m_bindings_rw_mutex. A refusal means this poller does not hold the layer; the rules
              *          stay cached and @ref m_consume_rules_unpublished latches so the poll loop retries on
-             *          acquisition.
+             *          acquisition. Capacity diagnostics land in @p diagnostics for the caller to emit off the lock.
              */
-            void publish_consume_rules_locked() noexcept;
+            void publish_consume_rules_locked(DeferredDiagnostics &diagnostics) noexcept;
 
             /// Transparent hasher enabling std::string_view lookup without allocation.
             struct StringHash
