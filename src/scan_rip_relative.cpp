@@ -3,12 +3,14 @@
  * @brief Standalone x86-64 RIP-relative resolvers and candidate semantic verification.
  * @details Resolves an absolute address from a RIP-relative instruction whose displacement is read under a fault guard,
  *          then screened against the plausible-userspace floor. find_and_resolve_rip_relative scans a Region for an
- *          opcode prefix and returns the first occurrence whose disp32 resolves plausibly, skipping decoy prefixes
- *          whose displacement cannot be trusted. A failure on either path surfaces as a typed ErrorCode in the Scan
- *          block rather than undefined behaviour.
+ *          opcode prefix and returns the first occurrence whose disp32 resolves plausibly to a readable target,
+ *          skipping decoy prefixes whose displacement cannot be trusted. A failure on either path surfaces as a typed
+ *          ErrorCode in the Scan block rather than undefined behaviour.
  */
 
 #include "DetourModKit/scan.hpp"
+
+#include "DetourModKit/memory.hpp"
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_shared.hpp"
@@ -94,11 +96,12 @@ namespace DetourModKit
             const std::byte first = opcode_prefix[0];
 
             // A byte sequence that matches the opcode prefix but whose disp32 resolves to an
-            // implausible target (or is unreadable) is a decoy, not a hard stop: the same prefix
+            // implausible or unreadable target is a decoy, not a hard stop (B-60): the same prefix
             // can legitimately recur, so the genuine instruction may be a later occurrence. Keep
             // scanning past each decoy and return the first occurrence whose displacement resolves
-            // plausibly. The last resolve failure is retained so an all-decoy region reports WHY
-            // resolution never succeeded (e.g. ImplausibleTarget) rather than a bare PrefixNotFound.
+            // plausibly to a readable target. The last resolve failure is retained so an all-decoy
+            // region reports WHY resolution never succeeded (e.g. ImplausibleTarget or
+            // UnreadableTarget) rather than a bare PrefixNotFound.
             std::optional<Error> last_resolve_error;
 
             for (std::size_t i = 0; i <= scan_limit; ++i)
@@ -114,11 +117,21 @@ namespace DetourModKit
                 }
 
                 auto resolved = resolve_rip_relative(Address{&search_start[i]}, prefix_len, instruction_length);
-                if (resolved)
+                if (!resolved)
                 {
-                    return resolved;
+                    last_resolve_error = resolved.error();
+                    continue;
                 }
-                last_resolve_error = resolved.error();
+                // Plausibility is pure arithmetic, so a coincidental disp32 can still name a committed-looking
+                // address on a PAGE_NOACCESS page. One target byte is checked here rather than in
+                // resolve_rip_relative, which stays the guarded arithmetic primitive.
+                if (!memory::is_readable(Region{*resolved, 1}))
+                {
+                    last_resolve_error =
+                        Error{ErrorCode::UnreadableTarget, "scan::find_and_resolve_rip_relative", resolved->raw()};
+                    continue;
+                }
+                return resolved;
             }
 
             // A prefix was found but no occurrence resolved: surface the concrete decode failure.
