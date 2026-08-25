@@ -595,10 +595,10 @@ namespace DetourModKit
          * @class HookStack
          * @brief Move-only owner of a set of Hook handles that guarantees newest-first (LIFO) teardown.
          * @details `[B-16]` Same-target layers must unwind newest-first, or the older layer's restore clobbers a
-         *          prologue the newer layer's live trampoline still chains through. A bare `std::vector<Hook>`
-         *          destroys oldest-first, and teardown then retains the older backend permanently. This container
-         *          restores back-to-front instead. Prefer it over a bare vector when hooks stay alive together. This
-         *          rule especially applies to hooks layered on one address and successes returned by @ref install_all.
+         *          prologue the newer layer's live trampoline still chains through. A bare `std::vector<Hook>` has
+         *          unspecified element destruction order. This container restores back-to-front instead. Prefer it
+         *          over a bare vector when hooks stay alive together. This rule especially applies to hooks layered on
+         *          one address and successes returned by @ref install_all.
          *          Push those successes in table order. Inline/mid @ref Hook handles only: @ref VmtHook already
          *          unwinds its objects newest-first.
          * @note Move-only, mirroring @ref Hook. Not internally synchronized: build and tear it down on the setup
@@ -879,9 +879,9 @@ namespace DetourModKit
          * @struct InstallOutcome
          * @brief Per-row result of @ref install_all, in table order, so a mod can correlate which optional hooks
          *        landed.
-         * @warning A `std::vector<InstallOutcome>` destroys its rows front-to-back, so its hooks tear down
-         *          OLDEST-first. That order is inverted for hooks layered on one target (`[B-16]`, see @ref HookStack).
-         *          Move successful hooks into a @ref HookStack in table order for clean teardown.
+         * @warning A `std::vector<InstallOutcome>` has unspecified element destruction order. That order cannot prove
+         *          newest-first teardown for hooks layered on one target (`[B-16]`, see @ref HookStack). Move
+         *          successful hooks into a @ref HookStack in table order for clean teardown.
          */
         struct InstallOutcome
         {
@@ -902,8 +902,8 @@ namespace DetourModKit
          *          back a partial table therefore never has to disarm a live hook. noexcept, matching
          *          scan::resolve_batch: it catches bad_alloc / backend failure internally and reports it per row rather
          *          than throwing across the init path.
-         * @warning The returned vector tears its hooks down OLDEST-first when dropped. See the @ref InstallOutcome
-         *          warning. Move the successful hooks into a @ref HookStack in table order.
+         * @warning The returned vector has unspecified element destruction order. See the @ref InstallOutcome
+         *          warning. Move successful hooks into a @ref HookStack in table order for newest-first teardown.
          * @note Setup/control-plane only: a batch install that resolves scans and allocates per row.
          */
         [[nodiscard]] Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;

@@ -64,8 +64,9 @@ namespace DetourModKit
      * @brief RAII owner of a mod's process lifetime: single-instance guard, logger configuration, input binding scope,
      *        and the ordered teardown of every process-wide subsystem.
      * @details Session::start(ModInfo) is the synchronous, directly-held path. bootstrap_attach(ModInfo, on_ready) is
-     *          the hosted path. The ~Session body owns the teardown order. scope().clear() releases this
-     *          session's input bindings first, in reverse insertion order. The process-wide subsystems then tear down
+     *          the hosted path. The private release() path owns the teardown order. ~Session and active move-assignment
+     *          call it. scope().clear() releases this session's input bindings first, in reverse insertion order. The
+     *          process-wide subsystems then tear down
      *          in reverse dependency order. The order is the config auto-reload watcher, the input poll thread, the
      *          memory cache, the config registry, and the logger. The logger stays last because every prior step can
      *          still log. Each subsystem shutdown applies
@@ -156,17 +157,18 @@ namespace DetourModKit
     private:
         friend struct detail::SessionBootstrapAccess;
 
-        // start() and the bootstrap access bridge both build the Session here, so the single-instance mutex is
-        // Session-owned and released only in ~Session. @p instance_mutex is null when ModInfo requested no guard.
+        // start() and the bootstrap access bridge both build the Session here. The Session owns the single-instance
+        // mutex until release(). A null instance_mutex means ModInfo requested no guard.
         explicit Session(void *instance_mutex) noexcept;
 
-        // The one ordered-teardown implementation shared by ~Session and move-assignment. Idempotent, inert-safe.
+        // The ordered teardown shared by ~Session and active move-assignment. It closes the owned mutex. Idempotent and
+        // inert-safe.
         void release() noexcept;
 
         // The mod's input bindings; cleared first in ~Session. Move-only, default-constructible: keeps Session movable.
         input::Scope m_scope;
-        // The single-instance mutex handle (or null); CloseHandle'd in ~Session. Typed as void* so this public header
-        // stays free of <windows.h>.
+        // The single-instance mutex handle (or null). release() closes it. The void pointer keeps this public header
+        // free of <windows.h>.
         void *m_instance_mutex{nullptr};
         // Gates the destructor. Transferred on move (source becomes inert), cleared by abandon().
         bool m_active{false};

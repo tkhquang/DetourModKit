@@ -46,10 +46,9 @@ namespace DetourModKit
         /**
          * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
          *        `std::basic_string_view`.
-         * @details `[B-21]` A view is trivially copyable. An unconstrained typed `write<T>` / `write_in_place<T>` binds
-         *          `write(addr, my_view)` exactly and stores the view's pointer and length instead of its bytes. The
-         *          exclusion sends a byte span to the byte-span sink. It turns any other view into a
-         *          compile error that directs the caller to `write_bytes`. Constraint sites inspect
+         * @details `[B-21]` A view is trivially copyable, but its bit-copy stores the view's pointer and length. Typed
+         *          `write<T>` rejects every view, even byte spans. Only `write_in_place` routes a byte span to its
+         *          byte-span overload. Use `write_bytes` for other views. Constraint sites inspect
          *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past.
          */
         template <class T> inline constexpr bool is_non_owning_view_v = false;
@@ -262,10 +261,11 @@ namespace DetourModKit
          *         region. A span rejected before any access, and the MinGW fallback that validates through
          *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
-         *          fault guard, so it reports a fault anywhere in the span without host termination. The function
-         *          rejects an address below @ref USERSPACE_PTR_MIN. It also rejects a span whose end wraps the address
-         *          space or passes @ref USERSPACE_PTR_MAX. The rejection prevents a first-chance exception from a stale
-         *          or sentinel pointer. On failure the contents of @p out are unspecified.
+         *          fault guard, so it reports a fault anywhere in the span without host termination. The pre-screen
+         *          rejects only out-of-range spans: addresses below @ref USERSPACE_PTR_MIN, wrapped ends, or ends above
+         *          @ref USERSPACE_PTR_MAX. It does not prove pointer validity. An in-range pointer can remain unmapped
+         *          or stale, and the fault guard reports that access failure. On failure the contents of @p out are
+         *          unspecified.
          * @note Callback-safe: allocates nothing, takes no lock, and on the established hot path issues no syscall.
          */
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;
@@ -782,12 +782,13 @@ namespace DetourModKit
              *                 readable; this performs NO validation and a violation faults the host process.
              * @return The value at @p address. A top-level bounded built-in array is returned as the equivalent nested
              *         `std::array`, because C++ functions cannot return a built-in array by value.
-             * @details A single inlined copy with no SEH, no VirtualQuery, and no cache lookup. Use it only for
-             *          pointers that the caller proves are live for the current frame. For anything that can be stale,
-             *          use the guarded @ref read.
-             * @note Callback-safe by construction (it does nothing but copy), but UNSAFE on an invalid address.
-             * @note An `assert(is_readable(...))` trips a violated precondition in a Debug build. It is compiled out
-             *       under NDEBUG, so a Release build has NO diagnostic and an invalid address faults the host.
+             * @details Under `NDEBUG`, this is a single inlined copy with no SEH, `VirtualQuery`, or cache lookup. A
+             *          Debug build first evaluates `assert(is_readable(...))`, which can take a shard lock or call
+             *          `VirtualQuery`. Use it only for pointers that the caller proves are live for the current frame.
+             *          For anything that can be stale, use the guarded @ref read.
+             * @note Callback-safe under `NDEBUG`: it does nothing but copy. A Debug build can block or call
+             *       `VirtualQuery` during the assertion.
+             * @warning Under `NDEBUG`, an invalid address faults the host. A Debug build stops at the assertion.
              */
             template <class T>
                 requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)

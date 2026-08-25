@@ -220,7 +220,7 @@ jobs:
 
       - name: Run dump-capturing lifecycle soak (MinGW Release)
         # A failure means that a lifecycle proof regressed or the soak did not restore the WER LocalDumps policy.
-        # A restore failure leaves HKLM pointed at a temporary dump directory on a self-hosted runner.
+        # A restore failure leaves HKLM pointed at a temporary dump directory on the current runner.
         # The script reports the failure and names the exact values to repair.
         timeout-minutes: 45
         run: |

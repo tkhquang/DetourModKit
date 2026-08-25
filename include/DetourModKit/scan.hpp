@@ -444,8 +444,9 @@ namespace DetourModKit::scan
      * @enum CandidateOrder
      * @brief How a ScanRequest's ladder is ordered before the resolver tries it.
      * @details AsDeclared preserves the caller's array order. UniqueFirst promotes the unique-only text tiers, then
-     *          anchored byte patterns, then the other byte patterns. Ladder order never changes valid addresses.
-     *          Every candidate retains the same verification, so promotion changes only when the resolver tries it.
+     *          anchored byte patterns, then the other byte patterns. @ref resolve returns the first candidate that
+     *          resolves successfully. The changed order can alter the returned @ref Hit when valid candidates resolve
+     *          to different addresses. Every candidate retains the same verification and validity rules.
      */
     enum class CandidateOrder : std::uint8_t
     {
