@@ -85,7 +85,9 @@ namespace DetourModKit
          * @param alignment The alignment in bytes; must be a power of two.
          * @details Branch-free power-of-two round-up. The caller owns the power-of-two precondition (an alignment of 0
          *          or a non-power-of-two yields a meaningless result rather than a diagnostic), matching how alignment
-         *          helpers are used on the scan/page paths where the value is always a known constant.
+         *          helpers are used on the scan/page paths where the value is always a known constant. An address
+         *          within `alignment - 1` bytes of the address-space top wraps modulo 2^64, so the result is then
+         *          numerically below this address.
          */
         [[nodiscard]] constexpr Address align_up(std::size_t alignment) const noexcept
         {

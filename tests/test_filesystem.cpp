@@ -8,7 +8,40 @@
 
 #include "DetourModKit/filesystem.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
+
+// [B-100] Filesystem boundary. Each call returns a separate string that can allocate. The forced loader verdict does
+// not change the cached value.
+TEST(FilesystemLoaderBoundary, WarmCallsCopyTheCacheAndStaySetupTier)
+{
+    const std::wstring wide = filesystem::get_runtime_directory();
+    const std::string utf8 = filesystem::get_runtime_directory_utf8();
+    ASSERT_FALSE(wide.empty());
+    ASSERT_FALSE(utf8.empty());
+    const std::size_t wide_inline_capacity = std::wstring{}.capacity();
+    const std::size_t utf8_inline_capacity = std::string{}.capacity();
+
+    long long warm_allocations = -1;
+    std::wstring warm_wide;
+    std::string warm_utf8;
+    {
+        const dmk_test::ForcedLoaderProbe held;
+        const long long before = dmk_test::thread_new_calls();
+        warm_wide = filesystem::get_runtime_directory();
+        warm_utf8 = filesystem::get_runtime_directory_utf8();
+        warm_allocations = dmk_test::thread_new_calls() - before;
+    }
+
+    EXPECT_EQ(warm_wide, wide);
+    EXPECT_EQ(warm_utf8, utf8);
+    if (wide.size() > wide_inline_capacity || utf8.size() > utf8_inline_capacity)
+    {
+        EXPECT_GT(warm_allocations, 0LL) << "a copy beyond the inline capacity must allocate";
+    }
+}
 
 TEST(FilesystemTest, GetRuntimeDirectory)
 {

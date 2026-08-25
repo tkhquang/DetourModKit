@@ -200,7 +200,8 @@ A `.cpp` must live beside the kind of header it implements. A TU for an installe
 - Apply these rules to names:
 - Functions, variables, file names, and function-local constants use `snake_case`.
 - Use `PascalCase` for types.
-- Use `UPPER_SNAKE_CASE` for macros and namespace- or class-scope protocol constants.
+- Use `UPPER_SNAKE_CASE` for macros and namespace- or class-scope protocol constants. One accepted exception: the `input_codes.hpp` code namespaces provide each constant in both UPPER_SNAKE_CASE and the original PascalCase spelling.
+- GoogleTest suite and case names use `PascalCase`. GoogleTest reserves `_` in those names, so the `snake_case` function rule does not apply to them.
 - Prefix file-scope statics with `s_` and private or protected members with `m_`.
 - Use plain field names for POD structs without invariants.
 - Do not put `_` at the end of a name.

@@ -221,6 +221,13 @@ namespace DetourModKit
              *        agree, so a two-member quorum with the default is the strict 2-of-2 corroboration. A quorum is
              *        corroboration, so an explicit N below 2 or above the member count is a malformed vote and fails
              *        the quorum closed rather than degrading to a single signal.
+             * @details Vote semantics: each resolved member value is a candidate center, and a center qualifies when
+             *          at least N resolved votes agree with it. Two qualified centers that disagree yield
+             *          @ref AnchorStatus::QuorumAmbiguous. Otherwise the vote commits the smallest qualified center.
+             *          Under @ref QuorumMatch::WithinTolerance agreement is measured against that center, so the
+             *          accepted members can span up to two tolerances.
+             *          AnchorTest.QuorumWithinToleranceCommitsTheCanonicalCenterForEveryMemberOrder proves the
+             *          commit is order-independent.
              */
             std::size_t quorum_threshold = 0;
             /// Quorum: how two resolved member values must relate for a vote to count them as agreeing.
@@ -620,11 +627,13 @@ namespace DetourModKit
          * @brief The @ref ResultDomain an anchor is declared to resolve, for binding-compatibility gating.
          * @param anchor The anchor.
          * @return The domain implied by @ref Anchor::kind: a VtableIdentity is a VtableAddress, a CodeOperand or Manual
-         *         a Scalar, a StringXref a CodeSite (a DataAddress for a StringPointerSlot return), an ExportName a
-         *         CodeSite, a RipGlobal a CodeSite only when @ref Anchor::pages narrows it to executable pages (else a
-         *         DataAddress), and a Quorum the single specific domain its members agree on (Unknown when they
-         *         conflict, or for CallArgHome / Unset). A resolved report stamps the same value in
-         *         @ref ResolvedAnchor::domain. Allocation-free and side-effect-free.
+         *         a Scalar, a StringXref a CodeSite (a DataAddress for a StringPointerSlot return), an ExportName
+         *         provisionally a CodeSite, a RipGlobal a CodeSite only when @ref Anchor::pages narrows it to
+         *         executable pages (else a DataAddress), and a Quorum the single specific domain its members agree on
+         *         (Unknown when they conflict, or for CallArgHome / Unset). @ref ResolvedAnchor::domain follows the
+         *         live page class instead: a code-site kind committed at a non-executable address is stamped
+         *         @ref ResultDomain::DataAddress. AnchorDomainTest.ExportNameDomainFollowsResolvedPageClass proves the
+         *         downgrade. Allocation-free and side-effect-free.
          */
         [[nodiscard]] ResultDomain declared_domain(const Anchor &anchor) noexcept;
 

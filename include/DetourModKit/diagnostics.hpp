@@ -10,6 +10,9 @@
  * @details Every counter and dispatcher here is scoped to one linked DMK instance, not to the process. DMK is a static
  *          library, so two modules in one process that each link it hold independent diagnostic state: a subscriber
  *          registered through one module's dispatcher never observes the other module's events.
+ * @warning `[B-100]` Run dispatcher first use, subscription, and collect() outside the loader lock. Counter queries
+ *          and recorders use only static atomics and remain Callback-safe. `DiagnosticsLoaderBoundary.*` pins the
+ *          boundary.
  */
 
 #include "DetourModKit/anchor.hpp"

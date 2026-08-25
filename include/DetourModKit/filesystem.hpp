@@ -3,9 +3,10 @@
 
 /**
  * @file filesystem.hpp
- * @brief Header for file system utilities.
- *
- * Declares functions for file system operations, such as retrieving the directory of the currently executing module.
+ * @brief Module-path filesystem utilities.
+ * @warning `[B-100]` Call these functions only outside the loader lock. First use queries the loader and caches the
+ *          module path. Each call returns a separate string that can allocate. `FilesystemLoaderBoundary.*` pins the
+ *          boundary.
  */
 
 #include <string>

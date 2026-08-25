@@ -286,12 +286,7 @@ configure_file(
 )
 
 # Static analysis (clang-tidy, opt-in advisory)
-# The curated .clang-tidy at the repo root is advisory: it never fails a build (WarningsAsErrors: '') and confines
-# header diagnostics to include/DetourModKit via HeaderFilterRegex. This option wires it into the build so clang-tidy
-# runs alongside compilation of DetourModKit's own sources (and the tests). Off by default so normal consumer and CI
-# builds are unaffected; CI runs it in a continue-on-error lane. Set here - after the external submodules are added
-# above and before the library and test targets below - so only this project's targets inherit the launcher
-# and SafetyHook / Zydis / Zycore are never analysed.
+# The local opt-in build reports DetourModKit diagnostics without failure, while CI treats each diagnostic as an error.
 option(DMK_ENABLE_CLANG_TIDY "Run clang-tidy on DetourModKit sources during the build (advisory)" OFF)
 
 if(DMK_ENABLE_CLANG_TIDY)
