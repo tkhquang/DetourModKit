@@ -3,12 +3,15 @@
  * @brief This TU implements the protection-region cache and its readability predicates.
  *
  * The sharded cache uses SRW locks. It provides FIFO eviction and exact invalidation without SEH.
- * Shutdown drains reader epochs before shard release. This TU controls the MinGW guarded-engine lifecycle.
+ * Shutdown closes reader admission and drains admitted readers before a deadline. A timeout retains the storage.
+ *
+ * This TU controls the MinGW guarded-engine lifecycle.
  */
 
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
+#include "internal/drain_backoff.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/srw_shared_mutex.hpp"
 #include "platform.hpp"
@@ -42,8 +45,10 @@ namespace DetourModKit::detail
 {
     void (*g_memory_cache_before_lifecycle_lock_test_hook)() = nullptr;
     void (*g_memory_cache_before_running_publish_test_hook)() = nullptr;
+    void (*g_memory_cache_reopen_window_test_hook)() = nullptr;
     void (*g_memory_cache_shutdown_window_test_hook)() = nullptr;
     void (*g_memory_cache_leader_publish_window_test_hook)() = nullptr;
+    HMODULE (*g_memory_cache_keepalive_ref_override)() noexcept = nullptr;
 } // namespace DetourModKit::detail
 #endif
 
@@ -159,8 +164,8 @@ namespace DetourModKit
                 return (static_cast<std::size_t>((address * 0x9E3779B97F4A7C15ULL) >> 48)) % shard_count;
             }
 
-            // The fixed-size shard array never resizes because CacheShard is non-movable. It is null before init and
-            // after shutdown.
+            // The fixed-size shard array never resizes because CacheShard is non-movable. It is null before init.
+            // A drained shutdown clears it. Abandonment or a timeout retains it until a later drain.
             std::unique_ptr<CacheShard[]> s_cache_shards;
             std::atomic<std::size_t> s_shard_count{0};
             std::atomic<std::size_t> s_max_entries_per_shard{0};
@@ -169,10 +174,10 @@ namespace DetourModKit
             /**
              * @enum LifecycleState
              * @brief Defines the cache lifecycle authority: Stopped -> Starting -> Running -> Stopping -> Stopped.
-             * @details The seq_cst order pairs the reader hot path with the ActiveReaderGuard stripe increment.
-             *          Running is published last by init_cache and cleared first by shutdown_cache. Normal
-             *          transitions use s_lifecycle_mutex. Loader-lock abandonment uses compare/exchange because it
-             *          cannot wait for that mutex.
+             * @details Running is published last by init_cache and cleared first by shutdown_cache. The per-stripe
+             *          closed-bit words decide reader admission. This state directs control paths. Normal transitions
+             *          use s_lifecycle_mutex. Loader-lock abandonment uses compare-exchange because it cannot wait for
+             *          that mutex.
              */
             enum class LifecycleState : std::uint8_t
             {
@@ -183,7 +188,7 @@ namespace DetourModKit
             };
             std::atomic<LifecycleState> s_lifecycle_state{LifecycleState::Stopped};
 
-            /// Reports whether the cache is active under the seq_cst reader-liveness gate in LifecycleState.
+            /// Reports whether the cache lifecycle is in its Running state.
             [[nodiscard]] inline bool cache_is_running() noexcept
             {
                 return s_lifecycle_state.load(std::memory_order_seq_cst) == LifecycleState::Running;
@@ -210,10 +215,14 @@ namespace DetourModKit
             // This sticky counter records unexpected joinable handles recovered before a new cleanup worker appears.
             std::atomic<std::uint64_t> s_lifecycle_violations{0};
 
-            // Reader epochs let shutdown wait for zero before data release. Cache-line-padded counters stripe readers,
-            // so concurrent reads do not serialize on one shared line. See active_reader_total() and the
-            // ActiveReaderGuard Dekker note.
+            // Reader admission uses the [B-73] closed-drain pattern. Each stripe word holds a high closed bit and an
+            // admitted-reader count. One compare-exchange checks the closed bit and increments the count. Teardown sets
+            // the closed bit on every stripe before it reads the counts, so it drains a closed population.
+            // Cache-line-padded stripes keep concurrent readers off one shared line (measured in the phase 9 warm-hit
+            // contention benchmark).
             constexpr std::size_t READER_STRIPE_COUNT = 64;
+            constexpr std::uint64_t READER_ADMISSION_CLOSED = std::uint64_t{1} << 63;
+            constexpr std::uint64_t READER_ADMISSION_COUNT_MASK = ~READER_ADMISSION_CLOSED;
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -222,20 +231,22 @@ namespace DetourModKit
 #endif
             struct alignas(64) ReaderStripe
             {
-                std::atomic<std::int32_t> count{0};
+                // Starts closed: admission opens only after init_cache publishes a running cache.
+                std::atomic<std::uint64_t> word{READER_ADMISSION_CLOSED};
             };
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
+            static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
             std::array<ReaderStripe, READER_STRIPE_COUNT> s_reader_stripes{};
 
             /**
-             * @brief Returns this thread's reader stripe, derived from its Win32 thread id.
+             * @brief Returns this thread's admission stripe, derived from its Win32 thread id.
              * @details A hash of GetCurrentThreadId allocates nothing and takes no lock, so loader lock permits it.
              *          In contrast, MinGW lowers first access to a thread_local counter into __emutls_get_address,
              *          which can allocate. The id is stable for the thread's life, so the same stripe carries the
-             *          increment and its paired decrement. A collision adds contention but never a drain miscount.
+             *          admission and its paired release. A collision adds contention but never a drain miscount.
              */
             [[nodiscard]] inline std::size_t reader_stripe_index() noexcept
             {
@@ -243,46 +254,151 @@ namespace DetourModKit
                 return static_cast<std::size_t>(mixed >> 48) % READER_STRIPE_COUNT;
             }
 
-            /**
-             * @brief Returns the sum of all reader stripes inside an ActiveReaderGuard.
-             * @details After shutdown_cache publishes Stopping, it waits for this sum to reach zero under seq_cst.
-             *          It then frees shard storage.
-             */
-            [[nodiscard]] inline std::int64_t active_reader_total() noexcept
+            /// Returns the admitted-reader count summed across all stripes.
+            [[nodiscard]] inline std::uint64_t admitted_reader_count() noexcept
             {
-                std::int64_t total = 0;
+                std::uint64_t total = 0;
                 for (const ReaderStripe &stripe : s_reader_stripes)
                 {
-                    total += stripe.count.load(std::memory_order_seq_cst);
+                    total += stripe.word.load(std::memory_order_seq_cst) & READER_ADMISSION_COUNT_MASK;
                 }
                 return total;
             }
 
             /**
-             * @class ActiveReaderGuard
-             * @brief Tracks one reader with paired stripe updates across every exit path.
+             * @brief Closes reader admission on every stripe.
+             * @details After the last fetch_or returns, no stripe admits a reader, so a later drain waits on a closed
+             *          population. Each fetch_or is wait-free, so loader-lock abandonment can call this.
              */
-            class ActiveReaderGuard
+            void close_reader_admission() noexcept
+            {
+                for (ReaderStripe &stripe : s_reader_stripes)
+                {
+                    stripe.word.fetch_or(READER_ADMISSION_CLOSED, std::memory_order_seq_cst);
+                }
+            }
+
+            /**
+             * @brief Reopens reader admission after a drained start from each exact closed and zero-reader value.
+             * @details While a stripe is closed, its count only decreases. The caller drains every count under
+             *          s_cache_state_mutex. Init opens all stripes before it publishes Running. Concurrent abandonment
+             *          closes them and changes Starting to Stopped. The publication check then rolls init back.
+             */
+            void reopen_reader_admission() noexcept
+            {
+                for (std::size_t i = 0; i < s_reader_stripes.size(); ++i)
+                {
+                    ReaderStripe &stripe = s_reader_stripes[i];
+                    std::uint64_t expected = READER_ADMISSION_CLOSED;
+                    (void)stripe.word
+                        .compare_exchange_strong(expected, 0, std::memory_order_seq_cst, std::memory_order_seq_cst);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (i == 0)
+                    {
+                        if (auto *const hook = DetourModKit::detail::g_memory_cache_reopen_window_test_hook)
+                            hook();
+                    }
+#endif
+                }
+            }
+
+            /// Bounds every reader drain. Expiry retains the reader-visible storage instead of a free ([B-73]).
+            constexpr auto READER_DRAIN_TIMEOUT = std::chrono::seconds{1};
+
+            /// Waits for the admitted-reader count to reach zero within READER_DRAIN_TIMEOUT.
+            [[nodiscard]] bool drain_admitted_readers() noexcept
+            {
+                return DetourModKit::detail::drain_until_zero(
+                    []() noexcept { return admitted_reader_count(); },
+                    std::chrono::steady_clock::now() + READER_DRAIN_TIMEOUT
+                );
+            }
+
+            // A cache session takes this reference before admission opens. A timeout retains it with the shard array.
+            // Guarded by s_cache_state_mutex.
+            HMODULE s_cache_self_ref{nullptr};
+
+            /// Takes the keepalive that makes a later bounded-drain timeout safe.
+            [[nodiscard]] HMODULE acquire_cache_keepalive_ref() noexcept
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *const override_fn = DetourModKit::detail::g_memory_cache_keepalive_ref_override)
+                    return override_fn();
+#endif
+                return acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
+            }
+
+            /**
+             * @brief Releases the cache keepalive after the admitted reader count reaches zero.
+             * @note
+             * Must be called with s_cache_state_mutex held.
+             */
+            void release_cache_keepalive_after_drain() noexcept
+            {
+                if (s_cache_self_ref != nullptr)
+                {
+                    release_module_ref(s_cache_self_ref, diagnostics::ModulePinReason::MemoryCache);
+                    s_cache_self_ref = nullptr;
+                }
+            }
+
+            /**
+             * @brief Records one timeout that retains the cache keepalive and reader-visible state.
+             *
+             * @note Must be called with s_cache_state_mutex held.
+             */
+            void record_reader_drain_timeout_retention() noexcept
+            {
+                assert(s_cache_self_ref != nullptr);
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::MemoryCache
+                );
+            }
+
+            /**
+             * @class ReaderAdmission
+             * @brief Admits one reader through its stripe's closed-bit word and releases it on every exit path.
+             * @details A rejected admission leaves the count untouched, so the caller never joins the teardown drain
+             *          population and must take the uncached route.
+             */
+            class ReaderAdmission
             {
             public:
-                ActiveReaderGuard() noexcept : m_stripe(reader_stripe_index())
+                ReaderAdmission() noexcept : m_stripe(reader_stripe_index())
                 {
-                    // This increment and the reader lifecycle load use seq_cst. Their total order forbids the Dekker
-                    // StoreLoad outcome with shutdown_cache. A reader that observes Running enters the count before
-                    // shutdown reads that stripe. On x86-64, this is the same lock xadd as acq_rel.
-                    s_reader_stripes[m_stripe].count.fetch_add(1, std::memory_order_seq_cst);
+                    std::atomic<std::uint64_t> &word = s_reader_stripes[m_stripe].word;
+                    std::uint64_t value = word.load(std::memory_order_seq_cst);
+                    while ((value & READER_ADMISSION_CLOSED) == 0)
+                    {
+                        if (word.compare_exchange_weak(
+                                value,
+                                value + 1,
+                                std::memory_order_seq_cst,
+                                std::memory_order_seq_cst
+                            ))
+                        {
+                            m_admitted = true;
+                            break;
+                        }
+                    }
                 }
 
-                ~ActiveReaderGuard() noexcept
+                ~ReaderAdmission() noexcept
                 {
-                    s_reader_stripes[m_stripe].count.fetch_sub(1, std::memory_order_release);
+                    if (m_admitted)
+                    {
+                        s_reader_stripes[m_stripe].word.fetch_sub(1, std::memory_order_release);
+                    }
                 }
 
-                ActiveReaderGuard(const ActiveReaderGuard &) = delete;
-                ActiveReaderGuard &operator=(const ActiveReaderGuard &) = delete;
+                [[nodiscard]] bool admitted() const noexcept { return m_admitted; }
+
+                ReaderAdmission(const ReaderAdmission &) = delete;
+                ReaderAdmission &operator=(const ReaderAdmission &) = delete;
 
             private:
                 const std::size_t m_stripe;
+                bool m_admitted{false};
             };
 
             // Use std::thread, not jthread. The jthread auto-join destructor runs after s_cleanup_cv and
@@ -883,6 +999,10 @@ namespace DetourModKit
                 // If another thread owns the handle lock, it completes the join/detach decision after loader unlock.
                 (void)try_detach_cleanup_thread_unauthorized();
 
+                // Close admission before another reader enters the retained shard array. Each fetch_or is wait-free
+                // and loader-lock safe. The next authorized init or shutdown drains admitted readers before any free.
+                close_reader_admission();
+
                 LifecycleState state = s_lifecycle_state.load(std::memory_order_seq_cst);
                 while (state == LifecycleState::Starting || state == LifecycleState::Running)
                 {
@@ -1180,15 +1300,17 @@ namespace DetourModKit
                 if (address == 0 || size == 0)
                     return false;
 
-                // Guard before the lifecycle load so shutdown cannot free the shard array between check and access.
-                ActiveReaderGuard reader_guard;
+                // One compare-exchange combines admission with the closed check. A query after closure never joins the
+                // drain population ([B-73]). While admitted, teardown cannot free the shard array.
+                ReaderAdmission admission;
 
-                const bool cache_running = cache_is_running();
-                const std::size_t shard_count = cache_running ? s_shard_count.load(std::memory_order_acquire) : 0;
-
-                // If no cache is available, walk the range directly. This occurs outside Running or after a concurrent
-                // shutdown clears the count. The walk spans protection boundaries, so a re-protected interior
-                // page is answered correctly.
+                // Without an admitted running cache, walk the range directly. The walk spans protection boundaries,
+                // so a re-protected interior page is answered correctly.
+                if (!admission.admitted() || !cache_is_running())
+                {
+                    return range_permission_uncached(address, size, check_permission);
+                }
+                const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
                 if (shard_count == 0)
                 {
                     return range_permission_uncached(address, size, check_permission);
@@ -1251,8 +1373,8 @@ namespace DetourModKit
                 if (callback == nullptr)
                     return;
 
-                ActiveReaderGuard reader_guard;
-                if (!cache_is_running())
+                ReaderAdmission admission;
+                if (!admission.admitted() || !cache_is_running())
                     return;
 
                 const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
@@ -1280,8 +1402,8 @@ namespace DetourModKit
                 fifo = 0;
                 ranges = 0;
 
-                ActiveReaderGuard reader_guard;
-                if (!cache_is_running())
+                ReaderAdmission admission;
+                if (!admission.admitted() || !cache_is_running())
                     return;
 
                 const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
@@ -1343,26 +1465,36 @@ namespace DetourModKit
 
             {
                 std::lock_guard state_lock(s_cache_state_mutex);
-                // A loader-lock abandon leaves the previous session shard array allocated with readers undrained. A
-                // preempted reader can still hold a pointer into it, so drain before the array is freed. Starting
-                // is already published, so no new reader enters.
-                if (s_cache_shards)
+                // Close every stripe before the shard array changes. Then drain the closed reader population before
+                // the deadline. Abandonment or a prior timeout can leave reader-visible state retained. Free that state
+                // only after this drain reaches zero. On expiry the start fails and retains the state under [B-73].
+                close_reader_admission();
+                s_shard_count.store(0, std::memory_order_release);
+                if (!drain_admitted_readers())
                 {
-                    s_shard_count.store(0, std::memory_order_release);
-                    constexpr int yield_spins = 4096;
-                    int spins = 0;
-                    while (active_reader_total() > 0)
+                    record_reader_drain_timeout_retention();
+                    s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
+                    return false;
+                }
+
+                if (s_cache_self_ref == nullptr)
+                {
+                    s_cache_self_ref = acquire_cache_keepalive_ref();
+                    if (s_cache_self_ref == nullptr)
                     {
-                        if (spins < yield_spins)
-                            std::this_thread::yield();
-                        else
-                            std::this_thread::sleep_for(std::chrono::microseconds(100));
-                        ++spins;
+                        s_cache_shards.reset();
+                        s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                        s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                        s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
+                        return false;
                     }
                 }
 
                 if (!perform_cache_initialization(cache_size, expiry_ms, shard_count))
                 {
+                    release_cache_keepalive_after_drain();
+                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
                     s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
                     return false;
                 }
@@ -1428,6 +1560,10 @@ namespace DetourModKit
                 atexit_registered = true;
             }
 
+            // Open every stripe before Running publishes. A concurrent abandonment closes the stripes and changes
+            // Starting to Stopped. The publication check below then rolls the start back.
+            reopen_reader_admission();
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *const hook = DetourModKit::detail::g_memory_cache_before_running_publish_test_hook)
                 hook();
@@ -1447,59 +1583,64 @@ namespace DetourModKit
                 (void)join_cleanup_thread();
 
                 std::lock_guard<SrwSharedMutex> state_lock(s_cache_state_mutex);
+                close_reader_admission();
                 s_shard_count.store(0, std::memory_order_release);
-                while (active_reader_total() > 0)
-                    std::this_thread::yield();
-                s_cache_shards.reset();
-                s_configured_expiry_ms.store(0, std::memory_order_relaxed);
-                s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                if (drain_admitted_readers())
+                {
+                    s_cache_shards.reset();
+                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                    release_cache_keepalive_after_drain();
+                }
+                else
+                {
+                    record_reader_drain_timeout_retention();
+                }
 #if !defined(_MSC_VER) && defined(_WIN64)
                 detail::release_guarded_engine();
 #endif
                 return false;
             }
+
             return true;
         }
 
         void clear_cache() noexcept
         {
-            std::lock_guard state_lock(s_cache_state_mutex);
-
-            if (!cache_is_running())
-                return;
-
-            const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
-            if (shard_count == 0)
-                return;
-
-            // Acquire an exclusive lock for each shard and wait if needed. The cleanup thread uses try_lock, so it
-            // skips held shards.
-            for (std::size_t i = 0; i < shard_count; ++i)
             {
-                std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
-                s_cache_shards[i].entries.clear();
-                s_cache_shards[i].fifo_index.clear();
-                s_cache_shards[i].sorted_ranges.clear();
-                s_cache_shards[i].hits.store(0, std::memory_order_relaxed);
-                s_cache_shards[i].misses.store(0, std::memory_order_relaxed);
-                // Advance the generation so an in-flight leader cannot republish a pre-clear result.
-                s_cache_shards[i].content_gen.fetch_add(1, std::memory_order_release);
+                std::lock_guard state_lock(s_cache_state_mutex);
+
+                if (!cache_is_running())
+                    return;
+
+                const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
+                if (shard_count == 0)
+                    return;
+
+                // Acquire an exclusive lock for each shard and wait if needed. The cleanup thread uses try_lock, so it
+                // skips held shards.
+                for (std::size_t i = 0; i < shard_count; ++i)
+                {
+                    std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+                    s_cache_shards[i].entries.clear();
+                    s_cache_shards[i].fifo_index.clear();
+                    s_cache_shards[i].sorted_ranges.clear();
+                    s_cache_shards[i].hits.store(0, std::memory_order_relaxed);
+                    s_cache_shards[i].misses.store(0, std::memory_order_relaxed);
+                    // Advance the generation so an in-flight leader cannot republish a pre-clear result.
+                    s_cache_shards[i].content_gen.fetch_add(1, std::memory_order_release);
+                }
+
+                s_stats.invalidations.store(0, std::memory_order_relaxed);
+                s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
+                s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
+
+                s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_relaxed);
             }
 
-            s_stats.invalidations.store(0, std::memory_order_relaxed);
-            s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
-            s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
-
-            s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_relaxed);
-
-            // This diagnostic tail is optional. clear_cache is noexcept, so a sink or format failure drops the line.
-            try
-            {
-                log().debug("MemoryCache: All entries cleared.");
-            }
-            catch (...)
-            {
-            }
+            // Deferred-log order: the optional diagnostic tail runs after every cache mutex is released. A sink or
+            // format failure drops the line.
+            (void)log().try_log(LogLevel::Debug, "MemoryCache: All entries cleared.");
         }
 
         void shutdown_cache() noexcept
@@ -1520,9 +1661,14 @@ namespace DetourModKit
             if (state != LifecycleState::Running && !(state == LifecycleState::Stopped && s_cache_shards))
                 return;
 
-            // Stopped with a live shard array is a prior loader-lock abandonment, safe to finish here off the
-            // loader lock. Stopping also prevents a concurrent loader-lock callback from another Stopped publication.
+            // Stopped with a live shard array is a prior loader-lock abandonment or drain timeout, safe to finish here
+            // off the loader lock. Stopping also prevents a concurrent loader-lock callback from another Stopped
+            // publication.
             s_lifecycle_state.store(LifecycleState::Stopping, std::memory_order_seq_cst);
+
+            // Close every admission stripe before the drain reads the counts. The drain then sees a closed population.
+            // A query after this point takes the uncached route ([B-73]).
+            close_reader_admission();
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
             // Force an initializer to attempt this lifecycle lock before teardown continues.
@@ -1531,69 +1677,72 @@ namespace DetourModKit
 #endif
 
             // Join the cleanup thread before acquisition of the state mutex. The thread takes s_cache_state_mutex in
-            // forced cleanup. A join under that mutex can deadlock.
+            // forced cleanup. A join under that mutex can deadlock. The joined population is closed: the flag store
+            // above makes the one worker exit its wait promptly.
             s_cleanup_thread_running.store(false, std::memory_order_release);
             s_cleanup_cv.notify_one();
             (void)join_cleanup_thread();
 
-            std::lock_guard state_lock(s_cache_state_mutex);
-
-            // Capture the shard count before its reset to zero because the destroy loop needs the length.
-            const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
-            s_shard_count.store(0, std::memory_order_release);
-
-            // Wait for active readers to exit before data destruction. Escalate yield -> sleep.
-            constexpr int yield_spins = 4096;
-            int spins = 0;
-            while (active_reader_total() > 0)
+            bool drained = false;
             {
-                if (spins < yield_spins)
+                std::lock_guard state_lock(s_cache_state_mutex);
+
+                // Capture the shard count before its reset to zero because the destroy loop needs the length.
+                const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
+                s_shard_count.store(0, std::memory_order_release);
+
+                drained = drain_admitted_readers();
+                if (drained)
                 {
-                    std::this_thread::yield();
+                    for (std::size_t i = 0; i < shard_count; ++i)
+                    {
+                        std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+                        s_cache_shards[i].entries.clear();
+                        s_cache_shards[i].fifo_index.clear();
+                        s_cache_shards[i].sorted_ranges.clear();
+                    }
+
+                    s_cache_shards.reset();
+
+                    // Only the global cold counters need an explicit reset. s_lifecycle_violations is intentionally
+                    // NOT reset: a sticky diagnostic that must survive a restart.
+                    s_stats.invalidations.store(0, std::memory_order_relaxed);
+                    s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
+                    s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
+                    s_last_cleanup_time_ns.store(0, std::memory_order_relaxed);
+                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                    release_cache_keepalive_after_drain();
                 }
                 else
                 {
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    // A stalled admitted reader can still hold shard pointers. Retain the shard array, configuration,
+                    // and precommitted module reference. A later init_cache or shutdown_cache call retries the drain.
+                    record_reader_drain_timeout_retention();
                 }
-                ++spins;
-            }
-
-            for (std::size_t i = 0; i < shard_count; ++i)
-            {
-                std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
-                s_cache_shards[i].entries.clear();
-                s_cache_shards[i].fifo_index.clear();
-                s_cache_shards[i].sorted_ranges.clear();
-            }
-
-            s_cache_shards.reset();
-
-            // Only the global cold counters need an explicit reset. s_lifecycle_violations is intentionally NOT
-            // reset: a sticky diagnostic that must survive a restart.
-            s_stats.invalidations.store(0, std::memory_order_relaxed);
-            s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
-            s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
-            s_last_cleanup_time_ns.store(0, std::memory_order_relaxed);
-            s_configured_expiry_ms.store(0, std::memory_order_relaxed);
-            s_max_entries_per_shard.store(0, std::memory_order_relaxed);
-            s_cleanup_requested.store(false, std::memory_order_relaxed);
+                s_cleanup_requested.store(false, std::memory_order_relaxed);
 
 #if !defined(_MSC_VER) && defined(_WIN64)
-            // Remove the vectored fault handler so it cannot dangle into freed code if the DMK module is unloaded after
-            // teardown. The engine drains guarded reads on the handler path before handler removal. An in-flight read
-            // cannot fault into a missing handler. The operation is idempotent. A later guarded read reinstalls it.
-            detail::release_guarded_engine();
+                // Remove the vectored fault handler so it cannot dangle into freed code if the DMK module is unloaded
+                // after teardown. The engine drains guarded reads on the handler path before handler removal. An
+                // in-flight read cannot fault into a missing handler. The operation is idempotent. A later guarded
+                // read reinstalls it.
+                detail::release_guarded_engine();
 #endif
 
-            // Publish Stopped last, under the lifecycle mutex, so the next init_cache admits a fresh start.
-            s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
-
-            try
-            {
-                log().debug("MemoryCache: Shutdown complete.");
+                // Publish Stopped last, under the lifecycle mutex, so the next init_cache admits a fresh start (which
+                // reopens admission only from the exact closed and zero-reader state).
+                s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
             }
-            catch (...)
+
+            // Deferred-log order: the optional diagnostic tail runs after every cache mutex is released.
+            if (drained)
             {
+                (void)log().try_log(LogLevel::Debug, "MemoryCache: Shutdown complete.");
+            }
+            else
+            {
+                (void)log().try_log(LogLevel::Debug, "MemoryCache: Shutdown drain timed out, cache storage retained.");
             }
         }
 
@@ -1607,13 +1756,12 @@ namespace DetourModKit
             stats.on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
             stats.lifecycle_violations = s_lifecycle_violations.load(std::memory_order_relaxed);
 
-            // Capture the config fields and entry totals behind the reader guard and the same seq_cst lifecycle gate
-            // that permission readers use. A plain acquire of s_shard_count alone lets a concurrent shutdown free the
-            // array between a stale non-zero count and the loop. Every field stays at its zero default while the cache
-            // is down.
+            // Capture the config fields and entry totals under the same reader admission that permission readers use.
+            // A plain acquire of s_shard_count alone lets a concurrent shutdown free the array between a stale
+            // non-zero count and the loop. Every field stays at its zero default while the cache is down.
             {
-                ActiveReaderGuard reader_guard;
-                if (cache_is_running())
+                ReaderAdmission admission;
+                if (admission.admitted() && cache_is_running())
                 {
                     const std::size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
                     if (active_shard_count > 0)
@@ -1670,10 +1818,9 @@ namespace DetourModKit
             if (!range.base || range.size == 0)
                 return;
 
-            // Guard before the lifecycle check so shutdown cannot free the shard array between check and access.
-            ActiveReaderGuard reader_guard;
-
-            if (!cache_is_running())
+            // Admission keeps shutdown from a shard-array free during the sweep. A rejected caller has no live cache.
+            ReaderAdmission admission;
+            if (!admission.admitted() || !cache_is_running())
                 return;
 
             const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
@@ -1703,9 +1850,8 @@ namespace DetourModKit
             if (address == 0 || size == 0)
                 return ReadableStatus::NotReadable;
 
-            ActiveReaderGuard reader_guard;
-
-            if (!cache_is_running())
+            ReaderAdmission admission;
+            if (!admission.admitted() || !cache_is_running())
             {
                 // No cache is available. Use a range walk that can wait and return a definite answer. The
                 // cache-present path below never issues a VirtualQuery and returns Unknown on a miss.
@@ -1749,6 +1895,22 @@ namespace DetourModKit::detail
     void memory_cache_abandon_for_test() noexcept
     {
         memory::abandon_cache_unauthorized();
+    }
+
+    std::uint64_t memory_cache_admitted_reader_count_for_test() noexcept
+    {
+        return memory::admitted_reader_count();
+    }
+
+    bool memory_cache_has_retained_shards_for_test() noexcept
+    {
+        return memory::s_cache_shards != nullptr;
+    }
+
+    bool memory_cache_reader_would_be_admitted_for_test() noexcept
+    {
+        memory::ReaderAdmission admission;
+        return admission.admitted();
     }
 
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept

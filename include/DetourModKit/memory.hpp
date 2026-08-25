@@ -677,7 +677,9 @@ namespace DetourModKit
          *         A false return leaves the cache stopped, so readers use the uncached `VirtualQuery` route.
          * @details A call while the cache is running returns true and keeps the running configuration, with no
          *          reconfiguration and no loader-lock check.
-         *          A call after @ref shutdown_cache starts a fresh cache with the arguments of that call.
+         *          A call after @ref shutdown_cache starts a fresh cache with the arguments of that call. A start fails
+         *          if readers from a prior session do not exit before the drain deadline. It retains that session's
+         *          storage and precommitted module reference.
          *          A successful start creates the cleanup thread when the platform permits it.
          *          Otherwise, the cache uses on-demand cleanup.
          *          MinGW also installs the process fault handler for guarded reads.
@@ -703,6 +705,12 @@ namespace DetourModKit
          * @details Call before module unload to terminate the cleanup thread cleanly. After shutdown, the cache cannot
          *          be reused without re-initialization. Under loader lock the thread is detached rather than joined to
          *          avoid deadlock, and on MinGW the vectored fault handler is drained and removed.
+         *          Teardown closes reader admission first. A later permission query takes the uncached `VirtualQuery`
+         *          route. The wait for admitted readers has a fixed deadline. The cache precommits a module reference
+         *          before admission opens. On expiry it retains that reference and the cache storage. It also records
+         *          one @ref diagnostics::LeakSubsystem::MemoryCache event. A later @ref init_cache or
+         *          @ref shutdown_cache call can reclaim the storage after the stalled reader exits. A clean shutdown
+         *          releases the cache reference.
          * @note Setup/control-plane only.
          */
         void shutdown_cache() noexcept;

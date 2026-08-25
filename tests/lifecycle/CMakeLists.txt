@@ -88,6 +88,21 @@ dmk_add_raw_proof(NAME Lifecycle.VmtUnreadableModuleHeader
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# Cache shutdown must retain the shard storage and its precommitted module reference after a drain timeout (`[B-73]`).
+# The deadline and retained state require a separate process.
+add_executable(cache_shutdown_stall cache_shutdown_stall.cpp)
+target_link_libraries(cache_shutdown_stall PRIVATE DetourModKit dmk_coverage)
+target_include_directories(cache_shutdown_stall PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(cache_shutdown_stall PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(cache_shutdown_stall)
+add_dependencies(dmk_lifecycle_proof_hosts cache_shutdown_stall)
+
+dmk_add_raw_proof(NAME Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader
+  COMMAND $<TARGET_FILE:cache_shutdown_stall>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:cache_shutdown_stall>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Deliberately provokes an unhandled-if-unfixed access violation, so it needs its own process. Runs on both
 # toolchains: the vectored handler under test is the backend's, and the fault is an OS property.
 add_executable(trap_closed_window test_trap_closed_window.cpp)
