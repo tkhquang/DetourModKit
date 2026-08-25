@@ -328,14 +328,13 @@ namespace DetourModKit
         const std::size_t written = detail::read_name_seh(name_addr, out, out_len, module_end);
         if (written == 0)
         {
-            // A one-byte destination has room only for the terminator. Distinguish that zero-length truncation from a
-            // read failure; an empty RTTI name, while not emitted by MSVC, is still a complete read.
-            if (out_len == 1)
-            {
-                char first = 1;
-                if (DetourModKit::detail::guarded_read_bytes(name_addr, &first, 1))
-                    result.status = (first == '\0') ? NameStatus::Ok : NameStatus::Truncated;
-            }
+            // Zero bytes copied means a complete empty name or a read failure. Probe the first byte at every capacity.
+            // A failed probe keeps the default Failed status. An empty RTTI name is still a complete read. A readable
+            // non-terminator means that the name exists but no byte was copied. This case reports Truncated.
+            // RttiTest.TypeNameChecked_EmptyName* pins the matrix.
+            char first = 1;
+            if (DetourModKit::detail::guarded_read_bytes(name_addr, &first, 1))
+                result.status = (first == '\0') ? NameStatus::Ok : NameStatus::Truncated;
             return result;
         }
         result.written = written;

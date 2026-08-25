@@ -1700,13 +1700,15 @@ namespace
             return std::unexpected(started.error());
         }
         dmk::Result<rtti::HealHit> outcome = std::unexpected(dmk::Error{ErrorCode::HealNoMatch, "test"});
-        started->add_group(
-            [&outcome, &lm, table, &slot](rtti::HealRun &run) noexcept -> bool
-            {
-                outcome = run.heal_into("fixture", lm, Address{table}, slot);
-                return outcome.has_value();
-            }
-        );
+        EXPECT_TRUE(started
+                        ->add_group(
+                            [&outcome, &lm, table, &slot](rtti::HealRun &run) noexcept -> bool
+                            {
+                                outcome = run.heal_into("fixture", lm, Address{table}, slot);
+                                return outcome.has_value();
+                            }
+                        )
+                        .has_value());
         started->tick();
         return outcome;
     }

@@ -29,6 +29,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -77,8 +78,13 @@ namespace DetourModKit
 
             std::unique_ptr<DetourModKit::detail::ConfigWatcher> &get_config_watcher()
             {
-                static std::unique_ptr<DetourModKit::detail::ConfigWatcher> s_watcher;
-                return s_watcher;
+                // `[B-47]` requires never-destroyed storage. Static destruction can run after libstdc++ tears down
+                // worker synchronization state and can fault the process. Explicit disable and drain paths still
+                // reset this owner. Lifecycle.FullLifecycleExit pins the process exit path.
+                using WatcherOwner = std::unique_ptr<DetourModKit::detail::ConfigWatcher>;
+                alignas(WatcherOwner) static unsigned char s_watcher_storage[sizeof(WatcherOwner)];
+                static WatcherOwner *const s_watcher = ::new (static_cast<void *>(s_watcher_storage)) WatcherOwner();
+                return *s_watcher;
             }
 
             // Stores a copy of the user on_reload callback. ConfigWatcher swallows it with no getter, so only this

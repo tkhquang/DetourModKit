@@ -455,7 +455,10 @@ namespace DetourModKit
             {
                 ensure_lifecycle(binding);
             }
-            recompute_modifier_caches_locked();
+            // Construction is single-owner, so no lock is held; emit directly after the rebuild.
+            DeferredDiagnostics diagnostics;
+            recompute_modifier_caches_locked(diagnostics);
+            diagnostics.emit();
         }
 
         // The poll loop drives the wheel through these helpers so it never names a specific backend. MessageHook
@@ -753,7 +756,8 @@ namespace DetourModKit
             }
         }
 
-        void InputPoller::recompute_modifier_caches_locked(CacheFailPolicy policy) noexcept
+        void
+        InputPoller::recompute_modifier_caches_locked(DeferredDiagnostics &diagnostics, CacheFailPolicy policy) noexcept
         {
             // Snapshot wheel ownership before this reshape. The installed detour continues to latch notches across an
             // unbind -> rebind while the poll loop skips the drain. A stale backlog accumulates in the unowned window.
@@ -800,7 +804,7 @@ namespace DetourModKit
 
                 // Offer the detour-side consume rule list. A poller that does not hold the layer keeps the rules
                 // cached and does not overwrite the owner's list.
-                publish_consume_rules_locked();
+                publish_consume_rules_locked(diagnostics);
 
                 // On the no-wheel -> wheel transition, discard whatever the detour latched while no binding owned
                 // the wheel. The published flag stays false until after this drain. Otherwise, the poll thread can
@@ -829,13 +833,8 @@ namespace DetourModKit
                     // rest of the process.
                     m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                     m_consume_rules.clear();
-                    publish_consume_rules_locked();
-                    (void)log().try_log(
-                        LogLevel::Error,
-                        "InputPoller: out of memory rebuilding modifier caches; name lookup is "
-                        "retained and gamepad consume suppression is disarmed until the next "
-                        "successful rebuild"
-                    );
+                    publish_consume_rules_locked(diagnostics);
+                    diagnostics.cache_rebuild_retained = true;
                     return;
                 }
 
@@ -847,16 +846,12 @@ namespace DetourModKit
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_consume_rules.clear();
-                publish_consume_rules_locked();
-                (void)log().try_log(
-                    LogLevel::Error,
-                    "InputPoller: out of memory rebuilding modifier caches; "
-                    "name lookup and input interception disabled until the next successful rebuild"
-                );
+                publish_consume_rules_locked(diagnostics);
+                diagnostics.cache_rebuild_cleared = true;
             }
         }
 
-        void InputPoller::publish_consume_rules_locked() noexcept
+        void InputPoller::publish_consume_rules_locked(DeferredDiagnostics &diagnostics) noexcept
         {
             const ConsumePublish result =
                 publish_gamepad_consume_rules(m_consume_rules.data(), m_consume_rules.size(), m_intercept_owner);
@@ -864,22 +859,30 @@ namespace DetourModKit
             {
                 // Not this poller's layer: report zero occupancy and keep the rules cached for the retry.
                 m_consume_rules_unpublished.store(true, std::memory_order_release);
-                record_consume_capacity(0, 0);
+                record_consume_capacity(0, 0, diagnostics);
                 return;
             }
             m_consume_rules_unpublished.store(false, std::memory_order_release);
-            record_consume_capacity(result.published, m_consume_rules.size() - result.published);
+            record_consume_capacity(result.published, m_consume_rules.size() - result.published, diagnostics);
         }
 
 #ifdef DMK_ENABLE_TEST_SEAMS
         void InputPoller::publish_consume_rules_for_test() noexcept
         {
-            std::unique_lock lock(m_bindings_rw_mutex);
-            publish_consume_rules_locked();
+            DeferredDiagnostics diagnostics;
+            {
+                std::unique_lock lock(m_bindings_rw_mutex);
+                publish_consume_rules_locked(diagnostics);
+            }
+            diagnostics.emit();
         }
 #endif
 
-        void InputPoller::record_consume_capacity(std::size_t active, std::size_t rejected) noexcept
+        void InputPoller::record_consume_capacity(
+            std::size_t active,
+            std::size_t rejected,
+            DeferredDiagnostics &diagnostics
+        ) noexcept
         {
             m_consume_rules_total.store(active + rejected, std::memory_order_relaxed);
             if (rejected == 0)
@@ -892,13 +895,48 @@ namespace DetourModKit
             {
                 return;
             }
-            (void)log().try_log(
-                LogLevel::Warning,
-                "InputPoller: {} of {} gamepad consume chords exceed the interception table; "
-                "they keep the reactive mask but lose same-frame suppression",
-                rejected,
-                active + rejected
-            );
+            diagnostics.consume_bound = true;
+            diagnostics.consume_rejected = rejected;
+            diagnostics.consume_total = active + rejected;
+        }
+
+        void InputPoller::DeferredDiagnostics::emit() const noexcept
+        {
+            if (cache_rebuild_retained)
+            {
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: out of memory rebuilding modifier caches; name lookup is "
+                    "retained and gamepad consume suppression is disarmed until the next "
+                    "successful rebuild"
+                );
+            }
+            if (cache_rebuild_cleared)
+            {
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: out of memory rebuilding modifier caches; "
+                    "name lookup and input interception disabled until the next successful rebuild"
+                );
+            }
+            if (add_binding_oom)
+            {
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_binding; binding not added");
+            }
+            if (add_bindings_oom)
+            {
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_bindings; bindings not added");
+            }
+            if (consume_bound)
+            {
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "InputPoller: {} of {} gamepad consume chords exceed the interception table; "
+                    "they keep the reactive mask but lose same-frame suppression",
+                    consume_rejected,
+                    consume_total
+                );
+            }
         }
 
         input::ConsumeCapacity InputPoller::consume_capacity() const noexcept
@@ -1071,18 +1109,32 @@ namespace DetourModKit
 
         void InputPoller::set_consume(std::string_view name, bool consume) noexcept
         {
-            std::unique_lock lock(m_bindings_rw_mutex);
-            const auto it = m_name_index.find(name);
-            if (it == m_name_index.end())
+            DeferredDiagnostics diagnostics;
             {
-                return;
+                std::unique_lock lock(m_bindings_rw_mutex);
+                const auto it = m_name_index.find(name);
+                if (it == m_name_index.end())
+                {
+                    return;
+                }
+                bool changed = false;
+                for (const size_t idx : it->second)
+                {
+                    if (m_bindings[idx].consume != consume)
+                    {
+                        m_bindings[idx].consume = consume;
+                        changed = true;
+                    }
+                }
+                // Refresh the interception gates only on a real transition, as set_consume_by_owner does. A redundant
+                // rebuild advances the generation and makes every live BindingToken stale despite no state change.
+                // InputTest.BindingTokenStaysCurrentAfterRedundantConsumeSet pins both no-op flag values.
+                if (changed)
+                {
+                    recompute_modifier_caches_locked(diagnostics, CacheFailPolicy::Retain);
+                }
             }
-            for (const size_t idx : it->second)
-            {
-                m_bindings[idx].consume = consume;
-            }
-            // Refresh the interception gates so the poll loop installs or skips the XInput and queue hooks next cycle.
-            recompute_modifier_caches_locked(CacheFailPolicy::Retain);
+            diagnostics.emit();
         }
 
         void InputPoller::set_consume_by_owner(std::uint64_t owner, bool consume) noexcept
@@ -1093,22 +1145,26 @@ namespace DetourModKit
             {
                 return;
             }
-            std::unique_lock lock(m_bindings_rw_mutex);
-            bool changed = false;
-            for (auto &binding : m_bindings)
+            DeferredDiagnostics diagnostics;
             {
-                if (binding.consume_owner == owner && binding.consume != consume)
+                std::unique_lock lock(m_bindings_rw_mutex);
+                bool changed = false;
+                for (auto &binding : m_bindings)
                 {
-                    binding.consume = consume;
-                    changed = true;
+                    if (binding.consume_owner == owner && binding.consume != consume)
+                    {
+                        binding.consume = consume;
+                        changed = true;
+                    }
+                }
+                // Rebuild only on a real transition. A redundant rebuild advances the generation and makes every live
+                // BindingToken stale despite no state change.
+                if (changed)
+                {
+                    recompute_modifier_caches_locked(diagnostics, CacheFailPolicy::Retain);
                 }
             }
-            // Rebuild only on a real transition. A redundant rebuild advances the generation and makes every live
-            // BindingToken stale despite no state change.
-            if (changed)
-            {
-                recompute_modifier_caches_locked(CacheFailPolicy::Retain);
-            }
+            diagnostics.emit();
         }
 
         void InputPoller::shutdown() noexcept
@@ -1306,8 +1362,12 @@ namespace DetourModKit
                 if (m_consume_rules_unpublished.load(std::memory_order_acquire) &&
                     intercept_owned_by(m_intercept_owner))
                 {
-                    std::unique_lock rules_lock(m_bindings_rw_mutex);
-                    publish_consume_rules_locked();
+                    DeferredDiagnostics diagnostics;
+                    {
+                        std::unique_lock rules_lock(m_bindings_rw_mutex);
+                        publish_consume_rules_locked(diagnostics);
+                    }
+                    diagnostics.emit();
                 }
 
                 // Accumulate bits that active consume bindings claim this cycle, then publish them after the binding
@@ -1744,6 +1804,7 @@ namespace DetourModKit
             std::vector<BindingRundown> rundowns;
             std::vector<InputBinding> retired;
             std::vector<InputBinding> rebuilt;
+            DeferredDiagnostics diagnostics;
 
             try
             {
@@ -1791,8 +1852,9 @@ namespace DetourModKit
                     {
                         rundown.generation = rundown.lifecycle->advance_generation();
                     }
-                    recompute_modifier_caches_locked();
+                    recompute_modifier_caches_locked(diagnostics);
                     lock.unlock();
+                    diagnostics.emit();
                     drain_rundowns(rundowns);
                     return true;
                 }
@@ -1894,15 +1956,17 @@ namespace DetourModKit
                                              ? rundown.lifecycle->advance_generation()
                                              : rundown.lifecycle->tombstone();
                 }
-                recompute_modifier_caches_locked();
+                recompute_modifier_caches_locked(diagnostics);
             }
             catch (...)
             {
                 // Phase 1 allocates before any mutation, so the poller is left unchanged and no callbacks fire.
+                // The stack unwind already released the writer lock, so this emission is off the lock.
                 (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in update_combos; combos unchanged");
                 return false;
             }
 
+            diagnostics.emit();
             drain_rundowns(rundowns);
 
             // Fire the captured release callbacks outside the writer lock. This path runs from a user-driven INI
@@ -1937,39 +2001,47 @@ namespace DetourModKit
 
         bool InputPoller::add_binding(InputBinding binding) noexcept
         {
-            std::unique_lock lock(m_bindings_rw_mutex);
-
-            const size_t old_count = m_bindings.size();
-            const size_t new_count = old_count + 1;
-
-            try
+            DeferredDiagnostics diagnostics;
+            bool added = false;
             {
-                ensure_lifecycle(binding);
+                std::unique_lock lock(m_bindings_rw_mutex);
 
-                // Build the replacement state array before mutation of m_bindings so an allocation failure leaves
-                // both at their prior equal sizes. A mismatch causes an out-of-bounds poll read. Seed each retained
-                // slot from the current value so a held binding does not flicker inactive.
-                auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_count);
-                for (size_t i = 0; i < old_count; ++i)
+                const size_t old_count = m_bindings.size();
+                const size_t new_count = old_count + 1;
+
+                try
                 {
-                    new_states[i].store(m_active_states[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
-                }
-                new_states[old_count].store(0, std::memory_order_relaxed);
+                    ensure_lifecycle(binding);
 
-                // push_back has the strong guarantee, so a reallocation failure leaves m_bindings unchanged and
-                // simply discards the new_states array.
-                m_bindings.push_back(std::move(binding));
-                m_active_states = std::move(new_states);
-                recompute_modifier_caches_locked();
-                return true;
+                    // Build the replacement state array before mutation of m_bindings so an allocation failure leaves
+                    // both at their prior equal sizes. A mismatch causes an out-of-bounds poll read. Seed each retained
+                    // slot from the current value so a held binding does not flicker inactive.
+                    auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_count);
+                    for (size_t i = 0; i < old_count; ++i)
+                    {
+                        new_states[i].store(
+                            m_active_states[i].load(std::memory_order_relaxed),
+                            std::memory_order_relaxed
+                        );
+                    }
+                    new_states[old_count].store(0, std::memory_order_relaxed);
+
+                    // push_back has the strong guarantee, so a reallocation failure leaves m_bindings unchanged and
+                    // simply discards the new_states array.
+                    m_bindings.push_back(std::move(binding));
+                    m_active_states = std::move(new_states);
+                    recompute_modifier_caches_locked(diagnostics);
+                    added = true;
+                }
+                catch (...)
+                {
+                    // Drop the binding and leave the poller unchanged. The false return lets the facade surface
+                    // the failure.
+                    diagnostics.add_binding_oom = true;
+                }
             }
-            catch (...)
-            {
-                // Drop the binding and leave the poller unchanged. The false return lets the facade surface
-                // the failure.
-                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_binding; binding not added");
-                return false;
-            }
+            diagnostics.emit();
+            return added;
         }
 
         bool InputPoller::add_bindings(std::vector<InputBinding> bindings) noexcept
@@ -1979,47 +2051,55 @@ namespace DetourModKit
                 return true;
             }
 
-            std::unique_lock lock(m_bindings_rw_mutex);
-
-            const size_t old_count = m_bindings.size();
-            const size_t append_count = bindings.size();
-            const size_t new_count = old_count + append_count;
-
-            try
+            DeferredDiagnostics diagnostics;
+            bool added = false;
             {
-                for (auto &binding : bindings)
-                {
-                    ensure_lifecycle(binding);
-                }
+                std::unique_lock lock(m_bindings_rw_mutex);
 
-                // Allocate every replacement container before mutation of the live engine. Preserve an atomic
-                // multi-combo registration under OOM.
-                auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_count);
-                std::vector<InputBinding> rebuilt;
-                rebuilt.reserve(new_count);
+                const size_t old_count = m_bindings.size();
+                const size_t append_count = bindings.size();
+                const size_t new_count = old_count + append_count;
 
-                for (size_t i = 0; i < old_count; ++i)
+                try
                 {
-                    new_states[i].store(m_active_states[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    rebuilt.push_back(std::move(m_bindings[i]));
-                }
-                for (size_t i = 0; i < append_count; ++i)
-                {
-                    new_states[old_count + i].store(0, std::memory_order_relaxed);
-                    rebuilt.push_back(std::move(bindings[i]));
-                }
+                    for (auto &binding : bindings)
+                    {
+                        ensure_lifecycle(binding);
+                    }
 
-                m_bindings = std::move(rebuilt);
-                m_active_states = std::move(new_states);
-                recompute_modifier_caches_locked();
-                return true;
+                    // Allocate every replacement container before mutation of the live engine. Preserve an atomic
+                    // multi-combo registration under OOM.
+                    auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_count);
+                    std::vector<InputBinding> rebuilt;
+                    rebuilt.reserve(new_count);
+
+                    for (size_t i = 0; i < old_count; ++i)
+                    {
+                        new_states[i].store(
+                            m_active_states[i].load(std::memory_order_relaxed),
+                            std::memory_order_relaxed
+                        );
+                        rebuilt.push_back(std::move(m_bindings[i]));
+                    }
+                    for (size_t i = 0; i < append_count; ++i)
+                    {
+                        new_states[old_count + i].store(0, std::memory_order_relaxed);
+                        rebuilt.push_back(std::move(bindings[i]));
+                    }
+
+                    m_bindings = std::move(rebuilt);
+                    m_active_states = std::move(new_states);
+                    recompute_modifier_caches_locked(diagnostics);
+                    added = true;
+                }
+                catch (...)
+                {
+                    // All allocation precedes any move from m_bindings, so the live poller remains unchanged.
+                    diagnostics.add_bindings_oom = true;
+                }
             }
-            catch (...)
-            {
-                // All allocation precedes any move from m_bindings, so the live poller remains unchanged.
-                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_bindings; bindings not added");
-                return false;
-            }
+            diagnostics.emit();
+            return added;
         }
 
         size_t InputPoller::remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
@@ -2029,6 +2109,7 @@ namespace DetourModKit
             std::vector<InputBinding> retired;
             std::vector<InputBinding> staged;
             size_t removed = 0;
+            DeferredDiagnostics diagnostics;
 
             try
             {
@@ -2108,17 +2189,20 @@ namespace DetourModKit
                 m_active_states = std::move(new_states);
                 removed = indices.size();
 
-                recompute_modifier_caches_locked();
+                recompute_modifier_caches_locked(diagnostics);
             }
             catch (...)
             {
-                // Allocation precedes erasure, so the poller is left unchanged and no callbacks fire.
+                // Allocation precedes erasure, so the poller is left unchanged and no callbacks fire. The stack
+                // unwind already released the writer lock, so this emission is off the lock.
                 (void)log().try_log(
                     LogLevel::Error,
                     "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged"
                 );
                 return 0;
             }
+
+            diagnostics.emit();
 
             // invoke_callbacks == false means the caller owns the wait. The loader-lock abandon path must not block.
             // The typed unload drain bounds the wait on its own deadline. The tombstone is already published, so an
@@ -2257,6 +2341,7 @@ namespace DetourModKit
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
             std::vector<InputBinding> retired;
+            DeferredDiagnostics diagnostics;
 
             try
             {
@@ -2301,17 +2386,20 @@ namespace DetourModKit
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_consume_rules.clear();
-                publish_consume_rules_locked();
+                publish_consume_rules_locked(diagnostics);
                 m_active_states = std::move(new_states);
             }
             catch (...)
             {
+                // The stack unwind already released the writer lock, so this emission is off the lock.
                 (void)log().try_log(
                     LogLevel::Error,
                     "InputPoller: out of memory in clear_bindings; bindings unchanged"
                 );
                 return;
             }
+
+            diagnostics.emit();
 
             // invoke_callbacks == false abandons in-flight callbacks (see remove_bindings_by_name). A normal clear
             // drains.

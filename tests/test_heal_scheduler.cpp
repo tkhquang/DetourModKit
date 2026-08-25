@@ -76,13 +76,15 @@ TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
     rtti::HealScheduler &sched = *started;
 
     int scans = 0;
-    sched.add_group(
-        [&scans](rtti::HealRun &) noexcept
-        {
-            ++scans;
-            return false; // never resolves, so the group keeps its cadence forever
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&scans](rtti::HealRun &) noexcept
+                        {
+                            ++scans;
+                            return false; // never resolves, so the group keeps its cadence forever
+                        }
+                    )
+                    .has_value());
 
     sched.tick(); // frame 0 -> scan
     EXPECT_EQ(scans, 1);
@@ -113,13 +115,15 @@ TEST(HealSchedulerTest, LatchStopsScanningAfterSuccess)
     rtti::HealScheduler &sched = *started;
 
     int scans = 0;
-    sched.add_group(
-        [&scans](rtti::HealRun &) noexcept
-        {
-            ++scans;
-            return true; // resolves on the first scan
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&scans](rtti::HealRun &) noexcept
+                        {
+                            ++scans;
+                            return true; // resolves on the first scan
+                        }
+                    )
+                    .has_value());
 
     EXPECT_FALSE(sched.all_resolved());
     sched.tick();
@@ -147,13 +151,15 @@ TEST(HealSchedulerTest, RetriesUntilResolvedWithNoAttemptCap)
     rtti::HealScheduler &sched = *started;
 
     int scans = 0;
-    sched.add_group(
-        [&scans](rtti::HealRun &) noexcept
-        {
-            ++scans;
-            return scans >= 5;
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&scans](rtti::HealRun &) noexcept
+                        {
+                            ++scans;
+                            return scans >= 5;
+                        }
+                    )
+                    .has_value());
 
     // interval 1 -> scans land on ticks 1, 3, 5, 7, 9 (a scan then one skip). Drive well past the fifth scan.
     for (int i = 0; i < 40; ++i)
@@ -180,18 +186,20 @@ TEST(HealSchedulerTest, SilentPreGateDoesNotSpendTheInterval)
     bool ready = false;
     int scans = 0;
     int gate_calls = 0;
-    sched.add_group(
-        [&scans](rtti::HealRun &) noexcept
-        {
-            ++scans;
-            return true;
-        },
-        [&ready, &gate_calls]() noexcept
-        {
-            ++gate_calls;
-            return ready;
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&scans](rtti::HealRun &) noexcept
+                        {
+                            ++scans;
+                            return true;
+                        },
+                        [&ready, &gate_calls]() noexcept
+                        {
+                            ++gate_calls;
+                            return ready;
+                        }
+                    )
+                    .has_value());
 
     // Target absent for many frames: the gate is polled every frame, but no scan happens and no interval is spent.
     for (int i = 0; i < 100; ++i)
@@ -218,13 +226,15 @@ TEST(HealSchedulerTest, MovedFromSchedulerIsInert)
     ASSERT_TRUE(started.has_value());
 
     int scans = 0;
-    started->add_group(
-        [&scans](rtti::HealRun &) noexcept
-        {
-            ++scans;
-            return true;
-        }
-    );
+    EXPECT_TRUE(started
+                    ->add_group(
+                        [&scans](rtti::HealRun &) noexcept
+                        {
+                            ++scans;
+                            return true;
+                        }
+                    )
+                    .has_value());
 
     rtti::HealScheduler moved = std::move(*started);
 
@@ -256,23 +266,27 @@ TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
     // Group A registers group B from inside its own work callback. The defer-queue must apply B only after tick's scan
     // loop, so the range-for over the group vector is never invalidated by a reallocation mid-iteration (the UB a naive
     // push_back-during-iteration would cause).
-    sched.add_group(
-        [&](rtti::HealRun &)
-        {
-            ++a;
-            if (a == 1)
-            {
-                sched.add_group(
-                    [&](rtti::HealRun &) noexcept
-                    {
-                        ++b;
-                        return true;
-                    }
-                );
-            }
-            return true; // A latches on its first scan
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &)
+                        {
+                            ++a;
+                            if (a == 1)
+                            {
+                                EXPECT_TRUE(sched
+                                                .add_group(
+                                                    [&](rtti::HealRun &) noexcept
+                                                    {
+                                                        ++b;
+                                                        return true;
+                                                    }
+                                                )
+                                                .has_value());
+                            }
+                            return true; // A latches on its first scan
+                        }
+                    )
+                    .has_value());
 
     sched.tick(); // A scans (deferring B); A latches; B has not run yet
     EXPECT_EQ(a, 1);
@@ -298,26 +312,30 @@ TEST(HealSchedulerTest, PendingGroupsRemainUnresolvedWhenAdoptionRunsOutOfMemory
 
     constexpr int deferred_count = 64;
     int deferred_runs = 0;
-    sched.add_group(
-        [&](rtti::HealRun &)
-        {
-            for (int i = 0; i < deferred_count; ++i)
-            {
-                sched.add_group(
-                    [&](rtti::HealRun &) noexcept
-                    {
-                        ++deferred_runs;
-                        return true;
-                    }
-                );
-            }
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &)
+                        {
+                            for (int i = 0; i < deferred_count; ++i)
+                            {
+                                EXPECT_TRUE(sched
+                                                .add_group(
+                                                    [&](rtti::HealRun &) noexcept
+                                                    {
+                                                        ++deferred_runs;
+                                                        return true;
+                                                    }
+                                                )
+                                                .has_value());
+                            }
 
-            // All deferred callbacks are safely staged. Fail the allocation that would adopt them into the active
-            // group vector after this callback returns.
-            dmk_test::arm_alloc_failure(0);
-            return true;
-        }
-    );
+                            // All deferred callbacks are safely staged. Fail the allocation that would adopt them into
+                            // the active group vector after this callback returns.
+                            dmk_test::arm_alloc_failure(0);
+                            return true;
+                        }
+                    )
+                    .has_value());
 
     sched.tick();
     dmk_test::disarm_alloc_failure();
@@ -350,24 +368,28 @@ TEST(HealSchedulerTest, PendingGroupsSurviveRepeatedAdoptionFailure)
 
     constexpr int deferred_count = 64;
     int deferred_runs = 0;
-    sched.add_group(
-        [&](rtti::HealRun &)
-        {
-            for (int i = 0; i < deferred_count; ++i)
-            {
-                sched.add_group(
-                    [&](rtti::HealRun &) noexcept
-                    {
-                        ++deferred_runs;
-                        return true;
-                    }
-                );
-            }
-            // Left armed past this tick so every following entry and exit adoption fails too.
-            dmk_test::arm_alloc_failure(0);
-            return true;
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &)
+                        {
+                            for (int i = 0; i < deferred_count; ++i)
+                            {
+                                EXPECT_TRUE(sched
+                                                .add_group(
+                                                    [&](rtti::HealRun &) noexcept
+                                                    {
+                                                        ++deferred_runs;
+                                                        return true;
+                                                    }
+                                                )
+                                                .has_value());
+                            }
+                            // Left armed past this tick so each later entry and exit adoption fails too.
+                            dmk_test::arm_alloc_failure(0);
+                            return true;
+                        }
+                    )
+                    .has_value());
 
     constexpr int failing_ticks = 4;
     bool resolved_while_failing[failing_ticks] = {};
@@ -393,6 +415,95 @@ TEST(HealSchedulerTest, PendingGroupsSurviveRepeatedAdoptionFailure)
     EXPECT_TRUE(sched.all_resolved());
 }
 
+// These two add_group OOM cases pin the Result contract. A failed registration returns OutOfMemory and commits no
+// state. The direct case pushes into `groups`. The re-entrant case first pushes into `pending`. Each callable exists
+// before the injector arms, so only the registration push can fail. GoogleTest assertions run after disarm.
+TEST(HealSchedulerTest, AddGroupAllocationFailureReturnsOutOfMemoryWithoutStateCommit)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    bool ran = false;
+    rtti::HealScheduler::Work work = [&ran](rtti::HealRun &) noexcept
+    {
+        ran = true;
+        return true;
+    };
+
+    dmk_test::arm_alloc_failure(0);
+    const DetourModKit::Result<void> result = sched.add_group(std::move(work));
+    dmk_test::disarm_alloc_failure();
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::OutOfMemory);
+    EXPECT_TRUE(sched.all_resolved()) << "a failed add_group must register no group";
+    sched.tick();
+    EXPECT_FALSE(ran) << "a failed add_group must never run the rejected work";
+
+    // With memory back, the same registration succeeds and the scheduler is fully usable.
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&ran](rtti::HealRun &) noexcept
+                        {
+                            ran = true;
+                            return true;
+                        }
+                    )
+                    .has_value());
+    EXPECT_FALSE(sched.all_resolved());
+    sched.tick();
+    EXPECT_TRUE(ran);
+    EXPECT_TRUE(sched.all_resolved());
+}
+
+TEST(HealSchedulerTest, ReentrantAddGroupAllocationFailureReturnsOutOfMemoryWithoutStateCommit)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    bool inner_ran = false;
+    DetourModKit::Result<void> inner_result;
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &)
+                        {
+                            rtti::HealScheduler::Work inner_work = [&inner_ran](rtti::HealRun &) noexcept
+                            {
+                                inner_ran = true;
+                                return true;
+                            };
+                            // The re-entrant registration's INITIAL push lands in the empty pending queue. Its first
+                            // allocation must fail.
+                            dmk_test::arm_alloc_failure(0);
+                            inner_result = sched.add_group(std::move(inner_work));
+                            dmk_test::disarm_alloc_failure();
+                            return true; // the outer group latches
+                        }
+                    )
+                    .has_value());
+
+    sched.tick();
+    ASSERT_FALSE(inner_result.has_value());
+    EXPECT_EQ(inner_result.error().code, ErrorCode::OutOfMemory);
+    EXPECT_TRUE(sched.all_resolved()) << "a failed re-entrant add_group must leave no pending group";
+    sched.tick();
+    EXPECT_FALSE(inner_ran) << "a failed re-entrant add_group must never run the rejected work";
+}
+
 TEST(HealSchedulerTest, ManyGroupsAddedFromCallbackDeferWithoutInvalidatingIteration)
 {
     // Hardens the defer contract against the re-entrant dangling-reference hazard: a work callback that registers MANY
@@ -412,23 +523,27 @@ TEST(HealSchedulerTest, ManyGroupsAddedFromCallbackDeferWithoutInvalidatingItera
     std::atomic<int> spawned{0};
     int ran = 0;
 
-    sched.add_group(
-        [&](rtti::HealRun &)
-        {
-            for (int i = 0; i < deferred_count; ++i)
-            {
-                sched.add_group(
-                    [&](rtti::HealRun &) noexcept
-                    {
-                        ++ran;
-                        return true;
-                    }
-                );
-                spawned.fetch_add(1, std::memory_order_relaxed);
-            }
-            return true; // the seed group latches on its first scan
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &)
+                        {
+                            for (int i = 0; i < deferred_count; ++i)
+                            {
+                                EXPECT_TRUE(sched
+                                                .add_group(
+                                                    [&](rtti::HealRun &) noexcept
+                                                    {
+                                                        ++ran;
+                                                        return true;
+                                                    }
+                                                )
+                                                .has_value());
+                                spawned.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            return true; // the seed group latches on its first scan
+                        }
+                    )
+                    .has_value());
 
     sched.tick(); // the seed scans and defers all 64 groups; none has run yet
     EXPECT_EQ(spawned.load(), deferred_count);
@@ -638,8 +753,10 @@ TEST_F(HealSchedulerHealTest, HealIntoPublishesConfirmedNominalOffset)
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
-    sched.add_group([&](rtti::HealRun &run) noexcept
-                    { return run.heal_into("nominal", lm, Address{st.base()}, slot).has_value(); });
+    EXPECT_TRUE(sched
+                    .add_group([&](rtti::HealRun &run) noexcept
+                               { return run.heal_into("nominal", lm, Address{st.base()}, slot).has_value(); })
+                    .has_value());
 
     sched.tick();
     EXPECT_TRUE(sched.all_resolved());
@@ -669,8 +786,10 @@ TEST_F(HealSchedulerHealTest, HealIntoPublishesDriftedOffset)
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
-    sched.add_group([&](rtti::HealRun &run) noexcept
-                    { return run.heal_into("drift", lm, Address{st.base()}, slot).has_value(); });
+    EXPECT_TRUE(sched
+                    .add_group([&](rtti::HealRun &run) noexcept
+                               { return run.heal_into("drift", lm, Address{st.base()}, slot).has_value(); })
+                    .has_value());
 
     sched.tick();
     EXPECT_TRUE(sched.all_resolved());
@@ -697,8 +816,12 @@ TEST_F(HealSchedulerHealTest, HealIntoKeepsNominalOnMissThenHealsWhenTargetAppea
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
-    sched.add_group([&](rtti::HealRun &run) noexcept
-                    { return run.heal_into("late", lm, Address{st.base()}, slot, /*required=*/false).has_value(); });
+    EXPECT_TRUE(
+        sched
+            .add_group([&](rtti::HealRun &run) noexcept
+                       { return run.heal_into("late", lm, Address{st.base()}, slot, /*required=*/false).has_value(); })
+            .has_value()
+    );
 
     // First scans miss: the slot is left untouched at its nominal (fail closed, never a guessed offset) and the group
     // stays un-latched so it keeps retrying.
@@ -755,13 +878,16 @@ TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     bool healed = true;
-    sched.add_group(
-        [&](rtti::HealRun &run) noexcept
-        {
-            healed = run.heal_into("wanted", lm, Address{st.base()}, slot, /*required=*/true).has_value();
-            return true;
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &run) noexcept
+                        {
+                            healed =
+                                run.heal_into("wanted", lm, Address{st.base()}, slot, /*required=*/true).has_value();
+                            return true;
+                        }
+                    )
+                    .has_value());
     sched.tick();
 
     EXPECT_FALSE(healed) << "the required heal must miss";
@@ -800,13 +926,15 @@ TEST_F(HealSchedulerHealTest, OptionalMissPublishesUnverified)
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
-    sched.add_group(
-        [&](rtti::HealRun &run) noexcept
-        {
-            (void)run.heal_into("optional", lm, Address{st.base()}, slot, /*required=*/false);
-            return true;
-        }
-    );
+    EXPECT_TRUE(sched
+                    .add_group(
+                        [&](rtti::HealRun &run) noexcept
+                        {
+                            (void)run.heal_into("optional", lm, Address{st.base()}, slot, /*required=*/false);
+                            return true;
+                        }
+                    )
+                    .has_value());
     sched.tick();
 
     const rtti::HealedOffset snap = slot.load();
@@ -841,9 +969,13 @@ TEST_F(HealSchedulerHealTest, HealedSlotResolvePublishesConfirmedAndAuthorizes)
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
-    sched.add_group(
-        [&](rtti::HealRun &run) noexcept
-        { return run.heal_into("confirmed", lm, Address{st.base()}, slot, /*required=*/true).has_value(); }
+    EXPECT_TRUE(
+        sched
+            .add_group(
+                [&](rtti::HealRun &run) noexcept
+                { return run.heal_into("confirmed", lm, Address{st.base()}, slot, /*required=*/true).has_value(); }
+            )
+            .has_value()
     );
     sched.tick();
     EXPECT_TRUE(sched.all_resolved());
@@ -891,9 +1023,13 @@ TEST_F(HealSchedulerHealTest, MissingImageGenerationDoesNotLatchConfirmedHeal)
     );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &scheduler = *started;
-    scheduler.add_group(
-        [&](rtti::HealRun &run) noexcept
-        { return run.heal_into("no-generation", landmark, Address{structure.base()}, slot).has_value(); }
+    EXPECT_TRUE(
+        scheduler
+            .add_group(
+                [&](rtti::HealRun &run) noexcept
+                { return run.heal_into("no-generation", landmark, Address{structure.base()}, slot).has_value(); }
+            )
+            .has_value()
     );
     scheduler.tick();
 
@@ -917,25 +1053,29 @@ TEST(HealSchedulerTest, RecursiveTickIsRejectedAndDoesNotInvalidateIteration)
     std::atomic<int> deferred_ran{0};
     for (int i = 0; i < 4; ++i)
     {
-        sched.add_group(
-            [&](rtti::HealRun &) noexcept
-            {
-                sched.tick(); // nested tick: must be rejected, must not clear the outer in-flight state
-                // Add many groups: were this to push into `groups` rather than `pending`, the reallocation would
-                // invalidate the outer range-for and crash.
-                for (int k = 0; k < 32; ++k)
-                {
-                    sched.add_group(
-                        [&](rtti::HealRun &) noexcept
-                        {
-                            deferred_ran.fetch_add(1, std::memory_order_relaxed);
-                            return true;
-                        }
-                    );
-                }
-                return true; // latch
-            }
-        );
+        EXPECT_TRUE(sched
+                        .add_group(
+                            [&](rtti::HealRun &) noexcept
+                            {
+                                sched.tick(); // nested tick: must be rejected, must not clear the outer in-flight state
+                                // Add many groups. A push into `groups` instead of `pending` invalidates the outer
+                                // range-for and crashes.
+                                for (int k = 0; k < 32; ++k)
+                                {
+                                    EXPECT_TRUE(sched
+                                                    .add_group(
+                                                        [&](rtti::HealRun &) noexcept
+                                                        {
+                                                            deferred_ran.fetch_add(1, std::memory_order_relaxed);
+                                                            return true;
+                                                        }
+                                                    )
+                                                    .has_value());
+                                }
+                                return true; // latch
+                            }
+                        )
+                        .has_value());
     }
 
     sched.tick(); // outer scan must complete without UB

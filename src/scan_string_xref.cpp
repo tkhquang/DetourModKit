@@ -518,13 +518,20 @@ namespace DetourModKit
                 return (found_count == 1) ? first_site : 0;
             }
 
-            // The store-slot scan decodes forward after `lea reg, [rip+string]`.
-            // It accepts the first `REX.W MOV [rip+disp32], reg64` store within the caller's tight window.
-            //
-            // Zydis does not classify INT3 or UD2 as a return or unconditional branch. Explicit stops keep the cursor
-            // inside the current function. NOP and conditional branches retain valid fall-through paths. The
+            // `[B-76]` defines the terminal predicate for forward value-attribution scans. RET, unconditional branches,
+            // and the SYSRET category stop by category. INT3, UD2, and UIRET stop by mnemonic because Zydis places them
+            // elsewhere. None has a fall-through path. A conditional branch keeps its fall-through path. The
             // StringXrefTest.StringPointerSlotStopsAt* and StringPointerSlotContinuesPastConditionalBranch cases pin
             // these choices.
+            [[nodiscard]] bool is_non_fall_through_terminal(const ZydisDecodedInstruction &insn) noexcept
+            {
+                return insn.meta.category == ZYDIS_CATEGORY_RET || insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+                       insn.meta.category == ZYDIS_CATEGORY_SYSRET || insn.mnemonic == ZYDIS_MNEMONIC_INT3 ||
+                       insn.mnemonic == ZYDIS_MNEMONIC_UD2 || insn.mnemonic == ZYDIS_MNEMONIC_UIRET;
+            }
+
+            // The store-slot scan decodes forward after `lea reg, [rip+string]`.
+            // It accepts the first `REX.W MOV [rip+disp32], reg64` store within the caller's tight window.
             //
             // store_end marks one past the accepted store. The complete decoded span forms the evidence for selector
             // failure-domain overlap.
@@ -615,14 +622,9 @@ namespace DetourModKit
                     {
                         return 0;
                     }
-                    // A RET, an unconditional JMP (a tail call), or UD2 ends this function's straight-line flow. INT3
-                    // padding also marks an inter-function boundary. Any store past one of them belongs to a different
-                    // function, so fail closed rather than walk into the next function's store. A conditional branch
-                    // (ZYDIS_CATEGORY_COND_BR) is intentionally excluded. Its fall-through can still reach the
-                    // caching store. INT3 and UD2 are checked explicitly because they decode as valid instructions
-                    // that neither category check catches.
-                    if (insn.meta.category == ZYDIS_CATEGORY_RET || insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
-                        insn.mnemonic == ZYDIS_MNEMONIC_INT3 || insn.mnemonic == ZYDIS_MNEMONIC_UD2)
+                    // A store past a non-fall-through terminal belongs to a different function or an unreachable
+                    // path, so fail closed rather than attribute it to this lea.
+                    if (is_non_fall_through_terminal(insn))
                     {
                         return 0;
                     }

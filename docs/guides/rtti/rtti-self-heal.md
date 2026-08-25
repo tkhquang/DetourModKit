@@ -8,7 +8,7 @@ The [RTTI walker](rtti-walker.md) answers the forward question: *given a vtable,
 - **Several fields co-moved. What single shift fits them all?** (`solve_fingerprint`)
 - **Run those heals on a frame cadence, latch each group once it resolves, and warn once when the layout really drifted.** (`HealScheduler`)
 
-It reuses the walker's verified COL prelude (module-bound-checked, SEH-guarded) rather than a duplicate of it, so every guarantee the walker makes carries over. Every non-scheduler entry point is `noexcept` (of the scheduler surface, only the setup call `add_group` can allocate and throw). Every derived address is range-checked against its owning module before a read. Matching compares MSVC mangled bytes exactly (no `UnDecorateSymbolName`). Scope is x64 MSVC.
+It reuses the walker's verified COL prelude instead of a duplicate. The module bound checks and SEH guards apply to each use. Every entry point is `noexcept`. The setup call `add_group` allocates and returns `Result<void>`. A failed registration returns `ErrorCode::OutOfMemory` and leaves state unchanged. Every derived address is range-checked against its owning module before a read. The comparison uses exact MSVC mangled bytes (no `UnDecorateSymbolName`). Scope is x64 MSVC.
 
 Everything here fails **closed** on zero matches, an irreducible ambiguity, a forged COL, or an unmapped page. It returns a clean error, never a fault. One documented fail-wrong hazard remains. A single-landmark heal resolves to the uniquely *nearest* type+shape match, so a strictly-nearer same-typed decoy field (or, under `ObjectBase` / `Any`, a nearer multiple-inheritance secondary base) wins silently and returns a confidently-wrong offset. `HealAmbiguous` fires only for an exact `+d` / `-d` distance tie. When the window can hold more than one field of the landmark type, prefer `solve_fingerprint` (one uniform delta must fit every field), narrow the `window`, or tighten the type.
 
@@ -182,7 +182,8 @@ auto healer = rtti::HealScheduler::start({
 rtti::HealScheduler &sched = *healer;
 s_health_off.seed_nominal(0x2A0);
 
-sched.add_group(
+// add_group returns Result<void>: OutOfMemory on a failed registration, with no group registered.
+auto registered = sched.add_group(
     // work: heal from the live base; return true to latch the group.
     [&](rtti::HealRun &run) noexcept
     {
@@ -191,7 +192,7 @@ sched.add_group(
     // gate (optional): a cheap per-frame precondition. false -> skip silently, do NOT spend the interval.
     []() noexcept { return player_is_seated(); });
 
-// On the render thread, once per frame:
+// ... check registered, then on the render thread, once per frame:
 sched.tick();
 ```
 
