@@ -65,6 +65,29 @@ dmk_add_raw_proof(NAME Lifecycle.LateVmtOwnerOutlivesTheObjectGate
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# VMT slot classification against a loaded module whose PE header page is PAGE_NOACCESS (`[B-66]`). The unfixed
+# backend query faults on that header, so the proof needs its own process; exit status is the oracle. Page
+# protection is OS behavior, so it runs on both toolchains.
+add_executable(vmt_unreadable_header vmt_unreadable_header.cpp)
+target_link_libraries(vmt_unreadable_header PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(vmt_unreadable_header PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(vmt_unreadable_header)
+add_dependencies(vmt_unreadable_header hook_target_lib)
+add_dependencies(dmk_lifecycle_proof_hosts vmt_unreadable_header)
+
+# The host loads the fixture by bare name from its own directory; hook_target_lib is declared one level up and has
+# to be staged in.
+add_custom_command(TARGET vmt_unreadable_header POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:vmt_unreadable_header>)
+
+dmk_add_raw_proof(NAME Lifecycle.VmtUnreadableModuleHeader
+  COMMAND $<TARGET_FILE:vmt_unreadable_header>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:vmt_unreadable_header>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Deliberately provokes an unhandled-if-unfixed access violation, so it needs its own process. Runs on both
 # toolchains: the vectored handler under test is the backend's, and the fault is an OS property.
 add_executable(trap_closed_window test_trap_closed_window.cpp)

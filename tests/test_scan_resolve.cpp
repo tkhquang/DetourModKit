@@ -2083,6 +2083,7 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         ErrorCode::RegionTooSmall,
         ErrorCode::UnreadableDisplacement,
         ErrorCode::ImplausibleTarget,
+        ErrorCode::UnreadableTarget,
         ErrorCode::BadPattern,
         ErrorCode::DecodeFailed,
         ErrorCode::OperandOutOfRange,
@@ -2107,6 +2108,7 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
     static_assert(to_string(ErrorCode::MalformedQueryText) == "MalformedQueryText");
     static_assert(to_string(ErrorCode::EvidenceMismatch) == "EvidenceMismatch");
     static_assert(to_string(ErrorCode::PrologueFallbackAmbiguous) == "PrologueFallbackAmbiguous");
+    static_assert(to_string(ErrorCode::UnreadableTarget) == "UnreadableTarget");
 }
 
 // borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an

@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "DetourModKit/scan.hpp"
@@ -1803,6 +1804,8 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
         std::byte{0x90},
         std::byte{0x90}
     };
+    // The resolved target must be readable under the B-60 decoy gate, so keep it inside this buffer.
+    code.resize(64, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -1823,6 +1826,8 @@ TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
         std::byte{0x00},
         std::byte{0x00}
     };
+    // Readable-target gate: the +0x100 target must land inside this buffer.
+    code.resize(0x120, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_LEA_RAX_RIP, 7);
 
@@ -1842,6 +1847,8 @@ TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
         std::byte{0x00},
         std::byte{0x90}
     };
+    // Readable-target gate: the +0xFF target must land inside this buffer.
+    code.resize(0x120, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
@@ -1853,6 +1860,8 @@ TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
 TEST_F(ScannerRipTest, find_and_resolve_jmp_rel32)
 {
     std::vector<std::byte> code = {std::byte{0xE9}, std::byte{0x05}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    // Readable-target gate: the +0x05 target must land inside this buffer.
+    code.resize(16, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_JMP_REL32, 5);
 
@@ -1920,6 +1929,8 @@ TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
         std::byte{0x00},
         std::byte{0x00}
     };
+    // Readable-target gate: both candidate targets must land inside this buffer.
+    code.resize(48, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -2006,6 +2017,8 @@ TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
         std::byte{0x00},
         std::byte{0x00}
     };
+    // Readable-target gate: the +0x30 target must land inside this buffer.
+    code.resize(0x60, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
@@ -2060,27 +2073,29 @@ TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
     EXPECT_FALSE(to_string(ErrorCode::PrefixNotFound).empty());
     EXPECT_FALSE(to_string(ErrorCode::RegionTooSmall).empty());
     EXPECT_FALSE(to_string(ErrorCode::UnreadableDisplacement).empty());
+    EXPECT_FALSE(to_string(ErrorCode::UnreadableTarget).empty());
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
 {
-    // Prefix starts at the last valid position
+    // Prefix starts at the last valid position. The displacement is -8 so the readable-target gate
+    // resolves back to the buffer start rather than past its end.
     std::vector<std::byte> code = {
         std::byte{0x90},
         std::byte{0x90},
         std::byte{0x90},
         std::byte{0xE8},
-        std::byte{0x0A},
-        std::byte{0x00},
-        std::byte{0x00},
-        std::byte{0x00}
+        std::byte{0xF8},
+        std::byte{0xFF},
+        std::byte{0xFF},
+        std::byte{0xFF}
     };
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[3]);
-    EXPECT_EQ(result->raw(), instr_addr + 5 + 0x0A);
+    EXPECT_EQ(result->raw(), instr_addr + 5 - 8);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
@@ -2094,6 +2109,8 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
         std::byte{0x00},
         std::byte{0x00}
     };
+    // Readable-target gate: the +0x50 target must land inside this buffer.
+    code.resize(0x80, std::byte{0x90});
 
     auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RCX_RIP, 7);
 
@@ -2644,6 +2661,7 @@ TEST(ScannerStringTest, RipResolveErrorToString_IsNoexcept)
     static_assert(noexcept(to_string(ErrorCode::PrefixNotFound)));
     static_assert(noexcept(to_string(ErrorCode::RegionTooSmall)));
     static_assert(noexcept(to_string(ErrorCode::UnreadableDisplacement)));
+    static_assert(noexcept(to_string(ErrorCode::UnreadableTarget)));
 }
 
 TEST(ScannerTest, find_pattern_common_byte_anchoring)
@@ -3093,7 +3111,8 @@ TEST(ScannerRipResolveTest, find_and_resolve_prefix_not_found_returns_error)
 
 TEST(ScannerRipResolveTest, find_and_resolve_call_rel32_happy_path)
 {
-    std::vector<std::byte> buffer(64, std::byte{0x90});
+    // Sized so the +0x80 target stays inside the buffer under the readable-target gate.
+    std::vector<std::byte> buffer(256, std::byte{0x90});
 
     constexpr size_t instr_offset = 20;
     buffer[instr_offset] = std::byte{0xE8};
@@ -3108,7 +3127,8 @@ TEST(ScannerRipResolveTest, find_and_resolve_call_rel32_happy_path)
 
 TEST(ScannerRipResolveTest, find_and_resolve_mov_rax_rip_multi_byte_prefix)
 {
-    std::vector<std::byte> buffer(64, std::byte{0x90});
+    // Sized so the +0x1234 target stays inside the buffer under the readable-target gate.
+    std::vector<std::byte> buffer(0x1300, std::byte{0x90});
 
     constexpr size_t instr_offset = 12;
     buffer[instr_offset + 0] = std::byte{0x48};
@@ -3142,17 +3162,116 @@ TEST(ScannerRipResolveTest, find_and_resolve_returns_first_match_only)
 
 TEST(ScannerRipResolveTest, find_and_resolve_match_at_region_boundary)
 {
-    // Prefix sits at the last position where prefix + disp32 still fits in the region.
+    // Prefix sits at the last position where prefix + disp32 still fits in the region. The displacement is
+    // -16 so the readable-target gate resolves back to the buffer start rather than past its end.
     std::vector<std::byte> buffer(16, std::byte{0x90});
     const size_t instr_offset = buffer.size() - 5;
     buffer[instr_offset] = std::byte{0xE8};
-    write_disp32(buffer.data() + instr_offset + 1, 0x40);
+    write_disp32(buffer.data() + instr_offset + 1, -16);
 
     const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
-    const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 + 0x40;
+    const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 - 16;
     EXPECT_EQ(result->raw(), expected);
+}
+
+namespace
+{
+    /**
+     * @brief Two adjacent pages for the B-60 unreadable-decoy proofs: page 0 stays RW, page 1 becomes PAGE_NOACCESS.
+     * @details The protection flip precedes every query and the cache entry for the flipped page is invalidated, so
+     *          the readable-target gate sees the real protection rather than a stale cached verdict.
+     */
+    class UnreadableTargetPages final
+    {
+    public:
+        UnreadableTargetPages() = default;
+        [[nodiscard]] bool arm() noexcept
+        {
+            SYSTEM_INFO sys_info{};
+            ::GetSystemInfo(&sys_info);
+            m_page_size = sys_info.dwPageSize;
+            m_base = static_cast<std::byte *>(
+                ::VirtualAlloc(nullptr, m_page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
+            );
+            if (m_base == nullptr)
+            {
+                return false;
+            }
+            std::memset(m_base, 0x90, m_page_size);
+            DWORD old_protect = 0;
+            if (::VirtualProtect(m_base + m_page_size, m_page_size, PAGE_NOACCESS, &old_protect) == 0)
+            {
+                return false;
+            }
+            memory::invalidate_range(Region{Address{m_base + m_page_size}, m_page_size});
+            return true;
+        }
+
+        [[nodiscard]] std::byte *base() const noexcept { return m_base; }
+
+        [[nodiscard]] SIZE_T page_size() const noexcept { return m_page_size; }
+
+        ~UnreadableTargetPages() noexcept
+        {
+            if (m_base != nullptr)
+            {
+                ::VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        UnreadableTargetPages(const UnreadableTargetPages &) = delete;
+        UnreadableTargetPages &operator=(const UnreadableTargetPages &) = delete;
+        UnreadableTargetPages(UnreadableTargetPages &&) = delete;
+        UnreadableTargetPages &operator=(UnreadableTargetPages &&) = delete;
+
+    private:
+        std::byte *m_base = nullptr;
+        SIZE_T m_page_size = 0;
+    };
+
+    static_assert(!std::is_copy_constructible_v<UnreadableTargetPages>);
+    static_assert(!std::is_move_constructible_v<UnreadableTargetPages>);
+} // namespace
+
+// B-60 regression: a disp32 that resolves plausibly onto a PAGE_NOACCESS page is a decoy, so the scan must keep
+// going and return the later occurrence whose target is readable.
+TEST(ScannerRipResolveTest, FindAndResolveRipSkipsUnreadableDecoyAndFindsReadableSite)
+{
+    UnreadableTargetPages pages;
+    ASSERT_TRUE(pages.arm());
+
+    // Decoy at offset 0: CALL rel32 whose target is exactly the PAGE_NOACCESS second page (plausible, unreadable).
+    pages.base()[0] = std::byte{0xE8};
+    write_disp32(pages.base() + 1, static_cast<int32_t>(pages.page_size()) - 5);
+
+    // Genuine site at offset 16: CALL rel32 whose target is the readable first byte of the scan region.
+    constexpr size_t genuine_offset = 16;
+    pages.base()[genuine_offset] = std::byte{0xE8};
+    write_disp32(pages.base() + genuine_offset + 1, -static_cast<int32_t>(genuine_offset + 5));
+
+    const auto result = find_and_resolve_rip(pages.base(), 64, scan::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(pages.base()));
+}
+
+// B-60 regression: after the region is exhausted and the only failures were plausible-but-unreadable targets, the
+// scan must report UnreadableTarget with the last unreadable target in Error::detail.
+TEST(ScannerRipResolveTest, FindAndResolveRipAllUnreadableDecoysReportUnreadableTarget)
+{
+    UnreadableTargetPages pages;
+    ASSERT_TRUE(pages.arm());
+
+    pages.base()[0] = std::byte{0xE8};
+    write_disp32(pages.base() + 1, static_cast<int32_t>(pages.page_size()) - 5);
+
+    const auto result = find_and_resolve_rip(pages.base(), 32, scan::PREFIX_CALL_REL32, 5);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::UnreadableTarget);
+    EXPECT_EQ(result.error().detail, reinterpret_cast<uintptr_t>(pages.base()) + pages.page_size());
 }
 
 // Regression guard: the PREFIX_* constants must expose std::array::size(), decay into std::span cleanly, and feed
@@ -3162,7 +3281,8 @@ TEST(ScannerRipResolveTest, PrefixConstants_AreStdArraysAndUsableAsSpan)
     static_assert(scan::PREFIX_CALL_REL32.size() == 1, "PREFIX_CALL_REL32 must expose std::array::size()");
     EXPECT_EQ(scan::PREFIX_CALL_REL32[0], std::byte{0xE8});
 
-    std::vector<std::byte> buffer(5, std::byte{0x90});
+    // Sized so the +0x10 target stays inside the buffer under the readable-target gate.
+    std::vector<std::byte> buffer(32, std::byte{0x90});
     buffer[0] = std::byte{0xE8};
     write_disp32(buffer.data() + 1, 0x10);
 
