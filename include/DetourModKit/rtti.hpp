@@ -54,7 +54,7 @@ namespace DetourModKit
             Complete = 0,
             /** @brief The sweep under-covered the image, so a unique or absent verdict cannot be authorized. */
             Incomplete = 1,
-            /** @brief More qualifying sections or matches existed than the internal fixed buffer can hold. */
+            /** @brief The internal fixed buffer filled, so unseen qualifying sections or matches may exist. */
             Saturated = 2
         };
 

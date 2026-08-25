@@ -1,4 +1,5 @@
 #include "DetourModKit/address.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/region.hpp"
@@ -1688,11 +1689,9 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
 
 TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
 {
-    // The reader-tracking count is striped across many per-thread cache lines; shutdown_cache must sum every stripe to
-    // drain safely. Drive is_readable from many threads (round-robin stripe assignment puts them on distinct stripes)
-    // overlapping shutdown, then assert every reader finished without a crash. Shutdown therefore waited for all
-    // stripes, not just one. If the drain summed only a single stripe a reader on another stripe could touch shards
-    // freed out from under it.
+    // The admitted-reader count uses many per-thread cache lines. Shutdown must sum every stripe before release.
+    // Drive is_readable from many threads while shutdown overlaps. Round-robin assignment selects distinct stripes.
+    // Every reader must finish without a crash. If the drain reads one stripe, another reader can touch freed shards.
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
@@ -4193,9 +4192,13 @@ namespace DetourModKit::detail
 {
     extern void (*g_memory_cache_before_lifecycle_lock_test_hook)();
     extern void (*g_memory_cache_before_running_publish_test_hook)();
+    extern void (*g_memory_cache_reopen_window_test_hook)();
     extern void (*g_memory_cache_shutdown_window_test_hook)();
     extern void (*g_memory_cache_leader_publish_window_test_hook)();
+    extern HMODULE (*g_memory_cache_keepalive_ref_override)() noexcept;
     void memory_cache_abandon_for_test() noexcept;
+    std::uint64_t memory_cache_admitted_reader_count_for_test() noexcept;
+    bool memory_cache_reader_would_be_admitted_for_test() noexcept;
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept;
     void memory_cache_shard_index_sizes_for_test(
         Address address,
@@ -4227,6 +4230,17 @@ namespace
         s_publish_window_entered.store(true, std::memory_order_release);
         while (!s_release_publish_window.load(std::memory_order_acquire))
             std::this_thread::yield();
+    }
+
+    void abandon_during_admission_reopen()
+    {
+        DetourModKit::detail::memory_cache_abandon_for_test();
+    }
+
+    HMODULE refuse_cache_keepalive() noexcept
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return nullptr;
     }
 
     // Spawn an initializer and wait until it reaches the lifecycle-lock boundary held by shutdown.
@@ -4284,6 +4298,38 @@ namespace
         while (!s_release_contended_shard.load(std::memory_order_acquire))
             std::this_thread::yield();
     }
+
+    void *s_post_stop_probe_page = nullptr;
+    std::atomic<int> s_post_stop_hook_fires{0};
+    std::atomic<bool> s_post_stop_reader_answer{false};
+    std::atomic<bool> s_post_stop_admission_granted{true};
+    std::atomic<std::uint64_t> s_post_stop_admitted_before{1};
+    std::atomic<std::uint64_t> s_post_stop_admitted_after{1};
+
+    // Fire after shutdown_cache publishes Stopping and closes admission. A permission query must take the uncached
+    // route and must not join the drain population.
+    void post_stop_reader_probe_hook()
+    {
+        if (s_post_stop_hook_fires.fetch_add(1, std::memory_order_relaxed) != 0)
+            return;
+        s_post_stop_admitted_before.store(
+            DetourModKit::detail::memory_cache_admitted_reader_count_for_test(),
+            std::memory_order_relaxed
+        );
+        // The closed-bit compare-exchange itself must refuse the reader.
+        s_post_stop_admission_granted.store(
+            DetourModKit::detail::memory_cache_reader_would_be_admitted_for_test(),
+            std::memory_order_relaxed
+        );
+        s_post_stop_reader_answer.store(
+            memory::is_readable(Region{Address{s_post_stop_probe_page}, 1}),
+            std::memory_order_relaxed
+        );
+        s_post_stop_admitted_after.store(
+            DetourModKit::detail::memory_cache_admitted_reader_count_for_test(),
+            std::memory_order_relaxed
+        );
+    }
 } // namespace
 
 TEST(MemoryCacheLifecycleProof, ForcedOldStopNewStartScheduleIsSerialized)
@@ -4314,6 +4360,48 @@ TEST(MemoryCacheLifecycleProof, ForcedOldStopNewStartScheduleIsSerialized)
     memory::shutdown_cache();
 }
 
+// A permission query after shutdown closes admission must use the uncached route. It must not extend the drain
+// population ([B-73]).
+TEST(MemoryCacheLifecycleProof, ShutdownRejectsPostStopReaderWithoutExtendingDrain)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(page, nullptr);
+    // Warm probe: the running cache answers before the teardown window opens.
+    ASSERT_TRUE(memory::is_readable(Region{Address{page}, 1}));
+
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
+
+    s_post_stop_probe_page = page;
+    s_post_stop_hook_fires.store(0, std::memory_order_relaxed);
+    DetourModKit::detail::g_memory_cache_shutdown_window_test_hook = &post_stop_reader_probe_hook;
+    memory::shutdown_cache();
+    DetourModKit::detail::g_memory_cache_shutdown_window_test_hook = nullptr;
+
+    EXPECT_EQ(s_post_stop_hook_fires.load(std::memory_order_relaxed), 1);
+    // The closed admission word refused the post-stop reader outright.
+    EXPECT_FALSE(s_post_stop_admission_granted.load(std::memory_order_relaxed));
+    // The rejected reader still receives the correct uncached answer.
+    EXPECT_TRUE(s_post_stop_reader_answer.load(std::memory_order_relaxed));
+    // It never entered the closed drain population: the admitted count stayed zero around its whole call.
+    EXPECT_EQ(s_post_stop_admitted_before.load(std::memory_order_relaxed), 0u);
+    EXPECT_EQ(s_post_stop_admitted_after.load(std::memory_order_relaxed), 0u);
+    // The drain therefore saw a closed, empty population: no timeout retention was recorded.
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::MemoryCache),
+        leaks_before
+    );
+
+    VirtualFree(page, 0, MEM_RELEASE);
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    const int probe = 0;
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    memory::shutdown_cache();
+}
+
 // Loader-lock abandonment can cancel Starting without taking the lifecycle lock; the initializer must not overwrite
 // that cancellation when it reaches its final publication step.
 TEST(MemoryCacheLifecycleProof, AbandonedStartingGenerationCannotPublishRunning)
@@ -4336,6 +4424,40 @@ TEST(MemoryCacheLifecycleProof, AbandonedStartingGenerationCannotPublishRunning)
 
     EXPECT_FALSE(init_ok.load(std::memory_order_acquire));
     EXPECT_EQ(memory::get_memory_stats().shard_count, 0u);
+
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    const int probe = 0;
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    memory::shutdown_cache();
+}
+
+TEST(MemoryCacheLifecycleProof, AdmissionReopenCannotOutrunConcurrentAbandonment)
+{
+    memory::shutdown_cache();
+    DetourModKit::detail::g_memory_cache_reopen_window_test_hook = &abandon_during_admission_reopen;
+    const bool started = memory::init_cache(32, 5000);
+    DetourModKit::detail::g_memory_cache_reopen_window_test_hook = nullptr;
+
+    EXPECT_FALSE(started);
+    EXPECT_FALSE(DetourModKit::detail::memory_cache_reader_would_be_admitted_for_test());
+    memory::shutdown_cache();
+
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    const int probe = 0;
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    memory::shutdown_cache();
+}
+
+TEST(MemoryCacheLifecycleProof, StartRefusesWithoutPrecommittedTimeoutKeepalive)
+{
+    memory::shutdown_cache();
+    DetourModKit::detail::g_memory_cache_keepalive_ref_override = &refuse_cache_keepalive;
+    const bool started = memory::init_cache(32, 5000);
+    DetourModKit::detail::g_memory_cache_keepalive_ref_override = nullptr;
+
+    EXPECT_FALSE(started);
+    if (started)
+        memory::shutdown_cache();
 
     ASSERT_TRUE(memory::init_cache(32, 5000));
     const int probe = 0;

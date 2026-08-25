@@ -8,13 +8,13 @@ Rules owned here: `[B-05]`, `[B-17]`, `[B-18]`, `[B-19]`, `[B-20]`, `[B-21]`.
 
 ### Memory cache
 
-One `Stopped/Starting/Running/Stopping` state machine serializes normal init/shutdown and publishes `Running` last. Loader-lock teardown atomically unpublishes and retains reachable state without a wait. Later off-loader-lock setup or shutdown drains it. Shards use inline `SrwSharedMutex`, leader coalescing, striped reader counts, per-shard statistics, and a content generation. Clear and invalidation advance that generation when an in-flight leader or lock contention prevents physical eviction, so stale entries cannot become later hits. Eviction is insertion/refresh FIFO, not hit-order LRU.
+One `Stopped/Starting/Running/Stopping` state machine serializes normal init and shutdown. It publishes `Running` last. Reader admission uses 64 striped closed-bit words under `[B-73]`. One compare-exchange checks the closed bit and adds one reader. Teardown closes every stripe before it drains. A rejected reader takes the uncached `VirtualQuery` route. Every drain has a fixed deadline. The cache takes a module reference before it opens admission. A timeout retains that reference and the shard storage. It also records one `LeakSubsystem::MemoryCache` event. `Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader` proves this contract. Loader-lock teardown unpublishes the cache, closes admission, and retains reachable state without a wait. A later authorized setup or shutdown drains that state. Shards use inline `SrwSharedMutex`, leader coalescence, per-shard statistics, and a content generation. Clear and invalidation advance that generation when a leader or lock contention prevents physical eviction. Stale entries cannot become later hits. Eviction uses insertion and refresh order, not hit order.
 
 `memory::is_readable_nonblocking` uses a shared try-lock and cache lookup. It returns `Unknown` after contention, a cache miss, or the init publication window. Before `init_cache()`, it uses the synchronous `VirtualQuery` range walk.
 
 `memory::walk` resolves a pointer chain in one walk. It issues one guarded read for each intermediate hop. It screens each dereferenced link against that hop's `min_valid` floor and the user-mode ceiling. A failed link reports its hop index in `Error::detail`. The MinGW path guards every link through the vectored handler.
 
-Hot-path mechanism: Each cached query costs a shared shard lock, a striped reader increment, a per-shard statistic increment, and a content-generation load.
+Hot-path mechanism: Each cached query uses one shared shard lock and one striped admission compare-exchange. It also uses a paired release, one statistic increment, and one content-generation load.
 
 ## Memory access in hook callbacks
 

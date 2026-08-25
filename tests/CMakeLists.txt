@@ -444,12 +444,13 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationReleasedCallbackAllowsReload
     Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
-    Lifecycle.VmtUnreadableModuleHeader)
+    Lifecycle.VmtUnreadableModuleHeader
+    Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader)
   set(lifecycle_inventory_command
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 127)
+    --minimum 128)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()
