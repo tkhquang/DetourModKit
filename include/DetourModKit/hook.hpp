@@ -51,25 +51,18 @@ namespace DetourModKit
         /**
          * @struct MidContext
          * @brief Opaque handle for the CPU register state captured at a mid-hook site.
-         * @details Deliberately left INCOMPLETE: it is never defined in any translation unit. At the hook point the
-         *          backend hands the detour a backend-context reference, and DMK reinterpret_casts that reference to
-         *          MidContext& (and back, inside the accessors in src/hook_mid_context.cpp). Because MidContext is
-         *          only ever a pass-through alias for the live backend context, that cast is well-defined ONLY while
-         *          the type stays incomplete; a CI grep gate forbids any `struct/class MidContext { ... }` definition
-         *          so a future edit cannot silently turn the reinterpret_cast into undefined behaviour.
+         * @details Deliberately left INCOMPLETE: it is never defined in any translation unit. The accessors
+         *          reinterpret_cast a MidContext& to the live backend-context reference and back. This cast is
+         *          well-defined ONLY while the type stays incomplete. A CI grep gate forbids a definition.
          */
         struct MidContext;
 
         /**
          * @brief DMK-owned mid-hook detour signature.
          * @details Names only DMK types, so writing a detour pulls in neither SafetyHook nor Zydis.
-         * @warning MUST NOT THROW. DMK reaches the callback from its own adapter frame and contains any exception that
-         *          escapes, because the generated stub the callback returns into carries no unwind data and an
-         *          escaping throw would terminate the host. A contained escape is counted, logged once per site, and
-         *          the callback treated as complete with the captured context left as the callback last set it.
-         *          Containment is a safety net for a bug, not a contract to program against. The type is not
-         *          `noexcept` because requiring it would reject every existing detour; the rule is documented rather
-         *          than compiler-enforced.
+         * @warning MUST NOT THROW (`[B-84]`). DMK contains an exception that escapes. It counts the escape, logs once
+         *          per site, and treats the callback as complete with the context in its last callback-defined state.
+         *          Containment is a safety net for a bug, not a contract to program against.
          * @note Re-entering the hooked target from inside the callback is supported.
          * @warning Destroying the callback's own Hook from inside it is permitted but pins the backend; see @ref Hook.
          */
@@ -106,13 +99,9 @@ namespace DetourModKit
         /**
          * @struct XmmView
          * @brief Read-only by-value snapshot of one 128-bit XMM register captured at the mid-hook site.
-         * @details XMM state is surfaced read-only: the backend's XMM fields are writable, but a detour that only
-         *          needs to read a captured vector argument should not be handed a mutable reference into the live
-         *          context, so DMK copies the 16 bytes out by value. A writable `xmm_ref()` accessor is the natural
-         *          extension point should an in-place XMM write ever be required. lane<T>(index) reinterprets the
-         *          captured bytes as the caller's lane type (e.g.
-         *          lane<float>(0) for the first single-precision lane), mirroring the union-of-lanes shape of the
-         *          underlying register without naming the backend's union.
+         * @details DMK copies the 16 bytes out by value rather than hand out a mutable reference into the live
+         *          context. lane<T>(index) reinterprets the captured bytes as the caller's lane type, for example
+         *          lane<float>(0) for the first single-precision lane.
          */
         struct alignas(16) XmmView
         {
@@ -605,15 +594,13 @@ namespace DetourModKit
         /**
          * @class HookStack
          * @brief Move-only owner of a set of Hook handles that guarantees newest-first (LIFO) teardown.
-         * @details Same-target layers must unwind newest-first, or the older layer's restore clobbers a prologue the
-         *          newer layer's live trampoline still chains through (see @ref Hook). A bare `std::vector<Hook>`
-         *          destroys in storage order, i.e. oldest-first; teardown then contains the hazard by permanently
-         *          leaking the older backend. This container restores back-to-front instead, so when it owns the whole
-         *          layer set and hooks were pushed in creation order, neither the leak nor its warning can occur.
-         *          Prefer it over a bare vector whenever hooks are kept alive together, especially any layered on one
-         *          address or the successes returned by @ref install_all (push them in table order).
-         *
-         *          Inline/mid @ref Hook handles only: @ref VmtHook already unwinds its objects newest-first.
+         * @details `[B-16]` Same-target layers must unwind newest-first, or the older layer's restore clobbers a
+         *          prologue the newer layer's live trampoline still chains through. A bare `std::vector<Hook>` has
+         *          unspecified element destruction order. This container restores back-to-front instead. Prefer it
+         *          over a bare vector when hooks stay alive together. This rule especially applies to hooks layered on
+         *          one address and successes returned by @ref install_all.
+         *          Push those successes in table order. Inline/mid @ref Hook handles only: @ref VmtHook already
+         *          unwinds its objects newest-first.
          * @note Move-only, mirroring @ref Hook. Not internally synchronized: build and tear it down on the setup
          *       thread, exactly like the hooks it holds.
          */
@@ -636,11 +623,9 @@ namespace DetourModKit
 
             /**
              * @brief Move-assigns by tearing down this stack's current hooks newest-first, then adopting @p other's.
-             * @details Deliberately not defaulted. A defaulted move-assignment would let the underlying vector destroy
-             *          or overwrite the replaced hooks in a container-defined order, reopening the layered-hook
-             *          use-after-free this type exists to prevent. Draining newest-first here keeps the LIFO guarantee
-             *          even when a live stack is overwritten. The moved-from source is explicitly cleared afterward so
-             *          empty() remains a stable post-move query.
+             * @details Deliberately not defaulted: a defaulted move-assignment destroys the replaced hooks in a
+             *          container-defined order. The moved-from source is cleared, so empty() remains a stable
+             *          post-move query.
              * @note Setup/control-plane only: move-assignment may restore existing hooks and is not synchronized with
              *       hook callbacks or concurrent stack access.
              */
@@ -670,15 +655,13 @@ namespace DetourModKit
 
             /**
              * @brief Moves @p hook onto the top of the stack and returns a reference to the stored handle.
-             * @return A reference to the just-stored @ref Hook, valid until the next @ref push / @ref clear / move
-             *         (the standard vector-reference invalidation contract). Use it to capture the trampoline right
-             *         after pushing, e.g. `stack.push(std::move(h)).original<Fn>()`; call @ref reserve up front to keep
-             *         earlier references stable across a batch of pushes.
-             * @details Push order IS layer order: push the base hook first and each hook layered on top of it after, so
-             *          the newest-first destructor restores them in the safe order. A `std::bad_alloc` from growing the
-             *          storage unwinds @p hook (restoring its own prologue) and leaves the already-stored hooks
-             *          intact. That is a clean partial state, never a half-owned live hook.
-             * @note Setup/control-plane only: may allocate and may publish a new hook owner; do not call from a hook
+             * @return A reference to the just-stored @ref Hook, valid until the next @ref push / @ref clear / move.
+             *         Use it to capture the trampoline immediately after a push, for example
+             *         `stack.push(std::move(h)).original<Fn>()`.
+             * @details Push order IS layer order: push the base hook first. If storage growth throws `std::bad_alloc`,
+             *          the stack unwinds @p hook (which restores its prologue) and leaves the stored hooks
+             *          intact.
+             * @note Setup/control-plane only: may allocate and may publish a new hook owner. Do not call from a hook
              *       callback.
              */
             Hook &push(Hook hook)
@@ -715,12 +698,7 @@ namespace DetourModKit
             void clear() noexcept { teardown_newest_first(); }
 
         private:
-            /**
-             * @brief Restores the owned hooks strictly back-to-front (newest layer first).
-             * @details pop_back destroys the last (newest) element before the ones beneath it, which is the exact order
-             *          the trampoline-chaining hazard demands; relying on the raw vector destructor or move-assignment
-             *          would not provide this ownership contract.
-             */
+            /// Restores the owned hooks strictly back-to-front (newest layer first): pop_back destroys the newest.
             void teardown_newest_first() noexcept
             {
                 while (!m_hooks.empty())
@@ -802,14 +780,11 @@ namespace DetourModKit
         /**
          * @class HookSpec
          * @brief One row of a declarative install table consumed by @ref install_all.
-         * @details The factories are the SOLE constructor (the data ctor is private, so HookSpec is not an aggregate
-         *          and a bare designated-init does not compile): a forgotten name or target is a COMPILE error, not a
-         *          debug-only runtime trip. The detour is held as a typed variant, either an @ref InlineDetour
-         *          produced by the inline_hook factory (the one audited cast) or a typed MidHookFn, so the table
-         *          author never writes a reinterpret_cast and the mid case never loses its type. Each row also carries
-         *          @ref Options (default-constructed unless the factory's trailing options arg is supplied), which
-         *          @ref install_all applies verbatim, so one row can request @ref Prologue::Relocate or
-         *          fail_if_already_hooked while its neighbours keep the safe default.
+         * @details The factories are the SOLE constructor, so a forgotten name or target is a COMPILE error. The
+         *          detour uses a typed variant: an @ref InlineDetour from the inline_hook factory's one audited cast,
+         *          or a typed MidHookFn. A table author therefore never writes a reinterpret_cast. Each row carries
+         *          @ref Options, which @ref install_all applies verbatim. One row can request @ref Prologue::Relocate
+         *          or fail_if_already_hooked while its neighbours keep the safe default.
          */
         class HookSpec
         {
@@ -904,13 +879,9 @@ namespace DetourModKit
          * @struct InstallOutcome
          * @brief Per-row result of @ref install_all, in table order, so a mod can correlate which optional hooks
          *        landed.
-         * @warning A `std::vector<InstallOutcome>` (this is what @ref install_all returns) destroys its rows
-         *          front-to-back, i.e. the hooks it holds are torn down OLDEST-first. For hooks layered on one target
-         *          that is the inverted order: the older layer restores its prologue while a newer layer's trampoline
-         *          still chains through it. @ref Hook::~Hook now contains that hazard (it leaks the older backend
-         *          instead of corrupting, and logs a warning) rather than crashing, but the leak is real. To tear the
-         *          hooks down cleanly (newest-first, no leak, no warning), move the successful ones out of the outcomes
-         *          into a @ref HookStack in table order and let the stack own them; see @ref HookStack.
+         * @warning A `std::vector<InstallOutcome>` has unspecified element destruction order. That order cannot prove
+         *          newest-first teardown for hooks layered on one target (`[B-16]`, see @ref HookStack). Move
+         *          successful hooks into a @ref HookStack in table order for clean teardown.
          */
         struct InstallOutcome
         {
@@ -931,12 +902,8 @@ namespace DetourModKit
          *          back a partial table therefore never has to disarm a live hook. noexcept, matching
          *          scan::resolve_batch: it catches bad_alloc / backend failure internally and reports it per row rather
          *          than throwing across the init path.
-         * @warning The returned `std::vector<InstallOutcome>` owns the installed hooks and, if simply dropped, tears
-         *          them down OLDEST-first (front-to-back). That is the wrong order for hooks layered on one target and
-         *          leaks the older backend to stay memory-safe (see @ref InstallOutcome and @ref Hook::~Hook). When any
-         *          rows may target the same address, or whenever you keep several hooks alive together, move the
-         *          successful hooks out into a @ref HookStack in table order so teardown is newest-first by
-         *          construction rather than by caller discipline.
+         * @warning The returned vector has unspecified element destruction order. See the @ref InstallOutcome
+         *          warning. Move successful hooks into a @ref HookStack in table order for newest-first teardown.
          * @note Setup/control-plane only: a batch install that resolves scans and allocates per row.
          */
         [[nodiscard]] Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
@@ -1083,11 +1050,10 @@ namespace DetourModKit
              * @param index The zero-based vtable index of the method to hook. Count only virtual functions: the
              * ABI-specific vtable header (the Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not
              * part of the index. Index 0 is the first virtual method as declared.
-             * @param detour The replacement function. It is installed straight into a vtable slot, so its ABI must
-             * match the original virtual method's true signature: the object pointer arrives as the first integer
-             * argument (`this` in rcx under the Win64 ABI) followed by the declared parameters, so a free function
-             * taking the object pointer first is the correct shape. hook_method cannot validate that signature; a
-             * mismatch is silent ABI corruption, the same caller caveat @ref Hook::call carries.
+             * @param detour The replacement function, installed straight into a vtable slot. Its ABI must match the
+             * original virtual method's true signature. The object pointer arrives as the first integer argument
+             * (`this` in rcx under the Win64 ABI), followed by the declared parameters. hook_method cannot validate
+             * that signature. A mismatch is silent ABI corruption.
              * @return Success, or an Error: LoaderLockActive (loader-lock caller), InvalidHookState (disengaged
              * handle), InvalidArg (null @p detour or an out-of-range @p index), MethodAlreadyHooked (occupied index),
              * BackendFailed, or OutOfMemory.
@@ -1112,11 +1078,9 @@ namespace DetourModKit
              * @param index The zero-based vtable index used at @ref hook_method time.
              * @return A function pointer of type Fn to the original method's slot, or nullptr for an unhooked @p index
              * or a disengaged handle.
-             * @details The per-method analogue of @ref Hook::original: the pre-hook slot value is copied out (an
-             * immutable snapshot the backend recorded when @ref hook_method cloned the slot) under a shared-read lock,
-             * then returned so the detour can invoke the original lock-free through the returned pointer. It never
-             * needs a guarded @ref Hook::call twin because the slot pointer is fixed for the hook's lifetime; the
-             * caller only has to keep the hook alive across the call.
+             * @details The per-method analogue of @ref Hook::original: the pre-hook slot value is copied out under a
+             * shared-read lock, then invoked lock-free through the returned pointer. The slot pointer is fixed for the
+             * hook's lifetime. The caller only has to keep the hook alive across the call.
              * @note Callback-safe on the read side (a shared-lock snapshot copy, no allocation or I/O); the returned
              * pointer's invocation is the caller's responsibility.
              */

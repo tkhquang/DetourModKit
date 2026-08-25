@@ -209,16 +209,13 @@ namespace DetourModKit
             Binding binding{};
 
             /**
-             * @brief The @ref anchor::anchor_fingerprint captured at authoring time; 0 means "not captured yet".
+             * @brief The @ref anchor::anchor_fingerprint captured when authored. A zero value means "not captured yet".
              * @details The fingerprint is a content hash of the signature's own declarative definition: its locate
              *          evidence (pattern bytes / mangled name / xref literal), its @ref Binding contract, and its
-             *          label and module scope. It never reads the game's code. Persisting it alongside the
-             *          signature is what lets the gate tell a target that merely relocated (same declaration, the
-             *          fingerprint still matches, so the self-heal
-             *          is trusted) apart from a signature whose definition was edited without re-capturing the baseline
-             *          (the fingerprint differs, so the edit is unverified and its binding cannot be trusted). A value
-             *          of 0 reports as "unknown", never as "drifted", so an author who has not captured a baseline is
-             *          not falsely rejected.
+             *          label and module scope. It never reads the game's code. Persist it so the gate can distinguish
+             *          a relocated target from a signature edit. A relocation retains the same fingerprint. A
+             *          signature edit without a new baseline changes it. A value of 0 reports as "unknown", never as
+             *          "drifted", so an author without a baseline is not falsely rejected.
              */
             std::uint64_t expected_fingerprint = 0;
 
@@ -265,10 +262,7 @@ namespace DetourModKit
             Unset,
             /// The live fingerprint equals the captured baseline: the signature's declared definition is unchanged.
             Match,
-            /**
-             * @brief The live fingerprint differs from the baseline: the definition was edited without re-capturing, so
-             *        the edit is unverified and must not be trusted.
-             */
+            /// The live fingerprint differs from the baseline (see @ref SignatureRecord::expected_fingerprint).
             Drifted
         };
 
@@ -501,11 +495,8 @@ namespace DetourModKit
          * @param build_revision The revision this build authored its in-code signatures against; 0 disables the check.
          * @return true when @p build_revision is 0 (the consumer opts out of revision gating) or the manifest's
          *         @ref ManifestHeader::revision equals it; false when the file targets a different contract epoch.
-         * @details The manifest-level counterpart to the per-signature fingerprint gate. Bump @p build_revision (and
-         *          the file's `revision`) only on a breaking in-code contract change, so a routine mod update leaves
-         *          still-valid repair files working and only a genuinely incompatible file is rejected. On a false
-         *          result a consumer logs and falls back to its in-code defaults (an empty override set), telling the
-         *          user to delete the stale file or, only after re-verifying it, bump its `revision`.
+         * @details Bump @p build_revision (and the file's `revision`) only on an incompatible contract change (see
+         *          @ref ManifestHeader). On a false result a consumer logs and falls back to its in-code defaults.
          */
         [[nodiscard]] bool revision_compatible(const ManifestHeader &header, std::uint32_t build_revision) noexcept;
 
@@ -614,7 +605,7 @@ namespace DetourModKit
          *            worse than a missing file.
          *          - An override whose label matches no default is inert and is not included.
          *          An accepted override supplies the complete serializable record.
-         *          The effective override inherits these code-owned fields (T-MANIFEST-POLICY):
+         *          The effective override inherits these code-owned fields:
          *          - @ref SignatureRecord::validator
          *          - @ref SignatureRecord::validator_context
          *          - @ref SignatureRecord::validate_manual
@@ -639,9 +630,8 @@ namespace DetourModKit
         struct GatePolicy
         {
             /**
-             * @brief When true (the default), a signature whose fingerprint no longer matches its captured baseline is
-             *        safe-disabled, because its declared definition was edited without re-capturing, so the edited
-             *        binding is unverified and cannot be trusted.
+             * @brief When true (the default), a signature whose fingerprint no longer matches its captured baseline
+             *        (see @ref SignatureRecord::expected_fingerprint) is safe-disabled.
              */
             bool reject_on_fingerprint_drift = true;
             /**
@@ -672,9 +662,7 @@ namespace DetourModKit
             bool require_live_image_identity = false;
             /**
              * @brief When true, a mutation-capable entry with no captured image baseline is safe-disabled.
-             * @details Closes the read-only default's tolerance of an absent baseline. Without it an author who never
-             *          captured an identity is trusted to authorize a write, so the strongest available evidence is
-             *          the one most likely to be missing.
+             * @details Closes the read-only default's tolerance of an absent baseline.
              */
             bool require_captured_image_identity = false;
             /**
@@ -698,15 +686,10 @@ namespace DetourModKit
             bool require_contract_revision = false;
 
             /**
-             * @brief The strictest gate: reject drift, reject an unset baseline, and require every signature to
-             * resolve.
-             * @details The security-conscious posture, opposite the lenient default. The default GatePolicy trusts a
-             *          signature with no captured fingerprint (so an author who has not captured baselines yet is not
-             *          blocked) and imposes no whole-manifest floor. This preset inverts both: an unset baseline is
-             *          treated as untrusted, and the manifest passes only when the ENTIRE set is trusted
-             *          (min_resolved_fraction 1.0), so a single drifted or unresolved feature safe-disables the whole
-             *          manifest. It is additive and opt-in. The default-constructed GatePolicy is unchanged, so a
-             *          caller that wants "unknown means trusted" keeps it by not opting in.
+             * @brief The strictest gate. Reject drift and an unset baseline, and require every signature to resolve.
+             * @details Inverts the lenient default: an unset baseline is treated as untrusted. The manifest passes
+             *          only when the ENTIRE set is trusted (min_resolved_fraction 1.0). A single drifted or unresolved
+             *          feature therefore safe-disables the whole manifest.
              * @return A GatePolicy with reject_on_fingerprint_drift and reject_unset_fingerprint both true and
              *         min_resolved_fraction 1.0.
              */
@@ -721,16 +704,12 @@ namespace DetourModKit
 
             /**
              * @brief The strict gate PLUS every mutation-authorization requirement, for a manifest that drives a patch.
-             * @details Authorizing a write is the one operation whose worst failure is silent memory corruption in the
-             *          host, so this preset demands complete evidence rather than tolerating gaps: a mutation-capable
-             *          entry needs a captured fingerprint, a captured AND matching live image identity, content-bearing
-             *          winning evidence that matches both its baseline and a fresh guarded read, a mutation-safe typed
-             *          binding that is not a self-heal-incapable Manual, and a contract revision that was actually
-             *          checked. That last check in turn requires the @ref ManifestHeader overload with a nonzero build
-             *          revision.
-             *
-             *          Read-only lookup is deliberately unaffected: the plain overload, a zero build revision, and an
-             *          uncaptured baseline all remain usable for resolution, they simply cannot authorize a write.
+             * @details A mutation-capable entry needs a captured fingerprint and a captured live image identity that
+             *          matches. It also needs resolve evidence that matches its baseline and a fresh guarded read. The
+             *          entry needs a mutation-safe typed binding that is not a Manual and a checked contract revision.
+             *          The revision check requires the @ref ManifestHeader overload with a nonzero build revision.
+             *          Read-only lookup is unaffected. The plain overload, a zero build revision, and an uncaptured
+             *          baseline all remain usable for resolution. They cannot authorize a write.
              * @return A strict policy with every mutation requirement armed.
              */
             [[nodiscard]] static constexpr GatePolicy mutation_strict() noexcept
@@ -765,11 +744,8 @@ namespace DetourModKit
 
         /**
          * @enum GateReason
-         * @brief Which gate safe-disabled a signature.
-         * @details @ref RejectedSignature::status and @ref RejectedSignature::fingerprint report resolve and drift
-         *          state but cannot express the mutation-authorization gates, which all reject an entry that resolved
-         *          cleanly with an unedited definition. A consumer logging a safe-disable needs to tell "this feature
-         *          could not be located" from "this build may not write to that address".
+         * @brief Which gate safe-disabled a signature, so a log can tell a locate failure from a refused write
+         *        authorization.
          */
         enum class GateReason : std::uint8_t
         {
@@ -803,14 +779,9 @@ namespace DetourModKit
             std::string_view label;
             /// The resolve outcome; a non-Resolved status is why locate failed, if it did.
             anchor::AnchorStatus status = anchor::AnchorStatus::Unresolved;
-            /**
-             * @brief The drift verdict; @ref FingerprintState::Drifted here means "definition edited without recapture,
-             *        do not trust".
-             */
+            /// The drift verdict (see @ref FingerprintState).
             FingerprintState fingerprint = FingerprintState::Unset;
-            /**
-             * @brief The specific gate that rejected this entry.
-             */
+            /// The specific gate that rejected this entry.
             GateReason reason = GateReason::None;
         };
 

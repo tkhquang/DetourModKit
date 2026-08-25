@@ -714,7 +714,7 @@ WORKFLOWS = {
                             program=DISPATCH_IDENTITY_PROGRAM,
                             environment=DISPATCH_IDENTITY_ENVIRONMENT,
                         ),
-                        Step("Set up MSVC (x64) -- puts cl and the ASan runtime on PATH"),
+                        Step("Set up MSVC (x64) - puts cl and the ASan runtime on PATH"),
                         Step("Configure (MSVC Debug + ASan)", shell="pwsh"),
                         Step("Build", shell="pwsh"),
                         Step(
@@ -833,11 +833,11 @@ WORKFLOWS = {
 # permissions, outputs, defaults, and every unlisted shell line. The checker explicitly normalizes CRLF
 # and bare CR to LF, keeping the identity stable across checkouts while every other byte remains significant.
 WORKFLOW_SOURCE_SHA256 = {
-    ARCH_GATE: "4f307412bc640b90f87f7809f21d961b705de5bf3db7e551d42b8bae1ce66f48",
+    ARCH_GATE: "90dedef59cc277551052d8a066dbbb4b739ce331ab370b94413e7016d76a3e05",
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
-    PR_CHECK: "2603b1f617b250f8da4313a106a07ea97c30f43be89e19b2e08d2ccdab149264",
-    QUALITY: "2a0c3cef8480b6446f4c3068a0f9675e048581de96152bd008adb158633f54ab",
-    RELEASE: "069396585b7b5c686bc8320d3f7c3de3206a8fdea509a5f3e76ce35a1ac452b7",
-    SANITIZERS: "7d53176e985a113cd496e59bce3fec5a2585fb15f1deed7928d0b09fd9a55d57",
+    PR_CHECK: "96575ad2b33298ede32262e29f47ac5e3a94839a1453bbb6dd9f372b160a4eb8",
+    QUALITY: "79fb14f0c0ac91507a193a24eeaaae0237754da13e3e054cef2a3d771cd8964e",
+    RELEASE: "6954c7850380d7cc90a76699ce00edac9e932515ea0466c106bbac0717fc83b6",
+    SANITIZERS: "b32257522340ab589b06cfb93c867df0fb526107a301e4fd74833372d6ae306b",
     SIMD: "8824ad65838c14465826c71c8a3ab5504e050ea43bf8112ccec813cc47b45800",
 }

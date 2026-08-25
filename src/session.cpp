@@ -841,8 +841,7 @@ namespace DetourModKit
             return std::unexpected(Error{ErrorCode::Unknown, "Session::start"});
         }
 
-        // Setup succeeded: the session is Running. It now owns the single-session slot (released by ~Session) and the
-        // mutex handle (closed by ~Session).
+        // Setup succeeded. The session now owns the single-session slot and mutex handle until release().
         detail::lifecycle().mark_running();
         return Session(*instance_mutex);
     }

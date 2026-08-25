@@ -219,10 +219,9 @@ jobs:
         shell: bash
 
       - name: Run dump-capturing lifecycle soak (MinGW Release)
-        # A red here is one of two things: a lifecycle proof regressed, or the soak could not put this runner's
-        # machine-wide WER LocalDumps policy back. The second is not cosmetic on a self-hosted runner -- it leaves HKLM
-        # pointed at a temporary dump directory -- so the script reports it rather than warning past it, and names the
-        # exact values to repair.
+        # A failure means that a lifecycle proof regressed or the soak did not restore the WER LocalDumps policy.
+        # A restore failure leaves HKLM pointed at a temporary dump directory on the current runner.
+        # The script reports the failure and names the exact values to repair.
         timeout-minutes: 45
         run: |
           python scripts/run_lifecycle_soak.py \

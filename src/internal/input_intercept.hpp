@@ -12,24 +12,18 @@
  *               GetAsyncKeyState. A thread-scoped WH_GETMESSAGE hook observes WM_MOUSEWHEEL / WM_MOUSEHWHEEL
  *               retrieval on one UI-thread queue and latches each notch for the poll loop to consume.
  *
- *          Ownership: this module owns its safetyhook InlineHook objects directly rather than through a separately
- *          owned DMK Hook handle. The poll thread reads the XInput trampoline pointer every cycle, and the hook
- *          lifetime must be coupled to the poll thread's lifetime; a handle owned elsewhere could be dropped (freeing
- *          the trampoline) underneath a live poll thread.
+ *          Ownership: this module owns its safetyhook InlineHook objects directly. This ownership ties hook lifetime
+ *          to the poll thread that reads the XInput trampoline every cycle. State that the detours read lives in
+ *          file-scope statics. The loader-lock teardown path (InputPoller leaked, poll thread detached) therefore
+ *          leaves no detour with access to freed object state. The detours run on the game's threads. All shared state
+ *          is atomic, and every detour body allocates nothing and throws nothing.
  *
- *          State the detours read lives in file-scope statics (not InputPoller members) so that on the loader-lock
- *          teardown path (where InputPoller is leaked and its poll thread detached), the still-installed detours
- *          never dereference freed object state. The detours run on the game's threads (XInput caller threads and the
- *          window message thread); all shared state is atomic and every detour body is allocation-free and
- *          non-throwing.
- *
- *          Authorization: every operation that writes or drains the state the detours read takes an owner id and is
- *          refused unless it equals the live layer owner at the moment of the write. Holding no owner is not a licence
- *          to write; an idle layer must first be claimed by installing or through the raw test seam. Owner
- *          publication, owner revocation, and every data-plane write serialize on one lock, so a superseded owner that
- *          entered a publication before it lost the layer still observes the revocation and writes nothing. The lock
- *          order is s_intercept_mutex then the data-plane lock; the detours themselves take neither and keep reading
- *          plain atomics and the rule seqlock.
+ *          Authorization (`[B-95]`): every state write or drain takes an owner id. The operation fails unless that id
+ *          equals the live layer owner when the write occurs. Owner publication, owner revocation, and every
+ *          data-plane write serialize on one lock. A superseded owner therefore observes the revocation and writes
+ *          nothing, even if it entered publication before it lost the layer. The lock order is
+ *          s_intercept_mutex then the data-plane lock. The detours take neither lock and read plain atomics plus the
+ *          rule seqlock.
  *
  *          Windows-only internal header (mirrors platform.hpp); not installed.
  */
@@ -128,12 +122,11 @@ namespace DetourModKit::detail
     /**
      * @struct GamepadConsumeRule
      * @brief A consume chord reduced to the XInput button bits the detour can evaluate without the poll thread.
-     * @details The reactive (poll-published) mask trails the physical state by up to one poll cycle, which leaves a
-     *          leading-edge window: a modifier and trigger pressed inside one poll interval can be read by the game
-     *          before the mask catches up. A rule lets the detour mask the trigger against the exact snapshot the game
-     *          is about to read, closing that window. Built only from chords whose modifiers and masked triggers are
-     *          all digital gamepad buttons (the detour sees only
-     *          XINPUT_GAMEPAD.wButtons), so the decision is fully reproducible there.
+     * @details The reactive (poll-published) mask trails the physical state by up to one poll cycle. A rule lets the
+     *          detour mask the trigger against the exact snapshot that the game is about to read. This closes the
+     *          window.
+     *          Built only from chords whose modifiers and masked triggers are all digital gamepad buttons, so the
+     *          decision is fully reproducible from XINPUT_GAMEPAD.wButtons alone.
      */
     struct GamepadConsumeRule
     {
@@ -245,25 +238,19 @@ namespace DetourModKit::detail
      *          reachable publishes neither ownership nor a controller-index change; ambiguous target bytes retain any
      *          potentially reachable trampoline.
      *
-     *          The primary export and every distinct ordinal-100 export are one coverage transaction. Both hooks
-     *          are created disabled before either prologue is patched, so a creation failure rolls the pair back and
-     *          leaves both entries fully open. Complete coverage is published only after a final witness reads both
-     *          prologues, so a member a competing writer restored during the other member's arm window degrades the
-     *          pair instead of masking one entry point while the other bypasses. A required export that exists but is
-     *          not patched is degraded coverage, not success: this returns false, suppression stays inactive, and both
-     *          detours stay pass-through until the pair is whole. The layer is still claimed in that state, because a
-     *          live route needs an owner entitled to read its trampoline and to retire it. An absent or aliased
-     *          ordinal-100 export is complete coverage, since there is no second entry point to mask. A target that a
-     *          proxy forwards into another module receives its own hook and pre-acquired module keepalive.
+     *          The primary export and every distinct ordinal-100 export are one coverage transaction. Both hooks are
+     *          created disabled before either prologue is patched, so a creation failure rolls the pair back.
+     *          Complete coverage is published only after a final witness reads both prologues. An unpatched required
+     *          export is degraded coverage, not success. This function returns false, and both detours stay
+     *          pass-through until the pair is whole. The layer stays claimed because a live route needs an owner. An
+     *          absent or aliased ordinal-100 export is complete coverage. A target that a proxy forwards into another
+     *          module receives its own hook and pre-acquired module keepalive.
      *
-     *          Calling this while coverage is already published is the layer's health maintenance: both members are
-     *          re-witnessed, so an entry point lost after publication degrades the pair rather than being hidden by
-     *          the published flag. Recovery re-arms whichever member is missing, primary or ordinal-100, through that
-     *          member's existing hook object, never by layering a new hook over uncertain storage.
-     *
-     *          Recovery is deadline-gated. Each failed re-arm grows the delay toward a cap and never stops retrying;
-     *          a change of target module, owner, or member reachability drops the accumulated delay so the next call
-     *          attempts immediately.
+     *          A call after coverage publication re-witnesses both members, so a lost entry point degrades the pair.
+     *          Recovery re-arms the missing member through its
+     *          existing hook object, never a new hook over uncertain storage. Recovery is deadline-gated. Each failed
+     *          re-arm grows the delay toward a cap and retries continue. A target module, owner, or member-reachability
+     *          change drops the accumulated delay.
      * @param user_index The XInput controller index whose state may be masked.
      * @param owner Nonzero interception-layer owner id.
      * @return true only when coverage is complete for this owner; false when not ready, owned elsewhere, or degraded.
@@ -326,15 +313,10 @@ namespace DetourModKit::detail
 
     /**
      * @brief Hard ceiling on the raw per-direction wheel-notch counter the local wheel hook accumulates.
-     * @details The hook callback increments a counter per wheel notch and the poll loop drains it with
-     *          take_wheel_counts, but only while a wheel binding exists. Once the last wheel binding is removed the
-     *          poll loop stops draining (its drain is gated on live wheel bindings) yet the hook stays mounted until
-     *          shutdown, so the counter would otherwise accrete every idle notch until it overflows a signed int
-     *          (undefined behavior) and violates the bounded-backlog rule. Saturating the raw counter at the write
-     *          site bounds it regardless of poll-thread liveness (a stalled thread never drains either). The ceiling
-     *          is far above any real burst a single poll interval can accumulate (the pulse backlog itself caps at
-     *          MAX_WHEEL_PENDING), so a legitimate fast scroll is never truncated. Only the pathological
-     *          idle-accretion case saturates.
+     * @details `[B-25]` The poll loop drains the counter only while a wheel binding exists. The hook stays mounted
+     *          until shutdown, so an undrained counter accretes idle notches toward signed overflow.
+     *          Write-site saturation bounds it regardless of poll-thread liveness. The ceiling is far above
+     *          any real burst, so only the pathological idle-accretion case saturates.
      */
     inline constexpr int MAX_WHEEL_NOTCHES = 1024;
 
@@ -358,11 +340,10 @@ namespace DetourModKit::detail
      * @brief Mounts or migrates the local WH_GETMESSAGE wheel source onto @p target_thread_id under @p owner.
      * @details One transaction serves the fresh mount, the idempotent same-thread call, and the migration to a new
      *          thread. A migration disables capture, advances the epoch, drains admitted callback phases (bounded),
-     *          and removes the old hook before the new hook mounts, so hooks never overlap and no admitted decision
-     *          reaches the successor route. A removal failure on a live thread publishes
-     *          @ref WheelRouteState::CleanupBlocked and blocks the new mount; a signaled old thread is authoritative
-     *          hook retirement. Takes a permanent MessageHookKeepalive on the first successful publication, because
-     *          Windows permits a selected hook callback to run after UnhookWindowsHookEx returns.
+     *          and removes the old hook before the new hook mounts, so hooks never overlap. A removal failure on a
+     *          live thread publishes @ref WheelRouteState::CleanupBlocked and blocks the new mount. Takes a permanent
+     *          MessageHookKeepalive on the first successful publication, because Windows permits a selected hook
+     *          callback to run after UnhookWindowsHookEx returns.
      * @param owner Nonzero interception-layer owner id shared with the XInput hook.
      * @param target_thread_id The UI thread to mount on. It must belong to this process and be alive.
      * @return true when the hook is mounted on @p target_thread_id for this owner; false when the target is invalid,

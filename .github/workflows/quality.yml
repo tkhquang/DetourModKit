@@ -202,10 +202,9 @@ jobs:
         shell: bash
 
       - name: Analyse library sources (warnings are errors)
-        # --target is not optional. The database records MinGW g++ commands, but a Windows clang defaults to the MSVC
-        # target, and analysing GCC flags under the MS ABI reports findings that no supported build can produce -- and
-        # misses the include block that only a GNU target selects, turning src/internal/scan_engine.cpp into two hard
-        # parse errors. Pinning the triple to the compiler the database describes is what makes this route decidable.
+        # --target is required. The database records MinGW g++ commands, but Windows clang defaults to the MSVC target.
+        # Under the MS ABI, clang reports impossible GCC-flag results and misses the GNU-only include block.
+        # That mismatch causes two parse errors in src/internal/scan_engine.cpp. Pin the database compiler triple.
         run: |
           clang-tidy -p build/mingw-debug --quiet \
             --warnings-as-errors='*' \
