@@ -187,7 +187,7 @@ A top-level built-in array request returns the equivalent nested `std::array`, b
 
 | You have | You want | Use |
 |----------|----------|-----|
-| A pointer the hook was handed | To read or write it | Direct access. It is live for the current invocation. Use a guarded `memory::read` only if it can be stale by the time you run. |
+| A pointer the hook was handed | To read or write it | Direct access. It is live for the current invocation. Use a guarded `memory::read` or `memory::write_in_place` only if it can be stale by the time you run. |
 | A single address that can be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
 | A single address, a raw byte range | One range read that cannot fault | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
 | A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})`. `InvalidRepresentation` for a byte other than 0/1 |
