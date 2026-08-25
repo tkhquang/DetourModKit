@@ -74,6 +74,7 @@ Archived benchmark snapshots. Record new measurements in a new folder rather tha
 - [EventDispatcher](analysis/event_dispatcher_bench_v3.1.0/README.md). Emit and subscribe throughput.
 - [AVX-512 verify tier](analysis/avx512_verify_icount/README.md). Instruction-count proxy for the verify throughput gate.
 - [Protection-cache comparison](analysis/memory_cache_comparison_v4/README.md). Cache vs uncached decision record (A3).
+- [Protection-cache reader admission](analysis/memory_cache_admission_v5/README.md). Closed-bit admission word decision record (P1).
 - [Runtime footprint](analysis/runtime_footprint_v4/README.md). Logger and profiler resident bytes and high-water (P2-4).
 - [Signature-health corpus](analysis/sighealth_corpus_v4/README.md). Estimate vs ground truth over real x64 code (P1-9).
 - [Hot-path costs](analysis/hot_path_bench_v4/README.md). Type identity, guarded hook dispatch, and the asynchronous log producer (B1).

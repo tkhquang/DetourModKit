@@ -289,12 +289,10 @@ namespace
         return percentiles(all);
     }
 
-    // Warm-HIT contention throughput. Every thread hammers is_readable over a small, pre-warmed pool so almost all
-    // lookups hit the cache. With the lookup reduced to a per-shard shared lock plus the reader-tracking counter, the
-    // throughput ceiling is set by cross-thread cache-line contention on those words, exactly what the striped reader
-    // counters and the per-shard cache-line alignment target. Returns aggregate throughput (million is_readable/s),
-    // the metric that collapses when readers re-serialize on one shared line. A warm address re-misses at most once per
-    // cache TTL, so the periodic re-warm is negligible against the hit stream.
+    // Warm-HIT contention throughput uses a small, pre-warmed pool, so almost all lookups hit the cache. The workload
+    // isolates the shared shard lock and reader admission. Cross-thread cache-line contention sets the throughput
+    // ceiling. Striped admission words and aligned shards reduce that contention. The result is aggregate throughput
+    // in millions of is_readable calls per second. A warm address re-misses at most once per cache TTL.
     double run_warm_contention(const std::vector<void *> &pool, unsigned threads, std::size_t ops_per_thread)
     {
         std::atomic<bool> go{false};
@@ -700,11 +698,10 @@ int main()
     report("walk + read<u64>", ns_read_chain);
     std::printf("  gated/(walk+read) ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
 
-    // Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
-    // keeps almost every lookup a hit, so this isolates the cross-thread cost of the reader-tracking counter and the
-    // per-shard shared lock, the path the striped reader counters and cache-line-aligned shards target. Throughput
-    // that keeps scaling with thread count (rather than flattening as readers serialize on one counter line) is the
-    // win this phase measures.
+    // Phase 9 measures warm-HIT is_readable throughput under contention. The cache stays active, and a small pre-warmed
+    // pool keeps almost every lookup as a hit. This isolates the reader-admission word and the shared shard lock.
+    // Throughput must rise with the thread count. A shared admission line prevents that rise. The 1-thread and 8-thread
+    // rows form the recorded acceptance pair for admission changes.
     {
         constexpr std::size_t WARM_POOL = 256; // fits the cache (<= 16 shards x 32 hard-max) so all entries stay warm
         constexpr std::size_t WARM_OPS = 1u << 20; // is_readable calls per thread

@@ -13,14 +13,14 @@ namespace DetourModKit::detail
      *          on x64, 0xA0 on x86), then compares its OwningThread to the current thread id. Thread joins are unsafe
      *          while the loader lock is held (DllMain context), so this probe supplies the veto half of
      *          detail::blocking_teardown_permitted(), which every subsystem teardown reads.
-     * @note The result is fail-safe. If the PEB or the loader-lock pointer cannot be read, or the pointer does not
-     *       resolve to committed, readable memory (e.g. a future or foreign PEB layout shifted the offset), the
-     *       function assumes the lock IS held and returns true. A spurious true only leaks a detached thread (bounded,
-     *       with the thread's module reference held); a spurious false would join a thread under the loader lock and
-     *       deadlock the host on unload, so uncertainty must bias toward true.
-     * @note This is a fail-closed diagnostic only. A true or indeterminate result may veto a join, but a false result
-     *       never authorizes blocking teardown; that permission comes from the explicit loader context or from the
-     *       caller being the bootstrap worker (see detail::teardown_caller_authorized).
+     * @note Supported Windows x86/x64 layouts keep the PEB and its loader-lock field readable for the process lifetime.
+     *       The probe's PEB reads do not fault on those layouts. The probe validates only the loader-lock pointer target
+     *       before it reads OwningThread. A null PEB, null pointer, or pointer outside committed readable memory returns
+     *       true. A spurious true retains a detached thread and its module reference. A spurious false joins under the
+     *       loader lock and deadlocks host unload. Therefore, uncertainty must produce true.
+     * @note This is a fail-closed diagnostic only. A true or indeterminate result can veto a join. A false result never
+     *       authorizes a teardown wait. The explicit loader context or bootstrap worker grants that authority. See
+     *       detail::teardown_caller_authorized.
      * @return true if the current thread holds the loader lock, or if ownership cannot be determined.
      */
     [[nodiscard]] inline bool is_loader_lock_held_impl() noexcept
@@ -48,8 +48,8 @@ namespace DetourModKit::detail
         if (!cs)
             return true;
 
-        // Confirm the critical section lives in committed, readable memory before dereferencing OwningThread. A wrong
-        // LOADER_LOCK_OFFSET (foreign or future PEB layout) would otherwise read a bogus pointer and fault the host.
+        // Check that the critical section uses committed, readable memory before the OwningThread read. A stale or
+        // corrupt slot value can fault that read.
         constexpr DWORD READABLE_PROTECT = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
                                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         MEMORY_BASIC_INFORMATION mbi{};
