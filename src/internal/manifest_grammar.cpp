@@ -1,15 +1,10 @@
 /**
  * @file manifest_grammar.cpp
  * @brief Raw-text prepass that closes manifest identity and framing collisions before the INI backend can merge them.
- * @details The backend (a case-sensitive CSimpleIniCaseA) still merges exact-duplicate and whitespace-variant sections
- *          and keeps only the last of duplicate keys, and it silently absorbs an unterminated `<<<` heredoc to end of
- *          file. This pass tokenizes the raw bytes exactly as the backend's own FindEntry does (the same whitespace
- *          and blank-line skipping, the same first-`]` section terminator, the same discard of empty-key and no-`=`
- *          lines, the same `\r` / `\n` / `\r\n` line breaks, and the same case-sensitive heredoc terminator), so the
- *          set of sections and keys it validates is precisely the set the store will build. Any identity a merge would
- *          erase, any unclosed heredoc, and any section, key, field, or aggregate exceeding the caps fail closed here,
- *          before the store allocates. Mirroring the backend's tokenizer (rather than approximating it) is deliberate:
- *          a hand-rolled model that is one rule short of the backend's is one rule short of letting a collision escape.
+ * @details CSimpleIniCaseA merges duplicate sections, retains the last duplicate key, and absorbs an unterminated
+ *          heredoc through end of file. This pass uses the same whitespace, section, line-break, and heredoc rules.
+ *          It rejects lost identities, unclosed heredocs, discarded key lines, and resource-cap excesses before store
+ *          allocation. One shared token model prevents a collision from escape through a backend difference.
  */
 
 #include "internal/manifest_grammar.hpp"
@@ -280,15 +275,13 @@ namespace DetourModKit::manifest::detail
             }
             if (pos >= size || text[pos] != '=')
             {
-                // No value and no key-only support in the backend: the line is discarded.
-                pos = line_end_from(pos);
-                continue;
+                // The backend discards a noncomment line with no `=`. A dropped separator can restore a default value.
+                return fail(ErrorCode::MalformedLine, context);
             }
             if (pos == key_start)
             {
-                // Empty key (`= value`): the backend discards it without entering a heredoc.
-                pos = line_end_from(pos);
-                continue;
+                // The backend discards an empty key without entry into heredoc mode.
+                return fail(ErrorCode::MalformedLine, context);
             }
             const std::string_view key = rtrim(text.substr(key_start, pos - key_start));
             ++pos; // past '='

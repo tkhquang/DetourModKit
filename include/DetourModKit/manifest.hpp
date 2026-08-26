@@ -117,7 +117,7 @@ namespace DetourModKit
             std::string mangled;
             /// StringXref: the exact literal content to anchor on (no quotes).
             std::string string_text;
-            /// StringXref: how the literal is stored in the image.
+            /// StringXref: how the literal is stored in the image. Utf16le follows the @ref SignatureRecord rule.
             scan::StringEncoding string_encoding = scan::StringEncoding::Utf8;
             /// StringXref: whether to return the referencing instruction, its enclosing function, or the pointer slot.
             scan::XrefReturn string_return = scan::XrefReturn::ReferencingInstruction;
@@ -169,7 +169,12 @@ namespace DetourModKit
 
             /// StringXref: the exact literal content to anchor on (no quotes).
             std::string xref_text;
-            /// StringXref: byte encoding of the literal in the image (Utf16le for wchar_t literals).
+            /**
+             * @brief StringXref: byte encoding of the literal in the image (Utf16le for wchar_t literals).
+             * @details Utf16le evidence must contain well-formed UTF-8 because resolution converts it to UTF-16LE.
+             *          @ref parse, @ref Signature::compile, @ref Signature::adopt, and @ref serialize_checked reject
+             *          malformed text. Utf8 evidence remains byte-transparent.
+             */
             scan::StringEncoding xref_encoding = scan::StringEncoding::Utf8;
             /// StringXref: whether to return the referencing instruction, its enclosing function, or the pointer slot.
             scan::XrefReturn xref_return = scan::XrefReturn::ReferencingInstruction;
@@ -286,7 +291,8 @@ namespace DetourModKit
              *         EmptyCandidates (a RipGlobal / CodeOperand record with no ladder), or InvalidArg (a record whose
              *         kind is the non-serializable Quorum / CallArgHome / Unset, whose kind's required evidence is
              *         empty, whose persisted policy fields (including CodeOperand byte_width) are out of range, whose
-             *         label or string fields could not round-trip through the file grammar, or whose binding carries a
+             *         label or string fields that cannot round-trip through the file grammar, whose Utf16le string
+             *         evidence breaks the @ref SignatureRecord::xref_encoding rule, or whose binding carries a
              *         non-default value in a field its @ref BindingKind never reads).
              * @note Setup/control-plane only: compiling a ladder parses each rung's Pattern.
              */
@@ -298,8 +304,9 @@ namespace DetourModKit
              *        The function copies its borrowed views.
              * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, a
              *         serializable anchor whose required evidence is empty, an out-of-range persisted policy field
-             *         (including CodeOperand byte_width), or a label or string field that could not round-trip through
-             *         the file grammar).
+             *         (including CodeOperand byte_width), a label or string field that cannot round-trip through
+             *         the file grammar, or Utf16le string evidence that breaks the
+             *         @ref SignatureRecord::xref_encoding rule).
              * @details The counterpart to @ref compile for a signature that originates in code rather than a file. It
              *          copies the anchor's borrowed site candidates and strings into this object so the adopted
              *          signature outlives the caller's anchor table. The resulting record carries no ladder text (a
@@ -506,8 +513,10 @@ namespace DetourModKit
          * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
          * @return The parsed @ref Manifest (header plus records in file order), or an Error: MissingHeader (no
          *         `[manifest]` section or an unsupported schema), MalformedLine (a line, field, or enum token that
-         *         does not parse, a non-canonical section or key spelling, or a key that is inert for its record's
-         *         declared binding kind or its rung's mode), ManifestIdentityCollision (a case-, whitespace-, or
+         *         does not parse, a noncomment key line without `=`, an empty key, a non-canonical section or key
+         *         spelling, a key that is inert for its record's declared binding kind or its rung's mode, or Utf16le
+         *         string evidence that breaks the @ref SignatureRecord::xref_encoding rule), ManifestIdentityCollision
+         *         (a case-, whitespace-, or
          *         exactly-duplicated section, or a whitespace-variant or exactly-duplicated key, but a miscased key is
          *         MalformedLine before collision detection), ManifestFramingUnsafe (an unterminated `<<<` heredoc
          *         value, an opener with an empty tag, or a heredoc whose first body line is its terminator),
@@ -530,7 +539,8 @@ namespace DetourModKit
          * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
          * @return The manifest text, round-trippable through @ref parse, or an Error: InvalidArg (a record whose label
          *         or a string field cannot be framed, an out-of-range persisted policy field (including CodeOperand
-         *         byte_width), or a binding carrying a non-default inert field), ManifestIdentityCollision (two records
+         *         byte_width), a binding carrying a non-default inert field, or Utf16le string evidence that breaks
+         *         the @ref SignatureRecord::xref_encoding rule), ManifestIdentityCollision (two records
          *         whose labels fold to one section, or a record whose label folds into another record's rung section),
          *         SizeTooLarge (encoded text, a record, rung, field, or aggregate exceeding @p limits), or OutOfMemory.
          *         The `schema` line always reflects this build's @ref SCHEMA_VERSION.

@@ -2751,11 +2751,12 @@ TEST(ManifestCollisionTest, CaseVariantOrDuplicateIdentityCannotReachGate)
          dmk::ErrorCode::MalformedLine,
          "rung nested under a rung"},
         // Escape guards: the backend tokenizes these such that a second [sig.foo] survives, so the prepass must see it
-        // too. (1) An empty-key line never opens a heredoc, so the block below it is not swallowed.
+        // too. (1) An empty-key line never opens a heredoc in the backend. The prepass rejects the line itself
+        // (ManifestGrammarTest), so the block below it can never be swallowed.
         {header_text() + "[sig.foo]\nkind = manual\nmanual_value = 0\n= <<<END\n[sig.foo]\nkind = export_name\n"
                          "export_name = Sleep\nEND\n",
-         dmk::ErrorCode::ManifestIdentityCollision,
-         "empty-key heredoc hides a duplicate"},
+         dmk::ErrorCode::MalformedLine,
+         "empty-key heredoc opener fails closed"},
         // (2) A section name ends at the FIRST ']', so [sig.foo]bar] folds to the same identity as [sig.foo].
         {header_text() + "[sig.foo]\nkind = manual\nmanual_value = 0\n[sig.foo]bar]\nkind = manual\nmanual_value = 1\n",
          dmk::ErrorCode::ManifestIdentityCollision,
@@ -2848,6 +2849,230 @@ TEST(ManifestCollisionTest, CaseVariantOrDuplicateIdentityCannotReachGate)
     EXPECT_EQ(gate.trusted.size(), 2u);
     EXPECT_NE(gate.find("aaa"), nullptr);
     EXPECT_NE(gate.find("bbb"), nullptr);
+}
+
+// The backend silently discards a noncomment key line without `=` and an empty key. The prepass rejects both forms.
+TEST(ManifestGrammarTest, NoSeparatorAndEmptyKeyLinesFailClosedInEverySection)
+{
+    struct Rejection
+    {
+        std::string text;
+        const char *what;
+    };
+
+    const std::string rung_prefix = header_text() + "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\nmode = direct\n";
+    const std::vector<Rejection> rejected = {
+        {header_text() + "revision 7\n" + manual_section("x", 1), "header line without ="},
+        {"[manifest]\nschema = 1\n= 7\n" + manual_section("x", 1), "header empty key"},
+        {header_text() + "[sig.x]\nkind manual\nmanual_value = 1\n", "record line without ="},
+        {header_text() + "[sig.x]\nkind = manual\nmanual_value = 1\n= orphan_value\n", "record empty key"},
+        {rung_prefix + "pattern DE AD\n", "rung line without ="},
+        {rung_prefix + "pattern = DE AD\n= orphan_value\n", "rung empty key"},
+    };
+    for (const Rejection &r : rejected)
+    {
+        const auto parsed = mf::parse(r.text);
+        ASSERT_FALSE(parsed.has_value()) << r.what << ": expected rejection";
+        EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine) << r.what;
+    }
+}
+
+// This case drops `=` from serialized xref_encoding evidence. The complete manifest must fail closed.
+TEST(ManifestGrammarTest, DroppedSeparatorInSerializedRecordFailsClosed)
+{
+    mf::SignatureRecord record;
+    record.label = "probe.xref";
+    record.kind = an::AnchorKind::StringXref;
+    record.xref_text = "Hello";
+    record.xref_encoding = sc::StringEncoding::Utf16le;
+    mf::Manifest manifest;
+    manifest.records.push_back(std::move(record));
+    const auto serialized = mf::serialize_checked(manifest);
+    ASSERT_TRUE(serialized.has_value()) << serialized.error().message();
+
+    std::string no_equals = *serialized;
+    const std::string needle = "xref_encoding = utf16le";
+    const auto pos = no_equals.find(needle);
+    ASSERT_NE(pos, std::string::npos);
+    no_equals.replace(pos, needle.size(), "xref_encoding utf16le");
+
+    const auto parsed = mf::parse(no_equals);
+    ASSERT_FALSE(parsed.has_value()) << "the dropped separator must fail the parse, not revert the encoding";
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+namespace
+{
+    // Ill-formed UTF-8 classes the strict decoder must reject.
+    struct MalformedUtf8Case
+    {
+        std::string text;
+        const char *what;
+    };
+
+    [[nodiscard]] std::vector<MalformedUtf8Case> malformed_utf8_cases()
+    {
+        return {
+            {std::string("\xC3\x28\xFF"), "invalid two-byte tail plus invalid lead"},
+            {std::string("\xC3"), "truncated two-byte sequence"},
+            {std::string("Hello\xE2\x86"), "truncated three-byte tail"},
+            {std::string("\xE0\x80\xAF"), "overlong three-byte form"},
+            {std::string("\xF0\x80\x80\x80"), "overlong four-byte form"},
+            {std::string("\xED\xA0\x80"), "lone surrogate U+D800"},
+            {std::string("\xF4\x90\x80\x80"), "out-of-range U+110000"},
+            {std::string("\x80"), "bare continuation byte"},
+        };
+    }
+
+    [[nodiscard]] mf::SignatureRecord utf16_xref_record(std::string text)
+    {
+        mf::SignatureRecord record;
+        record.label = "probe.xref";
+        record.kind = an::AnchorKind::StringXref;
+        record.xref_text = std::move(text);
+        record.xref_encoding = sc::StringEncoding::Utf16le;
+        return record;
+    }
+
+    [[nodiscard]] mf::SignatureRecord utf16_rung_record(std::string text)
+    {
+        mf::SignatureRecord record;
+        record.label = "probe.rung";
+        record.kind = an::AnchorKind::RipGlobal;
+        mf::CandidateSpec rung;
+        rung.name = "text";
+        rung.mode = sc::Mode::StringXref;
+        rung.string_text = std::move(text);
+        rung.string_encoding = sc::StringEncoding::Utf16le;
+        record.ladder = {rung};
+        return record;
+    }
+} // namespace
+
+// Every Utf16le boundary uses the same strict UTF-8 rule. Malformed evidence cannot replace a valid default.
+TEST(ManifestUtf16EvidenceTest, CompileAndAdoptRejectMalformedUtf8AtRecordAndRungLevel)
+{
+    for (const MalformedUtf8Case &c : malformed_utf8_cases())
+    {
+        const auto record_compiled = mf::Signature::compile(utf16_xref_record(c.text));
+        ASSERT_FALSE(record_compiled.has_value()) << c.what;
+        EXPECT_EQ(record_compiled.error().code, dmk::ErrorCode::InvalidArg) << c.what;
+
+        const auto rung_compiled = mf::Signature::compile(utf16_rung_record(c.text));
+        ASSERT_FALSE(rung_compiled.has_value()) << c.what;
+        EXPECT_EQ(rung_compiled.error().code, dmk::ErrorCode::InvalidArg) << c.what;
+
+        an::Anchor anchor{};
+        anchor.label = "probe.adopt";
+        anchor.kind = an::AnchorKind::StringXref;
+        anchor.xref_text = c.text;
+        anchor.xref_encoding = sc::StringEncoding::Utf16le;
+        const auto adopted = mf::Signature::adopt(anchor);
+        ASSERT_FALSE(adopted.has_value()) << c.what;
+        EXPECT_EQ(adopted.error().code, dmk::ErrorCode::InvalidArg) << c.what;
+
+        const sc::StringRefQuery query{
+            .text = c.text,
+            .encoding = sc::StringEncoding::Utf16le,
+        };
+        const sc::Candidate candidates[] = {sc::Candidate::string_xref("malformed-rung", query)};
+        an::Anchor ladder_anchor{};
+        ladder_anchor.label = "probe.adopt.rung";
+        ladder_anchor.kind = an::AnchorKind::RipGlobal;
+        ladder_anchor.site = candidates;
+        const auto ladder_adopted = mf::Signature::adopt(ladder_anchor);
+        ASSERT_FALSE(ladder_adopted.has_value()) << c.what;
+        EXPECT_EQ(ladder_adopted.error().code, dmk::ErrorCode::InvalidArg) << c.what;
+    }
+
+    // Well-formed multi-byte text (a three-byte arrow and a surrogate-pair emoji) stays accepted at both levels.
+    const std::string valid = "Hello \xE2\x86\x92 \xF0\x9F\x99\x82";
+    EXPECT_TRUE(mf::Signature::compile(utf16_xref_record(valid)).has_value());
+    EXPECT_TRUE(mf::Signature::compile(utf16_rung_record(valid)).has_value());
+}
+
+// Utf8 evidence stays byte-transparent: the same bytes are legal because the scan matches them verbatim
+// (StringXrefTest.Utf8QueryStaysByteTransparent pins the runtime side).
+TEST(ManifestUtf16EvidenceTest, Utf8EvidenceStaysByteTransparent)
+{
+    for (const MalformedUtf8Case &c : malformed_utf8_cases())
+    {
+        mf::SignatureRecord record = utf16_xref_record(c.text);
+        record.xref_encoding = sc::StringEncoding::Utf8;
+        EXPECT_TRUE(mf::Signature::compile(std::move(record)).has_value()) << c.what;
+    }
+}
+
+// parse rejects the persisted forms as MalformedLine, and the checked encoder refuses to write them as InvalidArg,
+// so malformed Utf16le evidence can neither enter nor leave a manifest file.
+TEST(ManifestUtf16EvidenceTest, ParseAndCheckedSerializationRejectMalformedUtf8)
+{
+    const std::string probe_bytes("\xC3\x28\xFF");
+
+    // Valid controls isolate the malformed evidence below.
+    const std::string valid_record_text =
+        header_text() + "[sig.x]\nkind = string_xref\nxref_text = Hello\nxref_encoding = utf16le\n";
+    ASSERT_TRUE(mf::parse(valid_record_text).has_value());
+    const std::string valid_rung_text = header_text() + "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\n"
+                                                        "mode = string_xref\nstring_text = Hello\n"
+                                                        "string_encoding = utf16le\n";
+    ASSERT_TRUE(mf::parse(valid_rung_text).has_value());
+
+    const std::string record_text =
+        header_text() + "[sig.x]\nkind = string_xref\nxref_text = " + probe_bytes + "\nxref_encoding = utf16le\n";
+    const auto record_parsed = mf::parse(record_text);
+    ASSERT_FALSE(record_parsed.has_value());
+    EXPECT_EQ(record_parsed.error().code, dmk::ErrorCode::MalformedLine);
+
+    const std::string rung_text = header_text() +
+                                  "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\n"
+                                  "mode = string_xref\nstring_text = " +
+                                  probe_bytes + "\nstring_encoding = utf16le\n";
+    const auto rung_parsed = mf::parse(rung_text);
+    ASSERT_FALSE(rung_parsed.has_value());
+    EXPECT_EQ(rung_parsed.error().code, dmk::ErrorCode::MalformedLine);
+
+    mf::Manifest record_manifest;
+    record_manifest.records.push_back(utf16_xref_record(probe_bytes));
+    const auto record_encoded = mf::serialize_checked(record_manifest);
+    ASSERT_FALSE(record_encoded.has_value());
+    EXPECT_EQ(record_encoded.error().code, dmk::ErrorCode::InvalidArg);
+
+    mf::Manifest rung_manifest;
+    rung_manifest.records.push_back(utf16_rung_record(probe_bytes));
+    const auto rung_encoded = mf::serialize_checked(rung_manifest);
+    ASSERT_FALSE(rung_encoded.has_value());
+    EXPECT_EQ(rung_encoded.error().code, dmk::ErrorCode::InvalidArg);
+
+    // The Utf8 spelling of the same bytes round-trips whole (byte transparency).
+    mf::Manifest transparent;
+    mf::SignatureRecord utf8_record = utf16_xref_record(probe_bytes);
+    utf8_record.xref_encoding = sc::StringEncoding::Utf8;
+    transparent.records.push_back(std::move(utf8_record));
+    const auto utf8_encoded = mf::serialize_checked(transparent);
+    ASSERT_TRUE(utf8_encoded.has_value()) << utf8_encoded.error().message();
+    const auto utf8_parsed = mf::parse(*utf8_encoded);
+    ASSERT_TRUE(utf8_parsed.has_value()) << utf8_parsed.error().message();
+    EXPECT_EQ(utf8_parsed->records.at(0).xref_text, probe_bytes);
+}
+
+// A malformed Utf16le override falls back to the valid in-code default. This preserves the overlay contract.
+TEST(ManifestOverlayTest, MalformedUtf16OverrideFallsBackToDefault)
+{
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.xref";
+    defaults[0].kind = an::AnchorKind::StringXref;
+    defaults[0].xref_text = "default literal";
+    defaults[0].xref_encoding = sc::StringEncoding::Utf16le;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(utf16_xref_record("\xC3\x28\xFF"));
+    overrides[0].label = "policy.xref";
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].record().xref_text, "default literal");
 }
 
 // A record label carrying a miscased '.RUNG.' marker is an ordinary record, not a candidate rung: parse reads the

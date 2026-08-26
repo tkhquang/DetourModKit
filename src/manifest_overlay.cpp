@@ -217,14 +217,16 @@ namespace DetourModKit::manifest
         }
 
         if (value_is_unserializable(record.module) || value_is_unserializable(record.mangled) ||
-            value_is_unserializable(record.xref_text) || value_is_unserializable(record.export_name))
+            value_is_unserializable(record.xref_text) || value_is_unserializable(record.export_name) ||
+            xref_evidence_is_malformed(record.xref_text, record.xref_encoding))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
         for (const CandidateSpec &rung : record.ladder)
         {
             if (value_is_unserializable(rung.name) || value_is_unserializable(rung.pattern) ||
-                value_is_unserializable(rung.mangled) || value_is_unserializable(rung.string_text))
+                value_is_unserializable(rung.mangled) || value_is_unserializable(rung.string_text) ||
+                xref_evidence_is_malformed(rung.string_text, rung.string_encoding))
             {
                 return fail(ErrorCode::InvalidArg, "manifest::compile");
             }
@@ -311,9 +313,18 @@ namespace DetourModKit::manifest
         }
         if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
             value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
-            value_is_unserializable(record.export_name))
+            value_is_unserializable(record.export_name) ||
+            xref_evidence_is_malformed(record.xref_text, record.xref_encoding))
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        for (const scan::Candidate &candidate : source.site)
+        {
+            const scan::StringXref *xref = candidate.as_string_xref();
+            if (xref != nullptr && xref_evidence_is_malformed(xref->text, xref->encoding))
+            {
+                return fail(ErrorCode::InvalidArg, "manifest::adopt");
+            }
         }
         if ((record.kind == anchor::AnchorKind::RipGlobal || record.kind == anchor::AnchorKind::CodeOperand) &&
             source.site.empty())

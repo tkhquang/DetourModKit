@@ -3,8 +3,7 @@
 
 /**
  * @file internal/scan_shared.hpp
- * @brief Small shared helpers for the public scan-module TUs: the bounded haystack-frequency anchor override and the
- *        per-byte-tier resolution arithmetic.
+ * @brief Small shared helpers for scan-module TUs: anchor selection, resolution arithmetic, and strict UTF-8 decoding.
  * @details Never installed. The scan_matching, scan_resolution, and scan_prologue_recovery TUs all turn a value Pattern
  *          into an EnginePattern with a haystack-chosen anchor and screen byte-tier resolutions through the same
  *          plausible-userspace floor, so those helpers live here in one place rather than being duplicated. The anchor
@@ -24,6 +23,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace DetourModKit
 {
@@ -132,6 +132,90 @@ namespace DetourModKit
         {
             const std::size_t anchor = choose_scan_anchor(pattern, histogram);
             return engine_pattern_from(pattern, anchor);
+        }
+
+        /**
+         * @brief Decodes one UTF-8 code point and advances @p pos.
+         * @details Runtime and persistence share this strict decoder. A replacement character changes the requested
+         *          literal. The caller must pass pos less than text.size().
+         * @param text Input bytes.
+         * @param pos Input and output byte position.
+         * @param out Decoded scalar value on success.
+         * @return True on success. False for an invalid leader, tail, scalar value, overlong form, or truncated
+         * sequence.
+         */
+        [[nodiscard]] inline bool decode_utf8(std::string_view text, std::size_t &pos, char32_t &out) noexcept
+        {
+            const auto byte_at = [&text](std::size_t index) noexcept { return static_cast<std::uint8_t>(text[index]); };
+
+            const std::uint8_t lead = byte_at(pos);
+            std::size_t extra = 0;
+            char32_t value = 0;
+            if (lead < 0x80)
+            {
+                out = lead;
+                ++pos;
+                return true;
+            }
+            if (lead >= 0xC2 && lead <= 0xDF)
+            {
+                extra = 1;
+                value = lead & 0x1FU;
+            }
+            else if (lead >= 0xE0 && lead <= 0xEF)
+            {
+                extra = 2;
+                value = lead & 0x0FU;
+            }
+            else if (lead >= 0xF0 && lead <= 0xF4)
+            {
+                extra = 3;
+                value = lead & 0x07U;
+            }
+            else
+            {
+                return false;
+            }
+
+            // The caller guarantees pos < size. The subtraction keeps this bounds check free from pointer overflow.
+            if (extra >= text.size() - pos)
+            {
+                return false;
+            }
+            for (std::size_t i = 1; i <= extra; ++i)
+            {
+                const std::uint8_t continuation = byte_at(pos + i);
+                if ((continuation & 0xC0U) != 0x80U)
+                {
+                    return false;
+                }
+                value = (value << 6) | (continuation & 0x3FU);
+            }
+
+            // The leader ranges above exclude two-byte overlongs. These checks reject the remaining invalid values.
+            if ((extra == 2 && value < 0x800) || (extra == 3 && value < 0x10000) ||
+                (value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF)
+            {
+                return false;
+            }
+            pos += extra + 1;
+            out = value;
+            return true;
+        }
+
+        /// Reports whether every byte of @p text belongs to a well-formed UTF-8 sequence (decode_utf8's rule).
+        [[nodiscard]] inline bool utf8_is_well_formed(std::string_view text) noexcept
+        {
+            std::size_t pos = 0;
+            while (pos < text.size())
+            {
+                char32_t code_point = 0;
+                if (!decode_utf8(text, pos, code_point))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         // Exact-membership validity checks for the string-xref facet enums, shared by the direct find_string_xref
