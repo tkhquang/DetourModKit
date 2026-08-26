@@ -337,9 +337,11 @@ namespace DetourModKit
 
             /**
              * @brief Replaces the trigger combos of all bindings sharing @p name.
-             * @details Matching counts rewrite in place; differing counts rebuild the entry set carrying callbacks,
-             *          mode, and name forward. An empty list leaves one inert sentinel so the name stays addressable.
-             *          Held bindings receive on_state_change(false) before the swap. Safe while running.
+             * @details Matching-count updates preserve held state and dispatch no release callback. Cardinality changes
+             *          rebuild the entry set with the same callbacks, mode, and name. They dispatch
+             *          on_state_change(false) for held bindings after the replacement commit and binding-lock release.
+             *          An empty list leaves one inert sentinel so the name stays addressable. The operation is safe
+             *          while the poll thread runs.
              * @return The @ref ComboUpdate outcome. Both failure outcomes leave bindings, active states, callbacks,
              *         and generations unchanged.
              */
