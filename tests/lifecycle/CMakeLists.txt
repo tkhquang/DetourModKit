@@ -1193,10 +1193,11 @@ endwhile()
 
 # These scenarios use deterministic fixtures or no platform fixture. Exit 77 reports a failure.
 set(staged_generation_required_proofs
-  Lifecycle.StagedGenerationForeignXInputRetainsThePair     foreign-xinput
-  Lifecycle.StagedGenerationParkedCallbackRefusesReload     parked-callback
-  Lifecycle.StagedGenerationReleasedCallbackAllowsReload    drain-retry
-  Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps   partial-init)
+  Lifecycle.StagedGenerationForeignXInputRetainsThePair       foreign-xinput
+  Lifecycle.StagedGenerationParkedCallbackRefusesReload       parked-callback
+  Lifecycle.StagedGenerationReleasedCallbackAllowsReload      drain-retry
+  Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps     partial-init
+  Lifecycle.StagedGenerationExistingCandidateUsesFreshName    candidate-collision)
 while(staged_generation_required_proofs)
   list(POP_FRONT staged_generation_required_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}
