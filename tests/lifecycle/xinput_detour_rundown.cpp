@@ -5,6 +5,8 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 
+#include "raw_proof_error_mode.hpp"
+
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/input_codes.hpp"
@@ -3022,28 +3024,15 @@ namespace
 
     int run_xinput_pair_capacity_case()
     {
-        const wchar_t *const name = find_loadable_xinput();
-        if (name == nullptr)
-        {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
-        }
-        const HMODULE xinput = LoadLibraryW(name);
+        std::uint8_t *primary_target = nullptr;
+        std::uint8_t *ex_target = nullptr;
+        const HMODULE xinput = load_distinct_pair_proxy(&primary_target, &ex_target);
         if (xinput == nullptr)
         {
-            std::fprintf(stderr, "SKIP: the resolved XInput runtime could not be loaded\n");
-            return SKIP_EXIT_CODE;
-        }
-        const auto get_state =
-            reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
-        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(
-            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)))
-        );
-        if (get_state == nullptr)
-        {
-            std::fprintf(stderr, "FAIL: XInputGetState is not exported\n");
             return 170;
         }
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary_target));
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(ex_target));
 
         const auto before = safetyhook::route_retention_stats();
         // Room for exactly one worst-case chain. A per-hook reservation would admit the primary and then refuse its Ex
@@ -3077,7 +3066,7 @@ namespace
             std::fprintf(stderr, "FAIL: a refused pair left the primary entry uncallable\n");
             return 173;
         }
-        if (get_state_ex != nullptr && !legal_xinput_result(get_state_ex(0, &state)))
+        if (!legal_xinput_result(get_state_ex(0, &state)))
         {
             std::fprintf(stderr, "FAIL: a refused pair left the Ex entry uncallable\n");
             return 174;
@@ -3092,6 +3081,7 @@ namespace
         }
         uninstall();
 
+        set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
         std::puts("XINPUT_PAIR_RESERVES_ATOMICALLY");
         return 0;
@@ -3377,8 +3367,8 @@ int main(int argc, char **argv)
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 #endif
+    dmk_lifecycle::configure_raw_proof_error_mode();
 
     const std::string_view selected_case{argv[1]};
     if (selected_case == "wrapper-unwind")
