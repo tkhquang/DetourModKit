@@ -150,6 +150,13 @@ namespace DetourModKit::manifest
         return false;
     }
 
+    // Resolution converts Utf16le evidence through detail::decode_utf8. Persistence uses that rule for all xref text.
+    // Utf8 evidence remains byte-transparent.
+    [[nodiscard]] inline bool xref_evidence_is_malformed(std::string_view text, scan::StringEncoding encoding) noexcept
+    {
+        return encoding == scan::StringEncoding::Utf16le && !DetourModKit::detail::utf8_is_well_formed(text);
+    }
+
     // Every inert field must keep its default. An inert edit enters the drift fingerprint but is never emitted.
     // A recaptured baseline therefore cannot survive its own save and reload. See fold_binding.
     [[nodiscard]] inline bool binding_structure_is_valid(const Binding &binding) noexcept

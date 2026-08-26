@@ -551,8 +551,8 @@ namespace DetourModKit
              *          unbinds while keeping a single inert sentinel so the name stays addressable.
              * @param name Binding name previously registered.
              * @param combos Replacement combos (may be empty to unbind).
-             * @return Result<void>; ErrorCode::InvalidArg if the name was never registered (the call is otherwise a
-             *         success, including the unbind case).
+             * @return Success for a registered name. Returns ErrorCode::InvalidArg for an unknown name. Returns
+             *         ErrorCode::OutOfMemory after allocation failure, with all prior binding state unchanged.
              * @note Thread-safe; safe to call while the poll thread is running. A press or held(true) callback staged
              *       from the prior combo cannot fire after this returns; a staged release(false) is still delivered so
              *       a binding held as the swap lands ends released, not stranded. A callback that already began may

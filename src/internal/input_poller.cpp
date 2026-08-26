@@ -756,99 +756,109 @@ namespace DetourModKit
             }
         }
 
+        std::optional<InputPoller::ModifierCaches>
+        InputPoller::build_modifier_caches(const std::vector<InputBinding> &bindings) noexcept
+        {
+            try
+            {
+                ModifierCaches caches;
+                std::unordered_set<InputCode, InputCodeHash> modifier_set;
+                for (size_t i = 0; i < bindings.size(); ++i)
+                {
+                    if (!bindings[i].name.empty())
+                    {
+                        caches.name_index[bindings[i].name].push_back(i);
+                    }
+                    for (const auto &mod : bindings[i].modifiers)
+                    {
+                        modifier_set.insert(mod);
+                    }
+                }
+                caches.known_modifiers.assign(modifier_set.begin(), modifier_set.end());
+
+                // Built from the same bindings and modifier set as the reactive path so the two never disagree.
+                caches.consume_rules = build_gamepad_consume_rules(bindings, caches.known_modifiers);
+                caches.has_gamepad_bindings = scan_for_gamepad_bindings(bindings);
+                caches.has_wheel_bindings = scan_for_wheel_bindings(bindings);
+                caches.has_consume_gamepad_bindings = scan_for_consume_gamepad_bindings(bindings);
+                return caches;
+            }
+            catch (...)
+            {
+                return std::nullopt;
+            }
+        }
+
         void
-        InputPoller::recompute_modifier_caches_locked(DeferredDiagnostics &diagnostics, CacheFailPolicy policy) noexcept
+        InputPoller::commit_modifier_caches_locked(ModifierCaches &caches, DeferredDiagnostics &diagnostics) noexcept
         {
             // Snapshot wheel ownership before this reshape. The installed detour continues to latch notches across an
             // unbind -> rebind while the poll loop skips the drain. A stale backlog accumulates in the unowned window.
             // The no-wheel -> wheel transition below must discard it.
             const bool had_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_relaxed);
 
-            // Advance the generation before the rebuild. Even if the rebuild fails into the catch, every live
-            // BindingToken becomes invalid and fails closed until another acquisition.
+            m_consume_rules.swap(caches.consume_rules);
+            m_name_index.swap(caches.name_index);
+            m_known_modifiers.swap(caches.known_modifiers);
+            m_has_gamepad_bindings.store(caches.has_gamepad_bindings, std::memory_order_relaxed);
+            m_has_consume_gamepad_bindings.store(caches.has_consume_gamepad_bindings, std::memory_order_relaxed);
+
+            // Offer the detour-side consume rule list. A poller that does not hold the layer keeps the rules cached and
+            // does not overwrite the owner's list.
+            publish_consume_rules_locked(diagnostics);
+
+            // The published flag stays false until after this drain. Otherwise, the poll thread can consume a stale
+            // backlog before this thread clears it. A non-owner drains nothing because that backlog belongs to its
+            // owner's window.
+            if (!had_wheel_bindings && caches.has_wheel_bindings)
+            {
+                if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+                {
+                    m_external_wheel_discard_pending.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    (void)wheel_source_take_counts();
+                }
+            }
+            // Release pairs with the poll cycle's acquire snapshot and publishes the drain before consumption.
+            m_has_wheel_bindings.store(caches.has_wheel_bindings, std::memory_order_release);
+        }
+
+        void
+        InputPoller::recompute_modifier_caches_locked(DeferredDiagnostics &diagnostics, CacheFailPolicy policy) noexcept
+        {
+            // A caller already changed member state. Advance the generation even when the derived-cache build fails.
             m_binding_generation = next_binding_generation();
 
-            // Rebuild into locals and commit with noexcept moves only after every allocation succeeds. This helper is
-            // noexcept and reachable from loader-lock teardown.
-            try
+            std::optional<ModifierCaches> caches = build_modifier_caches(m_bindings);
+            if (caches)
             {
-                decltype(m_name_index) name_index;
-                std::unordered_set<InputCode, InputCodeHash> modifier_set;
-                for (size_t i = 0; i < m_bindings.size(); ++i)
-                {
-                    if (!m_bindings[i].name.empty())
-                    {
-                        name_index[m_bindings[i].name].push_back(i);
-                    }
-                    for (const auto &mod : m_bindings[i].modifiers)
-                    {
-                        modifier_set.insert(mod);
-                    }
-                }
-                std::vector<InputCode> known_modifiers(modifier_set.begin(), modifier_set.end());
-
-                // Built from the same bindings and modifier set as the reactive path so the two never disagree.
-                std::vector<GamepadConsumeRule> consume_rules =
-                    build_gamepad_consume_rules(m_bindings, known_modifiers);
-
-                // Commit. Container move assignment does not allocate, so the function cannot fail after this point.
-                m_consume_rules = std::move(consume_rules);
-                m_name_index = std::move(name_index);
-                m_known_modifiers = std::move(known_modifiers);
-                m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
-                const bool now_has_wheel_bindings = scan_for_wheel_bindings(m_bindings);
-                m_has_consume_gamepad_bindings.store(
-                    scan_for_consume_gamepad_bindings(m_bindings),
-                    std::memory_order_relaxed
-                );
-
-                // Offer the detour-side consume rule list. A poller that does not hold the layer keeps the rules
-                // cached and does not overwrite the owner's list.
-                publish_consume_rules_locked(diagnostics);
-
-                // On the no-wheel -> wheel transition, discard whatever the detour latched while no binding owned
-                // the wheel. The published flag stays false until after this drain. Otherwise, the poll thread can
-                // consume the stale backlog before this thread clears it. A non-owner drains nothing. That backlog
-                // belongs to the owner's window.
-                if (!had_wheel_bindings && now_has_wheel_bindings)
-                {
-                    if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
-                    {
-                        m_external_wheel_discard_pending.store(true, std::memory_order_release);
-                    }
-                    else
-                    {
-                        (void)wheel_source_take_counts();
-                    }
-                }
-                // Release pairs with the poll cycle's acquire snapshot and publishes the drain before consumption.
-                m_has_wheel_bindings.store(now_has_wheel_bindings, std::memory_order_release);
+                commit_modifier_caches_locked(*caches, diagnostics);
+                return;
             }
-            catch (...)
-            {
-                if (policy == CacheFailPolicy::Retain)
-                {
-                    // Keep the lookup caches (the caller changed a flag, not the binding set) but disarm the
-                    // suppression. A retained rule list has no independent expiry and masks a revoked chord for the
-                    // rest of the process.
-                    m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                    m_consume_rules.clear();
-                    publish_consume_rules_locked(diagnostics);
-                    diagnostics.cache_rebuild_retained = true;
-                    return;
-                }
 
-                // Keep every derived cache conservative and index-safe rather than leave a stale name map whose old
-                // indices can address past the new binding array.
-                m_name_index.clear();
-                m_known_modifiers.clear();
-                m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
-                m_has_wheel_bindings.store(false, std::memory_order_relaxed);
+            if (policy == CacheFailPolicy::Retain)
+            {
+                // Keep the lookup caches (the caller changed a flag, not the binding set) but disarm the suppression. A
+                // retained rule list has no independent expiry and masks a revoked chord for the rest of the process.
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_consume_rules.clear();
                 publish_consume_rules_locked(diagnostics);
-                diagnostics.cache_rebuild_cleared = true;
+                diagnostics.cache_rebuild_retained = true;
+                return;
             }
+
+            // Keep every derived cache conservative and index-safe rather than leave a stale name map whose old indices
+            // can address past the new binding array.
+            m_name_index.clear();
+            m_known_modifiers.clear();
+            m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_has_wheel_bindings.store(false, std::memory_order_relaxed);
+            m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_consume_rules.clear();
+            publish_consume_rules_locked(diagnostics);
+            diagnostics.cache_rebuild_cleared = true;
         }
 
         void InputPoller::publish_consume_rules_locked(DeferredDiagnostics &diagnostics) noexcept
@@ -1798,12 +1808,12 @@ namespace DetourModKit
             }
         }
 
-        bool InputPoller::update_combos(std::string_view name, const input::KeyComboList &combos) noexcept
+        InputPoller::ComboUpdate
+        InputPoller::update_combos(std::string_view name, const input::KeyComboList &combos) noexcept
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
-            std::vector<InputBinding> retired;
-            std::vector<InputBinding> rebuilt;
+            std::vector<InputBinding> staged_bindings;
             DeferredDiagnostics diagnostics;
 
             try
@@ -1816,47 +1826,54 @@ namespace DetourModKit
                     lock.unlock();
                     (void)log()
                         .try_log(LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found", name);
-                    return false;
+                    return ComboUpdate::NameAbsent;
                 }
 
                 std::vector<size_t> indices = it->second;
                 if (indices.empty())
                 {
-                    return false;
+                    return ComboUpdate::NameAbsent;
                 }
 
-                // This fast path preserves cardinality and active state. Each replacement copies the entry's gate
-                // reference, so the locked overwrite destroys no consumer callable.
+                // Stage every fallible binding and cache allocation before any member-state commit.
                 if (indices.size() == combos.size())
                 {
-                    std::vector<InputBinding> replacements;
-                    replacements.reserve(indices.size());
+                    staged_bindings = m_bindings;
                     for (size_t i = 0; i < indices.size(); ++i)
                     {
                         const size_t idx = indices[i];
-                        InputBinding binding = m_bindings[idx];
-                        binding.keys = combos[i].keys;
-                        binding.modifiers = combos[i].modifiers;
-                        replacements.push_back(std::move(binding));
+                        staged_bindings[idx].keys = combos[i].keys;
+                        staged_bindings[idx].modifiers = combos[i].modifiers;
                     }
+
+                    std::optional<ModifierCaches> caches = build_modifier_caches(staged_bindings);
+                    if (!caches)
+                    {
+                        lock.unlock();
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "InputPoller: out of memory in update_combos; combos unchanged"
+                        );
+                        return ComboUpdate::ResourceFailure;
+                    }
+
                     rundowns.reserve(indices.size());
                     for (size_t idx : indices)
                     {
                         add_rundown(rundowns, m_bindings[idx].lifecycle);
                     }
-                    for (size_t i = 0; i < indices.size(); ++i)
-                    {
-                        m_bindings[indices[i]] = std::move(replacements[i]);
-                    }
+
+                    m_bindings.swap(staged_bindings);
                     for (auto &rundown : rundowns)
                     {
                         rundown.generation = rundown.lifecycle->advance_generation();
                     }
-                    recompute_modifier_caches_locked(diagnostics);
+                    m_binding_generation = next_binding_generation();
+                    commit_modifier_caches_locked(*caches, diagnostics);
                     lock.unlock();
                     diagnostics.emit();
                     drain_rundowns(rundowns);
-                    return true;
+                    return ComboUpdate::Updated;
                 }
 
                 // A cardinality change rebuilds the bindings vector and the parallel m_active_states array. The
@@ -1869,8 +1886,8 @@ namespace DetourModKit
                 const size_t append_count = combos.empty() ? 1 : combos.size();
                 const size_t new_size = m_bindings.size() - indices.size() + append_count;
 
-                // Before m_bindings mutation, allocate every object that can throw. An empty replacement yields one
-                // inert sentinel, so the name stays addressable across a bound -> unbound -> bound INI reload cycle.
+                // An empty replacement yields one inert sentinel, so the name stays addressable across a bound ->
+                // unbound -> bound INI reload cycle.
                 std::vector<InputBinding> appended;
                 appended.reserve(append_count);
                 if (combos.empty())
@@ -1891,8 +1908,7 @@ namespace DetourModKit
                     }
                 }
 
-                rebuilt.reserve(new_size);
-                retired.reserve(indices.size());
+                staged_bindings.reserve(new_size);
                 std::vector<uint8_t> rebuilt_states;
                 rebuilt_states.reserve(new_size);
                 auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_size);
@@ -1919,28 +1935,37 @@ namespace DetourModKit
                     add_rundown(rundowns, m_bindings[idx].lifecycle);
                 }
 
-                // After allocation, commit the rebuilt state. No operation below can throw. Retained entries carry
-                // their prior atomic state across the swap, so a held binding does not report a false inactive state.
+                // Stage retained entries and their prior atomic states. A held binding stays active after the commit.
                 size_t cursor = 0;
                 for (size_t skip : indices)
                 {
                     for (size_t i = cursor; i < skip; ++i)
                     {
                         rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
-                        rebuilt.push_back(std::move(m_bindings[i]));
+                        staged_bindings.push_back(m_bindings[i]);
                     }
-                    retired.push_back(std::move(m_bindings[skip]));
                     cursor = skip + 1;
                 }
                 for (size_t i = cursor; i < m_bindings.size(); ++i)
                 {
                     rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
-                    rebuilt.push_back(std::move(m_bindings[i]));
+                    staged_bindings.push_back(m_bindings[i]);
                 }
                 for (auto &binding : appended)
                 {
-                    rebuilt.push_back(std::move(binding));
+                    staged_bindings.push_back(std::move(binding));
                     rebuilt_states.push_back(0);
+                }
+
+                std::optional<ModifierCaches> caches = build_modifier_caches(staged_bindings);
+                if (!caches)
+                {
+                    lock.unlock();
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: out of memory in update_combos; combos unchanged"
+                    );
+                    return ComboUpdate::ResourceFailure;
                 }
 
                 for (size_t i = 0; i < rebuilt_states.size(); ++i)
@@ -1948,7 +1973,7 @@ namespace DetourModKit
                     new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
                 }
 
-                m_bindings.swap(rebuilt);
+                m_bindings.swap(staged_bindings);
                 m_active_states = std::move(new_states);
                 for (auto &rundown : rundowns)
                 {
@@ -1956,14 +1981,14 @@ namespace DetourModKit
                                              ? rundown.lifecycle->advance_generation()
                                              : rundown.lifecycle->tombstone();
                 }
-                recompute_modifier_caches_locked(diagnostics);
+                m_binding_generation = next_binding_generation();
+                commit_modifier_caches_locked(*caches, diagnostics);
             }
             catch (...)
             {
-                // Phase 1 allocates before any mutation, so the poller is left unchanged and no callbacks fire.
-                // The stack unwind already released the writer lock, so this emission is off the lock.
+                // The transaction allocates before its member-state commit, so the prior state remains intact.
                 (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in update_combos; combos unchanged");
-                return false;
+                return ComboUpdate::ResourceFailure;
             }
 
             diagnostics.emit();
@@ -1996,7 +2021,7 @@ namespace DetourModKit
                 }
             }
 
-            return true;
+            return ComboUpdate::Updated;
         }
 
         bool InputPoller::add_binding(InputBinding binding) noexcept

@@ -1025,10 +1025,17 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "input::rebind"});
             }
 
-            // Live path: forward to the running poller outside m_mutex.
-            return local_poller->update_combos(name, combos)
-                       ? Result<void>{}
-                       : std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
+            // Forward to the live poller outside m_mutex. Preserve the caller and resource failure classes.
+            switch (local_poller->update_combos(name, combos))
+            {
+            case detail::InputPoller::ComboUpdate::Updated:
+                return {};
+            case detail::InputPoller::ComboUpdate::NameAbsent:
+                return std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
+            case detail::InputPoller::ComboUpdate::ResourceFailure:
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::rebind"});
+            }
+            return std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
         }
 
         void Input::set_consume(std::string_view name, bool consume) noexcept

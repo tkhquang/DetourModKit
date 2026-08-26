@@ -2992,6 +2992,60 @@ TEST(InputUpdateCombos, UpdatesRunningPollerBinding)
     im.set_require_focus(true);
 }
 
+// Live rebind preserves caller and resource failure classes. The failure leaves the same request ready for retry.
+TEST(InputUpdateCombos, LiveRebindTypesAllocationFailureAsOutOfMemory)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    auto &im = input::Input::instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    input::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}});
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-live-oom",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(5),
+        }
+    );
+    ASSERT_TRUE(im.is_running());
+
+    // Create both replacement lists before fail injection. The by-value argument then needs no allocation in the
+    // failure window.
+    input::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x42)}, {}});
+    replacement.push_back({{keyboard_key(0x43)}, {}});
+    input::KeyComboList retry = replacement;
+
+    // Warm the process-default logger so the OOM catch's guarded log runs on an already-built logger.
+    (void)DetourModKit::log();
+
+    auto live_oom = Result<void>{};
+    {
+        dmk_test::AllocFailScope fail(0); // fail the first allocation of the live cardinality-change rebuild
+        live_oom = im.rebind("update-live-oom", std::move(replacement));
+    }
+    ASSERT_FALSE(live_oom.has_value()) << "a live rebind under injected allocation failure must fail closed";
+    EXPECT_EQ(live_oom.error().code, ErrorCode::OutOfMemory);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+
+    const auto unknown = im.rebind("update-live-absent", retry);
+    ASSERT_FALSE(unknown.has_value());
+    EXPECT_EQ(unknown.error().code, ErrorCode::InvalidArg);
+
+    ASSERT_TRUE(im.rebind("update-live-oom", retry).has_value());
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
 TEST(InputUpdateCombos, ConcurrentUpdateWhilePollerRunning)
 {
     auto &im = input::Input::instance();
@@ -3726,7 +3780,7 @@ TEST_F(InputPollerTest, BindingTokenStaleAfterUpdateCombos)
             .modifiers = {},
         }
     };
-    EXPECT_TRUE(poller.update_combos("rebind", combos));
+    EXPECT_EQ(poller.update_combos("rebind", combos), detail::InputPoller::ComboUpdate::Updated);
     EXPECT_FALSE(poller.binding_token_current(token));
 
     // The name still exists, so a fresh token resolves and is current.
@@ -4769,7 +4823,10 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
     std::thread rebind_thread(
         [&]
         {
-            rebind_succeeded.store(poller.update_combos("H", rebound), std::memory_order_release);
+            rebind_succeeded.store(
+                poller.update_combos("H", rebound) == detail::InputPoller::ComboUpdate::Updated,
+                std::memory_order_release
+            );
             rebind_returned.store(true, std::memory_order_release);
         }
     );
@@ -5243,7 +5300,10 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
     std::thread rebind_thread(
         [&]
         {
-            rebind_succeeded.store(poller.update_combos("N", rebound), std::memory_order_release);
+            rebind_succeeded.store(
+                poller.update_combos("N", rebound) == detail::InputPoller::ComboUpdate::Updated,
+                std::memory_order_release
+            );
             rebind_returned.store(true, std::memory_order_release);
         }
     );
@@ -7002,6 +7062,61 @@ TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllo
 
     EXPECT_TRUE(poller.add_bindings(std::move(retry)));
     EXPECT_EQ(poller.binding_count(), 3u);
+}
+
+// update_combos preserves caller and resource failure classes. A ResourceFailure commits no state.
+TEST_F(InputPollerTest, UpdateCombosTypesAllocationFailureAsResourceFailureAndPreservesBindings)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    constexpr std::string_view name = "rebind_oom_name_past_the_small_string_buffer";
+    input::KeyComboList grown;
+    grown.push_back({{keyboard_key(0x71)}, {}});
+    grown.push_back({{keyboard_key(0x72)}, {}});
+
+    // Warm the process-default logger so each OOM diagnostic uses an existing logger.
+    (void)DetourModKit::log();
+
+    bool reached_success = false;
+    for (long long budget = 0; budget <= 128 && !reached_success; ++budget)
+    {
+        std::vector<detail::InputBinding> bindings;
+        detail::InputBinding seed;
+        seed.name = name;
+        seed.keys = {keyboard_key(0x70)};
+        bindings.push_back(std::move(seed));
+        detail::InputPoller poller(std::move(bindings));
+        const input::BindingToken token = poller.acquire_binding_token(name);
+        ASSERT_TRUE(poller.binding_token_current(token));
+
+        auto outcome = detail::InputPoller::ComboUpdate::NameAbsent;
+        {
+            dmk_test::AllocFailScope fail(budget);
+            outcome = poller.update_combos(name, grown);
+        }
+
+        if (outcome == detail::InputPoller::ComboUpdate::ResourceFailure)
+        {
+            EXPECT_EQ(poller.binding_count(), 1u) << "budget=" << budget;
+            EXPECT_TRUE(poller.binding_token_current(token)) << "budget=" << budget;
+            EXPECT_TRUE(poller.acquire_binding_token(name).valid()) << "budget=" << budget;
+            continue;
+        }
+
+        ASSERT_EQ(outcome, detail::InputPoller::ComboUpdate::Updated) << "budget=" << budget;
+        reached_success = true;
+        EXPECT_EQ(poller.binding_count(), 2u);
+        EXPECT_FALSE(poller.binding_token_current(token));
+        EXPECT_TRUE(poller.acquire_binding_token(name).valid());
+    }
+
+    EXPECT_TRUE(reached_success) << "the allocation sweep never reached a complete cache transaction";
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding seed;
+    seed.name = "known";
+    bindings.push_back(std::move(seed));
+    detail::InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.update_combos("never_registered", grown), detail::InputPoller::ComboUpdate::NameAbsent);
 }
 
 // A join failure inside the noexcept InputPoller::shutdown() must be contained rather than escape and terminate. The
