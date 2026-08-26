@@ -452,8 +452,8 @@ TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
     const std::wstring own = current_exe_path_wide();
     ASSERT_FALSE(own.empty());
 
-    // Place the child image beside the original so it resolves the same fixture DLLs. A hard link avoids a copy of the
-    // large test binary. A file system without hard links uses a copy.
+    // Place the child image beside the original so it resolves the same fixture DLLs. A copy gives the child separate
+    // file identity. The parent process keeps its own executable mapped until this test exits.
     const std::filesystem::path directory = std::filesystem::path(own).parent_path();
     const std::filesystem::path renamed = directory / (unique_long_multibyte_stem() + L".exe");
     const std::filesystem::path marker = child_execution_marker_path(renamed);
@@ -465,13 +465,12 @@ TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
         << "failed to clear prior child artifacts: " << cleanup_error.message();
 
     std::error_code create_error;
-    std::filesystem::create_hard_link(own, renamed, create_error);
-    if (create_error)
-    {
-        create_error.clear();
-        std::filesystem::copy_file(own, renamed, create_error);
-    }
+    std::filesystem::copy_file(own, renamed, create_error);
     ASSERT_FALSE(create_error) << "failed to create the child image: " << create_error.message();
+    std::error_code identity_error;
+    const bool shares_parent_file = std::filesystem::equivalent(own, renamed, identity_error);
+    ASSERT_FALSE(identity_error) << "failed to compare child image identity: " << identity_error.message();
+    ASSERT_FALSE(shares_parent_file) << "the child image must not share the mapped parent file identity";
 
     std::wstring command = L"\"" + renamed.wstring() +
                            L"\" --gtest_also_run_disabled_tests"
