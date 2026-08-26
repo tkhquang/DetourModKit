@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -46,6 +47,7 @@ namespace
     constexpr int SKIP_EXIT_CODE = 77;
     constexpr int SETUP_FAILURE = 2;
     constexpr int SOAK_CYCLES = 100;
+    constexpr unsigned STAGED_COPY_CANDIDATE_LIMIT = 1024;
 
     constexpr DWORD UNLOAD_POLL_BUDGET_MS = 3000;
     constexpr DWORD UNLOAD_POLL_STEP_MS = 10;
@@ -229,6 +231,14 @@ namespace
         return reinterpret_cast<Fn>(reinterpret_cast<void *>(::GetProcAddress(module, symbol)));
     }
 
+    /// Builds a staged-generation path from the current process ID and @p nonce.
+    [[nodiscard]] std::filesystem::path
+    make_staged_generation_path(const std::filesystem::path &directory, unsigned nonce)
+    {
+        return directory / ("staged_generation.p" + std::to_string(static_cast<unsigned long>(_getpid())) + "_g" +
+                            std::to_string(nonce) + ".dll");
+    }
+
     /// Copies the source image to a per-process unique name and rewrites the tag bytes to @p tag_value.
     [[nodiscard]] bool stage_copy(const std::string &tag_value, std::filesystem::path &staged)
     {
@@ -237,20 +247,44 @@ namespace
         const std::filesystem::path source = std::filesystem::current_path(error) / staged_gen::SOURCE_MODULE_NAME;
         if (error)
         {
+            std::fprintf(stderr, "stage_copy: current_path failed: %s (%d)\n", error.message().c_str(), error.value());
             return false;
         }
-        const unsigned nonce = s_counter.fetch_add(1, std::memory_order_relaxed);
-        staged = source.parent_path() / ("staged_generation.p" + std::to_string(static_cast<unsigned long>(_getpid())) +
-                                         "_g" + std::to_string(nonce) + ".dll");
-        std::filesystem::copy_file(source, staged, std::filesystem::copy_options::overwrite_existing, error);
-        if (error)
+
+        bool copied = false;
+        for (unsigned attempt = 0; attempt < STAGED_COPY_CANDIDATE_LIMIT; ++attempt)
         {
+            const unsigned nonce = s_counter.fetch_add(1, std::memory_order_relaxed);
+            std::filesystem::path candidate = make_staged_generation_path(source.parent_path(), nonce);
+            error.clear();
+            if (std::filesystem::copy_file(source, candidate, error))
+            {
+                staged = std::move(candidate);
+                copied = true;
+                break;
+            }
+            if (error != std::errc::file_exists)
+            {
+                std::fprintf(
+                    stderr,
+                    "stage_copy: copy_file failed for %s: %s (%d)\n",
+                    candidate.string().c_str(),
+                    error.message().c_str(),
+                    error.value()
+                );
+                return false;
+            }
+        }
+        if (!copied)
+        {
+            std::fprintf(stderr, "stage_copy: no free candidate after %u attempts\n", STAGED_COPY_CANDIDATE_LIMIT);
             return false;
         }
 
         std::fstream file(staged, std::ios::in | std::ios::out | std::ios::binary);
         if (!file)
         {
+            std::fprintf(stderr, "stage_copy: open failed for %s\n", staged.string().c_str());
             return false;
         }
         // One bulk read. A per-character read of the coverage-instrumented copy costs seconds per generation.
@@ -258,23 +292,27 @@ namespace
         const std::streamoff staged_size = file.tellg();
         if (staged_size <= 0)
         {
+            std::fprintf(stderr, "stage_copy: size read failed for %s\n", staged.string().c_str());
             return false;
         }
         file.seekg(0, std::ios::beg);
         std::vector<char> bytes(static_cast<std::size_t>(staged_size));
         if (!file.read(bytes.data(), staged_size))
         {
+            std::fprintf(stderr, "stage_copy: image read failed for %s\n", staged.string().c_str());
             return false;
         }
         const std::string_view needle{staged_gen::TAG_MARKER};
         const auto found = std::string_view{bytes.data(), bytes.size()}.find(needle);
         if (found == std::string_view::npos)
         {
+            std::fprintf(stderr, "stage_copy: tag marker missing from %s\n", staged.string().c_str());
             return false;
         }
         const std::size_t tag_at = found + needle.size();
         if (tag_at + staged_gen::TAG_LENGTH > bytes.size())
         {
+            std::fprintf(stderr, "stage_copy: tag range exceeds %s\n", staged.string().c_str());
             return false;
         }
         for (std::size_t i = 0; i < staged_gen::TAG_LENGTH; ++i)
@@ -283,7 +321,12 @@ namespace
         }
         file.seekp(static_cast<std::streamoff>(tag_at), std::ios::beg);
         file.write(bytes.data() + tag_at, static_cast<std::streamsize>(staged_gen::TAG_LENGTH));
-        return static_cast<bool>(file);
+        if (!file)
+        {
+            std::fprintf(stderr, "stage_copy: tag write failed for %s\n", staged.string().c_str());
+            return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool load_generation(const std::string &tag_value, Generation &generation)
@@ -330,6 +373,47 @@ namespace
     {
         std::error_code error;
         (void)std::filesystem::remove(generation.path, error);
+    }
+
+    int run_existing_candidate_uses_fresh_name()
+    {
+        std::error_code error;
+        const std::filesystem::path directory = std::filesystem::current_path(error);
+        if (error)
+        {
+            return fail("candidate-collision", "failed to resolve the staged-generation directory");
+        }
+        const std::filesystem::path collision = make_staged_generation_path(directory, 0);
+        {
+            std::ofstream collision_file(collision, std::ios::binary | std::ios::trunc);
+            collision_file.put('x');
+            if (!collision_file)
+            {
+                return fail("candidate-collision", "failed to create the existing candidate");
+            }
+        }
+
+        Generation generation;
+        if (!load_generation("COLLIDE", generation))
+        {
+            return fail("candidate-collision", "failed to load a generation after the existing candidate");
+        }
+        if (generation.path == collision)
+        {
+            (void)unload_generation(generation);
+            return fail("candidate-collision", "staging overwrote the existing candidate");
+        }
+        const void *const marker = generation.marker;
+        if (!unload_generation(generation) || !wait_for_unmap(marker))
+        {
+            return fail("candidate-collision", "the fresh generation did not unmap");
+        }
+        remove_unmapped_staged_file_best_effort(generation);
+        error.clear();
+        (void)std::filesystem::remove(collision, error);
+
+        std::fprintf(stderr, "OK: an existing staged candidate forced a fresh name\n");
+        return 0;
     }
 
     int run_soak()
@@ -969,11 +1053,15 @@ int main(int argc, char **argv)
     {
         return run_foreign_xinput();
     }
+    if (scenario == "candidate-collision")
+    {
+        return run_existing_candidate_uses_fresh_name();
+    }
 
     std::fprintf(
         stderr,
         "usage: %s soak|local-wheel-retention|uninstall-call-site|parked-callback|drain-retry|"
-        "partial-init|foreign-xinput\n",
+        "partial-init|foreign-xinput|candidate-collision\n",
         argc > 0 ? argv[0] : "staged_generation_soak"
     );
     return SETUP_FAILURE;
