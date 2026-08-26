@@ -225,6 +225,8 @@ TEST(SessionStartAsyncActivation, PostPublicationThrowLeavesWriterSessionOwned)
 namespace
 {
     constexpr DWORD CHILD_PROCESS_TIMEOUT_MS = 60000;
+    constexpr DWORD CHILD_ARTIFACT_CLEANUP_TIMEOUT_MS = 5000;
+    constexpr DWORD CHILD_ARTIFACT_CLEANUP_RETRY_MS = 20;
     constexpr std::string_view CHILD_EXECUTION_MARKER =
         "SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename:complete";
     std::atomic<std::uint32_t> s_child_image_counter{0};
@@ -311,7 +313,7 @@ namespace
         {
         }
 
-        /** @brief Retries cleanup on scope exit. */
+        /** @brief Retries bounded cleanup on scope exit. */
         ~ChildArtifactCleanup() noexcept
         {
             std::error_code error;
@@ -319,23 +321,44 @@ namespace
         }
 
         /**
-         * @brief Removes each artifact and reports the first file-system error.
+         * @brief Removes each artifact after a bounded retry for transient Windows locks.
          * @param error Receives the first file-system error.
          * @return True when all three removal operations report no error.
          */
         [[nodiscard]] bool cleanup(std::error_code &error) noexcept
         {
-            std::error_code marker_error;
-            (void)std::filesystem::remove(m_marker, marker_error);
-            std::error_code log_error;
-            (void)std::filesystem::remove(m_log, log_error);
-            std::error_code image_error;
-            (void)std::filesystem::remove(m_image, image_error);
+            const ULONGLONG deadline = GetTickCount64() + CHILD_ARTIFACT_CLEANUP_TIMEOUT_MS;
+            const std::error_code marker_error = remove_artifact(m_marker, deadline);
+            const std::error_code log_error = remove_artifact(m_log, deadline);
+            const std::error_code image_error = remove_artifact(m_image, deadline);
             error = marker_error ? marker_error : (log_error ? log_error : image_error);
             return !error;
         }
 
     private:
+        /** @brief Removes one file and retries only transient Windows lock failures until @p deadline. */
+        [[nodiscard]] static std::error_code
+        remove_artifact(const std::filesystem::path &path, ULONGLONG deadline) noexcept
+        {
+            for (;;)
+            {
+                if (DeleteFileW(path.c_str()) != FALSE)
+                {
+                    return {};
+                }
+                const DWORD error = GetLastError();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                {
+                    return {};
+                }
+                if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || GetTickCount64() >= deadline)
+                {
+                    return {static_cast<int>(error), std::system_category()};
+                }
+                Sleep(CHILD_ARTIFACT_CLEANUP_RETRY_MS);
+            }
+        }
+
         ChildArtifactCleanup(const ChildArtifactCleanup &) = delete;
         ChildArtifactCleanup &operator=(const ChildArtifactCleanup &) = delete;
         ChildArtifactCleanup(ChildArtifactCleanup &&) = delete;
@@ -346,6 +369,36 @@ namespace
         std::filesystem::path m_log;
     };
 } // namespace
+
+TEST(SessionStart, ChildArtifactCleanupRetriesTransientLocks)
+{
+    const std::filesystem::path locked_path = unique_session_log_path("session_child_cleanup_lock");
+    const HANDLE locked = CreateFileW(
+        locked_path.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    ASSERT_NE(locked, INVALID_HANDLE_VALUE) << "failed to create the locked cleanup fixture";
+    std::unique_ptr<void, decltype(&CloseHandle)> locked_guard{locked, &CloseHandle};
+
+    std::jthread release_lock(
+        [locked_guard = std::move(locked_guard)]() mutable noexcept -> void
+        {
+            Sleep(100);
+            locked_guard.reset();
+        }
+    );
+    const std::filesystem::path marker_path{locked_path.wstring() + L".marker"};
+    const std::filesystem::path log_path{locked_path.wstring() + L".log"};
+    ChildArtifactCleanup artifacts{locked_path, marker_path, log_path};
+    std::error_code cleanup_error;
+    ASSERT_TRUE(artifacts.cleanup(cleanup_error)) << cleanup_error.message();
+    EXPECT_FALSE(std::filesystem::exists(locked_path));
+}
 
 TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
 {

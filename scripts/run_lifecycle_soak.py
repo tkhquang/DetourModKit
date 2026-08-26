@@ -37,6 +37,7 @@ AEDEBUG_PATHS = (
     r"SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug",
 )
 VALUE_NAMES = ("DumpFolder", "DumpType", "DumpCount")
+WER_CAPTURE_ENV = "DMK_LIFECYCLE_WER_ACTIVE"
 
 # LocalDumps collection requires WER itself. A machine or policy `Disabled` value of 1 turns collection off.
 # A WerSvc start type of 4 (disabled) leaves no service to write the dump. The Disabled values are
@@ -112,12 +113,18 @@ def run_checked(command: list[str], cwd: Path | None = None, env: dict | None = 
         raise SoakError(f"Command '{command[0]}' exited with code {completed.returncode}.")
 
 
-def run_ctest(arguments: list[str], runtime_directory: str) -> None:
+def native_crash_environment() -> dict[str, str]:
     env = dict(os.environ)
     # GoogleTest re-arms SEM_NOGPFAULTERRORBOX in every proof process while catch_exceptions is on, which
     # would undo the cleared error mode this soak inherits down the tree. Under the soak a crash must die as
     # a crash and leave a WER dump, never be swallowed as a caught test failure.
     env["GTEST_CATCH_EXCEPTIONS"] = "0"
+    env[WER_CAPTURE_ENV] = "1"
+    return env
+
+
+def run_ctest(arguments: list[str], runtime_directory: str) -> None:
+    env = native_crash_environment()
     if runtime_directory:
         env["PATH"] = runtime_directory + os.pathsep + env.get("PATH", "")
     run_checked(["ctest", *arguments], env=env)
@@ -465,6 +472,7 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
                 "--stop-on-failure",
             ],
             cwd=repo_root,
+            env=native_crash_environment(),
         )
 
         run_ctest(

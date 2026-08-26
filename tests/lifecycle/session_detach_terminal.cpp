@@ -16,6 +16,7 @@
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 
+#include "raw_proof_error_mode.hpp"
 #include "test_alloc_probe.hpp"
 
 #include <windows.h>
@@ -116,8 +117,8 @@ int main()
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    ::SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 #endif
+    dmk_lifecycle::configure_raw_proof_error_mode();
 
     // Built before the budget is armed. Constructing it inside the armed scope would charge the caller's own
     // argument setup to the refusal and throw out of a noexcept frame.

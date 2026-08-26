@@ -20,6 +20,7 @@
 #include "internal/input_poller.hpp"
 
 #include "logic_dll_protocol.hpp"
+#include "raw_proof_error_mode.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -1588,8 +1589,8 @@ int main(int argc, char **argv)
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    ::SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 #endif
+    dmk_lifecycle::configure_raw_proof_error_mode();
 
     if (argc != 2)
     {

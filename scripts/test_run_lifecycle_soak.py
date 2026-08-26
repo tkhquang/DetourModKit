@@ -629,6 +629,8 @@ def test_soak_ctest_runs_disable_gtest_exception_catching() -> None:
     env = captured["env"]
     if env is None or env.get("GTEST_CATCH_EXCEPTIONS") != "0":
         raise AssertionError("the soak's ctest environment must carry GTEST_CATCH_EXCEPTIONS=0")
+    if env.get(MODULE.WER_CAPTURE_ENV) != "1":
+        raise AssertionError("the soak's ctest environment must keep WER capture active")
 
 
 def test_machine_wer_disable_is_corrected_and_restored() -> None:
