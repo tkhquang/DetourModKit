@@ -6,6 +6,7 @@
  */
 
 #include "DetourModKit/input.hpp"
+#include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
 
 #include "internal/config_diagnostics.hpp"
@@ -52,6 +53,18 @@ namespace
     static_assert(
         std::is_nothrow_move_assignable_v<DetourModKit::config::detail::DeferredDiagnostics>,
         "the startup diagnostic channel must use a no-throw move"
+    );
+
+    // Async activation is fail-soft: a refused activation leaves synchronous delivery, so both overloads carry the
+    // compile-time no-throw contract.
+    static_assert(
+        noexcept(std::declval<DetourModKit::Logger &>().enable_async_mode()),
+        "Logger::enable_async_mode() must not throw"
+    );
+    static_assert(
+        noexcept(std::declval<DetourModKit::Logger &>()
+                     .enable_async_mode(std::declval<const DetourModKit::AsyncLoggerConfig &>())),
+        "Logger::enable_async_mode(config) must not throw"
     );
 
     // A lost noexcept specifier puts the site back under the containment rule.

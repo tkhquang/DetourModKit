@@ -812,10 +812,9 @@ namespace DetourModKit
             return std::unexpected(instance_mutex.error());
         }
 
-        // Logger::configure builds std::string / std::wstring for the prefix and path; keep the noexcept contract by
-        // catching here and undoing the mutex and the guard first. std::bad_alloc is reported as OutOfMemory and
-        // everything else as Unknown: collapsing both into OutOfMemory would tell a caller to retry after a fault that
-        // retrying cannot clear.
+        // Logger::configure can throw while it builds owned strings. A std::bad_alloc maps to OutOfMemory.
+        // Every other exception maps to Unknown because a retry cannot clear an arbitrary fault.
+        // enable_async_mode contains its failures, so this catch owns only configuration.
         try
         {
             Logger::configure(info.name, info.log_file, DEFAULT_TIMESTAMP_FORMAT, info.log_open_mode);

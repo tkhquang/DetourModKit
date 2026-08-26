@@ -15,6 +15,7 @@ Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded i
 - When the writer thread detaches under loader lock, the writer's counted module reference stays outstanding.
 - The `shared_ptr<AsyncLogger>` moves into a per-call permanent cell. The normal path uses `new (std::nothrow)`. The fallback path uses non-CRT permanent storage. A heap allocation failure therefore cannot drop the last handle while the writer still runs.
 - If first-use construction fails under OOM, the process-default `log()` publishes an inert drop/count logger with no sink, shared sink mutex, or writer. The noexcept accessor never terminates.
+- `enable_async_mode` is noexcept and fail-soft. A refused activation leaves synchronous delivery and releases the unpublished writer's retention root. A committed activation stays published. `LoggerTest.PostPublicationThrowIsContainedAndKeepsThePublishedWriter` and `LoggerTest.NonStandardThrowBeforePublicationIsContainedAndBreaksTheRoot` prove the boundary.
 - `set_log_level` uses a private route that bypasses the level filter. A stricter threshold cannot hide its transition record. `LoggerTest.SetLogLevel_ChangedThresholdsEmitInfoControlRecord` proves the contract.
 - `dropped_count()` aggregates facade and async drops as best-effort observability.
 

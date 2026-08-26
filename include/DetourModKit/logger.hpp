@@ -226,15 +226,17 @@ namespace DetourModKit
 
         /**
          * @brief Enables asynchronous logging: messages are queued and written by a dedicated writer thread.
+         * @details A failure before publication leaves async mode off and keeps synchronous delivery.
+         *          A contained failure after publication keeps the writer active. Diagnostics use @ref try_log.
          * @param config Async writer configuration; the timestamp format is overridden with this logger's own so both
          *               sinks emit identical timestamps.
          * @note Setup/control-plane only: starts the writer thread and takes the async lifecycle mutex; not
          *       callback-safe.
          */
-        void enable_async_mode(const AsyncLoggerConfig &config);
+        void enable_async_mode(const AsyncLoggerConfig &config) noexcept;
 
         /// Enables asynchronous logging with the default AsyncLoggerConfig. See the config-taking overload.
-        void enable_async_mode();
+        void enable_async_mode() noexcept;
 
         /**
          * @brief Disables asynchronous logging and returns to synchronous writes.

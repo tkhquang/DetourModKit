@@ -465,8 +465,8 @@ namespace DetourModKit
             // Incremented whenever the cache is cleared so a resolve already in flight cannot republish afterward.
             mutable std::atomic<std::uint64_t> m_cache_epoch{0};
 
-            // Millisecond timestamp of the last unresolved sweep (0 = never). It bounds whole-module retries for a type
-            // that is not present; successful warm calls do not modify it.
+            // Millisecond timestamp of the last resolve attempt that controls a later retry (0 = never). It bounds
+            // whole-module retries. Successful warm calls do not modify it.
             mutable std::atomic<std::uint64_t> m_last_attempt_ms{0};
         };
     } // namespace rtti
