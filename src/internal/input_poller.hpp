@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -323,14 +324,26 @@ namespace DetourModKit
                 m_owner_keepalive = std::move(owner);
             }
 
+            /// Outcome of update_combos, so the facade can map each failure class to its promised error code.
+            enum class ComboUpdate : std::uint8_t
+            {
+                /// The swap committed (including the unbind sentinel case).
+                Updated,
+                /// The name was never registered.
+                NameAbsent,
+                /// A resource acquisition failed before the commit.
+                ResourceFailure,
+            };
+
             /**
              * @brief Replaces the trigger combos of all bindings sharing @p name.
              * @details Matching counts rewrite in place; differing counts rebuild the entry set carrying callbacks,
              *          mode, and name forward. An empty list leaves one inert sentinel so the name stays addressable.
              *          Held bindings receive on_state_change(false) before the swap. Safe while running.
-             * @return true on swap (including unbind); false only if the name was never registered.
+             * @return The @ref ComboUpdate outcome. Both failure outcomes leave bindings, active states, callbacks,
+             *         and generations unchanged.
              */
-            [[nodiscard]] bool update_combos(std::string_view name, const input::KeyComboList &combos) noexcept;
+            [[nodiscard]] ComboUpdate update_combos(std::string_view name, const input::KeyComboList &combos) noexcept;
 
             /**
              * @brief Appends a binding to the running poller, carrying surviving entries' active state forward.
@@ -396,6 +409,28 @@ namespace DetourModKit
             void poll_loop(std::stop_token stop_token);
             void release_active_holds() noexcept;
             [[nodiscard]] bool is_process_foreground() const noexcept;
+
+            /// Transparent hasher enabling std::string_view lookup without allocation.
+            struct StringHash
+            {
+                using is_transparent = void;
+                std::size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+            };
+
+            /**
+             * @struct ModifierCaches
+             * @brief Fallible derived state that a binding transaction prepares before its commit.
+             */
+            struct ModifierCaches
+            {
+                std::unordered_map<std::string, std::vector<std::size_t>, StringHash, std::equal_to<>> name_index;
+                std::vector<InputCode> known_modifiers;
+                std::vector<GamepadConsumeRule> consume_rules;
+                bool has_gamepad_bindings{false};
+                bool has_wheel_bindings{false};
+                bool has_consume_gamepad_bindings{false};
+            };
+
             /**
              * @enum CacheFailPolicy
              * @brief What a failed derived-cache rebuild leaves behind.
@@ -448,6 +483,20 @@ namespace DetourModKit
                 DeferredDiagnostics &diagnostics,
                 CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe
             ) noexcept;
+
+            /**
+             * @brief Builds all fallible derived state for @p bindings without a member-state change.
+             * @return The complete cache transaction, or std::nullopt after a resource failure.
+             */
+            [[nodiscard]] static std::optional<ModifierCaches>
+            build_modifier_caches(const std::vector<InputBinding> &bindings) noexcept;
+
+            /**
+             * @brief Publishes a complete cache transaction for the current binding set.
+             * @details Requires m_bindings_rw_mutex. The function performs no fallible allocation.
+             */
+            void commit_modifier_caches_locked(ModifierCaches &caches, DeferredDiagnostics &diagnostics) noexcept;
+
             void record_consume_capacity(
                 std::size_t active,
                 std::size_t rejected,
@@ -461,13 +510,6 @@ namespace DetourModKit
              *          acquisition. Capacity diagnostics land in @p diagnostics for the caller to emit off the lock.
              */
             void publish_consume_rules_locked(DeferredDiagnostics &diagnostics) noexcept;
-
-            /// Transparent hasher enabling std::string_view lookup without allocation.
-            struct StringHash
-            {
-                using is_transparent = void;
-                std::size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
-            };
 
             // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers, m_binding_generation, and the
             // interception gates during a live update. The poll loop holds a shared lock across the evaluation pass and

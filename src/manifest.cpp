@@ -674,6 +674,10 @@ namespace DetourModKit::manifest
                     }
                     spec.string_broad_match = *value;
                 }
+                if (xref_evidence_is_malformed(spec.string_text, spec.string_encoding))
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
                 break;
             }
             }
@@ -1079,6 +1083,10 @@ namespace DetourModKit::manifest
                     }
                     record.xref_broad_match = *value;
                 }
+                if (xref_evidence_is_malformed(record.xref_text, record.xref_encoding))
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
                 break;
             case anchor::AnchorKind::Manual:
             {
@@ -1345,8 +1353,9 @@ namespace DetourModKit::manifest
                 }
                 if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
                     value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
-                    value_is_unserializable(record.export_name) || !record_policy_domains_are_valid(record) ||
-                    !binding_structure_is_valid(record.binding) ||
+                    value_is_unserializable(record.export_name) ||
+                    xref_evidence_is_malformed(record.xref_text, record.xref_encoding) ||
+                    !record_policy_domains_are_valid(record) || !binding_structure_is_valid(record.binding) ||
                     !image_identity_is_valid(record.expected_image_identity) ||
                     !winning_bytes_are_valid(record.expected_winning_bytes))
                 {
@@ -1368,7 +1377,8 @@ namespace DetourModKit::manifest
                         return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
                     }
                     if (value_is_unserializable(spec.name) || value_is_unserializable(spec.pattern) ||
-                        value_is_unserializable(spec.mangled) || value_is_unserializable(spec.string_text))
+                        value_is_unserializable(spec.mangled) || value_is_unserializable(spec.string_text) ||
+                        xref_evidence_is_malformed(spec.string_text, spec.string_encoding))
                     {
                         return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
                     }

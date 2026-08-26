@@ -116,73 +116,6 @@ namespace DetourModKit
                 }
             }
 
-            // Decodes one code point from well-formed UTF-8 at @p pos, advancing it past the sequence. Returns false on
-            // any ill-formed input: a continuation byte in leader position, a truncated tail, a leader byte that no
-            // valid encoding uses (0xC0/0xC1/0xF5..0xFF), an overlong form, a value above U+10FFFF, or a surrogate code
-            // point, which UTF-8 must never encode. Rejecting rather than substituting U+FFFD is deliberate: a
-            // replacement character would make the scan search for a literal the caller never asked for.
-            bool decode_utf8(std::string_view text, std::size_t &pos, char32_t &out) noexcept
-            {
-                const auto byte_at = [&text](std::size_t index) noexcept
-                { return static_cast<std::uint8_t>(text[index]); };
-
-                const std::uint8_t lead = byte_at(pos);
-                std::size_t extra = 0;
-                char32_t value = 0;
-                if (lead < 0x80)
-                {
-                    out = lead;
-                    ++pos;
-                    return true;
-                }
-                if (lead >= 0xC2 && lead <= 0xDF)
-                {
-                    extra = 1;
-                    value = lead & 0x1FU;
-                }
-                else if (lead >= 0xE0 && lead <= 0xEF)
-                {
-                    extra = 2;
-                    value = lead & 0x0FU;
-                }
-                else if (lead >= 0xF0 && lead <= 0xF4)
-                {
-                    extra = 3;
-                    value = lead & 0x07U;
-                }
-                else
-                {
-                    return false;
-                }
-
-                // The caller guarantees pos < size, so size - pos is at least 1; the sequence fits only when every
-                // continuation byte is still inside the view. Subtracting keeps the check free of pointer overflow.
-                if (extra >= text.size() - pos)
-                {
-                    return false;
-                }
-                for (std::size_t i = 1; i <= extra; ++i)
-                {
-                    const std::uint8_t continuation = byte_at(pos + i);
-                    if ((continuation & 0xC0U) != 0x80U)
-                    {
-                        return false;
-                    }
-                    value = (value << 6) | (continuation & 0x3FU);
-                }
-
-                // The leader ranges above already exclude the two-byte overlongs (0xC0/0xC1); these reject the three-
-                // and four-byte overlongs, the surrogate range, and anything past the Unicode maximum.
-                if ((extra == 2 && value < 0x800) || (extra == 3 && value < 0x10000) ||
-                    (value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF)
-                {
-                    return false;
-                }
-                pos += extra + 1;
-                out = value;
-                return true;
-            }
-
             // Why a query cannot be compiled, so the caller can report a precise error instead of "not found".
             enum class QueryTextStatus : std::uint8_t
             {
@@ -240,7 +173,7 @@ namespace DetourModKit
                     while (pos < query.text.size())
                     {
                         char32_t code_point = 0;
-                        if (!decode_utf8(query.text, pos, code_point))
+                        if (!detail::decode_utf8(query.text, pos, code_point))
                         {
                             status = QueryTextStatus::Malformed;
                             return std::nullopt;

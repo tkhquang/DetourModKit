@@ -614,6 +614,21 @@ TEST(SigHealthRecord, StringAndVtableRecordKindsGradeByTheirText)
     EXPECT_EQ(sh::analyze_record(vt).grade, sh::Grade::Robust);
 }
 
+// The compile ceiling rejects malformed Utf16le evidence before the length score can grade it Robust.
+TEST(SigHealthRecord, MalformedUtf16EvidenceCannotGradeRobust)
+{
+    mf::SignatureRecord xref;
+    xref.label = "by.malformed.string";
+    xref.kind = an::AnchorKind::StringXref;
+    xref.xref_text = std::string("UniqueDiagnosticString") + "\xC3\x28\xFF";
+    xref.xref_encoding = sc::StringEncoding::Utf16le;
+
+    ASSERT_FALSE(mf::Signature::compile(xref).has_value());
+    const sh::RecordHealth health = sh::analyze_record(xref);
+    EXPECT_EQ(health.grade, sh::Grade::Unusable);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::UncompilableRecord));
+}
+
 TEST(SigHealthRecord, ExportNameGradesRobustWithoutLengthFloor)
 {
     // ExportName grades by an exact lookup within one module, not by the statistical selectivity of text searched
