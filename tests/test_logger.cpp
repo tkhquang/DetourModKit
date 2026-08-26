@@ -37,6 +37,14 @@ namespace
     std::atomic<unsigned> s_level_transition_arrivals{0};
     std::atomic<bool> s_level_transition_release{false};
     std::atomic<bool> s_level_transition_timed_out{false};
+    std::atomic<unsigned> s_activation_log_counter{0};
+
+    [[nodiscard]] std::filesystem::path unique_activation_log_path(std::string_view stem)
+    {
+        const unsigned counter = s_activation_log_counter.fetch_add(1, std::memory_order_relaxed);
+        return std::filesystem::temp_directory_path() /
+               (std::string(stem) + "_" + std::to_string(_getpid()) + "_" + std::to_string(counter) + ".log");
+    }
 
     void rendezvous_level_transition() noexcept
     {
@@ -2456,6 +2464,7 @@ namespace DetourModKit::detail
     extern std::atomic<std::atomic<bool> *> g_async_logger_writer_gate;
     extern std::atomic<std::size_t> g_async_logger_live_count_for_test;
     extern void (*g_logger_publication_probe)();
+    extern void (*g_logger_post_publication_probe)();
     extern void (*g_logger_async_snapshot_probe)() noexcept;
     extern int (*g_win_file_write_override)(void *, const void *, unsigned long, unsigned long *);
 } // namespace DetourModKit::detail
@@ -2943,6 +2952,70 @@ TEST_F(LoggerTest, PrePublicationFailureBreaksTheRetentionRoot)
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before);
 
     std::filesystem::remove(rollback_file, error_code);
+}
+
+// The rollback window must contain every exception type. An escaped non-standard throw terminates the process.
+TEST_F(LoggerTest, NonStandardThrowBeforePublicationIsContainedAndBreaksTheRoot)
+{
+    const std::filesystem::path rollback_file = unique_activation_log_path("test_logger_nonstd_rollback");
+    std::error_code error_code;
+    std::filesystem::remove(rollback_file, error_code);
+
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+    {
+        Logger logger("NONSTD", rollback_file.string(), "%H:%M:%S");
+        DetourModKit::detail::g_logger_publication_probe = []() { throw 42; };
+        logger.enable_async_mode();
+        DetourModKit::detail::g_logger_publication_probe = nullptr;
+
+        EXPECT_FALSE(logger.is_async_mode_enabled()) << "a refused publication must not leave async mode enabled";
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed), live_before)
+            << "a writer that was never published must be destroyed, not stranded on its own retention root";
+
+        // The refusal is contained, so a later enable still works.
+        logger.enable_async_mode();
+        EXPECT_TRUE(logger.is_async_mode_enabled());
+        logger.disable_async_mode();
+    }
+
+    std::filesystem::remove(rollback_file, error_code);
+}
+
+// A throw at the old diagnostic site must not escape after publication. The committed writer stays active.
+TEST_F(LoggerTest, PostPublicationThrowIsContainedAndKeepsThePublishedWriter)
+{
+    const std::filesystem::path post_file = unique_activation_log_path("test_logger_post_publication");
+    std::error_code error_code;
+    std::filesystem::remove(post_file, error_code);
+
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+    {
+        Logger logger("POSTPUB", post_file.string(), "%H:%M:%S");
+        DetourModKit::detail::g_logger_post_publication_probe = []()
+        { throw std::runtime_error("diagnostic refused"); };
+        logger.enable_async_mode();
+        DetourModKit::detail::g_logger_post_publication_probe = nullptr;
+
+        EXPECT_TRUE(logger.is_async_mode_enabled())
+            << "a contained post-publication throw must keep the activated writer";
+        EXPECT_EQ(
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+            live_before + 1
+        );
+
+        (void)logger.log(LogLevel::Info, "post-publication delivery still works");
+        logger.disable_async_mode();
+        EXPECT_EQ(
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+            live_before
+        );
+    }
+
+    std::filesystem::remove(post_file, error_code);
 }
 
 // Once shutdown has begun, the facade must drop a synchronous log rather than write it to the sink the detached

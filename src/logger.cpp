@@ -31,6 +31,10 @@ namespace DetourModKit::detail
     // cleared on a single thread inside a test fixture; the definition and fire site compile out of shipping builds.
     void (*g_logger_publication_probe)() = nullptr;
 
+    // Test-only probe at the old success-diagnostic site after enable_async_mode() publishes the writer.
+    // It can throw when non-null. Tests install it on one thread. Shipping builds omit it.
+    void (*g_logger_post_publication_probe)() = nullptr;
+
     // Test-only probe fired after Logger::log() snapshots an async writer and before it calls enqueue(). A fixture
     // retires that writer inside the probe to prove a late rejection reaches the facade's cumulative drop counter.
     void (*g_logger_async_snapshot_probe)() noexcept = nullptr;
@@ -740,7 +744,7 @@ namespace DetourModKit
         }
     }
 
-    void Logger::enable_async_mode(const AsyncLoggerConfig &config)
+    void Logger::enable_async_mode(const AsyncLoggerConfig &config) noexcept
     {
         // An inert first-use logger has no sink to feed a writer thread; async mode stays unavailable for its
         // process-lifetime inert state.
@@ -749,11 +753,11 @@ namespace DetourModKit
             return;
         }
 
-        bool should_log_error = false;
-        bool should_log_success = false;
-        std::string error_msg;
-        size_t queue_cap = 0;
-        size_t batch_sz = 0;
+        bool sink_closed = false;
+        bool activation_failed = false;
+        bool activated = false;
+        std::size_t queue_cap = 0;
+        std::size_t batch_sz = 0;
 
         {
             std::lock_guard<std::mutex> lock(m_async_mutex);
@@ -780,8 +784,7 @@ namespace DetourModKit
 
             if (!m_log_file_stream_ptr->is_open())
             {
-                should_log_error = true;
-                error_msg = "Cannot enable async mode: log file is not open.";
+                sink_closed = true;
             }
             else
             {
@@ -817,29 +820,57 @@ namespace DetourModKit
                         writer->release_retention_root();
                         throw;
                     }
-                    should_log_success = true;
+                    activated = true;
                     queue_cap = config.queue_capacity;
                     batch_sz = config.batch_size;
                 }
-                catch (const std::exception &e)
+                catch (...)
                 {
-                    should_log_error = true;
-                    error_msg = std::string("Failed to enable async mode: ") + e.what();
+                    // Every throw here occurs before publication. The writer never existed or released its retention
+                    // root, so async mode stays off and synchronous delivery remains available.
+                    activation_failed = true;
                 }
             }
         }
 
-        if (should_log_error)
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // This seam proves that a throw after publication cannot escape or disturb the published writer.
+        if (activated)
         {
-            log(LogLevel::Error, "{}", error_msg);
+            if (auto *post_publication_probe = detail::g_logger_post_publication_probe)
+            {
+                try
+                {
+                    post_publication_probe();
+                }
+                catch (...)
+                {
+                }
+            }
         }
-        else if (should_log_success)
+#endif
+
+        // Diagnostics stay outside the mutex. Fixed text through try_log keeps the published path no-throw.
+        if (sink_closed)
         {
-            log(LogLevel::Info, "Async logging mode enabled. Queue capacity: {}, Batch size: {}", queue_cap, batch_sz);
+            (void)try_log(LogLevel::Error, "Cannot enable async mode: log file is not open.");
+        }
+        else if (activation_failed)
+        {
+            (void)try_log(LogLevel::Error, "Failed to enable async mode.");
+        }
+        else if (activated)
+        {
+            (void)try_log(
+                LogLevel::Info,
+                "Async logging mode enabled. Queue capacity: {}, Batch size: {}",
+                queue_cap,
+                batch_sz
+            );
         }
     }
 
-    void Logger::enable_async_mode()
+    void Logger::enable_async_mode() noexcept
     {
         enable_async_mode(AsyncLoggerConfig{});
     }
