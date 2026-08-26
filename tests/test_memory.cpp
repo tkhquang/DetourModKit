@@ -1863,15 +1863,30 @@ TEST_F(MemoryTest, IsReadableNonblocking_NoCacheInitialized)
 
 TEST_F(MemoryTest, IsReadableNonblocking_FreedMemory)
 {
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    VirtualFree(mem, 0, MEM_RELEASE);
-
     memory::clear_cache();
     memory::shutdown_cache();
 
-    auto status = is_readable_nonblocking(mem, 1);
-    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
+    // Another allocation can map the address after VirtualFree. Bounded cycles find an address that stays free after
+    // the probe. A re-mapped cycle proves nothing about freed memory and is discarded.
+    bool proved = false;
+    for (int attempt = 0; attempt < 8 && !proved; ++attempt)
+    {
+        void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        ASSERT_NE(mem, nullptr);
+        VirtualFree(mem, 0, MEM_RELEASE);
+
+        const auto status = is_readable_nonblocking(mem, 1);
+
+        MEMORY_BASIC_INFORMATION info{};
+        const bool still_free = VirtualQuery(mem, &info, sizeof(info)) == sizeof(info) && info.State == MEM_FREE;
+        if (!still_free)
+        {
+            continue;
+        }
+        EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
+        proved = true;
+    }
+    EXPECT_TRUE(proved) << "every cycle lost the freed address to a concurrent re-mapping";
 
     (void)memory::init_cache();
 }

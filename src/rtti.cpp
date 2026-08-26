@@ -1240,6 +1240,11 @@ namespace DetourModKit
                 m_cached.store(Address{}, std::memory_order_relaxed);
                 m_image_stamp.store(0, std::memory_order_relaxed);
                 m_image_base.store(Address{}, std::memory_order_relaxed);
+                // Stamp the attempt before the gate drops: the refresh below is itself a whole-image sweep, so a miss
+                // must start the `[B-67]` cooldown. Without the stamp the next miss-path call reads the pre-refresh
+                // timestamp and runs a second adjacent sweep.
+                const std::uint64_t refresh_now = rtti_now_ms();
+                m_last_attempt_ms.store(refresh_now == 0 ? 1 : refresh_now, std::memory_order_release);
                 m_cache_writer.clear(std::memory_order_release);
                 return resolve_and_cache(next_epoch);
             }

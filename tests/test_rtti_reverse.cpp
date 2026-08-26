@@ -984,6 +984,37 @@ TEST_F(RttiReverseProof, TypeIdentityDoesNotPublishAcrossGenerationTransition)
     s_fake_clock_ms.store(1000 + 1'000'000);
     ASSERT_EQ(identity.vtable(), Address{vtable});
 }
+
+TEST_F(RttiReverseProof, TypeIdentityFailedStaleRefreshStartsCooldown)
+{
+    // A failed changed-generation refresh must start the `[B-67]` cooldown. Make the type present at the same clock
+    // value to prove that the next sweep does not run. Without the stamp, that call resolves the now-present type.
+    RttiClockScope clock;
+    s_fake_clock_ms.store(1000);
+    ScopedImageGen generation(1111);
+
+    const std::uintptr_t vt_warm = build_synth(".?AVRevStaleCooldown@@", 0);
+    ASSERT_NE(vt_warm, 0u);
+    rtti::TypeIdentity identity(".?AVRevStaleCooldown@@", pool_range());
+    ASSERT_TRUE(identity.vtable().has_value());
+
+    // The generation change permits one immediate refresh after the record disappears.
+    rev_reset();
+    s_fake_clock_ms.store(1000 + 1'000'000);
+    generation.set(2222);
+    EXPECT_FALSE(identity.vtable().has_value());
+
+    // The same clock value keeps the next call inside the cooldown.
+    const std::uintptr_t vt_present = build_synth(".?AVRevStaleCooldown@@", 0);
+    ASSERT_NE(vt_present, 0u);
+    EXPECT_FALSE(identity.vtable().has_value()) << "the failed stale refresh did not start the cooldown";
+
+    // Past the cooldown, the retry resolves. The throttle never latches the miss.
+    s_fake_clock_ms.store(1000 + 2'000'000);
+    const auto resolved = identity.vtable();
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->raw(), vt_present);
+}
 #endif
 
 // The uncached resolver half of the same-base replacement: with no cache in play at all, a type resolved in one image

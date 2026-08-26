@@ -10,6 +10,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -40,6 +41,8 @@ namespace DetourModKit::detail
 {
     bool request_servicer_reload_for_test() noexcept;
     extern void (*g_config_watcher_prehandshake_seam)();
+    extern void (*g_logger_publication_probe)();
+    extern void (*g_logger_post_publication_probe)();
 } // namespace DetourModKit::detail
 
 #if defined(_MSC_VER)
@@ -53,6 +56,14 @@ namespace DetourModKit::detail
 namespace
 {
     constexpr auto kTestTimeout = 5s;
+    std::atomic<std::uint32_t> s_session_log_counter{0};
+
+    [[nodiscard]] std::filesystem::path unique_session_log_path(std::string_view stem)
+    {
+        const std::uint32_t counter = s_session_log_counter.fetch_add(1, std::memory_order_relaxed);
+        return std::filesystem::temp_directory_path() /
+               (std::string(stem) + "_" + std::to_string(_getpid()) + "_" + std::to_string(counter) + ".log");
+    }
 
     std::string current_exe_basename()
     {
@@ -162,6 +173,51 @@ TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
     );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
+}
+
+// Async activation is fail-soft inside Session::start: a refused activation must not fail the start, and a committed
+// activation must never coexist with a returned failure. Both probes model the two halves of that boundary.
+TEST(SessionStartAsyncActivation, RefusedActivationDoesNotFailStart)
+{
+    const std::filesystem::path log_path = unique_session_log_path("sess_test_async_soft");
+    DetourModKit::detail::g_logger_publication_probe = []() { throw std::runtime_error("publication refused"); };
+    {
+        Result<Session> r = Session::start(
+            ModInfo{
+                .name = "SESS_ASYNC_SOFT",
+                .log_file = log_path.string(),
+            }
+        );
+        DetourModKit::detail::g_logger_publication_probe = nullptr;
+
+        EXPECT_TRUE(r.has_value()) << "a contained async activation failure must not fail Session::start";
+        EXPECT_FALSE(DetourModKit::log().is_async_mode_enabled())
+            << "a refused activation must leave the session on synchronous logging";
+    }
+    std::error_code error_code;
+    std::filesystem::remove(log_path, error_code);
+}
+
+TEST(SessionStartAsyncActivation, PostPublicationThrowLeavesWriterSessionOwned)
+{
+    const std::filesystem::path log_path = unique_session_log_path("sess_test_async_owned");
+    DetourModKit::detail::g_logger_post_publication_probe = []() { throw std::runtime_error("diagnostic refused"); };
+    {
+        Result<Session> r = Session::start(
+            ModInfo{
+                .name = "SESS_ASYNC_OWNED",
+                .log_file = log_path.string(),
+            }
+        );
+        DetourModKit::detail::g_logger_post_publication_probe = nullptr;
+
+        // A typed failure with a live writer leaves no Session owner. Containment keeps the writer owned until
+        // teardown.
+        EXPECT_TRUE(r.has_value()) << "start must not return failure while the activated writer is live";
+        EXPECT_TRUE(DetourModKit::log().is_async_mode_enabled());
+    }
+    std::error_code error_code;
+    std::filesystem::remove(log_path, error_code);
 }
 
 // The child executable supplies the long basename that the process gate reads. The parent starts the exact child case

@@ -92,7 +92,9 @@ namespace DetourModKit
          *         InstanceAlreadyRunning (a duplicate load holds the mutex), SessionAlreadyActive (a session already
          *         exists in this process), SystemCallFailed (a Win32 lifecycle operation failed; Error::detail =
          *         GetLastError()), OutOfMemory (setup threw std::bad_alloc), or Unknown (setup threw anything else).
-         * @note Setup/control-plane only. Each exception maps to a Result failure.
+         * @note Setup/control-plane only. Logger configuration exceptions map to Result failures. A refused async-mode
+         *       activation is contained inside the logger and does not fail start: the session starts with synchronous
+         *       logging.
          * @warning See the class `[B-100]` loader-lock warning.
          */
         [[nodiscard]] static Result<Session> start(const ModInfo &info) noexcept;
