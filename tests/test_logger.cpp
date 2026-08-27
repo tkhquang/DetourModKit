@@ -1876,7 +1876,7 @@ TEST_F(LoggerTest, SetLogLevel_ChangedThresholdsEmitInfoControlRecord)
     }
     ASSERT_FALSE(record_line.empty());
     EXPECT_NE(record_line.find("[INFO   ] ::"), std::string::npos) << "control record line: " << record_line;
-    EXPECT_NE(record_line.find("] :: [logger.cpp:"), std::string::npos) << "control record line: " << record_line;
+    EXPECT_EQ(record_line.find("] :: [logger.cpp:"), std::string::npos) << "control record line: " << record_line;
 
     logger.set_log_level(LogLevel::Info);
 }
@@ -2233,8 +2233,9 @@ TEST_F(LoggerTest, SourceLocation_StampsFileAndLine)
 {
     Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
+    logger.set_source_stamp_mode(LogSourceStampMode::always());
 
-    // The formatted (LocatedFormat) path auto-stamps the call site as a compact [file:line] prefix. Capture the line
+    // The always policy stamps the call site as a compact [file:line] prefix. Capture the line
     // number of the info() call from __LINE__ so the assertion is exact (it tracks future edits to this file) rather
     // than a loose digit search.
     const unsigned call_line = static_cast<unsigned>(__LINE__) + 1;
@@ -2254,6 +2255,7 @@ TEST_F(LoggerTest, SourceLocation_StampsFileAndLine)
 TEST_F(LoggerTest, SourceStampModePredicateTable)
 {
     // An out-of-range level selects always(). An unclamped value of 255 compares as never().
+    static_assert(LogSourceStampMode{} == LogSourceStampMode::at_or_below(LogLevel::Debug));
     static_assert(LogSourceStampMode::at_or_below(static_cast<LogLevel>(5)) == LogSourceStampMode::always());
     static_assert(LogSourceStampMode::at_or_below(static_cast<LogLevel>(255)) == LogSourceStampMode::always());
 
@@ -2308,7 +2310,7 @@ TEST_F(LoggerTest, SourceStampModeAtOrBelowDebugStampsTraceAndDebugOnly)
 {
     Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
-    logger.set_source_stamp_mode(LogSourceStampMode::at_or_below(LogLevel::Debug));
+    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::at_or_below(LogLevel::Debug));
 
     logger.trace("STAMP_TABLE_TRACE");
     logger.debug("STAMP_TABLE_DEBUG");
@@ -2360,7 +2362,8 @@ TEST_F(LoggerTest, SourceStampModeAccessorFlipAffectsLaterRecordsAndControlRecor
 {
     Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
-    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::always());
+    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::at_or_below(LogLevel::Debug));
+    logger.set_source_stamp_mode(LogSourceStampMode::always());
 
     logger.info("STAMP_BEFORE_MODE_FLIP");
     logger.set_source_stamp_mode(LogSourceStampMode::never());

@@ -84,7 +84,7 @@ namespace DetourModKit
             std::chrono::milliseconds block_timeout_ms{16};
             size_t block_max_spin_iterations{1000};
             LogOpenMode log_open_mode{LogOpenMode::Truncate};
-            LogSourceStampMode log_source_stamp_mode{LogSourceStampMode::always()};
+            LogSourceStampMode log_source_stamp_mode{};
 
             [[nodiscard]] bool stage(const ModInfo &info) noexcept
             {

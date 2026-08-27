@@ -3,11 +3,13 @@
 
 /**
  * @file logger.hpp
- * @brief Process logging value facade, the free log() accessor, and source-location-stamped formatting.
- * @details Logger is a VALUE FACADE: a constructible object owning one file sink and an optional async writer. The
- *          free log() returns the process-default instance. Formatted records auto-stamp their call site through
- *          LocatedFormat. Logging is FAIL-SOFT: a dropped or filtered line is a best-effort bool, never a Result. The
- *          async transport stays behind the AsyncLogger pimpl.
+ * @brief Process logging value facade, the free log() accessor, and source-location stamp policy.
+ * @details Logger is a VALUE FACADE that owns one file sink and an optional async writer.
+ *          The free log() returns the process-default instance.
+ *          Formatted records apply the configured stamp policy through LocatedFormat.
+ *          The logger is FAIL-SOFT.
+ *          A dropped or filtered line is a best-effort bool, never a Result.
+ *          The async transport stays behind the AsyncLogger pimpl.
  * @warning `[B-100]` Run Logger construction, first use of log(), and enable_async_mode() outside the loader lock.
  *          These routes allocate. enable_async_mode() can create the writer thread. The loader-lock teardown path
  *          detaches the writer without a wait. `LoggerTest.LoaderLock*` pins the boundary.
@@ -109,13 +111,14 @@ namespace DetourModKit
     /**
      * @class LogSourceStampMode
      * @brief Selects which formatted log levels render a source-location stamp.
-     * @details Lower LogLevel values carry more diagnostic detail. at_or_below() retains stamps through one selected
-     *          level. The default always() policy preserves the existing output.
+     * @details Lower LogLevel values carry more diagnostic detail.
+     *          at_or_below() retains stamps through one selected level.
+     *          The default retains stamps for Trace and Debug.
      */
     class LogSourceStampMode
     {
     public:
-        /// Constructs the default policy, which renders every source-location stamp.
+        /// Constructs the default policy, which renders Trace and Debug source-location stamps.
         constexpr LogSourceStampMode() noexcept = default;
 
         /// Returns a policy that renders every source-location stamp.
@@ -153,11 +156,12 @@ namespace DetourModKit
 
     private:
         static constexpr std::int8_t NEVER_LEVEL = -1;
+        static constexpr std::int8_t DEBUG_LEVEL = static_cast<std::int8_t>(LogLevel::Debug);
         static constexpr std::int8_t ERROR_LEVEL = static_cast<std::int8_t>(LogLevel::Error);
 
         explicit constexpr LogSourceStampMode(std::int8_t maximum_level) noexcept : m_maximum_level(maximum_level) {}
 
-        std::int8_t m_maximum_level{ERROR_LEVEL};
+        std::int8_t m_maximum_level{DEBUG_LEVEL};
     };
 
     static_assert(std::is_trivially_copyable_v<LogSourceStampMode>);
@@ -182,10 +186,11 @@ namespace DetourModKit
 
     /**
      * @struct LocatedFormat
-     * @brief A std::format_string that also captures the call site, so a variadic log() can auto-stamp source location.
-     * @details A defaulted std::source_location parameter cannot follow a variadic pack, so the format-string
-     *          argument captures the location instead. The consteval constructor validates the format string at
-     *          compile time and records the caller's log site, not a location inside the logger.
+     * @brief A std::format_string that captures the call site for the configured stamp policy.
+     * @details A defaulted std::source_location parameter cannot follow a variadic pack.
+     *          The format-string argument captures the location instead.
+     *          The consteval constructor validates the format string at compile time.
+     *          It records the caller's log site, not a location inside the logger.
      * @tparam Args The formatted argument types, deduced from the trailing pack at the call site.
      */
     template <typename... Args> struct LocatedFormat
@@ -203,18 +208,19 @@ namespace DetourModKit
 
         /// The validated format string forwarded to std::format at render time.
         std::format_string<Args...> fmt;
-        /// The captured call site, rendered as a compact [file:line] stamp ahead of the message.
+        /// The captured call site, available to the active source-location stamp policy.
         std::source_location where;
     };
 
     /**
      * @class Logger
      * @brief A thread-safe file logger: the value facade behind the free log() accessor and Session::log().
-     * @details Owns one mutex-protected file sink plus an optional async writer. The minimum level is atomic, so a
-     *          level change is lock-free and a record below it is dropped before any formatting (lazy evaluation). Two
-     *          formatting tiers share the sink: the level-named templates and the variadic log()/try_log() take a
-     *          LocatedFormat and apply the configured [file:line] stamp policy with compile-time format validation.
-     *          The plain log(level, string_view) / log_noexcept forms take an already-rendered line and add no stamp.
+     * @details The logger owns one mutex-protected file sink plus an optional async writer.
+     *          The minimum level is atomic, so a level change is lock-free.
+     *          A record below that level is dropped before format evaluation.
+     *          The level-named templates and variadic log()/try_log() take a LocatedFormat.
+     *          These methods apply the stamp policy, and the compiler validates their format strings.
+     *          The raw log() and log_noexcept() forms add no stamp.
      */
     class Logger
     {
@@ -227,7 +233,7 @@ namespace DetourModKit
          * @param file_name The log file path. Relative paths resolve against the runtime module directory.
          * @param timestamp_fmt The strftime-style timestamp format for each line.
          * @param open_mode The action for an existing target file. See @ref LogOpenMode.
-         * @param source_stamp_mode The source-location stamp policy for formatted records.
+         * @param source_stamp_mode The source-location stamp policy. The default retains Trace and Debug stamps.
          * @note Setup/control-plane only. Construction allocates and opens the sink.
          */
         explicit Logger(
@@ -235,7 +241,7 @@ namespace DetourModKit
             std::string_view file_name,
             std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
             LogOpenMode open_mode = LogOpenMode::Truncate,
-            LogSourceStampMode source_stamp_mode = LogSourceStampMode::always()
+            LogSourceStampMode source_stamp_mode = LogSourceStampMode{}
         );
 
         ~Logger() noexcept;
@@ -260,7 +266,7 @@ namespace DetourModKit
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
          * @param open_mode The mode for the process default's first sink open. An existing default follows the
          *                  @ref reconfigure reopen rule, even if its sink is closed.
-         * @param source_stamp_mode The source-location stamp policy for formatted records.
+         * @param source_stamp_mode The source-location stamp policy. The default retains Trace and Debug stamps.
          * @note Setup/control-plane only. The call allocates and can reopen the log file. Do not call it from a hook
          *       or input callback.
          */
@@ -269,7 +275,7 @@ namespace DetourModKit
             std::string_view file_name,
             std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
             LogOpenMode open_mode = LogOpenMode::Truncate,
-            LogSourceStampMode source_stamp_mode = LogSourceStampMode::always()
+            LogSourceStampMode source_stamp_mode = LogSourceStampMode{}
         );
 
         /**
@@ -427,10 +433,11 @@ namespace DetourModKit
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
         /**
-         * @brief Logs a source-location-stamped, std::format-style message at @p level.
-         * @details Arguments are formatted only when @p level passes the filter (lazy evaluation). The leading
-         *          LocatedFormat captures the call site, so the rendered line is prefixed with a compact [file:line]
-         *          stamp; the format string is validated against @p args at compile time.
+         * @brief Logs a std::format-style message and captures its source location.
+         * @details The active LogSourceStampMode policy controls the stamp.
+         *          It adds a compact [file:line] stamp only when it enables @p level.
+         *          Arguments format only after @p level passes the filter.
+         *          The compiler validates the format string against @p args.
          * @tparam Args Deduced formatted argument types.
          * @param level The level of the message.
          * @param fmt The format string (auto-wrapped into a LocatedFormat capturing the call site).
@@ -457,7 +464,10 @@ namespace DetourModKit
 
         /**
          * @name Level-named convenience loggers
-         * @brief Provides shorthand for log(LogLevel::X, fmt, args...). Each function stamps the call site.
+         * @brief Provides shorthand for log(LogLevel::X, fmt, args...).
+         * @details Each function captures the call site.
+         *          The active LogSourceStampMode policy controls the stamp.
+         *          It adds a compact [file:line] stamp only when it enables that function's level.
          * @note The functions inherit these contracts from @ref log:
          *       - They inherit its delivery contract.
          *       - They inherit its lazy-evaluation contract.
@@ -492,10 +502,14 @@ namespace DetourModKit
         /** @} */
 
         /**
-         * @brief No-throw, source-location-stamped formatted logging for callers on a noexcept boundary.
-         * @details Like log(level, fmt, args...) but formats inside a try/catch and routes through log_noexcept(), so
-         *          neither a std::format failure nor a sink failure can propagate. Prefer this over the throwing forms
-         *          inside hook callbacks. Arguments are formatted only when @p level is enabled.
+         * @brief Formats and logs without exceptions for callers on a noexcept boundary.
+         * @details Like log(level, fmt, args...), this overload captures the call site.
+         *          The active LogSourceStampMode policy controls the stamp.
+         *          It adds a compact [file:line] stamp only when it enables @p level.
+         *          A local try/catch contains format failures.
+         *          The log_noexcept() route contains sink failures.
+         *          Prefer this overload inside hook callbacks.
+         *          Arguments format only when @p level is enabled.
          * @return true if the message was handed to the sink, false if filtered out or dropped because
          *         formatting/logging failed. A dropped record is counted in @ref dropped_count.
          * @note Best-effort and no-throw: it swallows every std::format and sink failure, so it will not terminate a
@@ -555,14 +569,14 @@ namespace DetourModKit
              * @param file The log file name.
              * @param ts_fmt The timestamp format.
              * @param mode The first sink open mode.
-             * @param stamp_mode The source-location stamp policy.
+             * @param stamp_mode The source-location stamp policy. The default retains Trace and Debug stamps.
              */
             StaticConfig(
                 std::string prefix,
                 std::string file,
                 std::string ts_fmt,
                 LogOpenMode mode = LogOpenMode::Truncate,
-                LogSourceStampMode stamp_mode = LogSourceStampMode::always()
+                LogSourceStampMode stamp_mode = LogSourceStampMode{}
             )
                 : log_prefix(std::move(prefix)), log_file_name(std::move(file)), timestamp_format(std::move(ts_fmt)),
                   open_mode(mode), source_stamp_mode(stamp_mode)
@@ -737,7 +751,7 @@ namespace DetourModKit
         std::shared_ptr<detail::WinFileStream> m_log_file_stream_ptr;
         std::shared_ptr<std::mutex> m_log_mutex_ptr;
         std::atomic<LogLevel> m_current_log_level{LogLevel::Info};
-        std::atomic<LogSourceStampMode> m_source_stamp_mode{LogSourceStampMode::always()};
+        std::atomic<LogSourceStampMode> m_source_stamp_mode{LogSourceStampMode{}};
         std::atomic<bool> m_shutdown_called{false};
 
         // Facade-level drop counter: records refused by an inert/shut-down facade, records lost at the synchronous
