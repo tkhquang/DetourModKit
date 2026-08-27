@@ -72,6 +72,8 @@ The two standing high-arity idioms are deliberately mitigated and are the patter
 
 Reach for the struct form on every new public entry point.
 
+The existing `Logger` constructor and `configure` form one settled exception. Their `source_stamp_mode` parameter stays trailing and defaulted for ordinary call compatibility.
+
 ### [B-69]
 
 `error.hpp` documents that `SystemCallFailed`'s `detail` carries `GetLastError()`, and `detail::acquire_module_ref` restores the thread's last-error on failure precisely so its caller can read it. A failure site that builds `Error{SystemCallFailed, where}` with no detail leaves the consumer with a read of 0.

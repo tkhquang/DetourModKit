@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <array>
 #include <clocale>
 #include <fstream>
 #include <filesystem>
@@ -44,6 +45,24 @@ namespace
         const unsigned counter = s_activation_log_counter.fetch_add(1, std::memory_order_relaxed);
         return std::filesystem::temp_directory_path() /
                (std::string(stem) + "_" + std::to_string(_getpid()) + "_" + std::to_string(counter) + ".log");
+    }
+
+    [[nodiscard]] std::string read_line_containing(const std::filesystem::path &path, std::string_view marker)
+    {
+        std::ifstream stream(path);
+        for (std::string line; std::getline(stream, line);)
+        {
+            if (line.find(marker) != std::string::npos)
+            {
+                return line;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] bool has_source_stamp(std::string_view line) noexcept
+    {
+        return line.find("] :: [") != std::string_view::npos;
     }
 
     void rendezvous_level_transition() noexcept
@@ -1857,7 +1876,7 @@ TEST_F(LoggerTest, SetLogLevel_ChangedThresholdsEmitInfoControlRecord)
     }
     ASSERT_FALSE(record_line.empty());
     EXPECT_NE(record_line.find("[INFO   ] ::"), std::string::npos) << "control record line: " << record_line;
-    EXPECT_NE(record_line.find("] :: [logger.cpp:"), std::string::npos) << "control record line: " << record_line;
+    EXPECT_EQ(record_line.find("] :: [logger.cpp:"), std::string::npos) << "control record line: " << record_line;
 
     logger.set_log_level(LogLevel::Info);
 }
@@ -2214,8 +2233,9 @@ TEST_F(LoggerTest, SourceLocation_StampsFileAndLine)
 {
     Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
+    logger.set_source_stamp_mode(LogSourceStampMode::always());
 
-    // The formatted (LocatedFormat) path auto-stamps the call site as a compact [file:line] prefix. Capture the line
+    // The always policy stamps the call site as a compact [file:line] prefix. Capture the line
     // number of the info() call from __LINE__ so the assertion is exact (it tracks future edits to this file) rather
     // than a loose digit search.
     const unsigned call_line = static_cast<unsigned>(__LINE__) + 1;
@@ -2230,6 +2250,156 @@ TEST_F(LoggerTest, SourceLocation_StampsFileAndLine)
     const std::string expected_stamp = "[test_logger.cpp:" + std::to_string(call_line) + "]";
     EXPECT_NE(content.find(expected_stamp), std::string::npos)
         << "expected the rendered line to carry the source stamp " << expected_stamp;
+}
+
+TEST_F(LoggerTest, SourceStampModePredicateTable)
+{
+    // An out-of-range level selects always(). An unclamped value of 255 compares as never().
+    static_assert(LogSourceStampMode{} == LogSourceStampMode::at_or_below(LogLevel::Debug));
+    static_assert(LogSourceStampMode::at_or_below(static_cast<LogLevel>(5)) == LogSourceStampMode::always());
+    static_assert(LogSourceStampMode::at_or_below(static_cast<LogLevel>(255)) == LogSourceStampMode::always());
+
+    struct PolicyCase
+    {
+        LogSourceStampMode mode;
+        std::array<bool, 5> expected;
+    };
+
+    constexpr std::array<LogLevel, 5> levels{
+        LogLevel::Trace,
+        LogLevel::Debug,
+        LogLevel::Info,
+        LogLevel::Warning,
+        LogLevel::Error,
+    };
+    constexpr std::array<PolicyCase, 7> policies{
+        PolicyCase{.mode = LogSourceStampMode::never(), .expected = {false, false, false, false, false}},
+        PolicyCase{
+            .mode = LogSourceStampMode::at_or_below(LogLevel::Trace),
+            .expected = {true, false, false, false, false}
+        },
+        PolicyCase{
+            .mode = LogSourceStampMode::at_or_below(LogLevel::Debug),
+            .expected = {true, true, false, false, false}
+        },
+        PolicyCase{
+            .mode = LogSourceStampMode::at_or_below(LogLevel::Info),
+            .expected = {true, true, true, false, false}
+        },
+        PolicyCase{
+            .mode = LogSourceStampMode::at_or_below(LogLevel::Warning),
+            .expected = {true, true, true, true, false}
+        },
+        PolicyCase{
+            .mode = LogSourceStampMode::at_or_below(LogLevel::Error),
+            .expected = {true, true, true, true, true}
+        },
+        PolicyCase{.mode = LogSourceStampMode::always(), .expected = {true, true, true, true, true}},
+    };
+
+    for (const auto &policy : policies)
+    {
+        for (std::size_t i = 0; i < levels.size(); ++i)
+        {
+            EXPECT_EQ(policy.mode.renders(levels[i]), policy.expected[i]);
+        }
+    }
+}
+
+TEST_F(LoggerTest, SourceStampModeAtOrBelowDebugStampsTraceAndDebugOnly)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Trace);
+    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::at_or_below(LogLevel::Debug));
+
+    logger.trace("STAMP_TABLE_TRACE");
+    logger.debug("STAMP_TABLE_DEBUG");
+    logger.info("STAMP_TABLE_INFO");
+    logger.warning("STAMP_TABLE_WARNING");
+    logger.error("STAMP_TABLE_ERROR");
+    logger.flush();
+
+    const std::array<std::pair<std::string_view, bool>, 5> expected{
+        std::pair<std::string_view, bool>{"STAMP_TABLE_TRACE", true},
+        std::pair<std::string_view, bool>{"STAMP_TABLE_DEBUG", true},
+        std::pair<std::string_view, bool>{"STAMP_TABLE_INFO", false},
+        std::pair<std::string_view, bool>{"STAMP_TABLE_WARNING", false},
+        std::pair<std::string_view, bool>{"STAMP_TABLE_ERROR", false},
+    };
+    for (const auto &[marker, stamped] : expected)
+    {
+        const std::string line = read_line_containing(m_test_log_file, marker);
+        ASSERT_FALSE(line.empty()) << marker;
+        EXPECT_EQ(has_source_stamp(line), stamped) << line;
+    }
+}
+
+TEST_F(LoggerTest, SourceStampModeNeverCoversTryLogAndOverflow)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Trace);
+    logger.set_source_stamp_mode(LogSourceStampMode::never());
+
+    EXPECT_TRUE(logger.try_log(LogLevel::Debug, "TRYLOG_NO_STAMP_{}", 17));
+    const std::string oversized(LOG_INLINE_MESSAGE_SIZE + 64, 'X');
+    logger.info("OVERFLOW_NO_STAMP_{}", oversized);
+    logger.set_source_stamp_mode(LogSourceStampMode::at_or_below(LogLevel::Debug));
+    logger.debug("OVERFLOW_STAMPED_{}", oversized);
+    logger.flush();
+
+    const std::string try_log_line = read_line_containing(m_test_log_file, "TRYLOG_NO_STAMP_17");
+    const std::string overflow_line = read_line_containing(m_test_log_file, "OVERFLOW_NO_STAMP_");
+    const std::string stamped_overflow_line = read_line_containing(m_test_log_file, "OVERFLOW_STAMPED_");
+    ASSERT_FALSE(try_log_line.empty());
+    ASSERT_FALSE(overflow_line.empty());
+    ASSERT_FALSE(stamped_overflow_line.empty());
+    EXPECT_FALSE(has_source_stamp(try_log_line));
+    EXPECT_FALSE(has_source_stamp(overflow_line));
+    EXPECT_TRUE(has_source_stamp(stamped_overflow_line));
+}
+
+TEST_F(LoggerTest, SourceStampModeAccessorFlipAffectsLaterRecordsAndControlRecord)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Trace);
+    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::at_or_below(LogLevel::Debug));
+    logger.set_source_stamp_mode(LogSourceStampMode::always());
+
+    logger.info("STAMP_BEFORE_MODE_FLIP");
+    logger.set_source_stamp_mode(LogSourceStampMode::never());
+    EXPECT_EQ(logger.get_source_stamp_mode(), LogSourceStampMode::never());
+    logger.info("STAMP_AFTER_MODE_FLIP");
+    logger.set_log_level(LogLevel::Warning);
+    logger.flush();
+
+    const std::string before = read_line_containing(m_test_log_file, "STAMP_BEFORE_MODE_FLIP");
+    const std::string after = read_line_containing(m_test_log_file, "STAMP_AFTER_MODE_FLIP");
+    const std::string control = read_line_containing(m_test_log_file, "Log level changed from TRACE to WARNING");
+    ASSERT_FALSE(before.empty());
+    ASSERT_FALSE(after.empty());
+    ASSERT_FALSE(control.empty());
+    EXPECT_TRUE(has_source_stamp(before));
+    EXPECT_FALSE(has_source_stamp(after));
+    EXPECT_FALSE(has_source_stamp(control));
+}
+
+TEST_F(LoggerTest, SourceStampModeConfigureCommitsOnlyAfterAcceptedSink)
+{
+    Logger &logger = log();
+    const auto trace_and_debug = LogSourceStampMode::at_or_below(LogLevel::Debug);
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S", LogOpenMode::Truncate, trace_and_debug);
+    EXPECT_EQ(logger.get_source_stamp_mode(), trace_and_debug);
+    EXPECT_EQ(detail::LoggerTestSeams::static_config_for_test()->source_stamp_mode, trace_and_debug);
+
+    Logger::configure(
+        "BAD_STAMP_CONFIG",
+        "Z:\\nonexistent\\dir\\stamp_mode.log",
+        "%H:%M:%S",
+        LogOpenMode::Truncate,
+        LogSourceStampMode::never()
+    );
+    EXPECT_EQ(logger.get_source_stamp_mode(), trace_and_debug);
+    EXPECT_EQ(detail::LoggerTestSeams::static_config_for_test()->source_stamp_mode, trace_and_debug);
 }
 
 TEST_F(LoggerTest, RawStringViewLog_HasNoSourceStamp)

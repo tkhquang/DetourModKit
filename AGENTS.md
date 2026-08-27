@@ -461,6 +461,7 @@ These paths run at 60 fps or more from game callbacks. `[B-02]` governs allocati
 
 - `detail::InputPoller::is_binding_active(index/name/token)` uses a `shared_lock` and a relaxed load.
 - The `Logger::log()` level check and `is_enabled()` use one atomic load.
+- The formatted `Logger::log()` stamp check uses one relaxed atomic load after the level check.
 - The `Logger::log()` asynchronous enqueue uses an atomic shared-pointer snapshot and a lock-free queue push. The snapshot uses a bounded internal lock.
 - `memory::is_readable(Region)` uses a sharded SRWLOCK reader and a cache lookup.
 - `memory::is_readable_nonblocking(Region)` uses a shared try-lock and a cache lookup. It returns `Unknown` after contention or an unpublished cache result.
@@ -498,7 +499,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-10]` `[CONVENTION]` **Generated build artifacts must not enter commits.** [docs/design/build-ci.md](docs/design/build-ci.md) supplies related evidence.
 - `[B-11]` `[CONVENTION]` **A change must not remove or weaken current tests.** New code must have new tests. [docs/design/testing.md](docs/design/testing.md) supplies the test policy.
 - `[B-12]` `[CONVENTION]` **Top-level public API must not expose implementation-only container or entry types.** Such types must remain in `namespace detail` or an internal header. A backend type must stay behind a forward-declared `Impl`. [docs/design/public-api.md](docs/design/public-api.md) `[B-12]` owns the rationale.
-- `[B-13]` `[CONVENTION]` **If one listed trigger applies, a public function must use a request or options struct.** The struct must default-initialize its fields for designated initialization. Each new field must follow all established fields. [docs/design/public-api.md](docs/design/public-api.md) `[B-13]` owns the rationale. The triggers are adjacent parameters of the same type, more than about five parameters, or at least three counted knobs. Optional, policy, and configuration knobs all contribute to the count.
+- `[B-13]` `[CONVENTION]` **If one listed trigger applies, a public function must use a request or options struct.** The struct must default-initialize its fields for designated initialization. Each new field must follow all established fields. [docs/design/public-api.md](docs/design/public-api.md) `[B-13]` owns the rationale. The triggers are adjacent parameters of the same type, more than about five parameters, or at least three counted knobs. Optional, policy, and configuration knobs all contribute to the count. One settled exception preserves the existing `Logger` constructor and `configure` surface. `source_stamp_mode` remains a trailing defaulted parameter.
 - `[B-14]` `[CONVENTION]` **Output code must use `'\n'` instead of `std::endl`.** `std::endl` forces a flush. [docs/design/build-ci.md](docs/design/build-ci.md) supplies related evidence.
 - `[B-15]` `[SAFETY]` **Hook callbacks must use `EventDispatcher::emit_safe()`.** It contains handler exceptions. `EventDispatcherTest.EmitSafe_CatchesHandlerExceptions` proves the contract.
 - `[B-16]` `[SAFETY]` **Teardown must destroy layered hooks on one target newest-first.** `hook::HookStack` enforces this order. [docs/design/hooking.md](docs/design/hooking.md) `[B-16]` owns the rationale.

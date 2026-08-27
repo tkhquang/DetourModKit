@@ -155,7 +155,8 @@ namespace DetourModKit
         std::string_view prefix,
         std::string_view file_name,
         std::string_view timestamp_fmt,
-        LogOpenMode open_mode
+        LogOpenMode open_mode,
+        LogSourceStampMode source_stamp_mode
     )
     {
         std::lock_guard<std::mutex> config_lock(static_config_mutex());
@@ -166,7 +167,8 @@ namespace DetourModKit
             std::string(prefix),
             std::string(file_name),
             std::string(timestamp_fmt),
-            open_mode
+            open_mode,
+            source_stamp_mode
         );
         auto previous_config = get_static_config();
         set_static_config(std::move(staged_config));
@@ -200,6 +202,10 @@ namespace DetourModKit
             if (!instance.reconfigure_locked(prefix, file_name, timestamp_fmt))
             {
                 set_static_config(std::move(previous_config));
+            }
+            else
+            {
+                instance.set_source_stamp_mode(source_stamp_mode);
             }
         }
         catch (...)
@@ -341,6 +347,7 @@ namespace DetourModKit
         m_log_prefix = config->log_prefix;
         m_log_file_name = config->log_file_name;
         m_timestamp_format = config->timestamp_format;
+        m_source_stamp_mode.store(config->source_stamp_mode, std::memory_order_relaxed);
 
         // A default construction starts a fresh log unless the published configuration selected Append.
         // Reconfiguration never truncates.
@@ -359,10 +366,11 @@ namespace DetourModKit
         std::string_view prefix,
         std::string_view file_name,
         std::string_view timestamp_fmt,
-        LogOpenMode open_mode
+        LogOpenMode open_mode,
+        LogSourceStampMode source_stamp_mode
     )
         : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
-          m_log_mutex_ptr(std::make_shared<std::mutex>())
+          m_log_mutex_ptr(std::make_shared<std::mutex>()), m_source_stamp_mode(source_stamp_mode)
     {
         // Construction starts a fresh log unless the caller selected Append. Reconfiguration never truncates.
         adopt_first_sink(/*truncate=*/open_mode == LogOpenMode::Truncate);
@@ -539,6 +547,7 @@ namespace DetourModKit
         // The new threshold precedes this record. The ordinary predicate discards the record after an upward change.
         (void)format_located(
             [this](std::string_view rendered) { return this->emit_record(LogLevel::Info, rendered); },
+            source_stamp_enabled(LogLevel::Info),
             std::source_location::current(),
             "Log level changed from {} to {}",
             to_string(old_level),
