@@ -710,7 +710,7 @@ namespace
                 g_host.mount_done = done;
                 thread = CreateThread(
                     nullptr,
-                    64u * 1024u,
+                    static_cast<SIZE_T>(64u) * 1024u,
                     &mount_thread_main,
                     nullptr,
                     STACK_SIZE_PARAM_IS_A_RESERVATION,
