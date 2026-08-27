@@ -135,6 +135,12 @@ namespace
         std::uint64_t pending_lease = 0;
         std::uint64_t pending_owner = 0;
         std::uint64_t pending_generation = 0;
+        // The host owns the mount worker and its request-response rendezvous. See mount_resident_hook().
+        HANDLE mount_thread = nullptr;
+        HANDLE mount_request = nullptr;
+        HANDLE mount_done = nullptr;
+        std::uint32_t mount_request_tid = 0;
+        HHOOK mount_result = nullptr;
         // Counts resident callback frames inside an admission phase. Nested message loops can hold several at once.
         std::atomic<std::uint32_t> admitted_phases{0};
         std::atomic<std::uint64_t> capture_state{pack_capture(1, 0)};
@@ -625,6 +631,135 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
+    DWORD WINAPI mount_thread_main(LPVOID) noexcept
+    {
+        for (;;)
+        {
+            if (WaitForSingleObject(g_host.mount_request, INFINITE) != WAIT_OBJECT_0)
+            {
+                return 0;
+            }
+            if (g_host.mount_request_tid == 0)
+            {
+                return 0;
+            }
+            g_host.mount_result = SetWindowsHookExW(WH_GETMESSAGE, &resident_hook, nullptr, g_host.mount_request_tid);
+            if (SetEvent(g_host.mount_done) == 0)
+            {
+                return 0;
+            }
+        }
+    }
+
+    /**
+     * @brief Releases the handles for a terminated mount worker.
+     * @note Requires g_host.control_lock.
+     */
+    void clear_mount_thread() noexcept
+    {
+        CloseHandle(g_host.mount_thread);
+        CloseHandle(g_host.mount_request);
+        CloseHandle(g_host.mount_done);
+        g_host.mount_thread = nullptr;
+        g_host.mount_request = nullptr;
+        g_host.mount_done = nullptr;
+        g_host.mount_request_tid = 0;
+        g_host.mount_result = nullptr;
+    }
+
+    /**
+     * @brief Stops the mount worker and releases its handles.
+     * @note Requires g_host.control_lock.
+     */
+    [[nodiscard]] bool stop_mount_thread() noexcept
+    {
+        if (g_host.mount_thread == nullptr)
+        {
+            return true;
+        }
+
+        g_host.mount_request_tid = 0;
+        if (SetEvent(g_host.mount_request) == 0 && WaitForSingleObject(g_host.mount_thread, 0) != WAIT_OBJECT_0)
+        {
+            return false;
+        }
+        if (WaitForSingleObject(g_host.mount_thread, INFINITE) != WAIT_OBJECT_0)
+        {
+            return false;
+        }
+        clear_mount_thread();
+        return true;
+    }
+
+    /**
+     * @brief Requires g_host.control_lock. Installs the resident hook from the host-owned mount thread.
+     * @details Win32 removes a hook when the thread that installed it exits.
+     *          A transient poller can therefore leave a false ready route after its thread exits.
+     *          The host worker lasts until wheel_host_stop.
+     */
+    [[nodiscard]] HHOOK mount_resident_hook(std::uint32_t target_thread_id) noexcept
+    {
+        if (g_host.mount_thread == nullptr)
+        {
+            const HANDLE request = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            const HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            HANDLE thread = nullptr;
+            if (request != nullptr && done != nullptr)
+            {
+                g_host.mount_request = request;
+                g_host.mount_done = done;
+                thread = CreateThread(
+                    nullptr,
+                    static_cast<SIZE_T>(64u) * 1024u,
+                    &mount_thread_main,
+                    nullptr,
+                    STACK_SIZE_PARAM_IS_A_RESERVATION,
+                    nullptr
+                );
+            }
+            if (thread == nullptr)
+            {
+                if (request != nullptr)
+                {
+                    CloseHandle(request);
+                }
+                if (done != nullptr)
+                {
+                    CloseHandle(done);
+                }
+                g_host.mount_request = nullptr;
+                g_host.mount_done = nullptr;
+                return nullptr;
+            }
+            g_host.mount_thread = thread;
+        }
+        g_host.mount_request_tid = target_thread_id;
+        g_host.mount_result = nullptr;
+        if (SetEvent(g_host.mount_request) == 0)
+        {
+            if (WaitForSingleObject(g_host.mount_thread, 0) == WAIT_OBJECT_0)
+            {
+                clear_mount_thread();
+            }
+            return nullptr;
+        }
+        const std::array<HANDLE, 2> wait_handles = {
+            g_host.mount_done,
+            g_host.mount_thread,
+        };
+        const DWORD wait_result =
+            WaitForMultipleObjects(static_cast<DWORD>(wait_handles.size()), wait_handles.data(), FALSE, INFINITE);
+        if (wait_result != WAIT_OBJECT_0)
+        {
+            if (wait_result == WAIT_OBJECT_0 + 1)
+            {
+                clear_mount_thread();
+            }
+            return nullptr;
+        }
+        return g_host.mount_result;
+    }
+
     [[nodiscard]] bool pin_host_module() noexcept
     {
         HMODULE module = nullptr;
@@ -831,7 +966,7 @@ namespace
         {
             return fail_pending(DMK_WHEELHOST_ROUTE_RETRYABLE, DMK_WHEELHOST_ERR_THREAD);
         }
-        const HHOOK new_hook = SetWindowsHookExW(WH_GETMESSAGE, &resident_hook, nullptr, target_thread_id);
+        const HHOOK new_hook = mount_resident_hook(target_thread_id);
         if (new_hook == nullptr)
         {
             CloseHandle(new_thread);
@@ -883,10 +1018,11 @@ int32_t DMK_WHEELHOST_CALL wheel_host_start(
         {
             return DMK_WHEELHOST_ERR_THREAD;
         }
-        hook = SetWindowsHookExW(WH_GETMESSAGE, &resident_hook, nullptr, target_thread_id);
+        hook = mount_resident_hook(target_thread_id);
         if (hook == nullptr)
         {
             CloseHandle(target_thread);
+            (void)stop_mount_thread();
             return DMK_WHEELHOST_ERR_THREAD;
         }
     }
@@ -958,8 +1094,14 @@ int32_t DMK_WHEELHOST_CALL wheel_host_stop(void) noexcept
         g_host.pending_op = PendingOp::Stop;
         return DMK_WHEELHOST_ERR_THREAD;
     }
-
     g_host.hook = nullptr;
+    g_host.route_state = DMK_WHEELHOST_ROUTE_TARGET_WAIT;
+    if (!stop_mount_thread())
+    {
+        g_host.pending_op = PendingOp::Stop;
+        return DMK_WHEELHOST_ERR_THREAD;
+    }
+
     if (g_host.target_thread != nullptr)
     {
         CloseHandle(g_host.target_thread);
@@ -1016,7 +1158,7 @@ extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
     }
     if (thread_handles != nullptr)
     {
-        *thread_handles = g_host.target_thread != nullptr ? 1u : 0u;
+        *thread_handles = (g_host.target_thread != nullptr ? 1u : 0u) + (g_host.mount_thread != nullptr ? 1u : 0u);
     }
     if (active_leases != nullptr)
     {

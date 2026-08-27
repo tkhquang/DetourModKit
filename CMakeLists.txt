@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(DetourModKit VERSION 4.1.0 LANGUAGES CXX)
+project(DetourModKit VERSION 4.1.1 LANGUAGES CXX)
 
 # DetourModKit patches native x86-64 Windows processes. Another target fails before platform-specific checks cascade.
 # The public header and installed package enforce the same target contract.

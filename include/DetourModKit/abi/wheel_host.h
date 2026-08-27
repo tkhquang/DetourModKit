@@ -23,6 +23,8 @@
  *          - The host and the target UI thread must belong to the same process.
  *          - The host takes one process-lifetime reference on the module that contains the resident hook before it
  *            publishes the hook. Hook removal is host cleanup, never logic-unmap authorization.
+ *          - The host installs the hook from a host-owned thread. A mount established through start or retarget
+ *            survives the exit of the thread that requested it.
  *          - A resident loader with an older wheel-host ABI requires a process restart. Version negotiation is exact.
  *            A version-2 host rejects a version-1 request. Version-2 logic rejects a version-1 table.
  *          - A status query can settle physical mount health after its target-thread liveness check. It never expires,
