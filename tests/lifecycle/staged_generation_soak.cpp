@@ -437,7 +437,7 @@ namespace
         }
         const std::uint64_t host_identity = wheel_host.host_identity;
         const WheelHostSnapshot mounted = read_wheel_host_snapshot();
-        if (mounted.mounted_hooks != 1 || mounted.thread_handles != 1 || mounted.active_leases != 0 ||
+        if (mounted.mounted_hooks != 1 || mounted.thread_handles != 2 || mounted.active_leases != 0 ||
             mounted.mount_generation == 0)
         {
             return fail("soak", "the resident host did not publish one stable mount");
@@ -525,7 +525,7 @@ namespace
             }
             remove_unmapped_staged_file_best_effort(generation);
             const WheelHostSnapshot after_unmap = read_wheel_host_snapshot();
-            if (after_unmap.mounted_hooks != 1 || after_unmap.thread_handles != 1 || after_unmap.active_leases != 0 ||
+            if (after_unmap.mounted_hooks != 1 || after_unmap.thread_handles != 2 || after_unmap.active_leases != 0 ||
                 after_unmap.mount_generation != mounted.mount_generation)
             {
                 return fail("soak", "resident host resources changed across a logic generation");

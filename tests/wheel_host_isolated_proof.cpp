@@ -22,6 +22,12 @@ extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_finalize_probe(HookProbe 
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_force_unhook_failure(uint32_t enabled) noexcept;
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_drain_timeout(uint32_t timeout_ms) noexcept;
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_process_focus(int32_t focused) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
+    uint32_t *mounted_hooks,
+    uint32_t *thread_handles,
+    uint32_t *active_leases,
+    uint64_t *mount_generation
+) noexcept;
 
 // The status layout crosses the C ABI boundary.
 static_assert(sizeof(WheelHostRouteStatus) == 32, "WheelHostRouteStatus layout is ABI");
@@ -612,6 +618,11 @@ namespace
     {
         EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
         EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_ERR_STATE);
+        std::uint32_t mounted_hooks = 1;
+        std::uint32_t thread_handles = 1;
+        wheel_host_test_snapshot(&mounted_hooks, &thread_handles, nullptr, nullptr);
+        EXPECT_EQ(mounted_hooks, 0u);
+        EXPECT_EQ(thread_handles, 0u) << "Stop must release the target and mount-worker handles";
         // Restart so TearDown finds a started host.
         ASSERT_EQ(
             wheel_host_start(
@@ -718,7 +729,7 @@ namespace
         );
     }
 
-    TEST_F(WheelHostProof, TargetWaitStartMountsAndCountsAfterRetarget)
+    TEST_F(WheelHostProof, TargetWaitMountSurvivesRetargetThreadExitAndLeaseHandover)
     {
         // Restart unmounted, open a lease while unmounted, and prove capture stays disabled until the first retarget.
         ASSERT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
@@ -728,33 +739,55 @@ namespace
         );
         const std::uint64_t identity_before = table_.host_identity;
 
-        const WheelHostLease lease = open();
-        EXPECT_EQ(status(lease).route_state, DMK_WHEELHOST_ROUTE_TARGET_WAIT);
-        EXPECT_EQ(status(lease).capture_armable, 0u) << "an unmounted lease cannot arm capture";
+        const WheelHostLease first = open();
+        EXPECT_EQ(status(first).route_state, DMK_WHEELHOST_ROUTE_TARGET_WAIT);
+        EXPECT_EQ(status(first).capture_armable, 0u) << "an unmounted lease cannot arm capture";
         // Publish capture while unmounted: it is accepted but counting stays disabled.
         ASSERT_EQ(
-            table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+            table_.publish_capture(table_.host_context, first, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
             DMK_WHEELHOST_OK
         );
         pump_->post_wheel(false, 120);
         ASSERT_TRUE(pump_->quiesce());
         std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
-        ASSERT_EQ(table_.drain_counts(table_.host_context, lease, counts), DMK_WHEELHOST_OK);
+        ASSERT_EQ(table_.drain_counts(table_.host_context, first, counts), DMK_WHEELHOST_OK);
         EXPECT_EQ(counts[DMK_WHEEL_UP], 0u) << "an unmounted lease must not count";
 
-        // Retarget mounts the hook and preserves the host identity and the lease.
-        ASSERT_EQ(table_.retarget(table_.host_context, lease, pump_->tid()), DMK_WHEELHOST_OK);
+        // A transient generation thread requests the mount, then exits before capture starts.
+        std::int32_t retarget_status = DMK_WHEELHOST_ERR_STATE;
+        std::thread retarget_thread(
+            [this, first, &retarget_status]() -> void
+            { retarget_status = table_.retarget(table_.host_context, first, pump_->tid()); }
+        );
+        retarget_thread.join();
+        ASSERT_EQ(retarget_status, DMK_WHEELHOST_OK);
         EXPECT_EQ(table_.host_identity, identity_before);
-        EXPECT_EQ(status(lease).route_state, DMK_WHEELHOST_ROUTE_READY);
-        EXPECT_EQ(status(lease).capture_armable, 1u);
+        EXPECT_EQ(status(first).route_state, DMK_WHEELHOST_ROUTE_READY);
+        EXPECT_EQ(status(first).capture_armable, 1u);
         ASSERT_EQ(
-            table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+            table_.publish_capture(table_.host_context, first, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
             DMK_WHEELHOST_OK
         );
         pump_->post_wheel(false, 120);
         ASSERT_TRUE(pump_->quiesce());
-        ASSERT_EQ(table_.drain_counts(table_.host_context, lease, counts), DMK_WHEELHOST_OK);
-        EXPECT_EQ(counts[DMK_WHEEL_UP], 1u) << "a mounted lease counts after retarget";
+        ASSERT_EQ(table_.drain_counts(table_.host_context, first, counts), DMK_WHEELHOST_OK);
+        EXPECT_EQ(counts[DMK_WHEEL_UP], 1u) << "the mount must outlive the thread that requested it";
+        ASSERT_EQ(table_.close_lease(table_.host_context, first, LEASE_OWNER, LEASE_GENERATION), DMK_WHEELHOST_OK);
+
+        // The successor sees the ready route, so its poller does not request another retarget.
+        const WheelHostLease second = open();
+        const WheelHostRouteStatus inherited = status(second);
+        EXPECT_EQ(inherited.route_state, DMK_WHEELHOST_ROUTE_READY);
+        EXPECT_EQ(inherited.mounted_thread_id, pump_->tid());
+        EXPECT_EQ(inherited.capture_armable, 1u);
+        ASSERT_EQ(
+            table_.publish_capture(table_.host_context, second, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+            DMK_WHEELHOST_OK
+        );
+        pump_->post_wheel(false, 120);
+        ASSERT_TRUE(pump_->quiesce());
+        ASSERT_EQ(table_.drain_counts(table_.host_context, second, counts), DMK_WHEELHOST_OK);
+        EXPECT_EQ(counts[DMK_WHEEL_UP], 1u) << "a successor lease must count on a mount it did not establish";
     }
 
     TEST_F(WheelHostProof, SameThreadRetargetKeepsMountGeneration)
