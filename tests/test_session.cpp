@@ -65,6 +65,24 @@ namespace
                (std::string(stem) + "_" + std::to_string(_getpid()) + "_" + std::to_string(counter) + ".log");
     }
 
+    [[nodiscard]] std::string read_session_line_containing(const std::filesystem::path &path, std::string_view marker)
+    {
+        std::ifstream stream(path);
+        for (std::string line; std::getline(stream, line);)
+        {
+            if (line.find(marker) != std::string::npos)
+            {
+                return line;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] bool session_line_has_source_stamp(std::string_view line) noexcept
+    {
+        return line.find("] :: [") != std::string_view::npos;
+    }
+
     std::string current_exe_basename()
     {
         char exe_path[MAX_PATH]{};
@@ -841,6 +859,30 @@ TEST(SessionTeardown, FlushesConfiguredLogger)
     }
 }
 
+TEST(SessionLoggerConfiguration, StartPropagatesNeverSourceStampMode)
+{
+    const auto log_path = unique_session_log_path("test_session_stamp_start");
+    std::error_code error_code;
+    std::filesystem::remove(log_path, error_code);
+
+    {
+        Result<Session> opened = Session::start(
+            ModInfo{
+                .name = "SESS_STAMP_START",
+                .log_file = log_path.string(),
+                .log_source_stamp_mode = LogSourceStampMode::never(),
+            }
+        );
+        ASSERT_TRUE(opened.has_value()) << opened.error().message();
+        opened->log().info("SESSION_START_STAMP_MODE_{}", "NEVER");
+    }
+
+    const std::string line = read_session_line_containing(log_path, "SESSION_START_STAMP_MODE_NEVER");
+    ASSERT_FALSE(line.empty());
+    EXPECT_FALSE(session_line_has_source_stamp(line));
+    std::filesystem::remove(log_path, error_code);
+}
+
 TEST(SessionTeardown, ResetsMemoryCache)
 {
     {
@@ -1186,6 +1228,39 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
     EXPECT_EQ(m_sig.ready_calls.load(), 1);
+}
+
+TEST_F(SessionBootstrapTest, BootstrapPropagatesNeverSourceStampMode)
+{
+    const auto log_path = unique_session_log_path("test_session_stamp_bootstrap");
+    std::error_code error_code;
+    std::filesystem::remove(log_path, error_code);
+
+    Result<void> started = bootstrap(
+        ModInfo{
+            .name = "SESS_STAMP_BOOTSTRAP",
+            .log_file = log_path.string(),
+            .log_source_stamp_mode = LogSourceStampMode::never(),
+        },
+        [this](Session &session) -> Result<void>
+        {
+            session.log().info("SESSION_BOOTSTRAP_STAMP_MODE_{}", "NEVER");
+            m_sig.signal_ready();
+            return {};
+        }
+    );
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout)) << "on_ready did not complete within timeout";
+
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+
+    const std::string line = read_session_line_containing(log_path, "SESSION_BOOTSTRAP_STAMP_MODE_NEVER");
+    ASSERT_FALSE(line.empty());
+    EXPECT_FALSE(session_line_has_source_stamp(line));
+    std::filesystem::remove(log_path, error_code);
 }
 
 TEST_F(SessionBootstrapTest, ProcessGateMismatchDoesNotSpawnWorker)

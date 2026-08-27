@@ -57,6 +57,8 @@ namespace DetourModKit
          * @details Append preserves the prior generation's records across a staged-generation reload.
          */
         LogOpenMode log_open_mode{LogOpenMode::Truncate};
+        /// The source-location stamp policy for formatted records.
+        LogSourceStampMode log_source_stamp_mode{LogSourceStampMode::always()};
     };
 
     /**

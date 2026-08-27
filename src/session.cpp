@@ -84,6 +84,7 @@ namespace DetourModKit
             std::chrono::milliseconds block_timeout_ms{16};
             size_t block_max_spin_iterations{1000};
             LogOpenMode log_open_mode{LogOpenMode::Truncate};
+            LogSourceStampMode log_source_stamp_mode{LogSourceStampMode::always()};
 
             [[nodiscard]] bool stage(const ModInfo &info) noexcept
             {
@@ -104,6 +105,7 @@ namespace DetourModKit
                 block_timeout_ms = info.log.block_timeout_ms;
                 block_max_spin_iterations = info.log.block_max_spin_iterations;
                 log_open_mode = info.log_open_mode;
+                log_source_stamp_mode = info.log_source_stamp_mode;
                 return true;
             }
 
@@ -524,7 +526,8 @@ namespace DetourModKit
                         s_bootstrap_logger_info.name_view(),
                         s_bootstrap_logger_info.log_file_view(),
                         DEFAULT_TIMESTAMP_FORMAT,
-                        s_bootstrap_logger_info.log_open_mode
+                        s_bootstrap_logger_info.log_open_mode,
+                        s_bootstrap_logger_info.log_source_stamp_mode
                     );
                     DetourModKit::log().enable_async_mode(s_bootstrap_logger_info.logger_config());
                 }
@@ -817,7 +820,13 @@ namespace DetourModKit
         // enable_async_mode contains its failures, so this catch owns only configuration.
         try
         {
-            Logger::configure(info.name, info.log_file, DEFAULT_TIMESTAMP_FORMAT, info.log_open_mode);
+            Logger::configure(
+                info.name,
+                info.log_file,
+                DEFAULT_TIMESTAMP_FORMAT,
+                info.log_open_mode,
+                info.log_source_stamp_mode
+            );
             // Qualified: inside this static member the free accessor is hidden by the non-static Session::log().
             DetourModKit::log().enable_async_mode(info.log);
         }

@@ -21,6 +21,8 @@ Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded i
 
 Hot-path mechanism: The `log()` level check costs one atomic load.
 
+Formatted records apply one `LogSourceStampMode` policy. `always()` retains every stamp. `at_or_below(level)` retains stamps from Trace through that level. `never()` removes every stamp. The policy does not change record admission or the raw record tier. Each formatted path reads one relaxed atomic value before line format.
+
 ### AsyncLogger
 
 The queue is a lock-free Vyukov-style MPMC queue. Shutdown has a single owner: admitted producers finish, later producers drop and count, and the writer alone drains and acknowledges completion.
