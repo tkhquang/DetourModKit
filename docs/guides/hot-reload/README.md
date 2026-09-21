@@ -243,7 +243,7 @@ The host links the archive and owns every DetourModKit object. The logic DLL lin
 
 `prepare_logic_dll_unload(binding_names)` retires named input bindings and closes callback admission. It requests watcher and reload-servicer stop, then waits to one end-to-end deadline.
 
-`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed. Only session finalization reopens it.
+`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed with the rundown pending. Only a later drain that completes clears that state. The session-level `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not.
 
 `prepare_logic_dll_unload_all()` clears every input binding but keeps the poll thread alive. Use it only when the DLL that unloads owns the whole process-wide input and config surface. The registry is process-scoped, so the all-bindings form also retires a sibling DLL's bindings. Prefer the named-list overload when several logic DLLs share one instance.
 

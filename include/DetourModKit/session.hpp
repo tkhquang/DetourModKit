@@ -260,10 +260,12 @@ namespace DetourModKit
     [[nodiscard]] Result<void> shutdown_and_wait() noexcept;
 
     /**
-     * @brief The HMODULE of the module that links this DetourModKit copy while a Session lives on either path, or
-     *        nullptr while none does.
-     * @details Session::start and bootstrap() both publish it. It is null before either call, after ~Session, after
-     *          bootstrap_detach(), and after a successful shutdown_and_wait().
+     * @brief The HMODULE of the module that links this DetourModKit copy, published by Session::start and bootstrap()
+     *        and retired with the session, or nullptr outside that window.
+     * @details Both calls publish it after the process and instance gates pass and before their fallible setup
+     *          completes. A concurrent reader can observe the handle before the call returns, and a failed start or
+     *          bootstrap clears it. It is null before either call, after ~Session, after bootstrap_detach(), and
+     *          after a successful shutdown_and_wait().
      * @note ~Session and a completed drain both retire the identity, so capture the handle BEFORE them if the unload
      *       sequence needs it afterwards. SessionStart.PublishesModuleIdentityForTheSessionLifetime proves the
      *       synchronous path.
