@@ -47,8 +47,8 @@ namespace
 
     /**
      * @brief Stands in for a game function that a real mod resolves with a scan ladder.
-     * @details The sample hooks its own function so the example compiles without a game. The README code example
-     *          shows the scan-ladder install that a real mod uses. The Debug prologue exceeds every SafetyHook
+     * @details The sample hooks its own function so the example compiles without a game. The top-level README code
+     *          example shows the scan-ladder install that a real mod uses. The Debug prologue exceeds every SafetyHook
      *          patch size. A copy whose optimized prologue is too short fails inline_at, and Init() rolls back.
      */
     __declspec(noinline) int demo_apply_damage(int amount, int resist) noexcept
@@ -98,7 +98,7 @@ namespace
 extern "C"
 {
     /**
-     * @brief Reports this build, so the loader can log which bytes it loaded (guide step 6).
+     * @brief Reports this build, so the loader can log which bytes it loaded (guide step 8).
      * @details The stamp moves only when this translation unit recompiles. A real mod exports its own build
      *          revision constant.
      */
@@ -216,6 +216,8 @@ extern "C"
                 }
             );
 
+            // input().start() stays the last fallible step: roll_back_generation() runs no typed callback drain, so no
+            // step can fail while the poll thread is live.
             if (!s_session->input().start(
                     dmk::input::Input::Settings{
                         .wheel_backend = dmk::input::Input::WheelBackend::ExternalHost,
@@ -259,13 +261,8 @@ extern "C"
         (void)clear_generation_hooks(); // The stack clears newest-first while the code pages stay mapped.
         s_session.reset();              // Ordered teardown can retain XInput here.
 
-        // Stricter than the guide's local-topology verdict on purpose: the resident host owns the wheel pin and this
-        // generation books no keepalive, so the ExternalHost contract is global zero pins and zero intentional leaks.
-        const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
-        const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
-        const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
-        const bool no_pins = message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
-                             diag::total_module_pins() == 0 && diag::total_intentional_leaks() == 0;
+        // The ExternalHost verdict from the hot-reload guide: zero logic-image pins and zero intentional leaks.
+        const bool no_pins = diag::total_module_pins() == 0 && diag::total_intentional_leaks() == 0;
         return !s_hook_restore_failed && no_pins ? DMK_STAGED_RELOAD_OK : 0;
     }
 } // extern "C"

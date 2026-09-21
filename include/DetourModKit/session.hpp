@@ -189,7 +189,9 @@ namespace DetourModKit
      *          worker. The worker configures the logger and runs @p on_ready(session) off the loader lock. There it may
      *          allocate, load INIs, install hooks, and register bindings into session.scope(). It then blocks on the
      *          event until bootstrap_detach(), request_shutdown(), or shutdown_and_wait() wakes it, and destroys the
-     *          Session off the loader lock. The worker logs an @p on_ready failure as a value.
+     *          Session off the loader lock. The worker logs an @p on_ready failure as a value and keeps the generation
+     *          mapped and Running. Retire it with request_shutdown() from the callback or bootstrap_detach() from
+     *          DllMain.
      * @param info Mod identity, gating, and async-logger settings.
      * @param on_ready Called once on the worker thread with the live Session. A null value registers no callback.
      * @return An empty Result once the worker is published, or ProcessMismatch, InstanceAlreadyRunning,
@@ -258,10 +260,15 @@ namespace DetourModKit
     [[nodiscard]] Result<void> shutdown_and_wait() noexcept;
 
     /**
-     * @brief The module handle captured at bootstrap() time, or nullptr before bootstrap(), after bootstrap_detach(),
-     *        after a successful shutdown_and_wait(), or when only the synchronous Session::start path was used.
-     * @note A completed drain retires the identity along with the rest of the generation, so capture the handle BEFORE
-     *       shutdown_and_wait() if the unload sequence needs it afterwards.
+     * @brief The HMODULE of the module that links this DetourModKit copy, published by Session::start and bootstrap()
+     *        and retired with the session, or nullptr outside that window.
+     * @details Both calls publish it after the process and instance gates pass and before their fallible setup
+     *          completes. A concurrent reader can observe the handle before the call returns, and a failed start or
+     *          bootstrap clears it. It is null before either call, after ~Session, after bootstrap_detach(), and
+     *          after a successful shutdown_and_wait().
+     * @note ~Session and a completed drain both retire the identity, so capture the handle BEFORE them if the unload
+     *       sequence needs it afterwards. SessionStart.PublishesModuleIdentityForTheSessionLifetime proves the
+     *       synchronous path.
      * @note Callback-safe: published and read through a lock-free atomic, so a reader on any thread observes only the
      *       current identity or null and never races a concurrent detach-path clear.
      */

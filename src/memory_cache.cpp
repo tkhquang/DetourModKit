@@ -1659,7 +1659,14 @@ namespace DetourModKit
 
             const LifecycleState state = s_lifecycle_state.load(std::memory_order_seq_cst);
             if (state != LifecycleState::Running && !(state == LifecycleState::Stopped && s_cache_shards))
+            {
+#if !defined(_MSC_VER) && defined(_WIN64)
+                // The first guarded read installs the handler without init_cache, so a cache that never started
+                // still owns one. Lifecycle.GuardedReadHandlerRetiresWithTheSession proves this release.
+                detail::release_guarded_engine();
+#endif
                 return;
+            }
 
             // Stopped with a live shard array is a prior loader-lock abandonment or drain timeout, safe to finish here
             // off the loader lock. Stopping also prevents a concurrent loader-lock callback from another Stopped
@@ -1723,10 +1730,9 @@ namespace DetourModKit
                 s_cleanup_requested.store(false, std::memory_order_relaxed);
 
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // Remove the vectored fault handler so it cannot dangle into freed code if the DMK module is unloaded
-                // after teardown. The engine drains guarded reads on the handler path before handler removal. An
-                // in-flight read cannot fault into a missing handler. The operation is idempotent. A later guarded
-                // read reinstalls it.
+                // The second of the two ~Session release sites. The never-started early return above is the first,
+                // and abandon_cache_unauthorized covers the loader-lock arm. remove_veh_handler drains in-flight
+                // guarded reads first and is idempotent. A later guarded read reinstalls the handler.
                 detail::release_guarded_engine();
 #endif
 

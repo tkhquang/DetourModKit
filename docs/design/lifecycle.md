@@ -136,7 +136,7 @@ A binding still inside its callback at the deadline is reported `TimedOut` with 
 
 With those preconditions met, `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DMK worker callable remains. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` never authorize `FreeLibrary`.
 
-The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed but releases transaction ownership, so an off-loader retry can finish. Only complete session-level finalization reopens it.
+The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed with the rundown pending but releases transaction ownership, so an off-loader retry can finish. Only a retry that completes the drain clears the pending state. `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not (`InputLifecycleProof.TimedOutDrainCannotBeReopenedByAnAdmittedStart`, `SessionHotReload.ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin`).
 
 ### [B-90]
 
