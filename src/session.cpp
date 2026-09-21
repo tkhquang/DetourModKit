@@ -134,11 +134,6 @@ namespace DetourModKit
 
         BootstrapLoggerInfo s_bootstrap_logger_info;
 
-        // Module identity, the serialized single-session state machine, generation, and loader context all live in the
-        // one lifecycle control block (detail::lifecycle()). The module identity is a lock-free atomic so
-        // module_handle() never races a detach-path clear; the state machine (begin_start / mark_running / begin_stop /
-        // mark_stopped) is the single-session-per-process guard, admitting a new start only from Stopped.
-
         // These two objects may still own consumer state when DLL_PROCESS_DETACH runs. Construct them into raw static
         // storage so the CRT never registers destructors for them: a clean off-loader-lock drain resets their contents,
         // while loader detach retains them untouched instead of destroying callback captures inside DllMain.
@@ -393,6 +388,24 @@ namespace DetourModKit
                 break;
             }
 
+            // Identity only: UNCHANGED_REFCOUNT takes no reference, so module_handle() names the linking module without
+            // keeping it mapped. The bootstrap worker's keepalive is the separate counted reference bootstrap_core
+            // acquires before CreateThread. A code address in this archive resolves to the mod's own HMODULE.
+            constexpr DWORD CAPTURE_FLAGS =
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+            HMODULE captured_module = nullptr;
+            if (!GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&begin_session), &captured_module))
+            {
+                error = GetLastError();
+                if (mutex != nullptr)
+                {
+                    CloseHandle(mutex);
+                }
+                detail::lifecycle().mark_stopped();
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, operation, error});
+            }
+            detail::lifecycle().publish_module(captured_module);
+
             // Publish the phase only once the fallible gates have passed. begin_start() already reset the context to
             // Normal for this epoch, so every rollback above leaves a neutral phase behind rather than stranding a
             // non-blocking Attach that would fail-close every later teardown in a process that never started.
@@ -400,22 +413,17 @@ namespace DetourModKit
             return mutex;
         }
 
-        // The ordered process-wide subsystem teardown that ~Session runs after clearing the session's own scope. This
-        // is the single home for the teardown ordering: reverse dependency order, with the logger LAST because every
-        // prior step may still log. Each leaf shutdown passes the shared blocking-teardown gate, so this function
-        // delegates the join/retain action without duplicating the lifecycle decision.
+        // Reverse dependency order. The Session class contract in session.hpp publishes it and
+        // SessionTeardown.FullStackTeardownShutsEveryLeafDown proves it. Each leaf applies the shared
+        // blocking-teardown gate itself.
         void run_subsystem_teardown() noexcept
         {
-            // 1. Config auto-reload watcher first: its background thread can fire the user on_reload callback at any
-            //    moment, so it must stop before any state that callback might touch is torn down.
+            // First: the watcher thread can fire on_reload into any state below.
             config::disable_auto_reload();
-            // 2. Input poll thread (may invoke callbacks that log).
             input::Input::instance().shutdown();
-            // 3. Memory cache cleanup thread (must stop before the logger it may log through).
             memory::shutdown_cache();
-            // 4. Config registry: drops the bound std::function setters.
             config::clear();
-            // 5. Logger last: flush and close the sink. Nothing may log after this.
+            // Last: every prior step can still log.
             log().shutdown();
         }
 
@@ -446,11 +454,8 @@ namespace DetourModKit
 
         void retire_bootstrap_after_drain() noexcept
         {
-            // The worker retires its own identity before it exits, so on the path that reaches here this is an
-            // idempotent re-store. It stays because this function is the single retirement point: any future caller
-            // that arrives without a completed join must still leave no id behind for the OS to recycle onto an
-            // unrelated consumer thread, which would inherit both the worker's blocking authorization and its refused
-            // self-drain.
+            // Idempotent after the worker's own clear. It stays because this is the single retirement point for a
+            // caller that arrives without a completed join. LifecycleContext::clear_worker_thread owns the hazard.
             detail::lifecycle().clear_worker_thread();
             retire_shutdown_event_after_drain();
             s_on_ready = nullptr;
@@ -461,6 +466,17 @@ namespace DetourModKit
             // the phase the process is actually in. Both Normal and ExplicitDrain authorize blocking, so this is a
             // consistency store rather than a change of permission.
             detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
+        }
+
+        // Retires the worker identity, releases the reference bootstrap_core handed the worker, and exits the thread
+        // atomically. FreeLibraryAndExitThread never returns, so the pin count decrements first and the thread never
+        // returns through code the release may unmap. The release can be the terminal one when the consumer already
+        // dropped its LoadLibrary reference after request_shutdown().
+        [[noreturn]] void exit_bootstrap_worker(HMODULE self_ref) noexcept
+        {
+            detail::lifecycle().clear_worker_thread();
+            detail::module_pin_observability::note_released(diagnostics::ModulePinReason::Bootstrap);
+            FreeLibraryAndExitThread(self_ref, 0);
         }
 
         // The bootstrap worker. It finishes Session setup, runs on_ready, and performs teardown off the loader lock.
@@ -488,21 +504,11 @@ namespace DetourModKit
             // A control thread may claim Ready -> Draining before this thread observes Ready. Draining still owns a
             // fully published Session, callback, and shutdown event; adopt them and let the already-signalled event
             // drive the ordinary teardown so the waiting control thread can complete the drain.
-            // The second condition should never happen: the worker is spawned only after the Session is staged. Guard
-            // defensively rather than dereference an empty optional.
-            //
-            // Retire the identity on the way out of either branch. FreeLibraryAndExitThread never returns, so no
-            // scope-exit action can do it, and a published id that outlives its thread is worse than none: the OS
-            // recycles thread ids, so an unrelated consumer thread would inherit both this worker's blocking
-            // authorization and its refused self-drain.
+            // An empty optional is unreachable. bootstrap_core stages the Session before its Ready release store, and
+            // every state the spin can observe follows that store. Guard anyway.
             if ((state != BootstrapState::Ready && state != BootstrapState::Draining) || !s_pending_session)
             {
-                detail::lifecycle().clear_worker_thread();
-                // Release the reference bootstrap_core handed this worker and exit atomically, so the thread never
-                // returns through code the release may have unmapped. The pin count decrements first because
-                // FreeLibraryAndExitThread never returns through release_module_ref.
-                detail::module_pin_observability::note_released(diagnostics::ModulePinReason::Bootstrap);
-                FreeLibraryAndExitThread(self_ref, 0);
+                exit_bootstrap_worker(self_ref);
             }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -580,17 +586,8 @@ namespace DetourModKit
                 // JOIN, all while self_ref keeps this module's code mapped through the teardown.
             }
 
-            // Retire the identity only after the teardown it authorized, and before FreeLibraryAndExitThread can let
-            // the OS recycle this id.
-            detail::lifecycle().clear_worker_thread();
-
-            // The worker is done. Drop its own reference and exit the thread atomically: FreeLibraryAndExitThread never
-            // returns, so the FreeLibrary's return address is never in code the release may unmap. This release may be
-            // the terminal one if the consumer already dropped its LoadLibrary reference after request_shutdown(), so
-            // the worker must not call plain FreeLibrary and then return through this module. The pin count decrements
-            // first for the same no-return reason.
-            detail::module_pin_observability::note_released(diagnostics::ModulePinReason::Bootstrap);
-            FreeLibraryAndExitThread(self_ref, 0);
+            // The identity retires only after the teardown it authorized.
+            exit_bootstrap_worker(self_ref);
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -646,35 +643,16 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "bootstrap"});
             }
 
-            // Auto-capture the calling module. DetourModKit links statically into the mod DLL, so a DetourModKit code
-            // address resolves to the mod's own HMODULE (exactly the handle DllMain receives), letting the
-            // consumer's DllMain forward attach without threading the handle through. UNCHANGED_REFCOUNT is required:
-            // this handle is for identity only (module_handle()), so it must NOT take a reference on the module. The
-            // keepalive that protects the worker's code from a premature FreeLibrary is a SEPARATE counted reference
-            // acquired immediately before CreateThread and handed to lifecycle_thread; keeping that concern out of the
-            // identity lets module_handle() name the module without holding it mapped, and confines the "the module
-            // stays mapped past a bare FreeLibrary" behavior to the worker's own lifetime. Capture into a local because
-            // a Win32 out-parameter cannot target the std::atomic identity slot, then publish it with a release store.
-            constexpr DWORD CAPTURE_FLAGS =
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-            HMODULE captured_module = nullptr;
-            if (!GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &captured_module))
-            {
-                const DWORD error = GetLastError();
-                s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", error});
-            }
-            (void)DisableThreadLibraryCalls(captured_module);
-            detail::lifecycle().publish_module(captured_module);
-
             // Keep the gates that let DllMain decline the load synchronous, but defer logger/file setup to the worker.
             Result<HANDLE> instance_mutex = begin_session(info, "bootstrap", detail::LoaderContext::Attach);
             if (!instance_mutex)
             {
-                detail::lifecycle().clear_module();
                 s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
                 return std::unexpected(instance_mutex.error());
             }
+            // The identity begin_session published is the handle DllMain received, so the consumer forwards attach
+            // without threading it through.
+            (void)DisableThreadLibraryCalls(detail::lifecycle().module());
 
             if (!s_bootstrap_logger_info.stage(info))
             {
@@ -792,18 +770,16 @@ namespace DetourModKit
 
         // Enter Stopping so a start racing this teardown stays rejected until the slot is fully released.
         detail::lifecycle().begin_stop();
-        // 1. Release this session's input bindings first, in reverse insertion order (a Hold binding's release edge
-        //    fires before the bindings it may depend on).
         m_scope.clear();
-        // 2. Ordered process-wide subsystem teardown (logger last).
         run_subsystem_teardown();
-        // 3. Release the single-instance guard so a subsequent load starts clean.
         if (m_instance_mutex)
         {
             CloseHandle(static_cast<HANDLE>(m_instance_mutex));
             m_instance_mutex = nullptr;
         }
         m_active = false;
+        // The identity retires with the session, after every teardown callback that can still read it.
+        detail::lifecycle().clear_module();
         detail::lifecycle().mark_stopped();
     }
 
@@ -836,6 +812,7 @@ namespace DetourModKit
             {
                 CloseHandle(*instance_mutex);
             }
+            detail::lifecycle().clear_module();
             detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::OutOfMemory, "Session::start"});
         }
@@ -845,6 +822,7 @@ namespace DetourModKit
             {
                 CloseHandle(*instance_mutex);
             }
+            detail::lifecycle().clear_module();
             detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::Unknown, "Session::start"});
         }
@@ -877,16 +855,13 @@ namespace DetourModKit
 
     void Session::abandon() noexcept
     {
-        // Neutralize so ~Session does nothing. No teardown, no unhook, no flush, no join: for process death only, where
-        // the OS is reclaiming the address space and touching subsystem state is a use-after-free with no benefit. The
-        // single-instance mutex handle is intentionally left for the OS to reclaim at exit.
-        //
-        // Abandon the input scope explicitly. Clearing m_active makes release() a no-op, but m_scope is a member whose
-        // own destructor still runs after this Session is destroyed. Scope::abandon retains its complete guard
-        // container, so neither release logic nor consumer callback destruction can run during process detach.
+        // abandon() in session.hpp owns the process-termination-only rule. m_scope is a member whose own destructor
+        // still runs after this Session, so abandon it explicitly. Scope::abandon retains the guard container, so
+        // neither release logic nor consumer callback destruction can run during process detach.
         m_scope.abandon();
         m_active = false;
         m_instance_mutex = nullptr;
+        detail::lifecycle().clear_module();
         detail::lifecycle().mark_stopped();
     }
 
@@ -1041,8 +1016,6 @@ namespace DetourModKit
 
     ModuleHandle module_handle() noexcept
     {
-        // Lock-free atomic acquire load: race-free against a concurrent detach-path clear, so a reader observes only
-        // the current published identity or null, never a torn value.
         return detail::lifecycle().module();
     }
 
@@ -1074,131 +1047,94 @@ namespace DetourModKit
     }
 #endif
 
+    namespace
+    {
+        // The composed off-loader-lock drain both prepare_logic_dll_unload forms run. drain_input runs the input half
+        // inside the budget left after the config half begins. `[B-74]` owns the transaction contract.
+        template <typename DrainInput>
+            requires std::is_nothrow_invocable_r_v<input::CallbackDrainStatus, DrainInput, std::chrono::milliseconds>
+        [[nodiscard]] LogicDllUnloadStatus
+        run_logic_dll_unload(std::chrono::milliseconds timeout, DrainInput drain_input) noexcept
+        {
+            if (!detail::blocking_teardown_permitted())
+            {
+                return LogicDllUnloadStatus::LoaderLock;
+            }
+            if (detail::current_thread_in_delivery())
+            {
+                return LogicDllUnloadStatus::SelfDelivery;
+            }
+
+            const auto deadline = detail::drain_deadline(timeout);
+            const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
+            if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
+            {
+                return LogicDllUnloadStatus::SelfDelivery;
+            }
+            if (begin_status == config::detail::ReloadDrainStatus::InProgress)
+            {
+                return LogicDllUnloadStatus::InProgress;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const auto input_timeout = now < deadline
+                                           ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                                           : std::chrono::milliseconds{0};
+            const input::CallbackDrainStatus input_status = drain_input(input_timeout);
+
+            const config::detail::ReloadDrainStatus config_status = config::detail::finish_reload_drain(deadline);
+            LogicDllUnloadStatus status = LogicDllUnloadStatus::TimedOut;
+            if (input_status == input::CallbackDrainStatus::SelfDelivery ||
+                config_status == config::detail::ReloadDrainStatus::SelfDelivery)
+            {
+                status = LogicDllUnloadStatus::SelfDelivery;
+            }
+            else if (input_status == input::CallbackDrainStatus::InProgress ||
+                     config_status == config::detail::ReloadDrainStatus::InProgress)
+            {
+                status = LogicDllUnloadStatus::InProgress;
+            }
+            else if (input_status == input::CallbackDrainStatus::RetireFailed)
+            {
+                status = LogicDllUnloadStatus::RetireFailed;
+            }
+            else if (input_status == input::CallbackDrainStatus::Drained &&
+                     config_status == config::detail::ReloadDrainStatus::Ready)
+            {
+                if (detail::open_input_callback_admission())
+                {
+                    return LogicDllUnloadStatus::SafeToUnload;
+                }
+                status = LogicDllUnloadStatus::InProgress;
+            }
+
+            // The composed transaction did not certify unmapping, so leave the rundown unresolved. Marking it pending
+            // also closes staging admission. Keeping both set is what refuses a start() that re-arms callbacks over
+            // storage this transaction never proved gone.
+            detail::mark_input_callback_drain_pending();
+            return status;
+        }
+    } // namespace
+
     LogicDllUnloadStatus prepare_logic_dll_unload(
         std::span<const std::string_view> binding_names,
         std::chrono::milliseconds timeout
     ) noexcept
     {
-        if (!detail::blocking_teardown_permitted())
-        {
-            return LogicDllUnloadStatus::LoaderLock;
-        }
-        if (detail::current_thread_in_delivery())
-        {
-            return LogicDllUnloadStatus::SelfDelivery;
-        }
-
-        const auto deadline = detail::drain_deadline(timeout);
-        const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
-        if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
-        {
-            return LogicDllUnloadStatus::SelfDelivery;
-        }
-        if (begin_status == config::detail::ReloadDrainStatus::InProgress)
-        {
-            return LogicDllUnloadStatus::InProgress;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto input_timeout = now < deadline
-                                       ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-                                       : std::chrono::milliseconds{0};
-        const input::CallbackDrainStatus input_status =
-            input::Input::instance().prepare_logic_dll_unload(binding_names, input_timeout);
-
-        const config::detail::ReloadDrainStatus config_status = config::detail::finish_reload_drain(deadline);
-        LogicDllUnloadStatus status = LogicDllUnloadStatus::TimedOut;
-        if (input_status == input::CallbackDrainStatus::SelfDelivery ||
-            config_status == config::detail::ReloadDrainStatus::SelfDelivery)
-        {
-            status = LogicDllUnloadStatus::SelfDelivery;
-        }
-        else if (input_status == input::CallbackDrainStatus::InProgress ||
-                 config_status == config::detail::ReloadDrainStatus::InProgress)
-        {
-            status = LogicDllUnloadStatus::InProgress;
-        }
-        else if (input_status == input::CallbackDrainStatus::RetireFailed)
-        {
-            status = LogicDllUnloadStatus::RetireFailed;
-        }
-        else if (input_status == input::CallbackDrainStatus::Drained &&
-                 config_status == config::detail::ReloadDrainStatus::Ready)
-        {
-            if (detail::open_input_callback_admission())
-            {
-                return LogicDllUnloadStatus::SafeToUnload;
-            }
-            status = LogicDllUnloadStatus::InProgress;
-        }
-
-        // The composed transaction did not certify unmapping, so leave the rundown unresolved: marking it pending also
-        // closes staging admission, and keeping both set is what refuses a start() that would re-arm callbacks over
-        // storage this transaction never proved gone.
-        detail::mark_input_callback_drain_pending();
-        return status;
+        return run_logic_dll_unload(
+            timeout,
+            [binding_names](std::chrono::milliseconds input_timeout) noexcept -> input::CallbackDrainStatus
+            { return input::Input::instance().prepare_logic_dll_unload(binding_names, input_timeout); }
+        );
     }
 
     LogicDllUnloadStatus prepare_logic_dll_unload_all(std::chrono::milliseconds timeout) noexcept
     {
-        if (!detail::blocking_teardown_permitted())
-        {
-            return LogicDllUnloadStatus::LoaderLock;
-        }
-        if (detail::current_thread_in_delivery())
-        {
-            return LogicDllUnloadStatus::SelfDelivery;
-        }
-
-        const auto deadline = detail::drain_deadline(timeout);
-        const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
-        if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
-        {
-            return LogicDllUnloadStatus::SelfDelivery;
-        }
-        if (begin_status == config::detail::ReloadDrainStatus::InProgress)
-        {
-            return LogicDllUnloadStatus::InProgress;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto input_timeout = now < deadline
-                                       ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-                                       : std::chrono::milliseconds{0};
-        const input::CallbackDrainStatus input_status =
-            input::Input::instance().prepare_logic_dll_unload_all(input_timeout);
-
-        const config::detail::ReloadDrainStatus config_status = config::detail::finish_reload_drain(deadline);
-        LogicDllUnloadStatus status = LogicDllUnloadStatus::TimedOut;
-        if (input_status == input::CallbackDrainStatus::SelfDelivery ||
-            config_status == config::detail::ReloadDrainStatus::SelfDelivery)
-        {
-            status = LogicDllUnloadStatus::SelfDelivery;
-        }
-        else if (input_status == input::CallbackDrainStatus::InProgress ||
-                 config_status == config::detail::ReloadDrainStatus::InProgress)
-        {
-            status = LogicDllUnloadStatus::InProgress;
-        }
-        else if (input_status == input::CallbackDrainStatus::RetireFailed)
-        {
-            status = LogicDllUnloadStatus::RetireFailed;
-        }
-        else if (input_status == input::CallbackDrainStatus::Drained &&
-                 config_status == config::detail::ReloadDrainStatus::Ready)
-        {
-            if (detail::open_input_callback_admission())
-            {
-                return LogicDllUnloadStatus::SafeToUnload;
-            }
-            status = LogicDllUnloadStatus::InProgress;
-        }
-
-        // The composed transaction did not certify unmapping, so leave the rundown unresolved: marking it pending also
-        // closes staging admission, and keeping both set is what refuses a start() that would re-arm callbacks over
-        // storage this transaction never proved gone.
-        detail::mark_input_callback_drain_pending();
-        return status;
+        return run_logic_dll_unload(
+            timeout,
+            [](std::chrono::milliseconds input_timeout) noexcept -> input::CallbackDrainStatus
+            { return input::Input::instance().prepare_logic_dll_unload_all(input_timeout); }
+        );
     }
 
     void on_logic_dll_unload(std::span<const std::string_view> binding_names) noexcept

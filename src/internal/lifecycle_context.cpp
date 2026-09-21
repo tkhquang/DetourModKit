@@ -68,7 +68,9 @@ namespace DetourModKit
 
         bool teardown_caller_authorized() noexcept
         {
-            return lifecycle().context_permits_blocking() || lifecycle().is_worker_thread();
+            const LoaderContext context = lifecycle().loader_context();
+            return context == LoaderContext::Normal || context == LoaderContext::ExplicitDrain ||
+                   lifecycle().is_worker_thread();
         }
 
         bool blocking_teardown_permitted() noexcept

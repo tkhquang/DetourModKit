@@ -177,6 +177,42 @@ TEST(SessionFreeFunctions, ModuleHandleNullBeforeBootstrap)
     EXPECT_EQ(module_handle(), nullptr);
 }
 
+// The identity the synchronous path publishes is the module that links the archive, here the test binary. It is
+// resolved with the same identity-only UNCHANGED_REFCOUNT capture the bootstrap happy path checks against.
+TEST(SessionStart, PublishesModuleIdentityForTheSessionLifetime)
+{
+    constexpr DWORD identity_flags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    HMODULE expected = nullptr;
+    ASSERT_TRUE(GetModuleHandleExW(identity_flags, reinterpret_cast<LPCWSTR>(&DetourModKit::module_handle), &expected));
+    ASSERT_NE(expected, nullptr);
+    ASSERT_EQ(module_handle(), nullptr) << "no session is live before start";
+
+    {
+        Result<Session> r = start_local_session("SESS_TEST", "sess_test_identity.log");
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        EXPECT_EQ(module_handle(), expected);
+        EXPECT_EQ(module_handle(), GetModuleHandleW(nullptr)) << "the linking module is the test executable";
+        EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
+    }
+
+    EXPECT_EQ(module_handle(), nullptr) << "~Session must retire the identity with the session";
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+}
+
+TEST(SessionStart, RejectedSecondStartLeavesTheLiveIdentityIntact)
+{
+    Result<Session> first = start_local_session("SESS_TEST", "sess_test_identity_intact.log");
+    ASSERT_TRUE(first.has_value()) << first.error().message();
+    const ModuleHandle live = module_handle();
+    ASSERT_NE(live, nullptr);
+
+    Result<Session> second = start_local_session("SESS_TEST_2", "sess_test_identity_intact_2.log");
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
+    EXPECT_EQ(module_handle(), live) << "a refused start must not touch the live session's identity";
+}
+
 // Session::start gating
 
 TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
@@ -191,6 +227,7 @@ TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
     );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
+    EXPECT_EQ(module_handle(), nullptr) << "a refused start publishes no identity";
 }
 
 // Async activation is fail-soft inside Session::start: a refused activation must not fail the start, and a committed
@@ -949,6 +986,7 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
 
         s.abandon();
         EXPECT_FALSE(static_cast<bool>(s)) << "abandon() must neutralize the Session";
+        EXPECT_EQ(module_handle(), nullptr) << "abandon() must retire the identity";
         // s destructs here: inert, so config::clear() is NOT run and the registry entry survives.
     }
 

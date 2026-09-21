@@ -192,7 +192,7 @@ This table follows the reference topology.
 | State | Owner | Result after a clean unmap | Required action |
 | --- | --- | --- | --- |
 | Logic globals and function-local statics | Logic generation | Reset | Recreate them in `Init()`. |
-| `Session`, hooks, workers, and bindings | Logic generation | Destroyed | Drain them in `Shutdown()`. |
+| `Session`, hooks, workers, and bindings | Logic generation | Destroyed | Drain them in `Shutdown()` and on every failed `Init()` path. |
 | Profiler ring samples | Logic generation | Lost | Export required samples before `Shutdown()`. |
 | Direct game-memory writes | Game process | Preserved | Track and revert raw patches before the unload drain. |
 | INI file | File system | Preserved | Load it again from the new generation. |
@@ -243,7 +243,7 @@ The host links the archive and owns every DetourModKit object. The logic DLL lin
 
 `prepare_logic_dll_unload(binding_names)` retires named input bindings and closes callback admission. It requests watcher and reload-servicer stop, then waits to one end-to-end deadline.
 
-`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed. Only session finalization reopens it.
+`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed with the rundown pending. Only a later drain that completes clears that state. The session-level `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not.
 
 `prepare_logic_dll_unload_all()` clears every input binding but keeps the poll thread alive. Use it only when the DLL that unloads owns the whole process-wide input and config surface. The registry is process-scoped, so the all-bindings form also retires a sibling DLL's bindings. Prefer the named-list overload when several logic DLLs share one instance.
 
@@ -251,11 +251,9 @@ After `FreeLibrary`, verify the unmap. Probe an export address captured before t
 
 ### Binding guards during the drain
 
-Drop a consumer-owned `BindingGuard` before, during, or after the drain. Retirement reaches the callback through the binding's delivery gate, so a guard you keep cannot hold a callable alive. A Hold binding still held when the drain runs receives its balancing `on_state_change(false)` there, while your module is still mapped.
+Drop a consumer-owned `BindingGuard` before, during, or after the drain. Before the drop, release every lock or join that its callback or capture destructor can wait on, or the two threads can deadlock.
 
-Before a guard drop, release every lock or join that its callback or capture destructor can wait on. Otherwise the two threads can deadlock.
-
-[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract and the binding-guard rules.
+[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the transaction contract and the binding-guard rules. The `prepare_logic_dll_unload` contract in `session.hpp` states what a retained guard still does.
 
 ## Idempotency on a second `Init()`
 
@@ -285,24 +283,7 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 | Export resolution fails. | Check `Init`, `Shutdown`, `Revision`, calling convention, and protocol revision. | Release the failed stage only through the normal unmap proof. |
 | A breakpoint names old source lines. | Check the module name, revision, and loaded symbol file. | Reload debugger symbols for the current staged image. |
 | A reload starts from another application. | Check the foreground-process guard around `GetAsyncKeyState`. | Accept the hotkey only while the game owns the foreground window. |
-
-## Reload checklists
-
-Before the first reload:
-
-- Select one [ownership topology](#choose-the-ownership-topology).
-- Build and deploy the [reference pair](#start-with-the-reference-pair).
-- Define loader-owned and generation-owned state under [State ownership across reloads](#state-ownership-across-reloads).
-- Export `Init`, `Shutdown`, and a build revision through one stable C protocol.
-- Set a retained-generation count and byte budget.
-
-Before `FreeLibrary`:
-
-- Require the accepted result from [Reload sequence](#reload-sequence-staged-generations).
-- Apply the consumer order from [Threads, TLS, and static constructors](#threads-tls-and-static-constructors).
-- Read the complete verdict from [What pins the module that hosts DetourModKit](#what-pins-the-module-that-hosts-detourmodkit).
-- Close the loader probe lease.
-- Save one logic code address, call `FreeLibrary` once, and require the address-unmap probe.
+| `Init()` returns zero. | Check that the failure path ran the same teardown as `Shutdown()`: workers joined, hooks cleared newest-first, `~Session`. | Release the stage only through the normal unmap proof, as the reference loader does. |
 
 ## Proof pointers
 
