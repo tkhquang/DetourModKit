@@ -2442,7 +2442,10 @@ namespace
         return window;
     }
 
-    /// Counts the granule-aligned free starts inside the window, which is what the backend's placement walk tests.
+    /**
+     * @brief Counts the granule-aligned free starts in the window, which the backend's placement walk tests.
+     * @details A final partial granule counts as one candidate.
+     */
     std::size_t free_granules_in_window(const AllocationWindow &window) noexcept
     {
         std::size_t granules = 0;
@@ -2461,7 +2464,7 @@ namespace
                 const std::uintptr_t stop = region_end < window.high ? region_end : window.high;
                 if (start < stop)
                 {
-                    granules += (stop - start) / window.granule;
+                    granules += (stop - start + window.granule - 1) / window.granule;
                 }
             }
             if (region_end <= cursor)
@@ -2537,9 +2540,10 @@ namespace
                 m_reservations.push_back(whole);
                 return;
             }
-            for (std::uintptr_t candidate = start; candidate + granule <= stop; candidate += granule)
+            for (std::uintptr_t candidate = start; candidate < stop; candidate += granule)
             {
-                void *one = VirtualAlloc(reinterpret_cast<void *>(candidate), granule, MEM_RESERVE, PAGE_NOACCESS);
+                const std::uintptr_t size = stop - candidate < granule ? stop - candidate : granule;
+                void *one = VirtualAlloc(reinterpret_cast<void *>(candidate), size, MEM_RESERVE, PAGE_NOACCESS);
                 if (one != nullptr)
                 {
                     m_reservations.push_back(one);

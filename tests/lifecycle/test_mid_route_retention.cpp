@@ -44,17 +44,19 @@ namespace
     volatile int s_inline_hits = 0;
 
     // Six distinct targets. The seed keeps the bodies distinct so no optimizer folds them, and the volatile work keeps
-    // each prologue long enough for either backend patch form.
+    // each prologue long enough for either backend patch form. Unsigned arithmetic keeps the mixing free of overflow.
     template <int Seed> DMK_PROOF_NOINLINE int route_target(int value)
     {
-        volatile int accumulator = value * Seed;
-        for (int i = 0; i < 8; ++i)
+        constexpr std::uint32_t SEED = static_cast<std::uint32_t>(Seed);
+        volatile std::uint32_t accumulator = static_cast<std::uint32_t>(value) * SEED;
+        for (std::uint32_t i = 0; i < 8; ++i)
         {
-            accumulator = accumulator + ((accumulator >> 3) ^ (i * Seed));
+            accumulator = accumulator + ((accumulator >> 3) ^ (i * SEED));
             accumulator = accumulator ^ (accumulator << 5);
         }
-        s_sink = accumulator;
-        return accumulator + Seed;
+        const int bounded = static_cast<int>(accumulator & 0xFFFFu);
+        s_sink = bounded;
+        return bounded + Seed;
     }
 
     template <int Seed> int route_inline_detour(int value)
