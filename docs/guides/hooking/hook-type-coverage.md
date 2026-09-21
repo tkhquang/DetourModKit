@@ -46,7 +46,7 @@ The classification decides what gets published:
 - A hook whose exact patch committed under a failed transaction reports `is_enabled() == true` and returns `ErrorCode::BackendFailed`, never a false Disabled over a live detour.
 - A committed restore publishes Disabled and closes the call gate.
 - A committed restore followed by Foreign or Indeterminate remains conservatively Active with `DisableFailed`, because a newer layer can chain through its trampoline and unreadable bytes prove no absence. DMK reasserts the backend's retained state in that case, so `is_enabled()` remains true, and a restore of the exact OwnedPatch bytes permits a real retry.
-- Original clears any stale backend flag before destruction and authorizes backend destruction. A published x64 mid hook still retains its routed gateway, inline trampoline, allocator backing, and unwind metadata for the process lifetime. Clean teardown reclaims only the mid stub and adapter portion.
+- Original clears any stale backend flag before destruction and authorizes backend destruction. A published x64 mid hook still retains its routed gateway, inline trampoline, allocator backing, and unwind metadata for the process lifetime. Clean teardown reclaims only the mid stub and adapter portion. The [hook design note](../../design/hooking.md) states the per-copy and per-generation cost of that retention ("Clean x64 mid teardown").
 - Foreign and Indeterminate are refused before either unconditional backend write, and teardown pins the whole backend.
 
 Some routes dispatch through generated code rather than a straight jump to the destination:
