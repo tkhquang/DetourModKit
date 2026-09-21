@@ -671,7 +671,9 @@ namespace DetourModKit
          * @brief Shuts the cache down and joins the background cleanup thread.
          * @details Call before module unload to terminate the cleanup thread cleanly. After shutdown, the cache cannot
          *          be reused without re-initialization. Under loader lock the thread is detached rather than joined to
-         *          avoid deadlock, and on MinGW the vectored fault handler is drained and removed.
+         *          avoid deadlock, and on MinGW the vectored fault handler is drained and removed. The first guarded
+         *          read installs that handler without @ref init_cache. A module with no @ref Session must therefore
+         *          call this before it unloads, even when the cache never started.
          *          Teardown closes reader admission first. A later permission query takes the uncached `VirtualQuery`
          *          route. The wait for admitted readers has a fixed deadline. The cache precommits a module reference
          *          before admission opens. On expiry it retains that reference and the cache storage. It also records

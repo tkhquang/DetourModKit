@@ -249,6 +249,46 @@ while(hook_instance_scope_proofs)
     LABELS "lifecycle-proof")
 endwhile()
 
+# The MinGW guarded-read vectored handler lives in the image whose first guarded read installed it, and only the cache
+# teardown removes it. A generation that hooked without init_cache used to leave it registered after FreeLibrary, and
+# the next exception the dispatcher passed through it killed the host. The fixture links the archive like a mod DLL.
+# The host links nothing from DetourModKit, unloads the image, proves the unmap, then dispatches a continuable
+# exception and a C++ throw. Exit status is the oracle. MSVC contains guarded reads in frame-based SEH and installs no
+# handler, so the host skips there (77).
+add_library(veh_unmap_dll SHARED veh_unmap_dll.cpp)
+set_target_properties(veh_unmap_dll PROPERTIES PREFIX "" OUTPUT_NAME "veh_unmap_dll")
+target_link_libraries(veh_unmap_dll PRIVATE DetourModKit dmk_coverage)
+target_include_directories(veh_unmap_dll PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(veh_unmap_dll SHARED)
+
+add_executable(veh_survives_unmap veh_survives_unmap.cpp)
+add_dependencies(veh_survives_unmap veh_unmap_dll)
+dmk_static_runtime(veh_survives_unmap)
+add_dependencies(dmk_lifecycle_proof_hosts veh_survives_unmap)
+
+set(veh_survives_unmap_proofs
+  Lifecycle.GuardedReadHandlerRetiresWithTheSession                  session
+  Lifecycle.GuardedReadHandlerRetiresOnCacheShutdownWithoutASession  hook-only
+  Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache         with-init-cache)
+while(veh_survives_unmap_proofs)
+  list(POP_FRONT veh_survives_unmap_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:veh_survives_unmap> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endwhile()
+
+# The unknown-token control uses the rationale above the input_gate_abba control. The host rejects the token before
+# its toolchain skip, so the control holds on MSVC too.
+add_test(NAME Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:veh_survives_unmap> no-such-scenario)
+set_tests_properties(Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
+  LABELS "lifecycle-proof")
+
 # A deadlock needs an isolated process so its timeout cannot wedge the shared unit binary.
 add_executable(input_gate_abba test_input_gate_abba.cpp)
 target_link_libraries(input_gate_abba PRIVATE DetourModKit dmk_coverage psapi)

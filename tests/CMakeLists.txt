@@ -336,6 +336,10 @@ if(DMK_BUILD_TESTS)
     Lifecycle.HookLedgerIsBlindAcrossLinkedInstances
     Lifecycle.ArmedForeignHookIsRefusedByDecode
     Lifecycle.HookRefusalCodesDistinguishTheMechanism
+    Lifecycle.GuardedReadHandlerRetiresWithTheSession
+    Lifecycle.GuardedReadHandlerRetiresOnCacheShutdownWithoutASession
+    Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache
+    Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario
     Lifecycle.CrossBindingReleaseHasNoABBA
     Lifecycle.RetiredPressCallableDisposalHasNoSelfDeadlock
     Lifecycle.RetiredHoldCallableDisposalHasNoSelfDeadlock
@@ -450,7 +454,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 128)
+    --minimum 132)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()
