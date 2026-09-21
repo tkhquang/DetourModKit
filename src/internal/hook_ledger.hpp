@@ -4,22 +4,10 @@
 /**
  * @file internal/hook_ledger.hpp
  * @brief Per-linked-instance safety ledger for the free-function hook surface; not a public registry.
- * @details Hooks are owned by the caller's handle rather than a central registry, but two safety properties still need
- *          shared state: exact same-kit duplicate detection (does this kit already patch address X?) and layer
- *          ordering for hooks stacked on one target address. This ledger is that state and only that state. It keys on
- *          the raw target address (inline/mid) and the cloned-vptr base (VMT clones), holds no names, exposes no
- *          enumeration, and is never installed.
- *
- *          SCOPE: one ledger per linked DMK instance, NOT per process. DetourModKit is a static archive
- *          (CMakeLists.txt: add_library(DetourModKit STATIC)), so two DLLs that each link it get two independent
- *          ledgers with two duplicate-detection and two layer-ordering domains. Cross-instance layering is therefore
- *          invisible here and is not defended against; a real process-shared registry would be required for that.
- *
- *          Layer ordering is not enforced by reordering destructors. The RAII model deliberately hands lifetime to
- *          the caller. Instead an operation that would alter a target's bytes claims that target's serialization slot
- *          and measures how many NEWER live hooks sit on the same address. A non-zero answer means the caller is
- *          toggling or unwinding a hook that is no longer on top, so the operation is refused (toggle) or the backend
- *          is intentionally leaked (teardown) rather than writing bytes a newer trampoline still depends on.
+ * @details Keyed on the raw target address (inline and mid) and the cloned-vptr base (VMT clones). It holds no
+ *          names, exposes no enumeration, and is never installed. hook.hpp (LEDGER SCOPE) owns the per-instance
+ *          rule. An operation that alters a target's bytes claims that target's slot and counts the newer live
+ *          hooks on it. A positive count refuses a toggle and pins a teardown (`[B-16]`, `[B-79]`).
  */
 
 #include <atomic>
@@ -55,14 +43,8 @@ namespace DetourModKit
         public:
             /**
              * @brief Returns this linked instance's ledger, constructing it once on first use.
-             * @details Constructed into function-local static storage and NEVER destroyed, mirroring
-             *          StringPool::instance() and Profiler::instance(). A Meyers singleton (`static HookLedger l;`)
-             *          would register a static destructor, and a Hook/VmtHook whose own destructor runs later would
-             *          then lock a destroyed mutex and search a destroyed map. That is a use-after-free, reachable
-             *          whenever a namespace-scope owner (e.g. an empty `static HookStack` populated after startup)
-             *          registers its destructor BEFORE the first hook is created and therefore before this ledger
-             *          registers its own. Leaking the state for the process lifetime is the cost of making that
-             *          ordering irrelevant.
+             * @details Never-destroyed storage (`[B-47]`): a namespace-scope Hook owner can register its destructor
+             *          before the ledger exists. tests/lifecycle/test_hook_static_order.cpp proves the late teardown.
              */
             [[nodiscard]] static HookLedger &instance() noexcept;
 
@@ -130,11 +112,8 @@ namespace DetourModKit
              *         (or sole) record, so a byte restore is in the safe newest-first order. Any positive value means
              *         newer layers sit on top and the caller must not restore. Lock failure returns a positive count
              *         so the caller fails closed to a leak.
-             * @note The count is keyed on the record, not on whether a handle still owns it: an id counts until its
-             *       owner calls this method, so it includes ids left behind by a pin (a teardown that took @ref
-             *       release_target_slot, and the release verbs, which abandon the backend without a ledger call at
-             *       all). Excluding the ownerless ones would authorize an older layer to write over a prologue a
-             *       retained trampoline can still resume through.
+             * @note An id counts until its owner calls this method, so retained ids count too
+             *       (docs/design/hooking.md, "A retained id still counts").
              */
             [[nodiscard]] std::size_t release_hook(std::uintptr_t target, std::uint64_t id) noexcept;
 
@@ -146,29 +125,17 @@ namespace DetourModKit
              *         any positive value means @p id is not the top layer (or one raced in during the claim) and
              *         the caller MUST refuse (toggle) or leak (teardown). An absent target/id, a bookkeeping
              *         allocation failure, or a lock failure all return a positive count so the caller fails closed.
-             * @details The write-side counterpart to @ref try_reserve_hook, used by enable, disable, and teardown. A
-             *          bare newer-count peek followed by a byte write is not atomic against a concurrent same-target
-             *          install: an install reserved after the peek reads the caller's prologue as its resume, and the
-             *          caller's write then clobbers it and the trampoline the new layer chains through - a
-             *          use-after-free. This method closes that window by waiting its turn in the SAME per-target queue
-             *          an install waits in, then blocking every new reserver behind this id until the slot is released.
-             *          While the slot is held no install can read or write @p target's prologue, so {decide, write} is
-             *          effectively atomic against installs.
+             * @details The write-side counterpart to @ref try_reserve_hook. The slot waits its turn in the same
+             *          per-target queue an install waits in, so {decide, write} is atomic against installs (`[B-79]`).
              * @warning The caller MUST release the slot exactly once, through @ref release_hook (which also drops the
              *          id from the creation order) or @ref release_target_slot (which keeps it). Otherwise later
              *          same-target installs block forever behind the unreleased queue sentinel. Only the sentinel can
              *          block. The creation-order entry never does. Release the slot before running user code or
              *          taking the loader lock: holding it across either invites a deadlock against an install that is
              *          itself under the loader lock.
-             * @note A release path that cannot retake the state lock leaves this id at the front of the pending queue,
-             *       which in isolation reads like a stranded sentinel that would park every later same-target reserver
-             *       forever. It cannot, and the release paths deliberately do NOT try to repair it: the queue is plain
-             *       vector state that only the mutex makes safe to touch, so erasing the sentinel without the lock
-             *       would be a data race, trading a stall for undefined behaviour. The stall is unreachable instead.
-             *       @ref lock_state fails only when std::mutex::lock throws, which is a permanent property of that
-             *       mutex rather than a transient one, so a later reserver fails its OWN acquisition and returns
-             *       OutOfMemory before it can reach the wait. Only the test seam can produce the selective one-shot
-             *       failure the stall would need, and it is compiled out of shipping builds.
+             * @note A release path that cannot retake the state lock leaves the sentinel in place, because the queue
+             *       is safe to touch only under the mutex. The stall is unreachable: @ref lock_state fails permanently,
+             *       so a later reserver fails its own acquisition first.
              *       HookLedgerFaultProof.AbandonedSlotCannotParkALaterReserver pins that ordering.
              */
             [[nodiscard]] std::size_t acquire_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
@@ -181,12 +148,8 @@ namespace DetourModKit
              *          same-target installer; the order entry stays so @ref is_target_hooked keeps reporting the
              *          target hooked. The restoring teardown path instead calls @ref release_hook, which drops the id
              *          from both.
-             * @note The order entry this method keeps goes on counting as a newer layer even once no handle owns it,
-             *       which is the contract rather than an oversight: the teardown caller here kept an installed
-             *       backend, so an older layer underneath must stay refused. Because ids are appended newest-last, a
-             *       kept id never outranks a layer installed after it, so a layer installed over a pinned target is
-             *       still the newest and still restores its own bytes on teardown. The pinned backend underneath it
-             *       is never restored, and the target stays reported hooked for the process lifetime.
+             * @note The kept order entry stays counted as a newer layer for the process lifetime
+             *       (docs/design/hooking.md, "A retained id still counts").
              */
             void release_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
 

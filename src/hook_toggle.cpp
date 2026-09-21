@@ -44,19 +44,10 @@ namespace DetourModKit
             using DetourModKit::detail::witness_of;
             using DetourModKit::detail::witness_permits_write;
 
-            enum class ToggleWarningKind : std::uint8_t
-            {
-                None,
-                EnableRefused,
-                EnableReconciled,
-                DisableRefused,
-                DisableReconciled
-            };
-
             /**
              * @brief Defers one warning until later-declared lock guards release.
              * @details Declare it before the call-gate lock and target slot. Its destructor runs after both guards
-             *          release.
+             *          release. HookToggleWarning.* pins the four texts.
              */
             class DeferredToggleWarning
             {
@@ -65,51 +56,31 @@ namespace DetourModKit
 
                 ~DeferredToggleWarning() noexcept
                 {
-                    switch (m_kind)
+                    if (m_text == nullptr)
                     {
-                    case ToggleWarningKind::None:
                         return;
-                    case ToggleWarningKind::EnableRefused:
+                    }
+                    if (m_witness)
+                    {
                         (void)log().try_log(
                             LogLevel::Warning,
-                            "hook: '{}' at 0x{:0{}X} refused enable: {}.",
+                            "hook: '{}' at 0x{:0{}X} {}: {}.",
                             m_name,
                             m_target,
                             sizeof(std::uintptr_t) * 2,
-                            witness_description(m_witness)
-                        );
-                        return;
-                    case ToggleWarningKind::EnableReconciled:
-                        (void)log().try_log(
-                            LogLevel::Warning,
-                            "hook: '{}' at 0x{:0{}X} has original bytes under an active state. This enable retries "
-                            "the arm.",
-                            m_name,
-                            m_target,
-                            sizeof(std::uintptr_t) * 2
-                        );
-                        return;
-                    case ToggleWarningKind::DisableRefused:
-                        (void)log().try_log(
-                            LogLevel::Warning,
-                            "hook: '{}' at 0x{:0{}X} refused disable: {}.",
-                            m_name,
-                            m_target,
-                            sizeof(std::uintptr_t) * 2,
-                            witness_description(m_witness)
-                        );
-                        return;
-                    case ToggleWarningKind::DisableReconciled:
-                        (void)log().try_log(
-                            LogLevel::Warning,
-                            "hook: '{}' at 0x{:0{}X} has owned bytes under a disabled state. This disable retries "
-                            "the restore.",
-                            m_name,
-                            m_target,
-                            sizeof(std::uintptr_t) * 2
+                            m_text,
+                            witness_description(*m_witness)
                         );
                         return;
                     }
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook: '{}' at 0x{:0{}X} {}.",
+                        m_name,
+                        m_target,
+                        sizeof(std::uintptr_t) * 2,
+                        m_text
+                    );
                 }
 
                 DeferredToggleWarning(const DeferredToggleWarning &) = delete;
@@ -117,14 +88,17 @@ namespace DetourModKit
                 DeferredToggleWarning(DeferredToggleWarning &&) = delete;
                 DeferredToggleWarning &operator=(DeferredToggleWarning &&) = delete;
 
-                /// Stores one warning and contains any name-copy failure.
+                /**
+                 * @brief Stores one warning and contains any name-copy failure.
+                 * @param text A string literal: only its pointer is stored. A witness appends as ": <witness>".
+                 */
                 void
-                arm(ToggleWarningKind kind,
+                arm(const char *text,
                     const std::string &name,
                     std::uintptr_t target,
-                    PatchWitness witness = PatchWitness::Indeterminate) noexcept
+                    std::optional<PatchWitness> witness = std::nullopt) noexcept
                 {
-                    m_kind = kind;
+                    m_text = text;
                     m_target = target;
                     m_witness = witness;
                     try
@@ -137,10 +111,10 @@ namespace DetourModKit
                 }
 
             private:
-                ToggleWarningKind m_kind{ToggleWarningKind::None};
+                const char *m_text{nullptr};
                 std::string m_name;
                 std::uintptr_t m_target{0};
-                PatchWitness m_witness{PatchWitness::Indeterminate};
+                std::optional<PatchWitness> m_witness;
             };
 
             /**
@@ -308,7 +282,7 @@ namespace DetourModKit
             const PatchWitness before = witness_of(m_impl->backend);
             if (!witness_permits_write(before))
             {
-                deferred_warning.arm(ToggleWarningKind::EnableRefused, m_impl->name, m_impl->target, before);
+                deferred_warning.arm("refused enable", m_impl->name, m_impl->target, before);
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", m_impl->target});
             }
 
@@ -327,7 +301,11 @@ namespace DetourModKit
                 }
                 // The bytes prove the target is unpatched. Rewrite the stale claim, then arm through the ordinary
                 // path so byte authority and the population tally both stay exact.
-                deferred_warning.arm(ToggleWarningKind::EnableReconciled, m_impl->name, m_impl->target);
+                deferred_warning.arm(
+                    "has original bytes under an active state. This enable retries the arm",
+                    m_impl->name,
+                    m_impl->target
+                );
                 reconcile_published_state(*m_impl, *gate, false);
                 m_impl->status.store(HookState::Enabling, std::memory_order_release);
             }
@@ -450,7 +428,7 @@ namespace DetourModKit
             const PatchWitness before = witness_of(m_impl->backend);
             if (!witness_permits_write(before))
             {
-                deferred_warning.arm(ToggleWarningKind::DisableRefused, m_impl->name, m_impl->target, before);
+                deferred_warning.arm("refused disable", m_impl->name, m_impl->target, before);
                 return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
             }
 
@@ -466,7 +444,11 @@ namespace DetourModKit
                 {
                     return {};
                 }
-                deferred_warning.arm(ToggleWarningKind::DisableReconciled, m_impl->name, m_impl->target);
+                deferred_warning.arm(
+                    "has owned bytes under a disabled state. This disable retries the restore",
+                    m_impl->name,
+                    m_impl->target
+                );
                 reconcile_published_state(*m_impl, *gate, true);
                 m_impl->status.store(HookState::Disabling, std::memory_order_release);
             }
