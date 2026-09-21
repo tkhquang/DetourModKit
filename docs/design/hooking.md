@@ -31,7 +31,7 @@ VmtHook and teardown:
 - `VmtHook` serializes object-vptr create/apply/remove/teardown transitions through a setup-time object gate, with per-method state still protected by its SRWLOCK.
 - The destructor applies the loader-lock leaf discipline. Under the loader lock it leaks the backend and `record_intentional_leak`s instead of a restore. It keeps the counted module reference it took at install, which maps the trampoline/detour code.
 - It restores only on a positive byte witness. Otherwise it pins the whole backend and keeps the ledger entry.
-- Clean x64 mid teardown is a separate bounded retention case. Public `mid_at` automatically reserves route capacity before publication. Backend destruction leaves the published gateway, inline trampoline, allocator backing, and unwind metadata mapped for process lifetime, while the mid stub/adapter can be retired.
+- Clean x64 mid teardown is a separate bounded retention case. Public `mid_at` automatically reserves route capacity before publication. Backend destruction leaves the published gateway, inline trampoline, allocator backing, and unwind metadata mapped for process lifetime, while the mid stub/adapter can be retired. The retention budget is per linked copy, so a hot-reloaded mod retains one block per published mid hook per generation. `Lifecycle.PublishedMidRouteRetainsOneBlockPerHook` pins that cost, and the hot-reload guide budgets retained generations ("Define a retained-generation policy").
 - A retained id still counts in newer-layer counting for the process lifetime. The pinned backend is still installed, so a layer underneath it must stay refused. Ids append newest-last, so a layer installed after a pin still tears down normally.
 - `Hook::release()` and `VmtHook::release()` are the caller-requested form of the same pin and book their leak identically.
 
@@ -39,15 +39,7 @@ Hot-path mechanism: None. Install and teardown are setup/control-plane. The per-
 
 ## Backend confinement
 
-The public hook island has these members:
-
-- `src/hook.cpp` belongs to the island.
-- `src/hook_toggle.cpp` belongs to the island.
-- `src/hook_mid_context.cpp` belongs to the island.
-- `src/internal/hook_backend.hpp` belongs to the island.
-- `src/internal/hook_backend_visit.hpp` belongs to the island.
-- `src/internal/mid_hook_adapter.hpp` belongs to the island.
-- `src/internal/mid_hook_adapter.cpp` belongs to the island.
+The public hook island is `src/hook.cpp`, `src/hook_toggle.cpp`, `src/hook_mid_context.cpp`, `src/internal/hook_backend.hpp`, `src/internal/hook_backend_visit.hpp`, `src/internal/mid_hook_adapter.hpp`, and `src/internal/mid_hook_adapter.cpp`.
 
 The active input island contains `src/internal/input_intercept.cpp`. Other library sources must not include SafetyHook or name `safetyhook::`.
 
@@ -55,7 +47,7 @@ The library links SafetyHook as a private build dependency. CMake keeps static l
 
 These sources prove the boundaries:
 
-- `scripts/check_header_hygiene.py` proves the source boundary.
+- `scripts/check_header_hygiene.py` proves the source boundary and owns the island list as `BACKEND_SOURCE_ISLANDS`.
 - `scripts/check_install_prefix.py` proves the install boundary.
 - `tests/package_build_tree` proves the consumer boundary.
 
@@ -82,21 +74,11 @@ The patch also carries address-scoped reported-failure and exception test seams 
 
 When you re-pin the backend, pin only to a commit that the configured upstream remote serves. ALSO regenerate the vendored patch so it still reconstructs the reviewed tree (`git -C external/safetyhook diff <base> <reviewed>`). A re-pin without the patch silently drops the fix. Never repoint `.gitmodules` at a fork to carry the delta.
 
-`scripts/check_backend_patch.py` fails closed if the model drifts. It validates the upstream URL and the frozen patch hash and fix markers. It validates the pinned base commit against both the parent gitlink and the checked-out submodule HEAD, and it validates the submodule working tree itself. That tree can be in exactly two source states: the pristine pinned base before any configure, or byte-exactly the reviewed patch output after one. Each of these is refused:
+`scripts/check_backend_patch.py` fails closed if the model drifts, and its docstring owns the refused states. The submodule working tree has exactly two source states: the pristine pinned base before any configure, or byte-exactly the reviewed patch output after one. `--expect-state pristine|patched` pins which state a phase requires. The blocking `backend-patch` quality job proves the fresh checkout, applies the patch through `cmake -P cmake/DMKBackendPatch.cmake`, and proves the result.
 
-- staged content, or index visibility flags,
-- an ordinary untracked path other than the configure-time `.dmk_patch.lock` marker,
-- ignored content outside the frozen non-source build/IDE/generated-output roots,
-- a tracked edit outside the patch's file set,
-- an incompletely applied patch,
-- a patched file whose bytes are not the reconstruction of base plus patch,
-- any failed state query.
+The configure-time verdict is byte equality, not a path set. `dmk_reconstruct_backend_targets` rebuilds every owned target from the pinned base blob plus the patch in a scratch git worktree and compares each file. The worktree sits inside the submodule's git directory, so backend-state enumeration never sees it. An edit inside a target the patch already owns therefore fails on bytes, not on the path set or the reverse-apply.
 
-`--expect-state pristine|patched` pins which state a phase requires. The blocking `backend-patch` quality job proves the fresh checkout, applies the patch through `cmake -P cmake/DMKBackendPatch.cmake`, and proves the result. `dmk_verify_backend_state` in that module decides the changed-file set, ignored-output boundary, and index visibility flags at configure time as well. A configure therefore aborts rather than compiles a backend nobody reviewed.
-
-The configure-time verdict is byte equality, not a path set, and that is frozen. An edit inside a target the patch already owns leaves the changed-path set identical. Once the patch's lines are present, the idempotence reverse-apply stays clean too. A ruling on either signal alone lets configure compile unreviewed bytes. `dmk_reconstruct_backend_targets` therefore rebuilds every owned target from the pinned base blob plus the patch in a scratch tree and compares each file. The scratch tree is anchored as its own git worktree root, because `git apply` otherwise resolves the patch against whatever repository it discovers. It sits inside the submodule's git directory, so backend-state enumeration can never see it.
-
-Python and CMake implement one model with two spellings of the same normalization: `lf()` and `git diff --ignore-cr-at-eol`. `scripts/test_check_backend_patch.py` asserts that they accept and refuse the same states. It does not trust the spellings to stay equivalent. A fixture for this defect must put the smuggled bytes outside every hunk, or the reverse-apply catches them first and the test proves nothing.
+Python and CMake spell one normalization two ways, `lf()` and `git diff --ignore-cr-at-eol`. `scripts/test_check_backend_patch.py` asserts that they accept and refuse the same states. A fixture for that defect must put the smuggled bytes outside every hunk, or the reverse-apply catches them first and the test proves nothing.
 
 A configured build tree leaves the submodule working tree dirty, because the patch is applied in place. It can also leave ignored generated build output under its reviewed roots. That is expected.
 

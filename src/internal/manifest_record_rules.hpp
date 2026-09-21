@@ -11,6 +11,7 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/manifest.hpp"
 
+#include "internal/hook_fault_boundary.hpp"
 #include "internal/scan_shared.hpp"
 
 #include <cstddef>
@@ -181,12 +182,8 @@ namespace DetourModKit::manifest
                    static_cast<std::uint8_t>(binding.read_register) <= static_cast<std::uint8_t>(hook::Gpr::R15) &&
                    (binding.xmm_index == XMM_INDEX_UNUSED || binding.xmm_index < 16);
         case BindingKind::VmtMethod:
-        {
-            // VmtHook bounds its captured table to 4096 methods, so no valid handle can expose a larger index.
-            constexpr std::size_t MAX_VMT_BINDING_SLOTS = 4096;
             return offsets_inert && width_inert && register_inert && xmm_inert &&
-                   binding.vmt_index < MAX_VMT_BINDING_SLOTS;
-        }
+                   binding.vmt_index < DetourModKit::detail::MAX_VMT_SLOTS;
         }
         return false;
     }

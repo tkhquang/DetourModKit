@@ -306,18 +306,14 @@ namespace DetourModKit
              *          as hooked, and `[B-73]` books the leak to
              *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager.
              *
-             *          For a MID hook this also runs the callback down. The callback retires first, so a pinned hook
-             *          goes INERT instead of a call into a destroyed owner. An authorized caller waits for callbacks
-             *          already in flight on every teardown branch, and on the restoring path also waits for every
-             *          adapter body to leave before the stub is freed. After this returns, no new mid-hook callback
-             *          begins.
-             * @note An unauthorized teardown, where an unload phase is published or the fail-closed loader-lock probe
-             *       vetoes, pins without a wait. A callback that began before teardown can still finish.
-             * @warning Destruction of a mid hook from INSIDE its own callback cannot wait, because the waiter is the
-             *          thread it waits for. DMK detects that case, retires the callback, pins the backend, and books
-             *          the leak. Destroy from a thread that is not inside the hook. Teardown pins the same way
-             *          whenever it cannot prove that no thread is inside the callback, so a pin alone is not evidence
-             *          of misuse.
+             *          A MID hook also runs its callback down (`[B-85]`). The tombstone flips first, so a pinned hook
+             *          goes inert instead of a call into a destroyed owner. No new callback begins after this returns.
+             *          An authorized off-loader-lock caller waits for admitted callbacks, and the restore path also
+             *          waits for every adapter body to leave before the stub is freed. A teardown that cannot prove
+             *          that no thread is inside the callback pins without a wait. The unprovable cases are the loader
+             *          lock, a published unload phase, destruction from inside the callback, and an unrecordable
+             *          entrant. A pin alone is therefore not evidence of misuse. See @ref mid_at for the adapter
+             *          contract.
              * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
              * @note This runs from DLL_PROCESS_DETACH / loader-lock teardown, where an escaping exception terminates
              *       the host, so every path inside fails closed rather than propagating.
@@ -450,24 +446,14 @@ namespace DetourModKit
              *         protection can remain unrestored. DisableFailed means this call did not prove a disarm after a
              *         rejected or uncertain arm. The handle remains conservatively active. The caller must quiesce or
              *         disable it before teardown.
-             * @details The operation is idempotent and thread-safe without external synchronization. An already-active
-             *          hook succeeds only while its own patch is what the target holds. Original bytes under an active
-             *          state prove that a third party disarmed the target. The call reconciles state, then uses the
-             *          ordinary arm path. Publish everything the detour needs before this call. `[B-83]` owns that
-             *          rule.
-             * @details `[B-97]` decides the reported state from the target's bytes, not from the backend result. Only
-             *          the saved prologue authorizes Disabled and only the exact committed patch authorizes Active,
-             *          so an ambiguous witness stays conservatively Active. This noexcept boundary contains backend
-             *          exceptions and reconciles them the same way.
-             * @note The toggle refuses bytes that belong to neither this hook nor its saved prologue. It does not
-             *       overwrite them because the backend emits its jmp over present bytes. The refusal is EnableFailed
-             *       and writes nothing, so a caller that resolves the conflict can retry. An unreadable target gets
-             *       the same refusal.
-             * @note Only the newest live hook on a target can arm it. An arm from underneath a newer layer is refused
-             *       with LayerConflict and nothing is written. The layer check precedes the idempotency check, so an
-             *       already-armed lower layer also gets LayerConflict instead of the no-op Success it gets on top. To
-             *       stack detours, arm the base hook before you create the one above it. A hook created while the
-             *       layer below is armed captures the patched prologue and resumes into it.
+             * @details Idempotent and thread-safe without external synchronization. `[B-97]` decides the published
+             *          state from the target's bytes. Only the exact committed patch authorizes Active, and only the
+             *          saved prologue authorizes Disabled. An ambiguous witness stays conservatively Active. The call
+             *          reconciles Original bytes under an active state before the ordinary arm. Foreign or unreadable
+             *          bytes refuse with EnableFailed and write nothing. Publish everything the detour needs before
+             *          this call (`[B-83]`).
+             * @note Only the newest live layer on a target can arm it (`[B-16]`). A lower layer gets LayerConflict
+             *       before the idempotency check, so arm the base hook before you create the one above it.
              * @note Setup/control-plane only: arming patches the target and serializes on the per-hook call gate.
              */
             [[nodiscard]] Result<void> enable() noexcept;
@@ -484,16 +470,12 @@ namespace DetourModKit
              *         longer redirects. The backend's restore transaction reported an error after the disarm. Target
              *         page protection can remain unrestored.
              * @details As in @ref enable, the target's bytes decide under `[B-97]`. Disabled publishes once the saved
-             *          prologue reads back, even after a backend failure or throw that follows the committed restore.
-             *          An ambiguous witness leaves the hook active, so a retry can disarm after the caller restores
-             *          this hook's exact patch bytes. An already-disabled hook succeeds only while the saved prologue
-             *          is what the target holds. The call reconciles a disabled state over this hook's own patch, then
-             *          retries the ordinary restore.
-             * @note The call refuses Foreign or unreadable bytes exactly as in @ref enable. It returns DisableFailed
-             *       and writes nothing. Teardown applies the same rule and pins the backend instead of a restore. See
-             *       @ref Hook::~Hook.
-             * @note Only the newest live hook on a target can disarm it, for the reason @ref enable gives: this hook's
-             *       saved prologue predates a newer layer's patch. Tear down or disable the newer layer first.
+             *          prologue reads back, even after a backend failure that follows the committed restore. An
+             *          ambiguous witness leaves the hook Active, so a retry can disarm after this hook's exact patch
+             *          bytes return. Foreign or unreadable bytes refuse with DisableFailed and write nothing. Teardown
+             *          pins the backend instead of a restore (@ref Hook::~Hook).
+             * @note Only the newest live layer on a target can disarm it (`[B-16]`). Tear down or disable the newer
+             *       layer first.
              * @note Setup/control-plane only: disarming restores target bytes and serializes on the per-hook call
              *       gate.
              */

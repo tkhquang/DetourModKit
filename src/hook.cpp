@@ -1,8 +1,6 @@
 /**
  * @file hook.cpp
  * @brief This TU implements hook lifecycle: install verbs, RAII handle teardown, and the VMT surface.
- * @details The hook sibling TUs (this file, hook_toggle.cpp, hook_mid_context.cpp, internal/mid_hook_adapter.cpp)
- *          and their private backend headers form the only layer that names the SafetyHook backend.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -472,6 +470,19 @@ namespace DetourModKit
             return "an unremarkable byte";
         }
 
+        /// Names the allocator's verdict so a log line separates an exhausted window from a refused commit.
+        [[nodiscard]] std::string_view allocator_error_description(safetyhook::Allocator::Error error) noexcept
+        {
+            switch (error)
+            {
+            case safetyhook::Allocator::Error::BAD_VIRTUAL_ALLOC:
+                return "VirtualAlloc refused the request";
+            case safetyhook::Allocator::Error::NO_MEMORY_IN_RANGE:
+                return "no free region within +/-2 GB of the target";
+            }
+            return "an unlisted allocator verdict";
+        }
+
         // These formatters preserve each backend reason in the diagnostic log after failures map to
         // ErrorCode::BackendFailed.
         std::string backend_error_string(const safetyhook::InlineHook::Error &err)
@@ -482,9 +493,9 @@ namespace DetourModKit
             {
             case safetyhook::InlineHook::Error::BAD_ALLOCATION:
                 return std::format(
-                    "InlineHook backend error ({}): bad allocation (allocator error {})",
+                    "InlineHook backend error ({}): bad allocation ({})",
                     type_int,
-                    static_cast<int>(err.allocator_error)
+                    allocator_error_description(err.allocator_error)
                 );
             case safetyhook::InlineHook::Error::FAILED_TO_DECODE_INSTRUCTION:
                 return std::format(
@@ -552,9 +563,9 @@ namespace DetourModKit
             {
             case safetyhook::MidHook::Error::BAD_ALLOCATION:
                 return std::format(
-                    "MidHook backend error ({}): bad allocation (allocator error {})",
+                    "MidHook backend error ({}): bad allocation ({})",
                     type_int,
-                    static_cast<int>(err.allocator_error)
+                    allocator_error_description(err.allocator_error)
                 );
             case safetyhook::MidHook::Error::BAD_INLINE_HOOK:
                 return std::format(
@@ -658,20 +669,14 @@ namespace DetourModKit
             return true;
         }
 
-        /**
-         * @brief Defines the hard cap on the vtable slot walk, which matches the bounded RTTI walkers.
-         * @details No real vtable approaches this many virtual methods. A walk that reaches the cap treats the seed
-         *          object as malformed and fails closed.
-         */
-        constexpr std::size_t MAX_VMT_SLOTS = 4096;
-
         // SafetyHook sizes a clone through an executable check for each slot target. This module-owned code address
         // fixes that answer after DMK counts the captured words. The detached clone receives the captured function
         // pointers before any host object can observe it.
         void vmt_snapshot_executable_marker() noexcept {}
 
         /**
-         * @brief Counts callable slots from the object's current vptr, guarded and capped at @ref MAX_VMT_SLOTS.
+         * @brief Counts callable slots from the object's current vptr, guarded and capped at
+         *        @ref detail::MAX_VMT_SLOTS.
          * @note The result bounds the guarded capture in @ref clone_vmt_snapshot. It is not the clone's slot count:
          *       the backend derives that from the captured snapshot, which is the only bound a slot write respects.
          */
@@ -680,7 +685,7 @@ namespace DetourModKit
             std::size_t count = 0;
             for (;;)
             {
-                if (count >= MAX_VMT_SLOTS)
+                if (count >= detail::MAX_VMT_SLOTS)
                 {
                     return std::nullopt;
                 }
@@ -1107,9 +1112,7 @@ namespace DetourModKit
 
         const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept
         {
-            // One allocator hold exists per linked DMK instance. It occupies static storage and is never released. A
-            // plain function-local static registers a destructor. A later Hook destructor can otherwise free its
-            // trampoline into a destroyed allocator arena.
+            // Never-destroyed storage (`[B-47]`). The declaration states why the hold is never released.
             alignas(
                 std::shared_ptr<safetyhook::Allocator>
             ) static unsigned char storage[sizeof(std::shared_ptr<safetyhook::Allocator>)];

@@ -4,18 +4,10 @@
 /**
  * @file internal/hook_backend.hpp
  * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
- * @details hook.hpp forward-declares the nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind
- *          a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible. This,
- *          internal/hook_backend_visit.hpp, and internal/mid_hook_adapter.hpp are the only DetourModKit headers that
- *          name the SafetyHook backend; none is installed and only the hook sibling TUs (src/hook.cpp,
- *          src/hook_toggle.cpp, src/hook_mid_context.cpp, src/internal/mid_hook_adapter.cpp) include them, so the
- *          backend (and the Zydis headers it drags in) stays confined to that island. A public consumer that includes
- *          hook.hpp pulls in none of it.
- *
- *          The opaque hook::MidContext bridge is deliberately NOT defined here. MidContext must stay an incomplete
- *          type in every translation unit so that the backend-context <-> MidContext reinterpret_cast remains a pure
- *          pass-through; the casts therefore live in the accessor function bodies in src/hook_mid_context.cpp, never
- *          as a type definition.
+ * @details hook.hpp forward-declares the nested Impl of every backend-owning handle and holds it behind a
+ *          std::unique_ptr. Those bodies are completed here, where safetyhook.hpp is visible. docs/design/hooking.md
+ *          ("Backend confinement") owns the island list and scripts/check_header_hygiene.py gates it. hook.hpp owns
+ *          the rule that hook::MidContext stays incomplete, so no definition of it belongs here.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -182,10 +174,9 @@ namespace DetourModKit
 
         /**
          * @brief Returns the SafetyHook allocator shared by every hook this linked instance installs.
-         * @details The reference is a refcount hold on the backend's allocator that keeps the trampoline arena mapped,
-         *          and it is deliberately never released: a hook owned by a namespace-scope object runs ~Impl during
-         *          static destruction and would otherwise free its trampoline into an already-destroyed arena. The
-         *          returned shared_ptr is empty only if the backend could not provide a global allocator, which the
+         * @details The hold keeps the trampoline arena mapped and is never released (`[B-47]`). A hook owned by a
+         *          namespace-scope object runs ~Impl during static destruction and must not free its trampoline into
+         *          a destroyed arena. An empty result means the backend provided no global allocator, which the
          *          create paths report as ErrorCode::AllocatorNotAvailable.
          */
         [[nodiscard]] const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept;
