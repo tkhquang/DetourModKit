@@ -375,6 +375,12 @@ if(DMK_BUILD_TESTS)
     Lifecycle.InputConcurrentFirstUseOomFailsClosed
     Lifecycle.InputFirstUseSuccessStartsEngine
     Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
+    Lifecycle.XInputCleanRouteResetReportsNoLeak
+    Lifecycle.XInputParkedRouteReportsRetention
+    Lifecycle.XInputParkedOrdinalRouteReportsRetention
+    Lifecycle.XInputAliasedRouteReportsOneRetention
+    Lifecycle.XInputRollbackReportsRouteRetention
+    Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention
     Lifecycle.XInputPreBodyRouteRetainsExecutableChain
     Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction
     Lifecycle.XInputCleanReleaseNeedsNoAllocation
@@ -407,6 +413,30 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteRestoreFailureChargesPublication
     Lifecycle.RouteAllocatorReclaimsWholeBlock
     Lifecycle.MidRouteAccountingIncludesGeneratedStub
+    Lifecycle.MidRouteSurvivesDormantFiber
+    Lifecycle.MidRouteSurvivesDormantTailCallee
+    Lifecycle.MidRouteSurvivesExceptionContinuation
+    Lifecycle.MidRouteUnwindSettlesRouteOwnership
+    Lifecycle.MidRouteIdleContinuationReclaims
+    Lifecycle.MidRouteReturnReclaims
+    Lifecycle.MidRouteExternalBranchReclaims
+    Lifecycle.MidRouteConditionalBranchReclaims
+    Lifecycle.MidRouteIndirectBranchReclaims
+    Lifecycle.MidRouteInternalBranchReclaims
+    Lifecycle.MidRouteSelectedExternalResumeReclaims
+    Lifecycle.MidRouteSelectedInternalResumeReclaims
+    Lifecycle.MidRouteFarPatchReclaims
+    Lifecycle.MidRouteExitPreservesRegistersAndFlags
+    Lifecycle.MidRouteExitUnwindRestoresCaller
+    Lifecycle.MidRouteSelectedEpilogueReclaims
+    Lifecycle.MidRouteClosedBypassPreservesOwnership
+    Lifecycle.MidRouteInternalReturnPreservesOwnership
+    Lifecycle.MidRouteInternalReturnPopPreservesOwnership
+    Lifecycle.MidRouteInternalTailBranchPreservesOwnership
+    Lifecycle.MidRouteInternalTailConditionalPreservesOwnership
+    Lifecycle.MidRouteInternalTailIndirectPreservesOwnership
+    Lifecycle.MidRouteProofRejectsUnknownScenario
+    Lifecycle.XInputTelemetryProofRejectsUnknownScenario
     Lifecycle.PublishedMidRouteReclaimsUnlessParked
     Lifecycle.TrapMappingPreservesTransactionDirection
     Lifecycle.DestroyLockFailureRetainsRoute

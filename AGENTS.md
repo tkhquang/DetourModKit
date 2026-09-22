@@ -429,6 +429,8 @@ These rules control volume and placement. The Technical prose rules control word
 
 ## Testing
 
+Required proofs must use DMK-owned tests and fixtures. No real game, deployed mod, or external consumer is required.
+
 - GoogleTest uses `tests/main.cpp` as its entry point.
 - `DMK_BUILD_TESTS=ON` enables tests.
 - Debug presets enable tests by default.

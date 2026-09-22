@@ -456,27 +456,33 @@ namespace DetourModKit::detail
 #endif
         }
 
-        /// Balances the install-time keepalives after all detour bodies become inactive.
-        void release_xinput_module_refs() noexcept
+        /**
+         * @brief Releases the install keepalives or retains them with an executable chain.
+         * @param retain True if a reset retains a route that can reach either code provider.
+         */
+        void retire_xinput_module_refs(bool retain = false) noexcept
         {
             if (s_xinput_permanent_hooks == nullptr)
             {
                 return;
             }
-            DetourModKit::detail::release_module_ref(
-                s_xinput_permanent_hooks->ex_target_ref,
-                diagnostics::ModulePinReason::XInputTarget
-            );
+            if (!retain)
+            {
+                DetourModKit::detail::release_module_ref(
+                    s_xinput_permanent_hooks->ex_target_ref,
+                    diagnostics::ModulePinReason::XInputTarget
+                );
+                DetourModKit::detail::release_module_ref(
+                    s_xinput_permanent_hooks->target_ref,
+                    diagnostics::ModulePinReason::XInputTarget
+                );
+                DetourModKit::detail::release_module_ref(
+                    s_xinput_permanent_hooks->self_ref,
+                    diagnostics::ModulePinReason::XInputKeepalive
+                );
+            }
             s_xinput_permanent_hooks->ex_target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(
-                s_xinput_permanent_hooks->target_ref,
-                diagnostics::ModulePinReason::XInputTarget
-            );
             s_xinput_permanent_hooks->target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(
-                s_xinput_permanent_hooks->self_ref,
-                diagnostics::ModulePinReason::XInputKeepalive
-            );
             s_xinput_permanent_hooks->self_ref = nullptr;
         }
 
@@ -659,13 +665,40 @@ namespace DetourModKit::detail
 
         /**
          * @brief Releases a hook after its target witnesses Original and its detour bodies drain.
-         * @note This noexcept move release performs no allocation. The backend frees a published route that its idle
-         *       proof clears and retains one it cannot prove idle.
+         * @return True if the backend retains the executable chain.
          */
-        void reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
+        [[nodiscard]] bool
+        reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
         {
             original.store(nullptr, std::memory_order_seq_cst);
-            hook = {};
+            hook.reset();
+            const bool retained = hook.route_retained();
+            if (retained)
+            {
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
+            }
+            return retained;
+        }
+
+        /**
+         * @brief Reports retained chains after the interception lock releases.
+         */
+        void emit_xinput_route_retention_logs(bool primary, bool ex) noexcept
+        {
+            if (primary)
+            {
+                (void)log().log_noexcept(
+                    LogLevel::Warning,
+                    "XInput route retention: XInputGetState retained its executable chain after reset."
+                );
+            }
+            if (ex)
+            {
+                (void)log().log_noexcept(
+                    LogLevel::Warning,
+                    "XInput route retention: ordinal 100 retained its executable chain after reset."
+                );
+            }
         }
 
         /**
@@ -2004,7 +2037,7 @@ namespace DetourModKit::detail
         s_xinput_permanent_hooks->target_ref = acquire_module_ref_containing_address(get_state);
         if (s_xinput_permanent_hooks->target_ref == nullptr)
         {
-            release_xinput_module_refs();
+            retire_xinput_module_refs();
             return false;
         }
         if (ex_is_distinct_member)
@@ -2012,7 +2045,7 @@ namespace DetourModKit::detail
             const HMODULE ex_target_ref = acquire_module_ref_containing_address(get_state_ex);
             if (ex_target_ref == nullptr)
             {
-                release_xinput_module_refs();
+                retire_xinput_module_refs();
                 return false;
             }
             if (ex_target_ref == s_xinput_permanent_hooks->target_ref)
@@ -2039,7 +2072,7 @@ namespace DetourModKit::detail
                     "so no XInput interception was installed and both entries remain open."
                 );
             }
-            release_xinput_module_refs();
+            retire_xinput_module_refs();
             return false;
         }
 
@@ -2052,7 +2085,7 @@ namespace DetourModKit::detail
                 s_xinput_permanent_hooks->primary
             ))
         {
-            release_xinput_module_refs();
+            retire_xinput_module_refs();
             return false;
         }
         if (ex_is_distinct_member && !create_disabled_xinput_hook(
@@ -2062,8 +2095,11 @@ namespace DetourModKit::detail
                                          s_xinput_permanent_hooks->ex
                                      ))
         {
-            reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
-            release_xinput_module_refs();
+            const bool primary_retained =
+                reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
+            retire_xinput_module_refs(primary_retained);
+            lock.unlock();
+            emit_xinput_route_retention_logs(primary_retained, false);
             return false;
         }
 
@@ -2096,9 +2132,12 @@ namespace DetourModKit::detail
         }
         if (primary_outcome != XInputArmOutcome::Armed)
         {
-            reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
-            reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
-            release_xinput_module_refs();
+            const bool ex_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+            const bool primary_retained =
+                reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
+            retire_xinput_module_refs(primary_retained || ex_retained);
+            lock.unlock();
+            emit_xinput_route_retention_logs(primary_retained, ex_retained);
             return false;
         }
 
@@ -2690,11 +2729,11 @@ namespace DetourModKit::detail
         }
 #endif
 
-        reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
-        reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
+        const bool ex_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+        const bool primary_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
 
-        // No detour code remains active. A later install_xinput() takes a fresh pair.
-        release_xinput_module_refs();
+        // A retained chain can still reach a code provider after its detour body drains.
+        retire_xinput_module_refs(primary_retained || ex_retained);
 
         s_xinput_installed.store(false, std::memory_order_release);
         s_xinput_pair_degraded.store(false, std::memory_order_release);
@@ -2703,6 +2742,8 @@ namespace DetourModKit::detail
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);
         s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
         s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
+        lock.unlock();
+        emit_xinput_route_retention_logs(primary_retained, ex_retained);
     }
 
 } // namespace DetourModKit::detail

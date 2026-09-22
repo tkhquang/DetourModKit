@@ -289,6 +289,43 @@ set_tests_properties(Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario P
   WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
   LABELS "lifecycle-proof")
 
+add_executable(route_continuation_lifetime route_continuation_lifetime.cpp)
+target_link_libraries(route_continuation_lifetime PRIVATE DetourModKit safetyhook dmk_coverage)
+dmk_static_runtime(route_continuation_lifetime)
+add_dependencies(dmk_lifecycle_proof_hosts route_continuation_lifetime)
+
+set(route_continuation_proofs
+  Lifecycle.MidRouteSurvivesDormantFiber fiber
+  Lifecycle.MidRouteSurvivesDormantTailCallee tail-fiber
+  Lifecycle.MidRouteSurvivesExceptionContinuation exception
+  Lifecycle.MidRouteUnwindSettlesRouteOwnership unwind
+  Lifecycle.MidRouteIdleContinuationReclaims idle
+  Lifecycle.MidRouteReturnReclaims return
+  Lifecycle.MidRouteExternalBranchReclaims branch
+  Lifecycle.MidRouteConditionalBranchReclaims conditional
+  Lifecycle.MidRouteIndirectBranchReclaims indirect
+  Lifecycle.MidRouteInternalBranchReclaims internal
+  Lifecycle.MidRouteSelectedExternalResumeReclaims redirect
+  Lifecycle.MidRouteSelectedInternalResumeReclaims resume
+  Lifecycle.MidRouteFarPatchReclaims ff
+  Lifecycle.MidRouteExitPreservesRegistersAndFlags state
+  Lifecycle.MidRouteExitUnwindRestoresCaller metadata
+  Lifecycle.MidRouteSelectedEpilogueReclaims resume-end
+  Lifecycle.MidRouteClosedBypassPreservesOwnership bypass
+  Lifecycle.MidRouteInternalReturnPreservesOwnership internal-return
+  Lifecycle.MidRouteInternalReturnPopPreservesOwnership internal-return-pop
+  Lifecycle.MidRouteInternalTailBranchPreservesOwnership internal-tail-branch
+  Lifecycle.MidRouteInternalTailConditionalPreservesOwnership internal-tail-conditional
+  Lifecycle.MidRouteInternalTailIndirectPreservesOwnership internal-tail-indirect)
+while(route_continuation_proofs)
+  list(POP_FRONT route_continuation_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_continuation_lifetime> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_continuation_lifetime>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
 # The proof retains five executable blocks for the process lifetime, parks threads inside generated code, and names
 # the backend for route_retention_stats(). It therefore runs in its own host rather than the shared unit binary.
 add_executable(mid_route_retention test_mid_route_retention.cpp)
@@ -1282,3 +1319,30 @@ set_tests_properties(Lifecycle.StagedGenerationProofRejectsAnUnknownScenario PRO
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
   LABELS "lifecycle-proof")
+
+add_dependencies(xinput_detour_rundown xinput_alias_ex_proxy)
+set(xinput_route_telemetry_proofs
+  Lifecycle.XInputCleanRouteResetReportsNoLeak telemetry-clean
+  Lifecycle.XInputParkedRouteReportsRetention telemetry-primary
+  Lifecycle.XInputParkedOrdinalRouteReportsRetention telemetry-ex
+  Lifecycle.XInputAliasedRouteReportsOneRetention telemetry-alias
+  Lifecycle.XInputRollbackReportsRouteRetention telemetry-rollback
+  Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention telemetry-repeat)
+while(xinput_route_telemetry_proofs)
+  list(POP_FRONT xinput_route_telemetry_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:xinput_detour_rundown> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+add_test(NAME Lifecycle.MidRouteProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:route_continuation_lifetime> invalid-scenario)
+set_tests_properties(Lifecycle.MidRouteProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+
+add_test(NAME Lifecycle.XInputTelemetryProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> telemetry-invalid)
+set_tests_properties(Lifecycle.XInputTelemetryProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")

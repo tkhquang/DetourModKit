@@ -293,6 +293,22 @@ A raw proof's failure exits are as load-bearing as its success path, and they ar
 
 Three bounded negative controls drive that path on purpose: `InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing`, `AbandonedFacadeDrivePremiseRunsDownBeforeClearing`, and `AbandonedSelfShutdownPremiseRunsDownBeforeClearing`. Each starts the real engine, parks a callback inside the poll thread, abandons its premise, and then asserts what the rundown did with it. The ordering oracle is read from inside the parked callback. The callback waits out a window that a correct rundown cannot use, because a correct rundown is blocked in a join on that same body. It then records whether its seam is still installed. A rundown that cleared before the join loses that race and is named for it. One that never unblocked hangs into the case's `TEST_TIMEOUT`. One that did not run at all leaves the engine started. Exit zero requires released, still-installed, stopped, then cleared, in that order.
 
+#### Mid-route continuations and XInput retention
+
+`route_continuation_lifetime.cpp` runs each scenario in a separate process. Its `Lifecycle.MidRoute*` cases cover these paths:
+
+- Dormant fibers, external tail callees, and repaired exception continuation after teardown.
+- Explicit retention after exception unwind.
+- Fall-through, return, direct and indirect branch exits.
+- Internal calls whose returns and direct, conditional, or indirect tail branches preserve ownership inside the displaced window.
+- Internal, external, and epilogue resume addresses.
+- Closed-route bypass, registers, flags, and dynamic unwind records.
+- Idle reclamation with no HookManager leak.
+
+`Lifecycle.TrapMappingPreservesTransactionDirection` verifies enable acquisition and counted execution that stays in the trampoline during disable. Unknown-scenario controls reject misspelled selectors.
+
+`xinput_detour_rundown.cpp` verifies clean reset, primary and ordinal routes, aliased exports, install rollback, and repeated uninstall. Each telemetry case checks the Input leak count and warning count. The warning probe reacquires the interception mutex. The host drops its DLL reference before it resumes a parked caller. Retained routes preserve their module pins, while clean teardown permits DLL unload. `Lifecycle.LabelInventoryIsComplete` pins their `lifecycle-proof` registrations.
+
 ### CTest execution-timeout control (tests/lifecycle/timeout_probe.cpp)
 
 `CTestTimeoutControl` is a passing meta-proof that CTest enforces a test's execution `TIMEOUT`, the property that fails and kills a hung case. That property is distinct from GoogleTest's `DISCOVERY_TIMEOUT`, which only bounds case enumeration. [`scripts/verify_ctest_timeout.cmake`](../../scripts/verify_ctest_timeout.cmake) writes a throwaway inner testfile that registers an intentionally-hung probe (`dmk_timeout_probe`) under a two-second `TIMEOUT`. It runs `ctest` against it and asserts that the timeout diagnostic failed the probe. The hung probe is never registered in the top-level suite, so an ordinary `ctest` run never blocks on it. This proof is toolchain-agnostic and runs on both MinGW and MSVC. A companion `CTestTimeoutControlNegative` (`WILL_FAIL`) drives the verifier against a fast-failing probe under a scratch path that itself contains the word "timeout". It passes only when the verifier rejects a non-timeout failure, which pins the `***Timeout` -token match against a regression to a bare-word match.
