@@ -7,8 +7,10 @@
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 
 #include <safetyhook/inline_hook.hpp>
+#include <safetyhook/os.hpp>
 
 #include <windows.h>
 
@@ -19,8 +21,14 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
+
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_record_probe)(LogLevel, std::string_view) noexcept;
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -423,6 +431,24 @@ namespace
         return true;
     }
 
+    std::uintptr_t s_warning_target{0};
+    int s_retention_warnings{0};
+    bool s_warning_after_release{true};
+
+    /**
+     * @brief Observes the ledger state when the retained-route warning reaches the logger.
+     */
+    void observe_retention_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
+    {
+        if (level == DetourModKit::LogLevel::Warning &&
+            message.find("retained its published route chain") != std::string_view::npos)
+        {
+            ++s_retention_warnings;
+            s_warning_after_release = !DetourModKit::hook::is_target_hooked(DetourModKit::Address{s_warning_target}) &&
+                                      s_warning_after_release;
+        }
+    }
+
     /**
      * @brief Installs @p layers published mid hooks on one target, parks a helper at the newest gateway entry, tears
      *        every layer down, and asserts that each layer retained exactly one block.
@@ -482,11 +508,28 @@ namespace
 
         // Newest first, with the helper parked. Every layer must retain: the newest holds the helper, and each older
         // one is still reachable from the retained newer trampoline.
+        const auto previous_probe = DetourModKit::detail::g_logger_record_probe;
+        const auto previous_level = DetourModKit::log().get_log_level();
+        if (layers == 1)
+        {
+            s_warning_target = reinterpret_cast<std::uintptr_t>(TARGETS[target_index]);
+            s_retention_warnings = 0;
+            s_warning_after_release = true;
+            DetourModKit::log().set_log_level(DetourModKit::LogLevel::Warning);
+            DetourModKit::detail::g_logger_record_probe = &observe_retention_warning;
+        }
         stack.clear();
+        DetourModKit::detail::g_logger_record_probe = previous_probe;
+        DetourModKit::log().set_log_level(previous_level);
 
         safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
         helper.join();
 
+        if (layers == 1 && (s_retention_warnings != 1 || !s_warning_after_release))
+        {
+            std::fputs("FAIL: retained-route warning precedes ledger release or is missing\n", stderr);
+            return base_code + 8;
+        }
         const ExecutableWalk after = walk_private_executable();
         const safetyhook::RouteRetentionStats charged_after = safetyhook::route_retention_stats();
         print_walk("after parked teardown", after);
@@ -688,6 +731,171 @@ namespace
         return 0;
     }
 
+    /**
+     * @brief Verifies one-way relocation through the live handler with both map representations.
+     */
+    int run_trap_mapping()
+    {
+        auto *const pages =
+            static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (pages == nullptr)
+        {
+            return 2;
+        }
+        std::uint8_t *const original = pages;
+        std::uint8_t *const trampoline = pages + 4096;
+        constexpr safetyhook::InstructionBoundary boundaries[] = {
+            {0, 0},
+            {2, 6},
+            {4, 8},
+        };
+        bool passed = true;
+        for (const bool mapped : {false, true})
+        {
+            for (const bool enable : {false, true})
+            {
+                const auto check = [&]() -> void
+                {
+                    for (const bool from_original : {false, true})
+                    {
+                        for (const auto &boundary : boundaries)
+                        {
+                            const std::size_t to_offset =
+                                mapped ? boundary.trampoline_offset : boundary.original_offset;
+                            std::uint8_t *const source =
+                                from_original ? original + boundary.original_offset : trampoline + to_offset;
+                            std::uint8_t *const expected =
+                                from_original == enable
+                                    ? (enable ? trampoline + to_offset : original + boundary.original_offset)
+                                    : source;
+                            CONTEXT context{};
+                            context.Rip = reinterpret_cast<DWORD64>(source);
+                            context.Rax = 0x1234;
+                            context.EFlags = 0x246;
+                            passed = safetyhook::dispatch_trap_fault_for_test(&context, source) && passed;
+                            passed = context.Rip == reinterpret_cast<DWORD64>(expected) && context.Rax == 0x1234 &&
+                                     context.EFlags == 0x246 && passed;
+                        }
+                    }
+                };
+                const auto result = safetyhook::trap_threads(
+                    original,
+                    trampoline,
+                    6,
+                    10,
+                    mapped ? std::span<const safetyhook::InstructionBoundary>{boundaries}
+                           : std::span<const safetyhook::InstructionBoundary>{},
+                    check,
+                    enable ? safetyhook::TrapDirection::ORIGINAL_TO_TRAMPOLINE
+                           : safetyhook::TrapDirection::TRAMPOLINE_TO_ORIGINAL
+                );
+                passed = result.has_value() && passed;
+            }
+        }
+        VirtualFree(pages, 0, MEM_RELEASE);
+
+        auto created =
+            safetyhook::InlineHook::create(TARGETS[0], INLINE_DETOURS[0], safetyhook::InlineHook::StartDisabled);
+        if (!created)
+        {
+            return 3;
+        }
+        auto *const target = reinterpret_cast<std::uint8_t *>(TARGETS[0]);
+        auto *const relocated = created->trampoline().data();
+        for (const bool enable : {true, false})
+        {
+            safetyhook::g_trap_transaction_reached.store(false);
+            safetyhook::g_trap_transaction_hold.store(true);
+            bool toggled = false;
+            std::thread worker{
+                [&created, &toggled, enable]() -> void
+                {
+                    try
+                    {
+                        toggled = (enable ? created->enable() : created->disable()).has_value();
+                    }
+                    catch (...)
+                    {
+                        toggled = false;
+                    }
+                }
+            };
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while (!safetyhook::g_trap_transaction_reached.load() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::yield();
+            }
+            const bool reached = safetyhook::g_trap_transaction_reached.load();
+            if (reached)
+            {
+                for (const bool from_original : {false, true})
+                {
+                    std::uint8_t *const source = from_original ? target : relocated;
+                    std::uint8_t *const expected = enable ? relocated : target;
+                    CONTEXT context{};
+                    context.Rip = reinterpret_cast<DWORD64>(source);
+                    passed = safetyhook::dispatch_trap_fault_for_test(&context, source) && passed;
+                    passed = context.Rip == reinterpret_cast<DWORD64>(expected) && passed;
+                }
+            }
+            safetyhook::g_trap_transaction_hold.store(false);
+            worker.join();
+            passed = reached && toggled && passed;
+        }
+        std::puts(
+            passed ? "PASS: each trap fault preserves the patch direction and maps once"
+                   : "FAIL: a trap fault reverses or violates the patch direction"
+        );
+        return passed ? 0 : 4;
+    }
+
+    /**
+     * @brief Verifies that a destroy lock failure retains route storage and charges it once.
+     */
+    int run_destroy_lock_failure()
+    {
+        for (const bool published : {false, true})
+        {
+            auto created = safetyhook::InlineHook::create(
+                TARGETS[0],
+                INLINE_DETOURS[0],
+                static_cast<safetyhook::InlineHook::Flags>(
+                    safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+                )
+            );
+            if (!created || (published && !created->enable()))
+            {
+                return 2;
+            }
+            const auto before = safetyhook::route_retention_stats();
+            const auto *const gateway = created->route_region_for_test(0);
+            const auto *const trampoline = created->trampoline().data();
+            safetyhook::g_destroy_lock_failure_target.store(reinterpret_cast<std::uint8_t *>(TARGETS[0]));
+            created->reset();
+            const auto after = safetyhook::route_retention_stats();
+            MEMORY_BASIC_INFORMATION gateway_info{};
+            MEMORY_BASIC_INFORMATION trampoline_info{};
+            if (!created->route_retained() || safetyhook::g_destroy_lock_failure_target.load() != nullptr ||
+                VirtualQuery(gateway, &gateway_info, sizeof(gateway_info)) != sizeof(gateway_info) ||
+                gateway_info.State != MEM_COMMIT ||
+                VirtualQuery(trampoline, &trampoline_info, sizeof(trampoline_info)) != sizeof(trampoline_info) ||
+                trampoline_info.State != MEM_COMMIT || after.committed_charged == 0 ||
+                (published && after.committed_charged != before.committed_charged) ||
+                (!published && after.committed_charged <= before.committed_charged))
+            {
+                std::fputs("FAIL: destroy lock failure lost route storage or its charge\n", stderr);
+                return 3;
+            }
+            created->reset();
+            if (safetyhook::route_retention_stats().committed_charged != after.committed_charged)
+            {
+                return 4;
+            }
+        }
+        std::puts("PASS: destroy lock failure retains published and unpublished routes without a duplicate charge");
+        return 0;
+    }
+
     /// Runs the three call-site teardowns on one generated target.
     int run_call_site_scenario(int base_code)
     {
@@ -717,8 +925,25 @@ namespace
     }
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+    if (argc == 2)
+    {
+        const std::string_view scenario{argv[1]};
+        if (scenario == "trap-mapping")
+        {
+            return run_trap_mapping();
+        }
+        if (scenario == "destroy-lock-failure")
+        {
+            return run_destroy_lock_failure();
+        }
+        return 2;
+    }
+    if (argc != 1)
+    {
+        return 2;
+    }
     SYSTEM_INFO system_info{};
     GetSystemInfo(&system_info);
     if (system_info.dwAllocationGranularity != BLOCK_BYTES)

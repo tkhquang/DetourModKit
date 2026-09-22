@@ -1380,6 +1380,16 @@ namespace DetourModKit
             if (route_retained)
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+            }
+            // The drain completed, or this was never a mid hook. No thread is inside the adapter, so slot contents can
+            // be reused.
+            if (has_mid_slot)
+            {
+                DetourModKit::detail::release_mid_adapter_slot(mid_slot);
+            }
+            (void)ledger.release_hook(target, ledger_id);
+            if (route_retained)
+            {
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook: mid hook '{}' at 0x{:0{}X} retained its published route chain at teardown. The backend "
@@ -1390,13 +1400,6 @@ namespace DetourModKit
                     sizeof(std::uintptr_t) * 2
                 );
             }
-            // The drain completed, or this was never a mid hook. No thread is inside the adapter, so slot contents can
-            // be reused.
-            if (has_mid_slot)
-            {
-                DetourModKit::detail::release_mid_adapter_slot(mid_slot);
-            }
-            (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             emit_lifecycle(
                 name,

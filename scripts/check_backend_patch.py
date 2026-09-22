@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "d2a4f1a9373c7aaa073a0eaf45d97993176cd16b9fb67c6826bcae10823855a3"
+EXPECTED_PATCH_SHA256 = "74c8320de8c2a7a77ab4d24ecadf788e0fd5087b11ec0ca9e3ab7fc8dba24896"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.

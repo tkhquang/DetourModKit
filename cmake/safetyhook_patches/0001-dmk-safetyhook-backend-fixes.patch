@@ -104,7 +104,7 @@ index c05d06f..47dab1f 100644
      static void combine_adjacent_freenodes(Memory& memory);
      [[nodiscard]] static std::expected<uint8_t*, Error> allocate_nearby_memory(
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..99aab93 100644
+index 58801fa..47acc8f 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
 @@ -16,9 +16,90 @@ import std.compat;
@@ -355,7 +355,7 @@ index 58801fa..99aab93 100644
      enum class Type {
          Unset,
          E9,
-@@ -358,20 +529,61 @@ private:
+@@ -358,20 +529,63 @@ private:
      uint8_t* m_target{};
      uint8_t* m_destination{};
      Allocation m_trampoline{};
@@ -410,6 +410,8 @@ index 58801fa..99aab93 100644
  };
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++/// @brief Makes the matching destroy lock acquisition report resource exhaustion once.
++extern std::atomic<uint8_t*> SAFETYHOOK_API g_destroy_lock_failure_target;
 +/// @brief Forces the next E9 setup to fall through to the FF setup path.
 +void SAFETYHOOK_API force_ff_hook_for_test(bool force) noexcept;
 +/// @brief Returns the boundary count from the latest E9 setup on the current thread.
@@ -505,7 +507,7 @@ index 68e44fd..4551165 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..d999d5c 100644
+index 8cb1fbe..1d3fef4 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -2,9 +2,14 @@
@@ -539,7 +541,7 @@ index 8cb1fbe..d999d5c 100644
  
  struct SystemInfo {
      uint32_t page_size;
-@@ -65,9 +72,140 @@ struct SystemInfo {
+@@ -65,9 +72,151 @@ struct SystemInfo {
  
  SystemInfo SAFETYHOOK_API system_info();
  
@@ -609,10 +611,17 @@ index 8cb1fbe..d999d5c 100644
 +    size_t trampoline_offset;
 +};
 +
++/// @brief The sole permitted instruction-pointer transfer during a patch transaction.
++enum class TrapDirection : uint8_t {
++    ORIGINAL_TO_TRAMPOLINE,
++    TRAMPOLINE_TO_ORIGINAL,
++};
++
 +std::expected<void, OsError> SAFETYHOOK_API trap_threads(
 +    uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
 +std::expected<void, OsError> SAFETYHOOK_API trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
-+    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn);
++    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn,
++    TrapDirection direction = TrapDirection::ORIGINAL_TO_TRAMPOLINE);
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +/// @brief Transaction point at which the exception seam throws after setup has succeeded.
@@ -632,6 +641,10 @@ index 8cb1fbe..d999d5c 100644
 +extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_exception_target_override;
 +/// @brief Test-only transaction stage paired with g_trap_exception_target_override.
 +extern std::atomic<TrapExceptionStage> SAFETYHOOK_API g_trap_exception_stage_override;
++
++/// @brief Dispatches one synthetic execute fault through the live trap handler.
++[[nodiscard]] bool SAFETYHOOK_API dispatch_trap_fault_for_test(
++    ThreadContext context, uint8_t* faulting_address) noexcept;
 +
 +/// @brief Test-only transaction park immediately before the first protection change.
 +extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_hold;
@@ -922,10 +935,10 @@ index 268ce9b..1a1b82f 100644
 +Allocator::~Allocator() = default;
 +} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..e25baa7 100644
+index a5b3700..13a98fe 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
-@@ -1,4 +1,11 @@
+@@ -1,5 +1,13 @@
 +#include <algorithm>
 +#include <array>
 +#include <atomic>
@@ -935,12 +948,18 @@ index a5b3700..e25baa7 100644
 +#include <mutex>
 +#include <new>
  #include <optional>
++#include <system_error>
  
  #if __has_include("Zydis/Zydis.h")
-@@ -18,6 +25,322 @@
+ #include "Zydis/Zydis.h"
+@@ -18,6 +26,326 @@
  
  namespace safetyhook {
  
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++std::atomic<uint8_t*> g_destroy_lock_failure_target{nullptr};
++#endif
++
 +namespace {
 +constexpr uint32_t ROUTE_LIVE = 0;
 +constexpr uint32_t ROUTE_CLOSING = 1;
@@ -1260,7 +1279,7 @@ index a5b3700..e25baa7 100644
  #pragma pack(push, 1)
  struct JmpE9 {
      uint8_t opcode{0xE9};
-@@ -159,8 +482,27 @@ std::expected<InlineHook, InlineHook::Error> InlineHook::create(
+@@ -159,8 +487,27 @@ std::expected<InlineHook, InlineHook::Error> InlineHook::create(
      const std::shared_ptr<Allocator>& allocator, void* target, void* destination, Flags flags) {
      InlineHook hook{};
  
@@ -1290,7 +1309,7 @@ index a5b3700..e25baa7 100644
          !setup_result) {
          return std::unexpected{setup_result.error()};
      }
-@@ -187,15 +529,36 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+@@ -187,15 +534,36 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
          m_target = other.m_target;
          m_destination = other.m_destination;
          m_trampoline = std::move(other.m_trampoline);
@@ -1327,7 +1346,7 @@ index a5b3700..e25baa7 100644
          other.m_type = Type::Unset;
      }
  
-@@ -206,16 +569,19 @@ InlineHook::~InlineHook() {
+@@ -206,16 +574,19 @@ InlineHook::~InlineHook() {
      destroy();
  }
  
@@ -1350,7 +1369,7 @@ index a5b3700..e25baa7 100644
  #if SAFETYHOOK_ARCH_X86_64
          if (auto ff_result = ff_hook(allocator); !ff_result) {
              return ff_result;
-@@ -225,12 +591,285 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+@@ -225,12 +596,285 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  #endif
      }
  
@@ -1360,9 +1379,9 @@ index a5b3700..e25baa7 100644
 +        }
 +    }
 +
-     return {};
- }
- 
++    return {};
++}
++
 +std::expected<void, InlineHook::Error> InlineHook::setup_route(
 +    const std::shared_ptr<Allocator>& allocator, RouteRetentionCredit* credit) {
 +#if SAFETYHOOK_ARCH_X86_64
@@ -1612,14 +1631,14 @@ index a5b3700..e25baa7 100644
 +    }
 +    m_route_unwind_table = table->functions;
 +
-+    return {};
+     return {};
 +#else
 +    (void)allocator;
 +    (void)credit;
 +    return std::unexpected{Error::not_enough_space(m_target)};
 +#endif
-+}
-+
+ }
+ 
  std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr<Allocator>& allocator) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_force_ff_hook.exchange(false, std::memory_order_acq_rel)) {
@@ -1636,7 +1655,7 @@ index a5b3700..e25baa7 100644
  
      std::vector<uint8_t*> desired_addresses{m_target};
      ZydisDecodedInstruction ix{};
-@@ -240,7 +879,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -240,7 +884,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              return std::unexpected{Error::failed_to_decode_instruction(ip)};
          }
  
@@ -1646,7 +1665,7 @@ index a5b3700..e25baa7 100644
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
  
          const auto is_relative = (ix.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0;
-@@ -255,16 +895,37 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -255,16 +900,37 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
                  const auto target_address = ip + ix.length + static_cast<int32_t>(ix.raw.imm[0].value.s);
                  desired_addresses.emplace_back(target_address);
@@ -1669,7 +1688,7 @@ index a5b3700..e25baa7 100644
 +                static_cast<uint8_t>(m_relocated_size + relocated_length);
 +        }
 +        m_relocated_size += relocated_length;
-+    }
+     }
 +    m_trampoline_size += m_relocated_size;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -1680,13 +1699,13 @@ index a5b3700..e25baa7 100644
 +            m_instruction_boundaries[i].original_offset, std::memory_order_relaxed);
 +        g_instruction_boundary_trampoline_offsets[i].store(
 +            m_instruction_boundaries[i].trampoline_offset, std::memory_order_relaxed);
-     }
++    }
 +    g_instruction_boundary_trace_size.store(boundary_count, std::memory_order_release);
 +#endif
  
      auto trampoline_allocation = allocator->allocate_near(desired_addresses, m_trampoline_size);
  
-@@ -273,6 +934,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -273,6 +939,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
      }
  
      m_trampoline = std::move(*trampoline_allocation);
@@ -1701,7 +1720,7 @@ index a5b3700..e25baa7 100644
  
      for (auto ip = m_target, tramp_ip = m_trampoline.data(); ip < m_target + m_original_bytes.size(); ip += ix.length) {
          if (!decode(&ix, ip)) {
-@@ -299,7 +968,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -299,7 +973,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
          } else if (is_relative && ix.raw.imm[0].size == 32) {
              std::copy_n(ip, ix.length, tramp_ip);
              const auto target_address = ip + ix.length + ix.raw.imm[0].value.s;
@@ -1717,7 +1736,7 @@ index a5b3700..e25baa7 100644
              store(tramp_ip + ix.raw.imm[0].offset, static_cast<int32_t>(new_disp));
              tramp_ip += ix.length;
          } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
-@@ -308,7 +984,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -308,7 +989,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1730,7 +1749,7 @@ index a5b3700..e25baa7 100644
              }
  
              *tramp_ip = 0x0F;
-@@ -321,7 +1001,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -321,7 +1006,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1743,7 +1762,7 @@ index a5b3700..e25baa7 100644
              }
  
              *tramp_ip = 0xE9;
-@@ -360,7 +1044,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -360,7 +1049,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
      }
  #endif
  
@@ -1758,7 +1777,7 @@ index a5b3700..e25baa7 100644
  
      return {};
  }
-@@ -368,7 +1059,12 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,7 +1064,12 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
@@ -1771,7 +1790,7 @@ index a5b3700..e25baa7 100644
      ZydisDecodedInstruction ix{};
  
      for (auto ip = m_target; ip < m_target + sizeof(JmpFF) + sizeof(uintptr_t); ip += ix.length) {
-@@ -384,6 +1080,15 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -384,6 +1085,15 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          }
  
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
@@ -1787,7 +1806,7 @@ index a5b3700..e25baa7 100644
          m_trampoline_size += ix.length;
      }
  
-@@ -394,6 +1099,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -394,6 +1104,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
      }
  
      m_trampoline = std::move(*trampoline_allocation);
@@ -1795,7 +1814,7 @@ index a5b3700..e25baa7 100644
  
      std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_trampoline.data());
  
-@@ -409,7 +1115,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -409,7 +1120,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          return std::unexpected{result.error()};
      }
  
@@ -1808,7 +1827,7 @@ index a5b3700..e25baa7 100644
  
      return {};
  }
-@@ -422,37 +1133,94 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -422,37 +1138,94 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
          return {};
      }
  
@@ -1924,7 +1943,7 @@ index a5b3700..e25baa7 100644
      return {};
  }
  
-@@ -463,23 +1231,313 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -463,23 +1236,339 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
          return {};
      }
  
@@ -1936,8 +1955,9 @@ index a5b3700..e25baa7 100644
 +    std::optional<Error> error;
 +    std::expected<void, OsError> trap_result;
 +    try {
-+        trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size,
-+            m_instruction_boundaries, [this, &error] {
++        trap_result = trap_threads(
++            m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size, m_instruction_boundaries,
++            [this, &error] {
 +                std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target);
 +                // Symmetric with enable(): the restored bytes are the transition, even if trap cleanup later fails or
 +                // throws.
@@ -1946,7 +1966,8 @@ index a5b3700..e25baa7 100644
 +                if (!vm_flush_instruction_cache(m_target, m_original_bytes.size())) {
 +                    error = Error::failed_to_flush_instruction_cache(m_target);
 +                }
-+            });
++            },
++            TrapDirection::TRAMPOLINE_TO_ORIGINAL);
 +    } catch (...) {
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +        throw;
@@ -2027,13 +2048,13 @@ index a5b3700..e25baa7 100644
 +InstructionBoundary instruction_boundary_trace_for_test(size_t index) noexcept {
 +    if (index >= g_instruction_boundary_trace_size.load(std::memory_order_acquire)) {
 +        return {};
-     }
++    }
 +    return {
 +        .original_offset = g_instruction_boundary_original_offsets[index].load(std::memory_order_relaxed),
 +        .trampoline_offset = g_instruction_boundary_trampoline_offsets[index].load(std::memory_order_relaxed),
 +    };
 +}
- 
++
 +uint8_t last_inline_hook_error_type_for_test() noexcept {
 +    return g_last_inline_hook_error_type.load(std::memory_order_relaxed);
 +}
@@ -2071,7 +2092,7 @@ index a5b3700..e25baa7 100644
 +        m_route_retention.logical + allocation.size(), m_route_retention.committed + allocation.backing_size()};
 +    if (combined.logical > m_route_reservation.logical || combined.committed > m_route_reservation.committed) {
 +        return false;
-+    }
+     }
 +    m_route_retention = combined;
 +    return true;
 +}
@@ -2092,7 +2113,7 @@ index a5b3700..e25baa7 100644
 +        return nullptr;
 +    }
 +}
-+
+ 
 +void* InlineHook::route_unwind_table_for_test() const noexcept {
 +    return m_route_unwind_table;
 +}
@@ -2186,7 +2207,31 @@ index a5b3700..e25baa7 100644
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +    }
 +
-+    std::scoped_lock lock{m_mutex};
++    std::unique_lock lock{m_mutex, std::defer_lock};
++    try {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        auto* expected = m_target;
++        if (expected != nullptr && g_destroy_lock_failure_target.compare_exchange_strong(expected, nullptr)) {
++            throw std::system_error{std::make_error_code(std::errc::resource_unavailable_try_again)};
++        }
++#endif
++        lock.lock();
++    } catch (...) {
++        if (m_route_control != nullptr) {
++            if (!m_route_retention_charged) {
++                charge_route_chain(m_route_retention, m_route_reservation);
++                m_route_reservation = {};
++                m_route_retention_charged = true;
++            }
++            register_retained_route();
++            m_trampoline.abandon();
++            m_route_gateway.abandon();
++            m_route_retained = true;
++            m_route_unwind_table = nullptr;
++            m_route_control = nullptr;
++        }
++        return;
++    }
 +    m_route_retained = false;
 +
 +    if (m_route_control != nullptr) {
@@ -2425,7 +2470,7 @@ index 339bef8..da42263 100644
 +}
  } // namespace safetyhook
 diff --git a/src/os.linux.cpp b/src/os.linux.cpp
-index d3f37f0..cafe95f 100644
+index d3f37f0..2215832 100644
 --- a/src/os.linux.cpp
 +++ b/src/os.linux.cpp
 @@ -2,8 +2,11 @@
@@ -2445,6 +2490,12 @@ index d3f37f0..cafe95f 100644
  }
  
 -void trap_threads([[maybe_unused]] uint8_t* from, [[maybe_unused]] uint8_t* to, [[maybe_unused]] size_t len,
+-    const std::function<void()>& run_fn) {
+-    auto from_protect = vm_protect(from, len, VM_ACCESS_RWX).value_or(0);
+-    auto to_protect = vm_protect(to, len, VM_ACCESS_RWX).value_or(0);
+-    run_fn();
+-    vm_protect(to, len, to_protect);
+-    vm_protect(from, len, from_protect);
 +bool vm_flush_instruction_cache(uint8_t* address, size_t size) noexcept {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    size_t failure_call = g_instruction_cache_flush_failure_call.load(std::memory_order_acquire);
@@ -2513,12 +2564,7 @@ index d3f37f0..cafe95f 100644
 +
 +std::expected<void, OsError> trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
 +    size_t trampoline_size, [[maybe_unused]] std::span<const InstructionBoundary> boundaries,
-     const std::function<void()>& run_fn) {
--    auto from_protect = vm_protect(from, len, VM_ACCESS_RWX).value_or(0);
--    auto to_protect = vm_protect(to, len, VM_ACCESS_RWX).value_or(0);
--    run_fn();
--    vm_protect(to, len, to_protect);
--    vm_protect(from, len, from_protect);
++    const std::function<void()>& run_fn, [[maybe_unused]] TrapDirection direction) {
 +    const auto from_protect = vm_protect(original, original_size, VM_ACCESS_RWX);
 +    if (!from_protect) {
 +        return std::unexpected{from_protect.error()};
@@ -2581,7 +2627,7 @@ index d3f37f0..cafe95f 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..91462bd 100644
+index 64eb0bb..da0a193 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,12 @@
@@ -2613,7 +2659,7 @@ index 64eb0bb..91462bd 100644
  
  #include "safetyhook/os.hpp"
  
-@@ -157,33 +163,200 @@ SystemInfo system_info() {
+@@ -157,33 +163,201 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -2715,6 +2761,7 @@ index 64eb0bb..91462bd 100644
 +    size_t original_size;
 +    size_t trampoline_size;
 +    std::span<const InstructionBoundary> boundaries;
++    TrapDirection direction;
  };
  
 -class TrapManager final {
@@ -2828,13 +2875,13 @@ index 64eb0bb..91462bd 100644
          });
  
          if (search == m_traps.end()) {
-@@ -213,115 +386,767 @@ public:
+@@ -213,115 +387,793 @@ public:
          return nullptr;
      }
  
 -    void add_trap(uint8_t* from, uint8_t* to, size_t len) {
 +    void add_trap(uint8_t* original, uint8_t* trampoline, size_t original_size, size_t trampoline_size,
-+        std::span<const InstructionBoundary> boundaries) {
++        std::span<const InstructionBoundary> boundaries, TrapDirection direction) {
          TrapInfo info{};
 -        info.from_page_start = align_down(from, 0x1000);
 -        info.from_page_end = align_up(from + len, 0x1000);
@@ -2854,6 +2901,7 @@ index 64eb0bb..91462bd 100644
 +        info.original_size = original_size;
 +        info.trampoline_size = trampoline_size;
 +        info.boundaries = boundaries;
++        info.direction = direction;
 +
 +        m_traps.insert_or_assign(original, std::move(info));
      }
@@ -2904,19 +2952,33 @@ index 64eb0bb..91462bd 100644
          }
  
          auto* ctx = exp->ContextRecord;
++        const bool from_original =
++            faulting_address >= trap->original && faulting_address < trap->original + trap->original_size;
++        // Enable moves only toward the trampoline. Disable moves only toward the restored target.
++        if (from_original != (trap->direction == TrapDirection::ORIGINAL_TO_TRAMPOLINE)) {
++            return EXCEPTION_CONTINUE_EXECUTION;
++        }
  
 -        for (size_t i = 0; i < trap->len; i++) {
 -            fix_ip(ctx, trap->from + i, trap->to + i);
 +        if (trap->boundaries.empty()) {
 +            const size_t shared_size = std::min(trap->original_size, trap->trampoline_size);
 +            for (size_t i = 0; i < shared_size; ++i) {
-+                fix_ip(ctx, trap->original + i, trap->trampoline + i);
-+                fix_ip(ctx, trap->trampoline + i, trap->original + i);
++                if (from_original) {
++                    fix_ip(ctx, trap->original + i, trap->trampoline + i);
++                } else {
++                    fix_ip(ctx, trap->trampoline + i, trap->original + i);
++                }
 +            }
 +        } else {
 +            for (const InstructionBoundary& boundary : trap->boundaries) {
-+                fix_ip(ctx, trap->original + boundary.original_offset, trap->trampoline + boundary.trampoline_offset);
-+                fix_ip(ctx, trap->trampoline + boundary.trampoline_offset, trap->original + boundary.original_offset);
++                if (from_original) {
++                    fix_ip(
++                        ctx, trap->original + boundary.original_offset, trap->trampoline + boundary.trampoline_offset);
++                } else {
++                    fix_ip(
++                        ctx, trap->trampoline + boundary.trampoline_offset, trap->original + boundary.original_offset);
++                }
 +            }
          }
  
@@ -2953,11 +3015,8 @@ index 64eb0bb..91462bd 100644
 +        }
 +        return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;
 +    }
- };
- 
--std::mutex TrapManager::mutex;
--std::unique_ptr<TrapManager> TrapManager::instance;
--bool TrapManager::is_destructed = false;
++};
++
 +[[nodiscard]] static bool initialize_trap_gateway(TrapRuntime& runtime) noexcept {
 +    if (runtime.vectored_handle != nullptr) {
 +        return true;
@@ -3211,8 +3270,11 @@ index 64eb0bb..91462bd 100644
 +private:
 +    std::array<HANDLE, MAX_SCANNED_THREADS> m_handles{};
 +    size_t m_count{0};
-+};
-+
+ };
+ 
+-std::mutex TrapManager::mutex;
+-std::unique_ptr<TrapManager> TrapManager::instance;
+-bool TrapManager::is_destructed = false;
 +// Opens every other thread of this process from one snapshot. A thread that exited after the snapshot was taken cannot
 +// be inside any code range, so it is skipped. Every other failure leaves the set incomplete.
 +[[nodiscard]] bool open_other_threads(HANDLE snapshot, ThreadHandleSet& handles) noexcept {
@@ -3389,6 +3451,16 @@ index 64eb0bb..91462bd 100644
 +    return g_trap_restore_trace[index].load(std::memory_order_relaxed);
 +}
 +
++bool dispatch_trap_fault_for_test(ThreadContext context, uint8_t* faulting_address) noexcept {
++    EXCEPTION_RECORD record{};
++    record.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
++    record.NumberParameters = 2;
++    record.ExceptionInformation[0] = 8;
++    record.ExceptionInformation[1] = reinterpret_cast<ULONG_PTR>(faulting_address);
++    EXCEPTION_POINTERS exception{&record, static_cast<CONTEXT*>(context)};
++    return TrapManager::trap_handler(&exception) == EXCEPTION_CONTINUE_EXECUTION;
++}
++
 +void retire_trap_runtime_for_test() noexcept {
 +    shut_down_trap_runtime(trap_runtime());
 +}
@@ -3404,7 +3476,8 @@ index 64eb0bb..91462bd 100644
 +}
 +
 +std::expected<void, OsError> trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
-+    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn) {
++    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn,
++    TrapDirection direction) {
      MEMORY_BASIC_INFORMATION find_me_mbi{};
      MEMORY_BASIC_INFORMATION from_mbi{};
      MEMORY_BASIC_INFORMATION to_mbi{};
@@ -3453,19 +3526,12 @@ index 64eb0bb..91462bd 100644
 +            new_protect = PAGE_EXECUTE_READWRITE;
 +            break;
 +        }
-     }
- 
--    auto si = system_info();
--    auto* from_page_start = align_down(from, si.page_size);
--    auto* from_page_end = align_up(from + len, si.page_size);
--    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
--    auto* vp_end = vp_start + 0x20;
++    }
++
 +    if (new_protect == PAGE_EXECUTE_READWRITE && original_size > 1) {
 +        return std::unexpected{OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE};
 +    }
- 
--    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
--        new_protect = PAGE_EXECUTE_READWRITE;
++
 +    // The transaction state and both SRW locks live in a never-destroyed cell. Shutdown takes this same lock, so a
 +    // transaction either completes under the registered stable gateway or loses the race and refuses here, before the
 +    // first protection change. No late static caller can touch a destructed C++ mutex.
@@ -3476,10 +3542,8 @@ index 64eb0bb..91462bd 100644
 +    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
 +    if (runtime->transactions_closed) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-     }
- 
--    if (!TrapManager::is_destructed) {
--        std::scoped_lock lock{TrapManager::mutex};
++    }
++
 +    {
 +        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
 +        if (!initialize_trap_gateway(*runtime)) {
@@ -3491,19 +3555,16 @@ index 64eb0bb..91462bd 100644
 +                return std::unexpected{OsError::FAILED_TO_PROTECT};
 +            }
 +        }
-+        runtime->manager->add_trap(original, trampoline, original_size, trampoline_size, boundaries);
++        runtime->manager->add_trap(original, trampoline, original_size, trampoline_size, boundaries, direction);
 +    }
- 
--        if (TrapManager::instance == nullptr) {
--            TrapManager::instance = std::make_unique<TrapManager>();
++
 +    const auto remove_trap = [runtime, original] {
 +        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
 +        if (runtime->manager != nullptr) {
 +            runtime->manager->remove_trap(original);
-         }
++        }
 +    };
- 
--        TrapManager::instance->add_trap(from, to, len);
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_trap_transaction_hold.load(std::memory_order_acquire)) {
 +        g_trap_transaction_reached.store(true, std::memory_order_release);
@@ -3521,8 +3582,11 @@ index 64eb0bb..91462bd 100644
 +    };
 +#endif
  
--    // Make sure we aren't working on a different address in the same memory page on a different thread.
--    std::scoped_lock vp_lock{virtual_protect_mutex};
+-    auto si = system_info();
+-    auto* from_page_start = align_down(from, si.page_size);
+-    auto* from_page_end = align_up(from + len, si.page_size);
+-    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
+-    auto* vp_end = vp_start + 0x20;
 +    // VirtualProtect operates on complete pages. The normalized union enters each shared page once.
 +    uint8_t* span0_begin = from_page_start;
 +    uint8_t* span0_end = from_page_end;
@@ -3546,8 +3610,8 @@ index 64eb0bb..91462bd 100644
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
  
--    DWORD from_protect;
--    DWORD to_protect;
+-    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
+-        new_protect = PAGE_EXECUTE_READWRITE;
 +    const auto restore = [&protect](ProtectSegment& segment) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        const size_t trace_index = g_trap_restore_trace_size.load(std::memory_order_relaxed);
@@ -3588,8 +3652,10 @@ index 64eb0bb..91462bd 100644
 +        }
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-+    }
-+
+     }
+ 
+-    if (!TrapManager::is_destructed) {
+-        std::scoped_lock lock{TrapManager::mutex};
 +    std::exception_ptr run_error;
 +    try {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -3600,13 +3666,14 @@ index 64eb0bb..91462bd 100644
 +            }
 +        }
 +#endif
-+
+ 
+-        if (TrapManager::instance == nullptr) {
+-            TrapManager::instance = std::make_unique<TrapManager>();
 +        if (run_fn) {
 +            run_fn();
-+        }
+         }
  
--    VirtualProtect(from, len, new_protect, &from_protect);
--    VirtualProtect(to, len, new_protect, &to_protect);
+-        TrapManager::instance->add_trap(from, to, len);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::AFTER_MUTATION) {
 +            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
@@ -3617,8 +3684,10 @@ index 64eb0bb..91462bd 100644
 +#endif
 +    } catch (...) {
 +        run_error = std::current_exception();
-+    }
-+
+     }
+ 
+-    // Make sure we aren't working on a different address in the same memory page on a different thread.
+-    std::scoped_lock vp_lock{virtual_protect_mutex};
 +    // Restoration runs in reverse and continues after a failure to minimize residual exposure.
 +    bool all_restored = true;
 +    for (size_t i = segment_count; i-- > 0;) {
@@ -3627,11 +3696,15 @@ index 64eb0bb..91462bd 100644
 +        }
 +    }
 +    remove_trap();
-+
+ 
+-    DWORD from_protect;
+-    DWORD to_protect;
 +    if (!all_restored) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
-+
+ 
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    // A reprotection failure that lands after run_fn has already committed its write is the one transaction outcome a
 +    // host cannot provoke on demand, and it is exactly the state a caller's logical enabled flag has to survive. The

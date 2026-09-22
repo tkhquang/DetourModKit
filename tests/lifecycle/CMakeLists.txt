@@ -303,6 +303,18 @@ dmk_add_raw_proof(NAME Lifecycle.PublishedMidRouteReclaimsUnlessParked
   TEST_TIMEOUT 120
   LABELS "lifecycle-proof")
 
+dmk_add_raw_proof(NAME Lifecycle.TrapMappingPreservesTransactionDirection
+  COMMAND $<TARGET_FILE:mid_route_retention> trap-mapping
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.DestroyLockFailureRetainsRoute
+  COMMAND $<TARGET_FILE:mid_route_retention> destroy-lock-failure
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
 # A deadlock needs an isolated process so its timeout cannot wedge the shared unit binary.
 add_executable(input_gate_abba test_input_gate_abba.cpp)
 target_link_libraries(input_gate_abba PRIVATE DetourModKit dmk_coverage psapi)

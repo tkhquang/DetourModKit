@@ -408,6 +408,8 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteAllocatorReclaimsWholeBlock
     Lifecycle.MidRouteAccountingIncludesGeneratedStub
     Lifecycle.PublishedMidRouteReclaimsUnlessParked
+    Lifecycle.TrapMappingPreservesTransactionDirection
+    Lifecycle.DestroyLockFailureRetainsRoute
     Lifecycle.XInputForwardedExOrdinalIsHooked
     Lifecycle.XInputSameModuleExOrdinalIsHooked
     Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage
