@@ -296,30 +296,20 @@ namespace DetourModKit
             Hook &operator=(const Hook &) = delete;
 
             /**
-             * @brief Restores the patched prologue when safe and reclaims a published x64 mid route once no thread
-             *        is inside it.
-             * @details Original bytes authorize backend destruction even after a failed restore. Foreign or
-             *          unreadable bytes do not. When the backend proves the chain idle, backend destruction frees a
-             *          published x64 MID route. Its gateway, inline trampoline, allocator block, and unwind metadata
-             *          go together. A chain that fails that proof stays mapped, and `[B-73]` books it to
-             *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager with a warning. Under the loader
-             *          lock, below a newer layer, or without an Original witness, the whole backend and module
-             *          reference are pinned, the target stays tracked as hooked, and `[B-73]` books the leak to the
-             *          same subsystem.
+             * @brief Restores the target when safe and reclaims an idle x64 mid route.
+             * @details Original bytes authorize destruction. Foreign or unreadable bytes retain the backend.
+             *          An idle route releases its executable storage, unwind records, and capacity charge together.
+             *          An unresolved continuation or nonlocal exit retains the backend, adapter, and module references.
+             *          The loader lock, a newer layer, or an unproved restore also retain the backend.
+             *          A retained patch keeps the target tracked as hooked.
+             *          `[B-73]` attributes each retention to HookManager with a warning.
              *
-             *          A MID hook also runs its callback down (`[B-85]`). The tombstone flips first, so a pinned hook
-             *          goes inert instead of a call into a destroyed owner. No new callback begins after this returns.
-             *          An authorized off-loader-lock caller waits for admitted callbacks, and the restore path also
-             *          waits for every adapter body to leave before the stub is freed. A teardown that cannot prove
-             *          that no thread is inside the callback pins without a wait. The unprovable cases are the loader
-             *          lock, a published unload phase, destruction from inside the callback, and an unrecordable
-             *          entrant. A pin alone is therefore not evidence of misuse. See @ref mid_at for the adapter
-             *          contract.
-             * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
-             * @note This runs from DLL_PROCESS_DETACH / loader-lock teardown, where an escaping exception terminates
-             *       the host, so every path inside fails closed rather than propagating.
-             * @note Setup/control-plane only: teardown mutates the target and can wait for in-flight mid-hook
-             *       callbacks.
+             *          A MID hook tombstones its callback before `[B-85]` rundown.
+             *          No new callback begins after destruction returns.
+             *          The loader lock, a published unload phase, self-destruction, or an unrecorded entrant prevents a wait.
+             *          Other mid teardown waits for admitted callbacks and adapter bodies. See @ref mid_at.
+             * @warning INLINE hook quiescence is caller-owned. See @ref inline_at.
+             * @note Setup/control-plane only: teardown mutates the target and can wait for callbacks and continuations.
              */
             ~Hook() noexcept;
 
@@ -728,28 +718,20 @@ namespace DetourModKit
          * @param detour The DMK-typed mid-hook detour (keeps its MidHookFn type; no raw cast at the call site).
          * @return The RAII @ref Hook on success, with the target unpatched, or an Error.
          *         `ErrorCode::MidHookCapacityExhausted` means every mid-hook adapter is in use and nothing was patched.
-         * @details See @ref inline_at for the two-step install transaction; it applies identically here.
-         *
-         *          Unlike @ref inline_at, DMK reaches a mid-hook callback through its own adapter, so DMK owns
-         *          exception containment and ordinary off-loader-lock rundown. Tombstoning is unconditional: no
-         *          callback begins after ~Hook returns. A wait is not unconditional. Off the loader lock and outside
-         *          the callback, destruction also waits out every admitted callback. An entrant that the adapter
-         *          could not record cannot be ruled out as the destroying thread, so that case pins instead.
-         * @note A mid hook holds one adapter from a fixed pool for its lifetime. A clean teardown returns the
-         *       adapter. A teardown that pins the backend instead (see @ref Hook::~Hook), and a hook retained by
-         *       @ref Hook::release, keep theirs for the process lifetime, because the stub stays reachable. Loader-
-         *       lock teardown and destruction from inside the callback both pin by design, so a host that does
-         *       either at scale spends pool capacity permanently.
-         * @note On x64, first publication commits a routed gateway and inline trampoline. The backend reserves their
-         *       bounded logical and allocator-block capacity before the hook can publish and refunds it when clean
-         *       destruction reclaims the chain. A chain that the backend cannot prove idle at teardown (a thread
-         *       inside it or still returning into it) stays mapped and is booked as a HookManager leak (see
-         *       @ref Hook::~Hook).
-         * @note After ordinary off-loader-lock destruction returns, a pinned backend that remains patched is inert:
-         *       its live recheck refuses later callbacks, and @ref is_target_hooked stays true for the patched target.
-         * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but
-         *          does not wait, so the callback provider must remain mapped until the admitted callback returns.
-         *          @ref Hook::release bypasses tombstoning and keeps dispatching for the process lifetime.
+         * @details See @ref inline_at for the two-step install transaction.
+         *          DMK owns callback exception containment and ordinary off-loader-lock rundown.
+         *          The callback tombstone and wait rules reside in @ref Hook::~Hook.
+         * @note Each hook holds one adapter from a fixed pool. Clean teardown returns it.
+         *       A retained backend keeps its adapter and capacity charge for the process lifetime.
+         *       Displaced instructions and their callees hold route ownership until an ordinary exit completes.
+         *       Dormant fibers and unresolved exception continuations therefore retain their routes during teardown.
+         *       Exception unwind or a nonlocal exit can abandon ownership and cause permanent retention.
+         * @warning Before teardown, quiesce saved contexts outside the counted displaced execution.
+         *          This includes entry and exit gaps, copied contexts, and later reuse of a captured
+         *          instruction pointer.
+         *          If quiescence is unproved, keep the Hook and its code providers alive.
+         * @warning A retained route does not authorize provider unload. Every admitted callback and continuation needs
+         *          its code providers until it exits. @ref Hook::release also keeps callback dispatch active.
          * @note Setup/control-plane only: the install claims an adapter and builds the routed chain.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);

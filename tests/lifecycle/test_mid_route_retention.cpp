@@ -750,46 +750,55 @@ namespace
             {4, 8},
         };
         bool passed = true;
-        for (const bool mapped : {false, true})
+        for (const bool counted : {false, true})
         {
-            for (const bool enable : {false, true})
+            for (const bool mapped : {false, true})
             {
-                const auto check = [&]() -> void
+                for (const bool enable : {false, true})
                 {
-                    for (const bool from_original : {false, true})
+                    std::atomic<std::uint32_t> route_entries{8};
+                    const auto check = [&]() -> void
                     {
-                        for (const auto &boundary : boundaries)
+                        for (const bool from_original : {false, true})
                         {
-                            const std::size_t to_offset =
-                                mapped ? boundary.trampoline_offset : boundary.original_offset;
-                            std::uint8_t *const source =
-                                from_original ? original + boundary.original_offset : trampoline + to_offset;
-                            std::uint8_t *const expected =
-                                from_original == enable
-                                    ? (enable ? trampoline + to_offset : original + boundary.original_offset)
-                                    : source;
-                            CONTEXT context{};
-                            context.Rip = reinterpret_cast<DWORD64>(source);
-                            context.Rax = 0x1234;
-                            context.EFlags = 0x246;
-                            passed = safetyhook::dispatch_trap_fault_for_test(&context, source) && passed;
-                            passed = context.Rip == reinterpret_cast<DWORD64>(expected) && context.Rax == 0x1234 &&
-                                     context.EFlags == 0x246 && passed;
+                            for (const auto &boundary : boundaries)
+                            {
+                                const std::size_t to_offset =
+                                    mapped ? boundary.trampoline_offset : boundary.original_offset;
+                                std::uint8_t *const source =
+                                    from_original ? original + boundary.original_offset : trampoline + to_offset;
+                                std::uint8_t *const expected =
+                                    from_original == enable && (!counted || enable)
+                                        ? (enable ? trampoline + to_offset : original + boundary.original_offset)
+                                        : source;
+                                CONTEXT context{};
+                                context.Rip = reinterpret_cast<DWORD64>(source);
+                                context.Rax = 0x1234;
+                                context.EFlags = 0x246;
+                                const auto entries_before = route_entries.load();
+                                passed = safetyhook::dispatch_trap_fault_for_test(&context, source) && passed;
+                                passed = context.Rip == reinterpret_cast<DWORD64>(expected) && context.Rax == 0x1234 &&
+                                         context.EFlags == 0x246 && passed;
+                                const auto entries_expected =
+                                    counted && source != expected ? entries_before + 1 : entries_before;
+                                passed = route_entries.load() == entries_expected && passed;
+                            }
                         }
-                    }
-                };
-                const auto result = safetyhook::trap_threads(
-                    original,
-                    trampoline,
-                    6,
-                    10,
-                    mapped ? std::span<const safetyhook::InstructionBoundary>{boundaries}
-                           : std::span<const safetyhook::InstructionBoundary>{},
-                    check,
-                    enable ? safetyhook::TrapDirection::ORIGINAL_TO_TRAMPOLINE
-                           : safetyhook::TrapDirection::TRAMPOLINE_TO_ORIGINAL
-                );
-                passed = result.has_value() && passed;
+                    };
+                    const auto result = safetyhook::trap_threads(
+                        original,
+                        trampoline,
+                        6,
+                        10,
+                        mapped ? std::span<const safetyhook::InstructionBoundary>{boundaries}
+                               : std::span<const safetyhook::InstructionBoundary>{},
+                        check,
+                        enable ? safetyhook::TrapDirection::ORIGINAL_TO_TRAMPOLINE
+                               : safetyhook::TrapDirection::TRAMPOLINE_TO_ORIGINAL,
+                        counted ? &route_entries : nullptr
+                    );
+                    passed = result.has_value() && passed;
+                }
             }
         }
         VirtualFree(pages, 0, MEM_RELEASE);

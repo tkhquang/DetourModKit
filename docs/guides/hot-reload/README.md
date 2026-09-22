@@ -273,6 +273,8 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 
 `input::register_combo` is append-only. The engine treats `name` as a label, not a key. That is the most common surprise across reloads. Under staged generations, re-registration from each generation's `Init()` is the supported path. `config::bind_*` replaces the item in place, and the previous generation's `Shutdown()` retired its bindings.
 
+A retained mid continuation keeps its backend and module references. The `mid_at` contract also requires host quiescence for saved contexts outside counted execution. The [hook note](../../design/hooking.md) identifies the permanent proofs.
+
 ## Diagnose a failed reload
 
 | Symptom | Check | Safe response |

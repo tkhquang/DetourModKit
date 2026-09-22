@@ -978,14 +978,22 @@ TEST(HookBackendCacheFlush, GeneratedE9FfRouteAndMidRangesFlushBeforePublication
     DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
     Result<Hook> mid_installed = install_mid_leaf(mid_page, "CacheFlushMid");
     ASSERT_TRUE(mid_installed.has_value()) << mid_installed.error().message();
-    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 3U);
-    for (std::size_t i = 0; i < 3; ++i)
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 5U);
+    for (std::size_t i = 0; i < 5; ++i)
     {
         const auto flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(i);
         EXPECT_NE(flush.address, nullptr);
         EXPECT_GT(flush.size, 0U);
         EXPECT_TRUE(flush.succeeded);
     }
+    EXPECT_EQ(
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(0).address,
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(2).address
+    );
+    EXPECT_EQ(
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(1).address,
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(3).address
+    );
 }
 
 TEST(HookBackendCacheFlush, TargetCommitFlushesBeforeProtectionRestoreInBothDirections)
@@ -1041,7 +1049,9 @@ TEST(HookBackendCacheFlush, GenerationFailureRefusesEveryExecutableRangeBeforePu
     verify_refusal("CacheFlushE9Failure", false, false, 1);
     verify_refusal("CacheFlushFFFailure", false, true, 1);
     verify_refusal("CacheFlushRouteFailure", true, false, 2);
-    verify_refusal("CacheFlushMidFailure", true, false, 3);
+    verify_refusal("CacheFlushContinuationFailure", true, false, 3);
+    verify_refusal("CacheFlushContinuationExitFailure", true, false, 4);
+    verify_refusal("CacheFlushMidFailure", true, false, 5);
 }
 
 TEST(HookBackendCacheFlush, RestoreFailureOutranksACommittedFlushFailure)
@@ -2412,11 +2422,7 @@ TEST(HookBackendVmtClassification, UnreadableHeaderBetweenPrecountAndCaptureAvoi
 
 #endif // DMK_ENABLE_TEST_SEAMS
 
-// A DMK log line renders no backend enum as an integer, and a create failure names the reason the backend kept. The
-// exhausted-window case reserves every free granule the allocator can place near the target. The mid create then
-// fails on placement, and the line must name the window. The interior-jump case pins the text the backend reports
-// for a prologue it cannot relocate. The backend discards that first cause and reports its indirect-jump fallback's
-// content check. A backend change that keeps the first cause therefore flips that assertion deliberately.
+// Exhaustion and unsupported relocation require distinct first-cause diagnostics.
 namespace
 {
     /// The range the backend's near allocation can reach from a target, clamped to the user address space.
@@ -2605,36 +2611,44 @@ namespace
 
 TEST(HookBackendCreate, ExhaustedWindowNamesTheAllocatorRefusal)
 {
-    dmk_test::ScratchPage page;
-    ASSERT_TRUE(page.ok());
-    plant_leaf(page);
-    const std::size_t leaks_before = hook_manager_leaks();
-    const std::size_t regions_before = private_executable_regions();
-
-    dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
-    std::optional<Result<Hook>> installed;
+    for (const bool interior_jump : {false, true})
     {
-        const WindowExhaustion exhausted{page.addr(0)};
-        ASSERT_EQ(free_granules_in_window(allocation_window(page.addr(0))), 0u)
-            << exhausted.count() << " reservations left a free granule in the window";
-        installed.emplace(install_mid_leaf(page, "ExhaustedWindow"));
+        SCOPED_TRACE(interior_jump);
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        if (interior_jump)
+        {
+            plant_interior_jump(page);
+        }
+        const std::size_t leaks_before = hook_manager_leaks();
+        const std::size_t regions_before = private_executable_regions();
+
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        std::optional<Result<Hook>> installed;
+        {
+            const WindowExhaustion exhausted{page.addr(0)};
+            ASSERT_EQ(free_granules_in_window(allocation_window(page.addr(0))), 0u)
+                << exhausted.count() << " reservations left a free granule in the window";
+            installed.emplace(install_mid_leaf(page, "ExhaustedWindow"));
+        }
+        ASSERT_FALSE(installed->has_value()) << "the mid create found room in an exhausted window";
+        EXPECT_EQ(installed->error().code, ErrorCode::BackendFailed);
+        EXPECT_EQ(installed->error().detail, page.addr(0));
+
+        const std::string text = capture.read_all();
+        EXPECT_NE(text.find("hook::mid_at: backend create failed for 'ExhaustedWindow'"), std::string::npos) << text;
+        EXPECT_NE(text.find("bad allocation (no free region within +/-2 GB of the target)"), std::string::npos) << text;
+        EXPECT_EQ(text.find("allocator error"), std::string::npos) << text;
+
+        // The failed create leaves nothing behind: no ledger record, no leak, and no committed arena.
+        EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+        EXPECT_EQ(hook_manager_leaks(), leaks_before);
+        EXPECT_EQ(private_executable_regions(), regions_before);
     }
-    ASSERT_FALSE(installed->has_value()) << "the mid create found room in an exhausted window";
-    EXPECT_EQ(installed->error().code, ErrorCode::BackendFailed);
-    EXPECT_EQ(installed->error().detail, page.addr(0));
-
-    const std::string text = capture.read_all();
-    EXPECT_NE(text.find("hook::mid_at: backend create failed for 'ExhaustedWindow'"), std::string::npos) << text;
-    EXPECT_NE(text.find("bad allocation (no free region within +/-2 GB of the target)"), std::string::npos) << text;
-    EXPECT_EQ(text.find("allocator error"), std::string::npos) << text;
-
-    // The failed create leaves nothing behind: no ledger record, no leak, and no committed arena.
-    EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
-    EXPECT_EQ(hook_manager_leaks(), leaks_before);
-    EXPECT_EQ(private_executable_regions(), regions_before);
 }
 
-TEST(HookBackendCreate, InteriorShortJumpReportsTheFallbackContentCheck)
+TEST(HookBackendCreate, InteriorShortJumpReportsTheFirstContentCheck)
 {
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
@@ -2648,7 +2662,7 @@ TEST(HookBackendCreate, InteriorShortJumpReportsTheFallbackContentCheck)
 
     const std::string text = capture.read_all();
     EXPECT_NE(text.find("hook::mid_at: backend create failed for 'InteriorShortJump'"), std::string::npos) << text;
-    EXPECT_NE(text.find("IP-relative instruction out of range"), std::string::npos) << text;
+    EXPECT_NE(text.find("unsupported instruction in trampoline"), std::string::npos) << text;
     EXPECT_EQ(text.find("no free region"), std::string::npos) << text;
     EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
 }

@@ -33,7 +33,17 @@ VmtHook and teardown:
 - It restores only on a positive byte witness. Otherwise it pins the whole backend and keeps the ledger entry.
 - Clean x64 mid teardown reclaims the published route after the backend proves that it is idle. Public `mid_at` reserves route capacity before publication. An idle chain returns its gateway, trampoline, allocator block, and unwind records, and refunds its charge. A failed proof retains the chain and its charge. `Hook::~Hook` records that retention as a `LeakSubsystem::HookManager` leak with a warning.
 
-  The proof requires a restored target, zero route entries, and a closed route. Each other thread is suspended in turn, and its instruction pointer must be outside the gateway and trampoline. Each suspended thread's committed stack is checked for relocated-call return addresses. The current thread's stack receives the same check. Dormant fiber stacks are outside this proof.
+  The proof requires a restored target, zero route entries, and a closed route. Each other thread is suspended in turn, and its instruction pointer must be outside the gateway and trampoline. Each suspended thread's committed stack is checked for relocated-call return addresses. The current thread's stack receives the same check. The scan excludes dormant fiber stacks. Counted displaced execution covers their route lifetime.
+
+  Mid ownership extends through displaced instructions and callees. Ordinary exits preserve registers and flags. An exit preserves ownership when its top stack slot points into the displaced window or its epilogue. Each generated exit has unwind records for its temporary frame.
+
+  A selected resume inside the displaced window or at its epilogue preserves ownership. An external resume releases it. Enable redirects acquire ownership. Disable leaves counted mid execution in the trampoline until its normal exit. Closed gateways acquire ownership before bypass execution.
+
+  A mid gateway requests 1,920 bytes for its control, exits, and unwind records. The reservation allows 4,096 logical bytes and three allocation granules per complete chain. Idle teardown refunds that reservation and charge. `Lifecycle.MidRouteAccountingIncludesGeneratedStub` verifies the requested bytes and complete capacity charge.
+
+  An exception continuation preserves its entry until normal execution exits. Exception unwind and nonlocal exits can abandon an entry. The bounded drain then retains the whole backend, adapter, and module references with an explicit warning. The saved-context quiescence contract resides in `mid_at`.
+
+  `Lifecycle.MidRouteSurvivesDormantFiber` and `Lifecycle.MidRouteSurvivesExceptionContinuation` verify saved execution after teardown. `Lifecycle.MidRouteUnwindSettlesRouteOwnership` verifies permanent retention after unwind. The other `Lifecycle.MidRoute*` cases verify normal exits, selected resumes, bypass execution, register preservation, unwind records, and idle reclamation.
 
   An earlier retained chain on the same target joins the proof because its trampoline can still feed the current gateway. The scan takes the backend transaction lock before any suspension and runs only off the loader lock. While a thread is suspended, the scan allocates nothing, takes no lock, and never changes an instruction pointer. `Lifecycle.PublishedMidRouteReclaimsUnlessParked` verifies reclamation, retention, and layered teardown.
 - A retained id still counts in newer-layer counting for the process lifetime. The pinned backend is still installed, so a layer underneath it must stay refused. Ids append newest-last, so a layer installed after a pin still tears down normally.
@@ -73,7 +83,9 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - instruction-boundary relocation and trap redirection for widened branches,
 - refusal before multi-byte writes when a required transaction code page must stay executable,
 - a VMT move constructor that propagates allocation failure,
-- reclamation of a published routed chain after an idle proof, with retention recorded for later proofs on the same target.
+- reclamation of a published routed chain after an idle proof, with retention recorded for later proofs on the same target,
+- mid-route ownership through displaced execution, terminal exits, and transaction redirects,
+- preservation of the first E9 failure when the FF fallback fails without an allocation error.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 

@@ -1293,10 +1293,7 @@ namespace DetourModKit
             }
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
 
-            // A successful restore stops new target entries. Reclamation still uses a bounded wait for the backend
-            // route.
-            // Expiry retains the backend exactly as an unprovable adapter rundown does. The short circuit expresses
-            // "no wait was owed": an unproven rundown is handled by the pin branch below and must not be waited on.
+            // An unresolved continuation keeps its route entry after the callback returns.
             const bool route_drained =
                 mid_rundown != DetourModKit::detail::MidRundown::Drained || drain_backend_route(m_impl->backend);
 
@@ -1307,21 +1304,19 @@ namespace DetourModKit
             // module's code and the host holds its own load reference, so this release is never the terminal one.
             if (mid_rundown != DetourModKit::detail::MidRundown::Drained || !route_drained)
             {
-                // An entrant remains counted after its drain and can still return through the stub. Pin the Impl to
-                // keep the stub mapped and leave the slot claimed. This case applies only to mid hooks.
-                // A managed inline hook route count stays zero, so its drain cannot expire.
+                // A nonlocal exit can abandon its entry. Retention keeps the same lifetime as an unresolved entrant.
                 const char *blocked_stage = mid_rundown == DetourModKit::detail::MidRundown::Unwaitable ? "callback"
                                             : mid_rundown == DetourModKit::detail::MidRundown::Expired
                                                 ? "callback past its bounded drain"
-                                                : "backend route after a bounded wait";
+                                                : "unresolved continuation or nonlocal exit";
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread can still be inside its {}. "
-                    "The target was restored, but the backend is pinned so that thread can return through its stub. "
-                    "The callback will not be entered again, and the adapter is not reclaimed.",
+                    "hook: mid hook '{}' at 0x{:0{}X} retained its backend after {}. "
+                    "The target is restored. The adapter and module references remain pinned. "
+                    "No new callback can enter.",
                     name,
                     target,
                     sizeof(std::uintptr_t) * 2,
