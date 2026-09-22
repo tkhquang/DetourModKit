@@ -3606,7 +3606,8 @@ int main(int argc, char **argv)
             "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
             "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
             "route-restore-failure|route-allocator-reclamation|"
-            "mid-route-accounting|xinput-pair-capacity|fresh-primary-loss|"
+            "mid-route-accounting|telemetry-clean|telemetry-primary|telemetry-ex|telemetry-alias|"
+            "telemetry-rollback|telemetry-repeat|xinput-pair-capacity|fresh-primary-loss|"
             "installed-primary-loss|permanent-primary-loss|poller-maintains-pair>\n"
         );
         return 1;

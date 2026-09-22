@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "7ff733a115f615711d27753a02271bc8957f9481e9d95695bb9b350500f46a2c"
+EXPECTED_PATCH_SHA256 = "19263f0c850877bd949a8f2d1c7132f4433c8db6798939b5d2a881b835c0506a"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -125,7 +125,7 @@ PR43_SENTINELS = [
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route
     "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
-    "m_hook.set_mid_route()",  # mid entry stays admitted across the generated stub
+    "return set_mid_route();",  # mid entry stays admitted across the generated stub
     "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
     "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
     "std::atomic<uint64_t> admission",  # high-bit close and low-bit entry count share one ordered cell

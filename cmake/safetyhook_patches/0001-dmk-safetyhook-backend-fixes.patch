@@ -936,7 +936,7 @@ index 268ce9b..1a1b82f 100644
 +Allocator::~Allocator() = default;
 +} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..6fc4c9a 100644
+index a5b3700..629a5e0 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
 @@ -1,5 +1,13 @@
@@ -1374,13 +1374,16 @@ index a5b3700..6fc4c9a 100644
              return ff_result;
          }
  #elif SAFETYHOOK_ARCH_X86_32
-@@ -225,12 +598,338 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+@@ -225,12 +598,341 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  #endif
      }
  
 +    if ((flags & RoutedExternal) != 0) {
 +        if (auto route_result = setup_route(allocator, credit); !route_result) {
 +            return route_result;
++        }
++        if (m_mid_route) {
++            return set_mid_route();
 +        }
 +    }
 +
@@ -1713,7 +1716,7 @@ index a5b3700..6fc4c9a 100644
  
      std::vector<uint8_t*> desired_addresses{m_target};
      ZydisDecodedInstruction ix{};
-@@ -240,7 +939,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -240,7 +942,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              return std::unexpected{Error::failed_to_decode_instruction(ip)};
          }
  
@@ -1723,7 +1726,7 @@ index a5b3700..6fc4c9a 100644
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
  
          const auto is_relative = (ix.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0;
-@@ -255,16 +955,41 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -255,16 +958,41 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
                  const auto target_address = ip + ix.length + static_cast<int32_t>(ix.raw.imm[0].value.s);
                  desired_addresses.emplace_back(target_address);
@@ -1750,7 +1753,7 @@ index a5b3700..6fc4c9a 100644
 +            relocated_length = 5;
 +        }
 +        m_relocated_size += relocated_length;
-+    }
+     }
 +    m_trampoline_size += m_relocated_size;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -1761,13 +1764,13 @@ index a5b3700..6fc4c9a 100644
 +            m_instruction_boundaries[i].original_offset, std::memory_order_relaxed);
 +        g_instruction_boundary_trampoline_offsets[i].store(
 +            m_instruction_boundaries[i].trampoline_offset, std::memory_order_relaxed);
-     }
++    }
 +    g_instruction_boundary_trace_size.store(boundary_count, std::memory_order_release);
 +#endif
  
      auto trampoline_allocation = allocator->allocate_near(desired_addresses, m_trampoline_size);
  
-@@ -273,6 +998,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -273,6 +1001,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
      }
  
      m_trampoline = std::move(*trampoline_allocation);
@@ -1782,7 +1785,7 @@ index a5b3700..6fc4c9a 100644
  
      for (auto ip = m_target, tramp_ip = m_trampoline.data(); ip < m_target + m_original_bytes.size(); ip += ix.length) {
          if (!decode(&ix, ip)) {
-@@ -290,7 +1023,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -290,7 +1026,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
          }
  #endif
  
@@ -1795,7 +1798,7 @@ index a5b3700..6fc4c9a 100644
              std::copy_n(ip, ix.length, tramp_ip);
              const auto target_address = ip + ix.length + ix.raw.disp.value;
              const auto new_disp = target_address - (tramp_ip + ix.length);
-@@ -299,7 +1036,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -299,7 +1039,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
          } else if (is_relative && ix.raw.imm[0].size == 32) {
              std::copy_n(ip, ix.length, tramp_ip);
              const auto target_address = ip + ix.length + ix.raw.imm[0].value.s;
@@ -1811,7 +1814,7 @@ index a5b3700..6fc4c9a 100644
              store(tramp_ip + ix.raw.imm[0].offset, static_cast<int32_t>(new_disp));
              tramp_ip += ix.length;
          } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
-@@ -308,7 +1052,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -308,7 +1055,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1824,7 +1827,7 @@ index a5b3700..6fc4c9a 100644
              }
  
              *tramp_ip = 0x0F;
-@@ -321,7 +1069,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -321,7 +1072,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1837,7 +1840,7 @@ index a5b3700..6fc4c9a 100644
              }
  
              *tramp_ip = 0xE9;
-@@ -360,7 +1112,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -360,7 +1115,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
      }
  #endif
  
@@ -1852,7 +1855,7 @@ index a5b3700..6fc4c9a 100644
  
      return {};
  }
-@@ -368,7 +1127,12 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,7 +1130,12 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
@@ -1865,7 +1868,7 @@ index a5b3700..6fc4c9a 100644
      ZydisDecodedInstruction ix{};
  
      for (auto ip = m_target; ip < m_target + sizeof(JmpFF) + sizeof(uintptr_t); ip += ix.length) {
-@@ -384,7 +1148,20 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -384,7 +1151,20 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          }
  
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
@@ -1887,7 +1890,7 @@ index a5b3700..6fc4c9a 100644
      }
  
      auto trampoline_allocation = allocator->allocate(m_trampoline_size);
-@@ -394,8 +1171,18 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -394,8 +1174,18 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
      }
  
      m_trampoline = std::move(*trampoline_allocation);
@@ -1908,7 +1911,7 @@ index a5b3700..6fc4c9a 100644
  
      const auto trampoline_epilogue =
          reinterpret_cast<TrampolineEpilogueFF*>(m_trampoline.data() + m_trampoline_size - sizeof(TrampolineEpilogueFF));
-@@ -409,7 +1196,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -409,7 +1199,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          return std::unexpected{result.error()};
      }
  
@@ -1921,7 +1924,7 @@ index a5b3700..6fc4c9a 100644
  
      return {};
  }
-@@ -422,37 +1214,96 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -422,37 +1217,96 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
          return {};
      }
  
@@ -1983,7 +1986,8 @@ index a5b3700..6fc4c9a 100644
 +                        error = result.error();
 +                    }
 +                }
-+#endif
+ #endif
+-    });
 +
 +                if (!error) {
 +                    // The write is the state transition: cleanup after this callback can still fail or throw, so the
@@ -2021,8 +2025,7 @@ index a5b3700..6fc4c9a 100644
 +                                            : Error::failed_to_unprotect(m_target);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        g_last_inline_hook_error_type.store(transaction_error.type, std::memory_order_relaxed);
- #endif
--    });
++#endif
 +        return std::unexpected{transaction_error};
 +    }
  
@@ -2039,7 +2042,7 @@ index a5b3700..6fc4c9a 100644
      return {};
  }
  
-@@ -463,23 +1314,405 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -463,23 +1317,405 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
          return {};
      }
  
@@ -2190,14 +2193,14 @@ index a5b3700..6fc4c9a 100644
 +        if (displacement < std::numeric_limits<int32_t>::min() || displacement > std::numeric_limits<int32_t>::max())
 +            return std::unexpected{Error::ip_relative_instruction_out_of_range(original)};
 +        store(relocated + emitted.raw.imm[0].offset, static_cast<int32_t>(displacement));
-     }
++    }
 +    if (!vm_flush_instruction_cache(m_trampoline.data(), m_trampoline.size()) ||
 +        !vm_flush_instruction_cache(m_route_gateway.data(), m_route_gateway.size()))
 +        return std::unexpected{Error::failed_to_flush_instruction_cache(m_trampoline.data())};
 +#endif
 +    return {};
 +}
- 
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +void force_ff_hook_for_test(bool force) noexcept {
 +    g_force_ff_hook.store(force, std::memory_order_release);
@@ -2224,10 +2227,10 @@ index a5b3700..6fc4c9a 100644
 +void set_route_park_for_test(RouteParkStage stage) noexcept {
 +    if (stage != RouteParkStage::NONE) {
 +        g_route_test_control.reached.store(0, std::memory_order_relaxed);
-+    }
+     }
 +    g_route_test_control.stage.store(static_cast<uint8_t>(stage), std::memory_order_release);
 +}
-+
+ 
 +bool route_park_reached_for_test() noexcept {
 +    return g_route_test_control.reached.load(std::memory_order_acquire) != 0;
 +}
@@ -2454,7 +2457,7 @@ index a5b3700..6fc4c9a 100644
  }
  } // namespace safetyhook
 diff --git a/src/mid_hook.cpp b/src/mid_hook.cpp
-index 339bef8..ce050d7 100644
+index 339bef8..ece7ee9 100644
 --- a/src/mid_hook.cpp
 +++ b/src/mid_hook.cpp
 @@ -96,9 +96,11 @@ MidHook::MidHook(MidHook&& other) noexcept {
@@ -2570,14 +2573,11 @@ index 339bef8..ce050d7 100644
  
      if (!hook_result) {
          m_stub.free();
-@@ -145,13 +209,32 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -145,13 +209,29 @@ std::expected<void, MidHook::Error> MidHook::setup(
      }
  
      m_hook = std::move(*hook_result);
 +#if SAFETYHOOK_ARCH_X86_64
-+    if (auto result = m_hook.set_mid_route(); !result) {
-+        return std::unexpected{Error::bad_inline_hook(result.error())};
-+    }
 +    // The stub is reached only through the route and is abandoned by the same publication rule, so it belongs to the
 +    // route's retained chain rather than to a separate budget. Folding it in before anything can publish keeps the
 +    // refusal on the create path, where nothing has been made permanent yet.
@@ -2604,7 +2604,7 @@ index 339bef8..ce050d7 100644
      return {};
  }
  
-@@ -170,4 +253,28 @@ std::expected<void, MidHook::Error> MidHook::disable() {
+@@ -170,4 +250,28 @@ std::expected<void, MidHook::Error> MidHook::disable() {
  
      return {};
  }
@@ -3928,7 +3928,7 @@ index 6aa11d5..bf5569a 100644
  }
  
 diff --git a/test/inline_hook.cpp b/test/inline_hook.cpp
-index 3da7a85..d8e27fe 100644
+index 3da7a85..b95cfee 100644
 --- a/test/inline_hook.cpp
 +++ b/test/inline_hook.cpp
 @@ -1,5 +1,7 @@
@@ -3939,7 +3939,7 @@ index 3da7a85..d8e27fe 100644
  #include <string>
  #include <string_view>
  #include <thread>
-@@ -8,9 +10,39 @@
+@@ -8,9 +10,95 @@
  #include <safetyhook.hpp>
  #include <xbyak/xbyak.h>
  
@@ -3976,10 +3976,66 @@ index 3da7a85..d8e27fe 100644
 +    EXPECT_FALSE(hook.route_retained());
 +}
 +
++#if SAFETYHOOK_ARCH_X86_64
++TEST(InlineHook, RoutedMidCreateInitializesContinuationExits) {
++    for (const bool start_disabled : {false, true}) {
++        SCOPED_TRACE(start_disabled);
++        Xbyak::CodeGenerator code{};
++        code.push(37);
++        code.pop(rax);
++        code.ret();
++        code.nop();
++        code.xor_(eax, eax);
++        code.ret();
++        code.nop(16);
++
++        uint8_t* trampoline = nullptr;
++        Xbyak::CodeGenerator destination{};
++        destination.mov(rax, reinterpret_cast<uintptr_t>(&trampoline));
++        destination.jmp(ptr[rax]);
++        const auto flags = static_cast<safetyhook::InlineHook::Flags>(
++            safetyhook::InlineHook::RoutedExternal | safetyhook::InlineHook::RoutedMid |
++            (start_disabled ? safetyhook::InlineHook::StartDisabled : 0));
++        auto created = safetyhook::InlineHook::create(
++            const_cast<uint8_t*>(code.getCode()), const_cast<uint8_t*>(destination.getCode()), flags);
++        ASSERT_TRUE(created.has_value());
++        auto hook = std::move(*created);
++        trampoline = hook.trampoline().data();
++        ASSERT_TRUE(hook.enable().has_value());
++        EXPECT_EQ(code.getCode<int (*)()>()(), 37);
++        EXPECT_EQ(hook.route_entries(), 0u);
++        hook.reset();
++        EXPECT_FALSE(hook.route_retained());
++    }
++}
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++TEST(InlineHook, MidFarFallbackRejectsRelativeUnconditionalBranches) {
++    for (const bool near_branch : {false, true}) {
++        SCOPED_TRACE(near_branch);
++        Xbyak::CodeGenerator code{};
++        Xbyak::Label destination;
++        code.jmp(destination, near_branch ? Xbyak::CodeGenerator::T_NEAR : Xbyak::CodeGenerator::T_SHORT);
++        code.nop(16);
++        code.L(destination);
++        code.ret();
++        const std::string original(reinterpret_cast<const char*>(code.getCode()), code.getSize());
++        safetyhook::force_ff_hook_for_test(true);
++        const auto created = safetyhook::MidHook::create(
++            const_cast<uint8_t*>(code.getCode()), +[](SafetyHookContext&) {}, safetyhook::MidHook::StartDisabled);
++        ASSERT_FALSE(created.has_value());
++        EXPECT_EQ(created.error().type, safetyhook::MidHook::Error::BAD_INLINE_HOOK);
++        EXPECT_EQ(created.error().inline_hook_error.type, safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE);
++        EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(code.getCode()), code.getSize()), original);
++    }
++}
++#endif
++#endif
++
  TEST(InlineHook, FunctionHookedMultipleTimes) {
      struct Target {
          SAFETYHOOK_NOINLINE static std::string fn(std::string name) { return "hello " + name; }
-@@ -768,3 +800,271 @@ TEST(InlineHook, FunctionHookCanBeEnableAndDisabled) {
+@@ -768,3 +856,271 @@ TEST(InlineHook, FunctionHookCanBeEnableAndDisabled) {
      EXPECT_EQ(fn(2), 4);
      EXPECT_EQ(fn(3), 6);
  }

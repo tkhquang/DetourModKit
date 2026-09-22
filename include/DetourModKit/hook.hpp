@@ -727,7 +727,8 @@ namespace DetourModKit
          *       Dormant fibers and unresolved exception continuations therefore retain their routes during teardown.
          *       Exception unwind or a nonlocal exit can abandon ownership and cause permanent retention.
          * @warning Before teardown, quiesce saved contexts outside the counted displaced execution.
-         *          This includes entry and exit gaps, copied contexts, and later reuse of a captured instruction pointer.
+         *          This includes entry and exit gaps, copied contexts, and later reuse of a captured
+         *          instruction pointer.
          *          If quiescence is unproved, keep the Hook and its code providers alive.
          * @warning A retained route does not authorize provider unload. Every admitted callback and continuation needs
          *          its code providers until it exits. @ref Hook::release also keeps callback dispatch active.
