@@ -108,6 +108,10 @@ The build is Win64 only. Every library translation unit includes `<windows.h>`, 
 
 `ctest -L <label>` exits zero on an empty selection. A toolchain gate, a renamed case, or a host that was never registered therefore removes the coverage and still reports green. Declare the label's cases to `scripts/check_test_label_inventory.py` (`--require` per name, `--minimum`, `--expect-target` for a `gtest_discover_tests` target whose `_NOT_BUILT` placeholder means it was never built). Register that check as a ctest that carries the same label, from `tests/CMakeLists.txt`, never from the subdirectory it covers. A gate that the skipped subdirectory also skips proves nothing. `FaultProof.LabelInventoryIsComplete` is the worked example. Related: `dmk_add_raw_proof` declares no build dependency. A workflow that builds targets by name must therefore list every raw host, or the ctest is registered and never built.
 
+### In-image hook targets live in their own section
+
+A proof that hooks a function in its own image must place that function in a private code section. A toggle transaction temporarily removes execute access from the target page. If a backend handler or its helpers share that page, the handler can fault under its own lock and deadlock. MSVC uses `#pragma code_seg`, and GCC uses `__attribute__((section))`. `test_mid_route_retention.cpp` and `xinput_detour_rundown.cpp` demonstrate this separation. A target in another image cannot share that page.
+
 ### CTest execution timeouts
 
 `CTestTimeoutControl` is the proof pointer. [The test coverage guide](../tests/README.md) owns the CTest timeout contract.

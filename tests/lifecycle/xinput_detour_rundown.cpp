@@ -2320,11 +2320,23 @@ namespace
     // RUNTIME_FUNCTION is unwound as a leaf: the unwinder reads a return address out of the middle of the shadow
     // space and walks into nonsense. These cases hold the generated addresses and assert the platform's own answer.
 
-    DMK_LIFECYCLE_NOINLINE int routed_unwind_target(int a, int b)
+    // Alone on the pages of a private image section (docs/design/testing.md, "In-image hook targets live in their own
+    // section").
+#if defined(_MSC_VER)
+#pragma code_seg(push, ".proof")
+#define DMK_PROOF_TARGET DMK_LIFECYCLE_NOINLINE
+#else
+#define DMK_PROOF_TARGET __attribute__((section(".proof"))) DMK_LIFECYCLE_NOINLINE
+#endif
+    DMK_PROOF_TARGET int routed_unwind_target(int a, int b)
     {
         volatile int result = a + b;
         return result;
     }
+#undef DMK_PROOF_TARGET
+#if defined(_MSC_VER)
+#pragma code_seg(pop)
+#endif
 
     std::atomic<int> s_routed_detour_calls{0};
     // Frames observed inside the gateway allocation while unwinding out of the detour.
@@ -2850,9 +2862,8 @@ namespace
 
     int run_route_metadata_retained_case()
     {
-        std::uintptr_t wrapper = 0;
-        std::uintptr_t gateway = 0;
-        std::uintptr_t exit_thunk = 0;
+        // Idle at teardown: the records and the arena go together, so a later lookup at the gateway finds nothing.
+        std::uintptr_t reclaimed_gateway = 0;
         {
             auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
             if (!created)
@@ -2861,27 +2872,89 @@ namespace
                 return 140;
             }
             safetyhook::InlineHook hook = std::move(*created);
-            gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
-            wrapper = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(1));
-            exit_thunk = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(2));
+            reclaimed_gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
             if (auto enabled = hook.enable(); !enabled)
             {
                 std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
                 return 141;
             }
             (void)call_routed_target(1, 1);
-            // Destroyed here. Publication already happened, so the code and its records are process-lifetime storage.
+            hook.reset();
+            if (hook.route_retained())
+            {
+                std::fprintf(stderr, "FAIL: an idle published route was retained at teardown\n");
+                return 300;
+            }
+        }
+        DWORD64 image_base = 0;
+        if (RtlLookupFunctionEntry(static_cast<DWORD64>(reclaimed_gateway), &image_base, nullptr) != nullptr)
+        {
+            std::fprintf(stderr, "FAIL: a reclaimed route left its unwind records registered\n");
+            return 301;
         }
 
-        DWORD64 image_base = 0;
+        // Parked before the entry increment: the code and its records must stay, because the thread still has to
+        // find them, and the parked call completes through the bypass once released.
+        std::uintptr_t wrapper = 0;
+        std::uintptr_t gateway = 0;
+        std::uintptr_t exit_thunk = 0;
+        {
+            auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!created)
+            {
+                std::fprintf(stderr, "FAIL: the parked routed hook could not be created\n");
+                return 302;
+            }
+            safetyhook::InlineHook hook = std::move(*created);
+            gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
+            wrapper = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(1));
+            exit_thunk = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(2));
+            if (auto enabled = hook.enable(); !enabled)
+            {
+                std::fprintf(stderr, "FAIL: the parked routed hook could not be enabled\n");
+                return 303;
+            }
+            const int detour_calls_before = s_routed_detour_calls.load(std::memory_order_relaxed);
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+            std::atomic<int> observed{0};
+            std::thread helper{[&observed] { observed.store(call_routed_target(2, 3), std::memory_order_release); }};
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            while (!safetyhook::route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::yield();
+            }
+            const bool parked = safetyhook::route_park_reached_for_test();
+            if (parked)
+            {
+                hook.reset();
+            }
+            const bool retained = hook.route_retained();
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            helper.join();
+            if (!parked)
+            {
+                std::fprintf(stderr, "FAIL: the helper never reached the gateway entry park\n");
+                return 304;
+            }
+            if (!retained)
+            {
+                std::fprintf(stderr, "FAIL: a route with a parked thread was reclaimed\n");
+                return 305;
+            }
+            if (observed.load(std::memory_order_acquire) != 5 ||
+                s_routed_detour_calls.load(std::memory_order_relaxed) != detour_calls_before)
+            {
+                std::fprintf(stderr, "FAIL: the parked call did not complete through the bypass\n");
+                return 306;
+            }
+        }
+
         if (RtlLookupFunctionEntry(static_cast<DWORD64>(wrapper), &image_base, nullptr) == nullptr ||
             image_base != static_cast<DWORD64>(gateway))
         {
             std::fprintf(stderr, "FAIL: the retained wrapper lost its unwind record when its handle was destroyed\n");
             return 142;
         }
-        // A thread parked before the gateway's first instruction after the handle is gone still has to find records,
-        // so a published route must never hand its metadata back.
         if (RtlLookupFunctionEntry(static_cast<DWORD64>(gateway), &image_base, nullptr) == nullptr)
         {
             std::fprintf(stderr, "FAIL: the retained gateway lost its unwind record\n");
@@ -2893,7 +2966,7 @@ namespace
             return 144;
         }
 
-        std::puts("PUBLISHED_ROUTE_METADATA_IS_RETAINED");
+        std::puts("PUBLISHED_ROUTE_METADATA_IS_RETAINED_ONLY_WHILE_PARKED");
         return 0;
     }
 
@@ -3236,6 +3309,17 @@ namespace
             return 185;
         }
 
+        // Restored at teardown, the committed route is an ordinary published chain: the idle proof frees it and gives
+        // its charge back.
+        hook.reset();
+        const auto reclaimed = safetyhook::route_retention_stats();
+        if (hook.route_retained() || reclaimed.logical_charged != before.logical_charged ||
+            reclaimed.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the committed route was not reclaimed and refunded at teardown\n");
+            return 307;
+        }
+
         std::puts("ROUTE_RESTORE_FAILURE_CHARGES_PUBLICATION");
         return 0;
     }
@@ -3332,6 +3416,23 @@ namespace
         {
             std::fprintf(stderr, "FAIL: MID publication did not convert its complete actual chain into a charge\n");
             return 195;
+        }
+
+        // Clean teardown of the published chain frees its private arena and gives the charge back.
+        auto *const gateway = hook.route_region_for_test(0);
+        hook.reset();
+        const auto reclaimed = safetyhook::route_retention_stats();
+        if (hook.route_retained() || reclaimed.logical_charged != before.logical_charged ||
+            reclaimed.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the published MID chain was not reclaimed and refunded at teardown\n");
+            return 308;
+        }
+        MEMORY_BASIC_INFORMATION gateway_info{};
+        if (VirtualQuery(gateway, &gateway_info, sizeof(gateway_info)) == 0 || gateway_info.State != MEM_FREE)
+        {
+            std::fprintf(stderr, "FAIL: the reclaimed MID arena block remained mapped\n");
+            return 309;
         }
 
         std::puts("MID_ROUTE_ACCOUNTING_INCLUDES_GENERATED_STUB");

@@ -4,9 +4,9 @@
 ``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
 actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's backend fixes --
 trap-transaction status reporting, commit-truthful state, executable-route rundown, allocation-free release,
-late-static handler retirement, and closed-window execute-fault retry -- exist on no upstream ref, so they are
-carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at configure time by
-``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
+late-static handler retirement, closed-window execute-fault retry, and published-route reclamation -- exist on
+no upstream ref, so they are carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule
+at configure time by ``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
 each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
 
 1. ``.gitmodules`` gets repointed at a personal fork. The model is "upstream pin + vendored patches",
@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "020125d09d358785259c1a9f40da1b3e9973d13604614a5ca53f30c2cd5f5669"
+EXPECTED_PATCH_SHA256 = "74c8320de8c2a7a77ab4d24ecadf788e0fd5087b11ec0ca9e3ab7fc8dba24896"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -203,6 +203,21 @@ REQUIRED_SENTINELS += PR2_SENTINELS
 VMT_SENTINELS = ["VmtHook(VmtHook&& other);"]
 
 REQUIRED_SENTINELS += VMT_SENTINELS
+
+# PR-06 additions: a published routed chain is reclaimed after an idle proof. Code tokens only, as above.
+PR06_SENTINELS = [
+    "threads_idle_outside",  # the teardown idle proof suspends each other thread in turn ...
+    "CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)",  # ... after every handle was opened, so nothing allocates ...
+    "GetThreadContext(thread, &context)",  # ... and reads only the control context
+    "reclaim_published_route",  # a chain that passes the proof is freed with its records ...
+    "refund_route_chain",  # ... and its charge is given back
+    "register_retained_route",  # a retained chain joins later proofs on the same target
+    "RouteParkStage::AT_ENTRY",  # deterministic proof parks a thread where the entry counter does not cover it
+    "route_retained() const noexcept",  # callers learn whether the chain was retained
+    "stack_holds_return_site",  # a thread still returning into a relocated call is found on its stack
+]
+
+REQUIRED_SENTINELS += PR06_SENTINELS
 
 
 def patch_files(patch_dir: Path):

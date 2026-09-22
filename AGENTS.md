@@ -487,7 +487,7 @@ Severity tiers have these meanings:
 
 A same-ID design-note pointer owns the complete rationale for that rule. A generic note link supplies evidence or context but does not transfer ownership. A short rule contains its complete contract.
 
-- `[B-01]` `[CONVENTION]` **Backend edits must not share an ordinary DetourModKit change.** Files under `external/` are submodules. A backend fix must have an isolated upstreamable commit and a gitlink pin. DMK reapplies the vendored patch at configure time. `scripts/check_backend_patch.py` proves byte equality. [docs/design/hooking.md](docs/design/hooking.md) `[B-01]` owns the rationale.
+- `[B-01]` `[CONVENTION]` **Backend edits must not share an ordinary DetourModKit change.** Files under `external/` are submodules. A backend fix must have an isolated upstreamable commit and a gitlink pin. DMK reapplies the vendored patch at configure time. `scripts/check_backend_patch.py` proves byte equality. A backend contract change also carries the DetourModKit code, proofs, and documents that the new contract requires, and nothing else. [docs/design/hooking.md](docs/design/hooking.md) `[B-01]` owns the rationale.
 - `[B-02]` `[CONVENTION]` **The listed 60+ fps callback paths must not add heap allocations.** The [hot-path proof inventory](docs/design/testing.md#hot-path-proof-inventory) identifies the evidence.
 - `[B-03]` `[SAFETY]` **Code must preserve each lock order documented in a class header.** The [lock-order proof locations](docs/design/testing.md#lock-order-proof-locations) identify the evidence.
 - `[B-04]` `[SAFETY]` **Code must not weaken an atomic memory order without a correctness proof.** [docs/design/hooking.md](docs/design/hooking.md) `[B-43]` supplies related proof.
