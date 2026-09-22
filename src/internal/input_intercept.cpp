@@ -659,8 +659,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Releases a hook after its target witnesses Original and its detour bodies drain.
-         * @note This noexcept move release performs no allocation. Published stable gateways remain process-lifetime
-         *       storage by design.
+         * @note This noexcept move release performs no allocation. The backend frees a published route that its idle
+         *       proof clears and retains one it cannot prove idle.
          */
         void reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
         {

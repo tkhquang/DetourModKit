@@ -1369,7 +1369,18 @@ namespace DetourModKit
             }
 
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
+            // The route verdict must outlive backend reset, so it is read before the Impl is destroyed.
+            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reset(); });
+            const bool route_retained = backend_value_or(
+                m_impl->backend,
+                false,
+                [](const auto &backend) noexcept { return backend.route_retained(); }
+            );
             m_impl.reset();
+            if (route_retained)
+            {
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+            }
             // The drain completed, or this was never a mid hook. No thread is inside the adapter, so slot contents can
             // be reused.
             if (has_mid_slot)
@@ -1377,6 +1388,18 @@ namespace DetourModKit
                 DetourModKit::detail::release_mid_adapter_slot(mid_slot);
             }
             (void)ledger.release_hook(target, ledger_id);
+            if (route_retained)
+            {
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: mid hook '{}' at 0x{:0{}X} retained its published route chain at teardown. The backend "
+                    "did not prove the chain idle (a thread was inside it or still had to return into it), so the "
+                    "storage stays mapped and is booked as a HookManager leak.",
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2
+                );
+            }
             DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             emit_lifecycle(
                 name,
