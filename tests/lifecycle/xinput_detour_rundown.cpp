@@ -44,6 +44,11 @@
 #include <crtdbg.h>
 #endif
 
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_record_probe)(LogLevel, std::string_view) noexcept;
+} // namespace DetourModKit::detail
+
 namespace
 {
     // Thread id whose plain (non-aligned) operator new must throw, or 0 when disarmed. Armed only around uninstall() on
@@ -3357,6 +3362,7 @@ namespace
     {
         const auto before = safetyhook::route_retention_stats();
         safetyhook::RouteRetentionCost inline_cost{};
+        std::size_t trampoline_bytes = 0;
         {
             auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
             if (!created)
@@ -3365,6 +3371,7 @@ namespace
                 return 190;
             }
             inline_cost = created->route_retention_for_test();
+            trampoline_bytes = created->trampoline().size();
         }
         const auto after_inline = safetyhook::route_retention_stats();
         if (after_inline.logical_reserved != before.logical_reserved ||
@@ -3396,7 +3403,7 @@ namespace
         }
         safetyhook::MidHook hook = std::move(*created);
         const auto mid_cost = hook.route_retention_for_test();
-        if (mid_cost.logical != inline_cost.logical + 404 ||
+        if (mid_cost.logical != trampoline_bytes + 1920 + 404 ||
             mid_cost.committed != inline_cost.committed + system_info.dwAllocationGranularity ||
             mid_cost.committed > static_cast<std::size_t>(system_info.dwAllocationGranularity) * 3)
         {
@@ -3438,6 +3445,151 @@ namespace
         std::puts("MID_ROUTE_ACCOUNTING_INCLUDES_GENERATED_STUB");
         return 0;
     }
+
+    unsigned s_route_warnings = 0;
+
+    void observe_xinput_route_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
+    {
+        if (level == DetourModKit::LogLevel::Warning && message.starts_with("XInput route retention:"))
+        {
+            (void)DetourModKit::detail::intercept_owned_by(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER);
+            ++s_route_warnings;
+        }
+    }
+
+    int run_route_telemetry_case(std::string_view scenario)
+    {
+        const auto capacity_before = safetyhook::route_retention_stats();
+        const bool alias = scenario == "telemetry-alias";
+        const bool clean = scenario == "telemetry-clean";
+        const bool rollback = scenario == "telemetry-rollback";
+        HMODULE module = LoadLibraryW(alias ? L"dmk_xinput_proxy_alias.dll" : L"dmk_xinput_proxy_local.dll");
+        if (module == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the DMK-owned XInput fixture is absent\n");
+            return 1;
+        }
+        set_xinput_module_override_for_test(module);
+        void *const primary = reinterpret_cast<void *>(GetProcAddress(module, "XInputGetState"));
+        void *const extended =
+            reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (primary == nullptr || extended == nullptr || (primary == extended) != alias)
+        {
+            std::fprintf(stderr, "FAIL: fixture export identities differ from the scenario\n");
+            return 1;
+        }
+        const auto release_host_reference = [&module, primary, clean]() noexcept -> bool
+        {
+            if (module != nullptr)
+            {
+                FreeLibrary(module);
+                module = nullptr;
+            }
+            HMODULE mapped = nullptr;
+            const bool target_mapped =
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(primary),
+                    &mapped
+                ) != FALSE;
+            return target_mapped != clean;
+        };
+        const auto before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto old_probe = DetourModKit::detail::g_logger_record_probe;
+        DetourModKit::detail::g_logger_record_probe = &observe_xinput_route_warning;
+        if (rollback)
+        {
+            set_xinput_backend_toggle_exception_for_test(primary, false);
+            safetyhook::g_unwind_unregistration_failure.store(true);
+        }
+        const bool installed = install_xinput(0);
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        safetyhook::g_unwind_unregistration_failure.store(false);
+        if (installed == rollback)
+        {
+            std::fprintf(stderr, "FAIL: install did not reach the requested outcome\n");
+            return 1;
+        }
+        if (!rollback && !clean)
+        {
+            const auto target = reinterpret_cast<XInputGetStateFn>(scenario == "telemetry-ex" ? extended : primary);
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+            DWORD result = ERROR_GEN_FAILURE;
+            DWORD packet = 0;
+            std::thread caller{
+                [target, &result, &packet]() -> void
+                {
+                    XINPUT_STATE state{};
+                    const XInputGetStateFn volatile indirect = target;
+                    result = indirect(7, &state);
+                    packet = state.dwPacketNumber;
+                }
+            };
+            const auto deadline = GetTickCount64() + 10000;
+            while (!safetyhook::route_park_reached_for_test() && GetTickCount64() < deadline)
+            {
+                std::this_thread::yield();
+            }
+            const bool reached = safetyhook::route_park_reached_for_test();
+            if (reached)
+            {
+                uninstall();
+                if (!release_host_reference())
+                {
+                    std::fprintf(stderr, "FAIL: the retained route lost its target DLL before its caller resumed\n");
+                    ExitProcess(6);
+                }
+            }
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            caller.join();
+            const DWORD expected_packet = scenario == "telemetry-ex" ? 8 : 7;
+            if (!reached || result != ERROR_DEVICE_NOT_CONNECTED || packet != expected_packet)
+            {
+                std::fprintf(stderr, "FAIL: the parked route did not resume through its original function\n");
+                return 1;
+            }
+        }
+        else if (clean)
+        {
+            uninstall();
+        }
+        const auto expected = clean ? 0u : 1u;
+        const auto after =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto warnings = s_route_warnings;
+        uninstall();
+        uninstall();
+        const auto repeated =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto capacity_after = safetyhook::route_retention_stats();
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        DetourModKit::detail::g_logger_record_probe = old_probe;
+        set_xinput_module_override_for_test(nullptr);
+        const bool module_lifetime = release_host_reference();
+        if (!module_lifetime || after - before != expected || warnings != expected || repeated != after ||
+            s_route_warnings != warnings ||
+            DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) !=
+                expected ||
+            DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
+                expected ||
+            xinput_module_refs_held() != 0 || capacity_after.logical_reserved != capacity_before.logical_reserved ||
+            capacity_after.committed_reserved != capacity_before.committed_reserved ||
+            capacity_after.committed_charged - capacity_before.committed_charged !=
+                static_cast<std::uint64_t>(expected) * 2 * system_info.dwAllocationGranularity)
+        {
+            std::fprintf(
+                stderr,
+                "FAIL: route telemetry leaks=%zu warnings=%u expected=%u\n",
+                after - before,
+                warnings,
+                expected
+            );
+            return 1;
+        }
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -3472,6 +3624,10 @@ int main(int argc, char **argv)
     dmk_lifecycle::configure_raw_proof_error_mode();
 
     const std::string_view selected_case{argv[1]};
+    if (selected_case == "telemetry-clean" || selected_case == "telemetry-primary" || selected_case == "telemetry-ex" ||
+        selected_case == "telemetry-alias" || selected_case == "telemetry-rollback" ||
+        selected_case == "telemetry-repeat")
+        return run_route_telemetry_case(selected_case);
     if (selected_case == "wrapper-unwind")
         return run_wrapper_unwind_case();
     if (selected_case == "wrapper-native-exception")

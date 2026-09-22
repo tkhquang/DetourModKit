@@ -602,3 +602,19 @@ g++ -o test_compile.exe docs/tests/test_compile.cpp
 5. Guard platform-specific tests: use `GTEST_SKIP()` for architecture-dependent logic.
 6. Rebuild clean for coverage: after major changes, delete `.gcda` files or rebuild from scratch.
 7. Follow naming conventions: `s_` for file-scope statics, `m_` for members, `snake_case` for functions.
+
+### Mid-route continuations and XInput retention
+
+`route_continuation_lifetime.cpp` runs each scenario in a separate process. Its `Lifecycle.MidRoute*` cases cover these paths:
+
+- Dormant fibers, external tail callees, and repaired exception continuation after teardown.
+- Explicit retention after exception unwind.
+- Fall-through, return, direct and indirect branch exits.
+- Internal calls whose returns and direct, conditional, or indirect tail branches preserve ownership inside the displaced window.
+- Internal, external, and epilogue resume addresses.
+- Closed-route bypass, registers, flags, and dynamic unwind records.
+- Idle reclamation with no HookManager leak.
+
+`Lifecycle.TrapMappingPreservesTransactionDirection` verifies enable acquisition and counted execution that stays in the trampoline during disable. Unknown-scenario controls reject misspelled selectors.
+
+`xinput_detour_rundown.cpp` verifies clean reset, primary and ordinal routes, aliased exports, install rollback, and repeated uninstall. Each telemetry case checks the Input leak count and warning count. The warning probe reacquires the interception mutex. The host drops its DLL reference before it resumes a parked caller. Retained routes preserve their module pins, while clean teardown permits DLL unload. `Lifecycle.LabelInventoryIsComplete` pins their `lifecycle-proof` registrations.

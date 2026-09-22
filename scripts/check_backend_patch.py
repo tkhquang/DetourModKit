@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "74c8320de8c2a7a77ab4d24ecadf788e0fd5087b11ec0ca9e3ab7fc8dba24896"
+EXPECTED_PATCH_SHA256 = "7ff733a115f615711d27753a02271bc8957f9481e9d95695bb9b350500f46a2c"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -125,7 +125,7 @@ PR43_SENTINELS = [
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route
     "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
-    "m_hook.set_mid_route();",  # mid entry stays admitted across the generated stub
+    "m_hook.set_mid_route()",  # mid entry stays admitted across the generated stub
     "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
     "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
     "std::atomic<uint64_t> admission",  # high-bit close and low-bit entry count share one ordered cell
@@ -147,7 +147,7 @@ PR47B_SENTINELS = [
     "vm_unregister_unwind_table",  # ... which is withdrawn only for storage nothing ever reached ...
     "g_unwind_registration_failure",  # ... and whose refusal is drivable, so the rollback branch is proved
     "g_unwind_unregistration_failure",  # failed removal is also drivable and retains all referenced storage
-    "struct RouteUnwindTable",  # the records live inside the gateway allocation, sharing the code's lifetime
+    "MID_UNWIND_OFFSET",  # the records live inside the gateway allocation, sharing the code's lifetime
     "Error::failed_to_register_unwind",  # a refused registration fails creation instead of publishing blind frames
     "emit_flag_frame",  # each routed flag frame saves a nonvolatile register before capturing RFLAGS ...
     "emit_flag_restore",  # ... then restores RFLAGS before the flag-transparent pop/jump epilogue
@@ -218,6 +218,18 @@ PR06_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PR06_SENTINELS
+
+# Mid continuations retain ownership until a generated exit or transaction transfer releases it.
+PR07_SENTINELS = [
+    "MID_CONTINUATION_SLOT",
+    "m_mid_route",
+    "trampoline_end",
+    "route_entries->fetch_add",
+    "!from_original && trap->route_entries != nullptr",
+    "ff_result.error().type != Error::BAD_ALLOCATION",
+]
+
+REQUIRED_SENTINELS += PR07_SENTINELS
 
 
 def patch_files(patch_dir: Path):
