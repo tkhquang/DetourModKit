@@ -296,15 +296,16 @@ namespace DetourModKit
             Hook &operator=(const Hook &) = delete;
 
             /**
-             * @brief Restores the patched prologue when safe; published x64 mid routes retain their route
-             *        storage.
+             * @brief Restores the patched prologue when safe and reclaims a published x64 mid route once no thread
+             *        is inside it.
              * @details Original bytes authorize backend destruction even after a failed restore. Foreign or
-             *          unreadable bytes do not. A published x64 MID route permanently retains its gateway, inline
-             *          trampoline, allocator blocks, and unwind metadata. Clean teardown can still reclaim its mid
-             *          stub and adapter after rundown. Under the loader lock, below a newer layer, or without an
-             *          Original witness, the whole backend and module reference are pinned, the target stays tracked
-             *          as hooked, and `[B-73]` books the leak to
-             *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager.
+             *          unreadable bytes do not. When the backend proves the chain idle, backend destruction frees a
+             *          published x64 MID route. Its gateway, inline trampoline, allocator block, and unwind metadata
+             *          go together. A chain that fails that proof stays mapped, and `[B-73]` books it to
+             *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager with a warning. Under the loader
+             *          lock, below a newer layer, or without an Original witness, the whole backend and module
+             *          reference are pinned, the target stays tracked as hooked, and `[B-73]` books the leak to the
+             *          same subsystem.
              *
              *          A MID hook also runs its callback down (`[B-85]`). The tombstone flips first, so a pinned hook
              *          goes inert instead of a call into a destroyed owner. No new callback begins after this returns.
@@ -739,9 +740,11 @@ namespace DetourModKit
          *       @ref Hook::release, keep theirs for the process lifetime, because the stub stays reachable. Loader-
          *       lock teardown and destruction from inside the callback both pin by design, so a host that does
          *       either at scale spends pool capacity permanently.
-         * @note On x64, first publication also commits a permanently retained routed gateway and inline trampoline.
-         *       The backend reserves their bounded logical and allocator-block capacity before the hook can publish.
-         *       Clean destruction restores the target but does not reclaim that routed chain.
+         * @note On x64, first publication commits a routed gateway and inline trampoline. The backend reserves their
+         *       bounded logical and allocator-block capacity before the hook can publish and refunds it when clean
+         *       destruction reclaims the chain. A chain that the backend cannot prove idle at teardown (a thread
+         *       inside it or still returning into it) stays mapped and is booked as a HookManager leak (see
+         *       @ref Hook::~Hook).
          * @note After ordinary off-loader-lock destruction returns, a pinned backend that remains patched is inert:
          *       its live recheck refuses later callbacks, and @ref is_target_hooked stays true for the patched target.
          * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but

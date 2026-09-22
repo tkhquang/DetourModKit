@@ -407,7 +407,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteRestoreFailureChargesPublication
     Lifecycle.RouteAllocatorReclaimsWholeBlock
     Lifecycle.MidRouteAccountingIncludesGeneratedStub
-    Lifecycle.PublishedMidRouteRetainsOneBlockPerHook
+    Lifecycle.PublishedMidRouteReclaimsUnlessParked
     Lifecycle.XInputForwardedExOrdinalIsHooked
     Lifecycle.XInputSameModuleExOrdinalIsHooked
     Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage

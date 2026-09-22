@@ -138,6 +138,8 @@ Never load two generations by the same file name. If the loader maps the build o
 
 A retained image keeps its code mapped, but it can still contain live old behavior. Only documented `MessageHookKeepalive` and XInput retention become inert after teardown. The reference loader requests a restart when an accepted image stays mapped. Every retained image counts against the reload budget.
 
+A published mid hook frees its route block at teardown unless the backend cannot prove the chain idle: a thread inside it or still returning into it. That retention is booked as a `LeakSubsystem::HookManager` leak, so the verdict reports it instead of a silent block.
+
 A custom staged-name loader can continue after an inert retention verdict. It must refuse every other pin and enforce count and byte budgets. `ExternalHost` removes the wheel pin, but every other unload proof still applies.
 
 Do not fight the pins:

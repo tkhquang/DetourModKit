@@ -289,15 +289,15 @@ set_tests_properties(Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario P
   WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
   LABELS "lifecycle-proof")
 
-# The proof retains thirty executable blocks for the process lifetime and names the backend for
-# route_retention_stats(). It therefore runs in its own host rather than the shared unit binary.
+# The proof retains five executable blocks for the process lifetime, parks threads inside generated code, and names
+# the backend for route_retention_stats(). It therefore runs in its own host rather than the shared unit binary.
 add_executable(mid_route_retention test_mid_route_retention.cpp)
 target_link_libraries(mid_route_retention PRIVATE DetourModKit safetyhook dmk_coverage)
 target_include_directories(mid_route_retention PRIVATE ${PROJECT_SOURCE_DIR}/include)
 dmk_static_runtime(mid_route_retention)
 add_dependencies(dmk_lifecycle_proof_hosts mid_route_retention)
 
-dmk_add_raw_proof(NAME Lifecycle.PublishedMidRouteRetainsOneBlockPerHook
+dmk_add_raw_proof(NAME Lifecycle.PublishedMidRouteReclaimsUnlessParked
   COMMAND $<TARGET_FILE:mid_route_retention>
   WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
   TEST_TIMEOUT 120
