@@ -75,6 +75,13 @@ namespace staged_gen
         const char *log_file = nullptr;
         /// Selects the required resident wheel host when non-null. Null preserves the local MessageHook backend.
         const WheelHostTable *wheel_host = nullptr;
+        /// Installs and exercises six mid hooks when nonzero.
+        int enable_mid = 0;
+        /**
+         * @brief Parks one caller at the first mid route entry through StagedShutdown when nonzero.
+         * @details Teardown then retains that route. Requires enable_mid.
+         */
+        int retain_mid = 0;
     };
 
     /**
@@ -96,6 +103,13 @@ namespace staged_gen
         std::uint64_t total_module_pins = 0;
         std::uint64_t hook_calls = 0;
         std::uint64_t init_calls = 0;
+        std::uint64_t mid_calls = 0;
+        std::uintptr_t coordinator_identity = 0;
+        std::size_t coordinator_bytes = 0;
+        std::size_t coordinator_live = 0;
+        std::size_t coordinator_retained = 0;
+        /// The value that the parked caller returned through the retained route, or 0.
+        int parked_result = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.

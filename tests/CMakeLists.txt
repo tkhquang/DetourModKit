@@ -440,6 +440,9 @@ if(DMK_BUILD_TESTS)
     Lifecycle.PublishedMidRouteReclaimsUnlessParked
     Lifecycle.TrapMappingPreservesTransactionDirection
     Lifecycle.DestroyLockFailureRetainsRoute
+    Lifecycle.ReconciledRouteReleasesProcessRecord
+    Lifecycle.RefusedTeardownNamesCoordinator
+    Lifecycle.RefusedTeardownCompletesRetention
     Lifecycle.XInputForwardedExOrdinalIsHooked
     Lifecycle.XInputSameModuleExOrdinalIsHooked
     Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage
@@ -473,6 +476,27 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LogicDllMidPostAdapterRouteDrainsBeforeUnload
     Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload
     Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload
+    Lifecycle.RouteCopiesRejectUnknownScenario
+    Lifecycle.RouteCopiesSerializeConcurrentScans
+    Lifecycle.RouteCopiesSerializePatchAndScan
+    Lifecycle.RouteCopiesRetainLayeredDependencies
+    Lifecycle.RouteCopiesRetainInlineDependencies
+    Lifecycle.RouteCopiesRetainOverlappingDependencies
+    Lifecycle.RouteCopiesReleaseOlderLayerAfterDrainFailure
+    Lifecycle.RouteCopiesReleaseOlderLayerAfterAdapterDrainFailure
+    Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub
+    Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait
+    Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread
+    Lifecycle.RouteCopiesRejectUncoordinatedReclamation
+    Lifecycle.RouteCopiesRejectIncompatibleCoordination
+    Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout
+    Lifecycle.RouteCopiesShareRegistrationCapacity
+    Lifecycle.RouteCopiesRetryRefusedConnection
+    Lifecycle.RouteCopiesRejectForeignCoordinatorView
+    Lifecycle.RouteCopiesReportLayerConflict
+    Lifecycle.RouteCopiesReportCoordinatorRefusal
+    Lifecycle.RouteCoordinatorSurvivesParticipantUnload
+    Lifecycle.StagedGenerationResourcesStayWithinBudget
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception

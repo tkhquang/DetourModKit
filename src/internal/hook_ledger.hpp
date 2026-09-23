@@ -3,11 +3,9 @@
 
 /**
  * @file internal/hook_ledger.hpp
- * @brief Per-linked-instance safety ledger for the free-function hook surface; not a public registry.
- * @details Keyed on the raw target address (inline and mid) and the cloned-vptr base (VMT clones). It holds no
- *          names, exposes no enumeration, and is never installed. hook.hpp (LEDGER SCOPE) owns the per-instance
- *          rule. An operation that alters a target's bytes claims that target's slot and counts the newer live
- *          hooks on it. A positive count refuses a toggle and pins a teardown (`[B-16]`, `[B-79]`).
+ * @brief Tracks local duplicate and layer identities for the free-function hook surface.
+ * @details The target slot serializes local requests under `[B-16]` and `[B-79]`. The process coordinator owns
+ *          order across participants. hook.hpp owns the duplicate-detection scope.
  */
 
 #include <atomic>
