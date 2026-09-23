@@ -2,6 +2,7 @@
  * @file staged_generation_dll.cpp
  * @brief Defines one reloadable test generation with its own DetourModKit archive.
  * @details The fixture runs the guide's Init and Shutdown sequence. The host controls each test seam before poll start.
+ *          It exercises inline and mid hooks and omits VMT hooks.
  */
 
 #include "DetourModKit/diagnostics.hpp"
@@ -15,11 +16,16 @@
 
 #include "staged_generation_protocol.hpp"
 
+#include <safetyhook/inline_hook.hpp>
+#include <safetyhook/os.hpp>
+
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -63,6 +69,95 @@ namespace
     std::atomic<TargetFn> s_original{nullptr};
     std::atomic<std::uint64_t> s_hook_calls{0};
     std::atomic<std::uint64_t> s_init_calls{0};
+    std::atomic<std::uint64_t> s_mid_calls{0};
+    bool s_retain_mid = false;
+    std::atomic<int> s_parked_result{0};
+
+    template <int Value>
+#if defined(_MSC_VER)
+    __declspec(noinline) __declspec(code_seg(".proof"))
+#else
+    __attribute__((noinline, section(".proof")))
+#endif
+    int
+    mid_target() noexcept
+    {
+        volatile int value = Value;
+        return value + value + value;
+    }
+
+    using MidTarget = int (*)() noexcept;
+
+    void mid_callback(DetourModKit::hook::MidContext &) noexcept
+    {
+        s_mid_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool install_mid_hooks()
+    {
+        constexpr std::array<MidTarget, 6> targets{
+            &mid_target<1>,
+            &mid_target<2>,
+            &mid_target<3>,
+            &mid_target<4>,
+            &mid_target<5>,
+            &mid_target<6>,
+        };
+        for (std::size_t i = 0; i < targets.size(); ++i)
+        {
+            auto installed = DetourModKit::hook::mid_at(
+                {
+                    .name = "staged_gen_mid",
+                    .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(targets[i])},
+                },
+                &mid_callback
+            );
+            if (!installed || !s_hooks.push(std::move(*installed)).enable())
+                return false;
+            MidTarget volatile target = targets[i];
+            if (target() != static_cast<int>(3 * (i + 1)) || s_mid_calls.load() != i + 1)
+                return false;
+        }
+        return true;
+    }
+
+    /**
+     * @brief Parks one caller before the entry count of the first mid route.
+     * @details The entry count does not cover that caller, so only the idle proof can retain the route.
+     * @return False after the park did not engage. No caller then remains.
+     */
+    [[nodiscard]] bool park_mid_caller(std::thread &caller) noexcept
+    {
+        safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+        try
+        {
+            caller = std::thread(
+                []() noexcept
+                {
+                    MidTarget volatile target = &mid_target<1>;
+                    s_parked_result.store(target(), std::memory_order_release);
+                }
+            );
+        }
+        catch (...)
+        {
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + READY_TIMEOUT;
+        while (!safetyhook::route_park_reached_for_test())
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+                caller.join();
+                return false;
+            }
+            ::Sleep(1);
+        }
+        return true;
+    }
+
     std::atomic<bool> s_probe_down{false};
     std::atomic<bool> s_park_armed{false};
     std::atomic<bool> s_park_entered{false};
@@ -162,6 +257,13 @@ extern "C"
         out->total_intentional_leaks = diag::total_intentional_leaks();
         out->total_module_pins = diag::total_module_pins();
         out->hook_calls = s_hook_calls.load(std::memory_order_relaxed);
+        out->mid_calls = s_mid_calls.load(std::memory_order_relaxed);
+        const auto coordinator = safetyhook::process_coordinator_snapshot_for_test();
+        out->coordinator_identity = coordinator.identity;
+        out->coordinator_bytes = coordinator.bytes;
+        out->coordinator_live = coordinator.live;
+        out->coordinator_retained = coordinator.retained;
+        out->parked_result = s_parked_result.load(std::memory_order_acquire);
         out->init_calls = s_init_calls.load(std::memory_order_relaxed);
     }
 
@@ -225,7 +327,7 @@ extern "C"
             s_session.emplace(std::move(*started));
 
             s_target_lib = ::LoadLibraryA(staged_gen::HOOK_TARGET_MODULE_NAME);
-            const auto target = reinterpret_cast<TargetFn>(
+            TargetFn volatile target = reinterpret_cast<TargetFn>(
                 s_target_lib != nullptr
                     ? reinterpret_cast<void *>(::GetProcAddress(s_target_lib, staged_gen::HOOK_TARGET_SYMBOL))
                     : nullptr
@@ -266,6 +368,12 @@ extern "C"
                 return 0;
             }
 
+            if (options->enable_mid != 0 && !install_mid_hooks())
+            {
+                roll_back_generation();
+                return 0;
+            }
+            s_retain_mid = options->enable_mid != 0 && options->retain_mid != 0;
             if (options->enable_probe_binding != 0)
             {
                 Result<input::BindingGuard> probe = input::register_combo(
@@ -416,7 +524,18 @@ extern "C"
             return 0;
         }
 
+        std::thread parked_caller;
+        if (s_retain_mid && !park_mid_caller(parked_caller))
+        {
+            return 0;
+        }
         const bool prologues_restored = clear_generation_hooks();
+        if (parked_caller.joinable())
+        {
+            // The closed route sends the released caller through its bypass to the restored target.
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            parked_caller.join();
+        }
         const bool external_wheel = s_external_wheel;
         s_session.reset();
 

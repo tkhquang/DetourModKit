@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "19263f0c850877bd949a8f2d1c7132f4433c8db6798939b5d2a881b835c0506a"
+EXPECTED_PATCH_SHA256 = "082ff7f9db0371afebc145b3f8af99de7bac6911acafcc6cd3ca11e98bd10a01"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -125,7 +125,7 @@ PR43_SENTINELS = [
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route
     "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
-    "return set_mid_route();",  # mid entry stays admitted across the generated stub
+    "if (auto result = set_mid_route(); !result)",  # mid entry stays admitted across the generated stub
     "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
     "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
     "std::atomic<uint64_t> admission",  # high-bit close and low-bit entry count share one ordered cell
@@ -230,6 +230,32 @@ PR07_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PR07_SENTINELS
+
+# Participants share one process coordinator for patch order, route records, and reclamation scans.
+PROCESS_COORDINATOR_SENTINELS = [
+    "class SAFETYHOOK_API ProcessCoordinator final",  # one process-owned serialization point ...
+    "state->version != expected_version",  # ... refuses an incompatible protocol ...
+    "result->mapping = mapping;",  # ... and leaves its first mapping to the process
+    "state->owner.load(std::memory_order_relaxed) == thread_id",  # the owner acquires again without a call ...
+    "__readgsdword(0x48)",  # ... and reads its thread identity without an export
+    "__readfsdword(0x24)",  # ... on both Windows pointer widths
+    "const ProcessCoordinator coordinator;",  # scans and patch transactions acquire before any suspension
+    "return std::unexpected{Error::coordination_unavailable(target)};",  # creation refuses before publication
+    "record.order > own->order && patches_overlap(record, *own)",  # a newer overlapping layer refuses a toggle
+    "record.order == 0 || !patches_overlap(record, *own)",  # reclamation weighs only overlapping records ...
+    "if (&record != own && record.order > own->order)",  # ... and refuses under any newer one
+    "void retain_route() noexcept",  # a leaked owner still marks its record retained
+    "coordinator.enabled(m_trampoline.data(), m_enabled);",  # a reconciled enable state reaches the record
+    "else if (m_process_registered && m_trampoline) {",  # a raw lock failure retains its record and storage
+    "coordinator.remove(m_trampoline.data());",  # clean teardown removes its record before storage release
+    "g_coordinator_state.store(state, std::memory_order_release);",  # a refused first connection stays retryable
+    # a coordinator refusal of the teardown restore names the retention cause
+    "restore_refused = !disabled && disabled.error().type == Error::COORDINATION_UNAVAILABLE;",
+    "is_canonical_view(view, view->canonical)",  # a mapping that another process created cannot redirect writes
+    "if (reason != RouteRetentionReason::None) {",  # every unpublished retention converts its reservation to a charge
+]
+
+REQUIRED_SENTINELS += PROCESS_COORDINATOR_SENTINELS
 
 
 def patch_files(patch_dir: Path):

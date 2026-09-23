@@ -545,6 +545,18 @@ namespace DetourModKit
                     type_int,
                     ip_str
                 );
+            case safetyhook::InlineHook::Error::COORDINATION_UNAVAILABLE:
+                return std::format(
+                    "InlineHook backend error ({}): process coordination is unavailable at {}",
+                    type_int,
+                    ip_str
+                );
+            case safetyhook::InlineHook::Error::LAYER_CONFLICT:
+                return std::format(
+                    "InlineHook backend error ({}): a newer participant owns the target at {}",
+                    type_int,
+                    ip_str
+                );
             case safetyhook::InlineHook::Error::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE:
                 return std::format(
                     "InlineHook backend error ({}): a non-executable patch transaction is unavailable at {}",
@@ -999,9 +1011,11 @@ namespace DetourModKit
          * @details The witness is taken whatever the disable reported, because the two disagree in both directions.
          *          The byte class is the complete verdict. Only @ref PatchWitness::Original authorizes backend
          *          destruction.
+         * @param refusal Receives the coordinator refusal of a failed disable.
          */
         template <class BackendVariant>
-        [[nodiscard]] PatchWitness run_teardown_restore(BackendVariant &backend) noexcept
+        [[nodiscard]] PatchWitness
+        run_teardown_restore(BackendVariant &backend, DetourModKit::detail::CoordinatorRefusal &refusal) noexcept
         {
             // Classify before the restore, so foreign bytes are refused rather than overwritten.
             const PatchWitness before = witness_of(backend);
@@ -1028,7 +1042,11 @@ namespace DetourModKit
             if (run_restore)
 #endif
             {
-                (void)backend_value_or(backend, false, [](auto &one) noexcept { return try_backend_disable(one); });
+                (void)backend_value_or(
+                    backend,
+                    false,
+                    [&refusal](auto &one) noexcept { return try_backend_disable(one, &refusal); }
+                );
             }
             const PatchWitness after = witness_of(backend);
             if (after == PatchWitness::Original)
@@ -1257,28 +1275,40 @@ namespace DetourModKit
 
             // Close the backend-owned route before restore, so admitted callers stay counted across the generated
             // stub. An Unwaitable self-owned mid teardown deliberately skips the drain. The pin below keeps its route
-            // alive.
-            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.begin_route_rundown(); });
+            // alive. The process coordinator is held first, because its wait export can be this closed route. A
+            // refused coordinator leaves the route open. The backend disable then acquires the coordinator itself and
+            // closes the route, or it refuses the restore.
+            std::optional<safetyhook::ProcessCoordinator> coordinator{std::in_place};
+            if (*coordinator)
+            {
+                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.begin_route_rundown(); });
+            }
             // Disable the backend here instead of in ~Impl. Its backend destructor discards a failed disable and
             // reclaims storage regardless. Only a prologue at its original bytes authorizes backend destruction.
             // Foreign and Indeterminate fail closed to the pin (see run_teardown_restore).
-            const PatchWitness restore = run_teardown_restore(m_impl->backend);
+            DetourModKit::detail::CoordinatorRefusal refusal = DetourModKit::detail::CoordinatorRefusal::None;
+            const PatchWitness restore = run_teardown_restore(m_impl->backend, refusal);
             if (restore != PatchWitness::Original)
             {
                 (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.cancel_route_rundown(); });
+                coordinator.reset();
                 // The target can still dispatch through this trampoline. Pin the Impl to keep its pages mapped. Book
                 // the leak and keep the creation-order entry, so is_target_hooked stays true.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 ledger.release_target_slot(target, ledger_id);
+                const std::string_view refusal_text = DetourModKit::detail::coordinator_refusal_description(refusal);
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: '{}' at 0x{:0{}X} could not restore its target's prologue during teardown ({}); leaked the "
-                    "backend to keep the possibly reachable trampoline mapped. The target remains tracked as hooked.",
+                    "hook: '{}' at 0x{:0{}X} did not restore its target's prologue during teardown ({}{}{}). "
+                    "Teardown leaked the backend, so the possibly reachable trampoline stays mapped. The target "
+                    "remains tracked as hooked.",
                     name,
                     target,
                     sizeof(std::uintptr_t) * 2,
-                    witness_description(restore)
+                    witness_description(restore),
+                    refusal_text.empty() ? "" : ", ",
+                    refusal_text
                 );
                 emit_lifecycle(
                     name,
@@ -1292,6 +1322,7 @@ namespace DetourModKit
                 return;
             }
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
+            coordinator.reset();
 
             // An unresolved continuation keeps its route entry after the callback returns.
             const bool route_drained =
@@ -1309,6 +1340,8 @@ namespace DetourModKit
                                             : mid_rundown == DetourModKit::detail::MidRundown::Expired
                                                 ? "callback past its bounded drain"
                                                 : "unresolved continuation or nonlocal exit";
+                // A live record refuses every older layer on this target.
+                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.retain_route(); });
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);
@@ -1339,6 +1372,7 @@ namespace DetourModKit
             {
                 // A thread remains inside the adapter body past the bounded wait. This counter is the slot-reuse
                 // authority, so the slot and stub stay retained. The ledger entry is clean.
+                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.retain_route(); });
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);
@@ -1371,14 +1405,22 @@ namespace DetourModKit
                 false,
                 [](const auto &backend) noexcept { return backend.route_retained(); }
             );
-            m_impl.reset();
+            const char *const retention_reason = backend_value_or(
+                m_impl->backend,
+                "route idle proof refused",
+                [](const auto &backend) noexcept { return backend.route_retention_reason(); }
+            );
             if (route_retained)
             {
+                // A retained route preserves every provider reference.
+                (void)m_impl.release();
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             }
-            // The drain completed, or this was never a mid hook. No thread is inside the adapter, so slot contents can
-            // be reused.
-            if (has_mid_slot)
+            else
+            {
+                m_impl.reset();
+            }
+            if (has_mid_slot && !route_retained)
             {
                 DetourModKit::detail::release_mid_adapter_slot(mid_slot);
             }
@@ -1387,15 +1429,18 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: mid hook '{}' at 0x{:0{}X} retained its published route chain at teardown. The backend "
-                    "did not prove the chain idle (a thread was inside it or still had to return into it), so the "
-                    "storage stays mapped and is booked as a HookManager leak.",
+                    "hook: '{}' at 0x{:0{}X} retained its executable route at teardown. "
+                    "The module reference remains held. Reason: {}.",
                     name,
                     target,
-                    sizeof(std::uintptr_t) * 2
+                    sizeof(std::uintptr_t) * 2,
+                    retention_reason
                 );
             }
-            DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
+            if (!route_retained)
+            {
+                DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
+            }
             emit_lifecycle(
                 name,
                 ledger_id,

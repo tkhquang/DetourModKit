@@ -665,9 +665,9 @@ namespace DetourModKit::detail
 
         /**
          * @brief Releases a hook after its target witnesses Original and its detour bodies drain.
-         * @return True if the backend retains the executable chain.
+         * @return The retention reason, or null after a clean reset.
          */
-        [[nodiscard]] bool
+        [[nodiscard]] const char *
         reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
         {
             original.store(nullptr, std::memory_order_seq_cst);
@@ -677,26 +677,28 @@ namespace DetourModKit::detail
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
             }
-            return retained;
+            return retained ? hook.route_retention_reason() : nullptr;
         }
 
         /**
          * @brief Reports retained chains after the interception lock releases.
          */
-        void emit_xinput_route_retention_logs(bool primary, bool ex) noexcept
+        void emit_xinput_route_retention_logs(const char *primary, const char *ex) noexcept
         {
             if (primary)
             {
-                (void)log().log_noexcept(
+                (void)log().try_log(
                     LogLevel::Warning,
-                    "XInput route retention: XInputGetState retained its executable chain after reset."
+                    "XInput route retention: XInputGetState retained its executable chain after reset. Reason: {}.",
+                    primary
                 );
             }
             if (ex)
             {
-                (void)log().log_noexcept(
+                (void)log().try_log(
                     LogLevel::Warning,
-                    "XInput route retention: ordinal 100 retained its executable chain after reset."
+                    "XInput route retention: ordinal 100 retained its executable chain after reset. Reason: {}.",
+                    ex
                 );
             }
         }
@@ -2095,11 +2097,11 @@ namespace DetourModKit::detail
                                          s_xinput_permanent_hooks->ex
                                      ))
         {
-            const bool primary_retained =
+            const char *const primary_retained =
                 reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
             retire_xinput_module_refs(primary_retained);
             lock.unlock();
-            emit_xinput_route_retention_logs(primary_retained, false);
+            emit_xinput_route_retention_logs(primary_retained, nullptr);
             return false;
         }
 
@@ -2132,8 +2134,9 @@ namespace DetourModKit::detail
         }
         if (primary_outcome != XInputArmOutcome::Armed)
         {
-            const bool ex_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
-            const bool primary_retained =
+            const char *const ex_retained =
+                reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+            const char *const primary_retained =
                 reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
             retire_xinput_module_refs(primary_retained || ex_retained);
             lock.unlock();
@@ -2729,8 +2732,9 @@ namespace DetourModKit::detail
         }
 #endif
 
-        const bool ex_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
-        const bool primary_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
+        const char *const ex_retained = reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+        const char *const primary_retained =
+            reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
 
         // A retained chain can still reach a code provider after its detour body drains.
         retire_xinput_module_refs(primary_retained || ex_retained);

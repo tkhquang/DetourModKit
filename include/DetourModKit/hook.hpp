@@ -15,14 +15,14 @@
  *          work. Argument construction at the call site stays the caller's. The Hook and VmtHook destructors retain
  *          unsafe state instead of a wait. See their notes.
  *
- *          LEDGER SCOPE: duplicate detection and same-target layer order live in a ledger held per linked
- *          DetourModKit instance, not per process. DetourModKit is a static archive, so two DLLs that each link it
- *          hold two independent ledgers, and a hook another kit placed on the same target is invisible here. A
- *          ledger duplicate refuses with @ref ErrorCode::TargetAlreadyHookedByThisKit, which the caller answers by
- *          dropping the handle it already holds. @ref Options::fail_if_already_hooked covers part of that blind spot
- *          without the ledger: it decodes the target's prologue for a foreign JMP and refuses with
- *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule. Nothing recovers layer order across instances, so
- *          cross-instance stacking has no defined teardown order.
+ *          LEDGER SCOPE: duplicate detection belongs to each linked instance. A local duplicate returns
+ *          @ref ErrorCode::TargetAlreadyHookedByThisKit. The foreign-prologue check returns
+ *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule when @ref Options::fail_if_already_hooked requires it.
+ *
+ *          Participants are the DetourModKit copies in this process that share the process route coordinator in
+ *          docs/design/hooking.md. Participants share backend patch order and route dependencies. Teardown must
+ *          proceed newest-first across participants. A coordinator refusal prevents mutation or retains the route.
+ *          Foreign libraries outside that protocol receive no cross-instance lifetime guarantee.
  */
 
 #include "DetourModKit/address.hpp"
@@ -299,7 +299,9 @@ namespace DetourModKit
              * @brief Restores the target when safe and reclaims an idle x64 mid route.
              * @details Original bytes authorize destruction. Foreign or unreadable bytes retain the backend.
              *          An idle route releases its executable storage, unwind records, and capacity charge together.
+             *
              *          An unresolved continuation or nonlocal exit retains the backend, adapter, and module references.
+             *          A route that the backend retains at reset keeps the same references and logs its reason.
              *          The loader lock, a newer layer, or an unproved restore also retain the backend.
              *          A retained patch keeps the target tracked as hooked.
              *          `[B-73]` attributes each retention to HookManager with a warning.
@@ -443,8 +445,10 @@ namespace DetourModKit
              *          reconciles Original bytes under an active state before the ordinary arm. Foreign or unreadable
              *          bytes refuse with EnableFailed and write nothing. Publish everything the detour needs before
              *          this call (`[B-83]`).
-             * @note Only the newest live layer on a target can arm it (`[B-16]`). A lower layer gets LayerConflict
-             *       before the idempotency check, so arm the base hook before you create the one above it.
+             * @note Only the newest live layer on a target can arm it (`[B-16]`). A lower layer in this instance gets
+             *       LayerConflict before the idempotency check, so arm the base hook before you create the one above
+             *       it. The process coordinator refuses an arm under another participant's newer layer with
+             *       LayerConflict. An armed patch of that layer fails the byte witness first and returns EnableFailed.
              * @note Setup/control-plane only: arming patches the target and serializes on the per-hook call gate.
              */
             [[nodiscard]] Result<void> enable() noexcept;
@@ -466,7 +470,9 @@ namespace DetourModKit
              *          bytes return. Foreign or unreadable bytes refuse with DisableFailed and write nothing. Teardown
              *          pins the backend instead of a restore (@ref Hook::~Hook).
              * @note Only the newest live layer on a target can disarm it (`[B-16]`). Tear down or disable the newer
-             *       layer first.
+             *       layer first. The process coordinator refuses a disarm under another participant's newer layer
+             *       with LayerConflict. An armed patch of that layer fails the byte witness first and returns
+             *       DisableFailed.
              * @note Setup/control-plane only: disarming restores target bytes and serializes on the per-hook call
              *       gate.
              */
@@ -481,8 +487,8 @@ namespace DetourModKit
              * @note Booked by @ref diagnostics::total_intentional_leaks like a defensive pin, and the target stays
              *       recorded: @ref is_target_hooked keeps reporting it hooked, a strict install keeps being refused,
              *       and a layer installed underneath this one can no longer enable, disable, or restore. Every
-             *       byte-writing operation that layer attempts is refused with @ref ErrorCode::LayerConflict for the
-             *       process lifetime. A layer installed AFTER it still tears down normally.
+             *       byte-writing operation that layer attempts is refused for the process lifetime with the codes that
+             *       @ref enable and @ref disable name. A layer installed AFTER it still tears down normally.
              * @note Setup/control-plane only: transfers the backend to process-lifetime retention; do not call from a
              *       hook or input callback.
              * @warning The detour and everything it reaches must remain mapped for the rest of the process.
@@ -722,7 +728,7 @@ namespace DetourModKit
          *          DMK owns callback exception containment and ordinary off-loader-lock rundown.
          *          The callback tombstone and wait rules reside in @ref Hook::~Hook.
          * @note Each hook holds one adapter from a fixed pool. Clean teardown returns it.
-         *       A retained backend keeps its adapter and capacity charge for the process lifetime.
+         *       A retained backend keeps its adapter, capacity charge, and module reference for the process lifetime.
          *       Displaced instructions and their callees hold route ownership until an ordinary exit completes.
          *       Dormant fibers and unresolved exception continuations therefore retain their routes during teardown.
          *       Exception unwind or a nonlocal exit can abandon ownership and cause permanent retention.

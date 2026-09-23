@@ -8,7 +8,7 @@ Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[
 
 ### hook (free functions + RAII Hook/VmtHook)
 
-There is no central registry.
+The process coordinator owns route order across participants. The local ledger owns DMK handle identities.
 
 The call gate:
 
@@ -22,8 +22,8 @@ The ledger:
 - The per-linked-instance `src/internal/hook_ledger.hpp` is a small mutex over target/vptr sets, not a public registry. DMK is a static archive, so two DLLs that each link it get two independent ledgers.
 - The ledger backs exact duplicate detection (`fail_if_already_hooked`) through an atomic check-and-reserve ( `try_reserve_hook`). The reservation commits only after backend create and fallible setup succeed, and it rolls back on any create failure.
 - The two refusal mechanisms carry two codes, because the caller's correct response differs. `ErrorCode::TargetAlreadyHookedByThisKit` comes from the ledger. `ErrorCode::TargetAlreadyHookedByAnotherModule` comes from the foreign-prologue decode that runs only when the ledger has no record.
-- Same-target backend creates proceed through the ledger's pending queue in reservation order, so permissive layering cannot patch concurrently or invert the trampoline chain.
-- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot and refuse with `ErrorCode::LayerConflict` from underneath a newer layer.
+- The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants.
+- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot and refuse with `ErrorCode::LayerConflict` from underneath a newer local layer.
 - The ledger's state is never-destroyed storage, so a hook owned by a namespace-scope object can still tear down at static-destruction time.
 
 VmtHook and teardown:
@@ -45,11 +45,38 @@ VmtHook and teardown:
 
   `Lifecycle.MidRouteSurvivesDormantFiber` and `Lifecycle.MidRouteSurvivesExceptionContinuation` verify saved execution after teardown. `Lifecycle.MidRouteUnwindSettlesRouteOwnership` verifies permanent retention after unwind. The other `Lifecycle.MidRoute*` cases verify normal exits, selected resumes, bypass execution, register preservation, unwind records, and idle reclamation.
 
-  An earlier retained chain on the same target joins the proof because its trampoline can still feed the current gateway. The scan takes the backend transaction lock before any suspension and runs only off the loader lock. While a thread is suspended, the scan allocates nothing, takes no lock, and never changes an instruction pointer. `Lifecycle.PublishedMidRouteReclaimsUnlessParked` verifies reclamation, retention, and layered teardown.
+  The [process route coordinator](#process-route-coordinator) owns dependencies across participants. `Lifecycle.RouteCopiesRetainLayeredDependencies`, `Lifecycle.RouteCopiesRetainInlineDependencies`, and `Lifecycle.RouteCopiesRetainOverlappingDependencies` verify that contract after both loader references drop. The local idle proof remains under `Lifecycle.PublishedMidRouteReclaimsUnlessParked`.
 - A retained id still counts in newer-layer counting for the process lifetime. The pinned backend is still installed, so a layer underneath it must stay refused. Ids append newest-last, so a layer installed after a pin still tears down normally.
 - `Hook::release()` and `VmtHook::release()` are the caller-requested form of the same pin and book their leak identically.
 
 Hot-path mechanism: None. Install and teardown are setup/control-plane. The per-hook gate mutex serializes `call()`, and the handle's own storage must outlive a concurrent call.
+
+## Process route coordinator
+
+Participants are the Windows x64 copies that share version 1 of a private data protocol. A named mapping identifies one canonical view. Its name includes the process ID and process creation time. A participant accepts an existing mapping only when its canonical address is a view of the same section in this process. A mapping that another process created first therefore refuses coordination.
+
+The process owns one 49,152-byte non-executable mapping and two handles. The payload occupies 45,112 bytes and holds 512 bounded records. It contains no callable address or allocator state. The owner remains after every participant unloads. `Lifecycle.StagedGenerationResourcesStayWithinBudget` verifies one view and two handles after each generation.
+
+`safetyhook::ProcessCoordinator` in `external/safetyhook/include/safetyhook/os.hpp` owns the lock order, the acquisition limit, owner reacquisition, and the shared layer order. Create holds the coordinator through the original-byte snapshot and record publication. Patch transactions and reclamation scans acquire it before any protection change or thread suspension. DMK teardown acquires it before a route closes, because the coordinator wait export can be that route.
+
+Each record identifies a target, its patched byte count, creation order, generated ranges, enable state, and continuation state. A live newer record blocks an older toggle. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
+
+Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses older layers.
+
+Retained DMK routes also preserve their adapter and counted module reference. A DMK drain failure or a destroy lock failure records its leaked route as retained.
+
+Foreign libraries outside this protocol remain outside its guarantee. The existing target-lifetime and saved-context contracts still apply. No public coordinator API or package target exists.
+
+`Lifecycle.RouteCopies*` verifies these contracts:
+
+- serialization and layered dependencies,
+- retention after a callback or adapter drain failure,
+- targets on the wait stub page and on the wait export,
+- refusals and their reported causes,
+- registration capacity, acquisition timeout, and a retried first connection,
+- refusal of a foreign or incompatible mapping.
+
+`Lifecycle.RouteCoordinatorSurvivesParticipantUnload` verifies a stable owner after the first participant unmaps. `Lifecycle.DestroyLockFailureRetainsRoute` and `Lifecycle.ReconciledRouteReleasesProcessRecord` verify the lock-failure and reconciled record states. `Lifecycle.RefusedTeardownNamesCoordinator` verifies the retention cause after a refused restore. `Lifecycle.RefusedTeardownCompletesRetention` verifies the charge and the retained record after a refused teardown acquisition.
 
 ## Backend confinement
 
@@ -85,7 +112,8 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - a VMT move constructor that propagates allocation failure,
 - reclamation of a published routed chain after an idle proof, with retention recorded for later proofs on the same target,
 - mid-route ownership through displaced execution, terminal exits, and transaction redirects,
-- preservation of the first E9 failure when the FF fallback fails without an allocation error.
+- preservation of the first E9 failure when the FF fallback fails without an allocation error,
+- process coordination for patch order, route records, and reclamation across participants.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 
@@ -103,7 +131,7 @@ A configured build tree leaves the submodule working tree dirty, because the pat
 
 ### [B-16]
 
-`disable()` writes a hook's saved prologue back over the target. A hook created on an already-hooked address saved a jump to the older detour as its prologue. An oldest-first restore therefore rewrites the entry into the older hook's freed trampoline, a use-after-free. `src/internal/hook_ledger.hpp` tracks per-target layer order and closes both halves. A non-top-layer `enable()` / `disable()` is REFUSED with `ErrorCode::LayerConflict` and writes nothing. An out-of-order destructor leaks the older backend rather than restores it. The rule below is therefore about clean teardown rather than crash avoidance. It still matters: the leak is permanent, and only newest-first restores the pristine prologue.
+`disable()` restores the saved prologue. A layered prologue can reference an older route, so teardown must proceed newest-first. The local ledger refuses an older local handle, and the process coordinator refuses an older participant's toggle. `Hook::enable()` and `Hook::disable()` own the resulting error codes, and `Lifecycle.RouteCopiesReportLayerConflict` verifies the coordinator refusal. An out-of-order destructor retains the older backend. The process coordinator owns the cross-participant contract above.
 
 Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) does not provide the required newest-first teardown contract. Code that holds layered same-target handles in a container must not rely on a container drop for rollback. Tear them down back-to-front (`pop_back`) or use a commit-on-success transaction, never `~vector`. This is the `install_all` rollback trap, fixed by its internal `InstallRollback` guard.
 

@@ -32,6 +32,7 @@
 
 #include <process.h>
 #include <windows.h>
+#include <winternl.h>
 
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
     uint32_t *mounted_hooks,
@@ -414,6 +415,266 @@ namespace
 
         std::fprintf(stderr, "OK: an existing staged candidate forced a fresh name\n");
         return 0;
+    }
+
+    std::uint64_t private_executable_bytes() noexcept
+    {
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        const auto limit = reinterpret_cast<std::uintptr_t>(system.lpMaximumApplicationAddress);
+        std::uint64_t bytes = 0;
+        for (std::uintptr_t cursor = 0; cursor < limit;)
+        {
+            MEMORY_BASIC_INFORMATION region{};
+            if (VirtualQuery(reinterpret_cast<const void *>(cursor), &region, sizeof(region)) != sizeof(region))
+                return UINT64_MAX;
+            if (region.State == MEM_COMMIT && region.Type == MEM_PRIVATE &&
+                (region.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+            {
+                bytes += region.RegionSize;
+            }
+            const auto next = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+            if (next <= cursor)
+                return UINT64_MAX;
+            cursor = next;
+        }
+        return bytes;
+    }
+
+    /**
+     * @brief Counts the clear bits of the process TLS bitmaps under the PEB lock.
+     * @details The census allocates no index, so a concurrent TlsAlloc in another thread never fails because of it.
+     *          Offsets 0x78 and 0x238 of the Windows x64 PEB hold TlsBitmap and TlsExpansionBitmap.
+     * @return Zero when ntdll exports no PEB lock, which fails the census.
+     */
+    std::size_t free_tls_indices() noexcept
+    {
+        struct TlsBitmap
+        {
+            ULONG size;
+            const ULONG *bits;
+        };
+        using PebLockFn = void(NTAPI *)();
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        const auto acquire =
+            reinterpret_cast<PebLockFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "RtlAcquirePebLock")));
+        const auto release =
+            reinterpret_cast<PebLockFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "RtlReleasePebLock")));
+        if (acquire == nullptr || release == nullptr)
+            return 0;
+        const auto *const peb = reinterpret_cast<const std::uint8_t *>(NtCurrentTeb()->ProcessEnvironmentBlock);
+        std::size_t count = 0;
+        acquire();
+        for (const std::size_t offset : {std::size_t{0x78}, std::size_t{0x238}})
+        {
+            const auto *const bitmap = *reinterpret_cast<const TlsBitmap *const *>(peb + offset);
+            for (ULONG bit = 0; bit < bitmap->size; ++bit)
+                count += ((bitmap->bits[bit / 32] >> (bit % 32)) & 1U) == 0 ? 1 : 0;
+        }
+        release();
+        return count;
+    }
+
+    struct CoordinatorObjects
+    {
+        std::size_t views = 0;
+        std::size_t mutex_handles = 0;
+        std::size_t mapping_handles = 0;
+    };
+
+    /**
+     * @brief Counts the views of the coordinator section and the handles to its lock and section in this process.
+     * @details The header prefix mirrors version 1. Lifecycle.RouteCopiesRejectForeignCoordinatorView proves that
+     *          layout. A value written through the canonical view identifies each view of the same section. The caller
+     *          runs no participant during the census.
+     * @return Zero counts when a query fails or kernelbase exports no CompareObjectHandles, which fails the census.
+     */
+    CoordinatorObjects coordinator_objects(std::uintptr_t identity) noexcept
+    {
+        struct CoordinatorHeader
+        {
+            std::uint64_t magic;
+            std::uint32_t version;
+            std::uint32_t bytes;
+            void *canonical;
+            HANDLE mutex;
+            HANDLE mapping;
+        };
+        using CompareFn = BOOL(WINAPI *)(HANDLE, HANDLE);
+        const auto compare = reinterpret_cast<CompareFn>(
+            reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "CompareObjectHandles"))
+        );
+        DWORD remaining = 0;
+        if (compare == nullptr || !GetProcessHandleCount(GetCurrentProcess(), &remaining))
+            return {};
+        const auto *const header = reinterpret_cast<const CoordinatorHeader *>(identity);
+        CoordinatorObjects objects{};
+        for (std::uintptr_t value = 4; remaining != 0 && value < (std::uintptr_t{1} << 20); value += 4)
+        {
+            const auto handle = reinterpret_cast<HANDLE>(value);
+            DWORD flags = 0;
+            if (!GetHandleInformation(handle, &flags))
+                continue;
+            --remaining;
+            objects.mutex_handles += compare(handle, header->mutex) ? 1 : 0;
+            objects.mapping_handles += compare(handle, header->mapping) ? 1 : 0;
+        }
+
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        const auto limit = reinterpret_cast<std::uintptr_t>(system.lpMaximumApplicationAddress);
+        auto *const canonical = reinterpret_cast<volatile std::uint64_t *>(identity);
+        const std::uint64_t original = *canonical;
+        for (std::uintptr_t cursor = 0; cursor < limit;)
+        {
+            MEMORY_BASIC_INFORMATION region{};
+            if (VirtualQuery(reinterpret_cast<const void *>(cursor), &region, sizeof(region)) != sizeof(region))
+                return {};
+            if (region.State == MEM_COMMIT && region.Type == MEM_MAPPED && region.Protect == PAGE_READWRITE &&
+                region.BaseAddress == region.AllocationBase)
+            {
+                const auto *const candidate = static_cast<const volatile std::uint64_t *>(region.BaseAddress);
+                bool same = true;
+                for (const std::uint64_t mask : {~std::uint64_t{0}, std::uint64_t{0x5A5A5A5A5A5A5A5A}})
+                {
+                    *canonical = original ^ mask;
+                    same = same && *candidate == (original ^ mask);
+                }
+                *canonical = original;
+                objects.views += same ? 1 : 0;
+            }
+            const auto next = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+            if (next <= cursor)
+                return {};
+            cursor = next;
+        }
+        return objects;
+    }
+
+    int run_resource_soak()
+    {
+#if defined(__SANITIZE_ADDRESS__)
+        std::fprintf(
+            stderr,
+            "SKIP: the resource census requires an uninstrumented process. "
+            "ASan retains separate VEH wrapper pages.\n"
+        );
+        return SKIP_EXIT_CODE;
+#else
+#if defined(__MINGW32__)
+        // Each generation imports libwinpthread-1.dll. Its first use after each load takes a TLS index that its unload
+        // never returns. One initialized host load keeps that runtime cost out of the per-generation budget.
+        const HMODULE winpthread = LoadLibraryW(L"libwinpthread-1.dll");
+        const auto pthread_self_fn = winpthread != nullptr
+                                         ? reinterpret_cast<std::uintptr_t (*)()>(
+                                               reinterpret_cast<void *>(GetProcAddress(winpthread, "pthread_self"))
+                                           )
+                                         : nullptr;
+        if (pthread_self_fn == nullptr)
+            return fail("resources", "the host did not initialize libwinpthread-1.dll");
+        (void)pthread_self_fn();
+#endif
+        // The first host staging initializes file and stream state that takes platform TLS indices. One discarded copy
+        // keeps that host cost out of the first generation budget.
+        std::filesystem::path warm_up;
+        if (!stage_copy("WARMUP", warm_up))
+            return fail("resources", "the host did not stage the warm-up copy");
+        std::error_code removed;
+        (void)std::filesystem::remove(warm_up, removed);
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        std::uint64_t previous_bytes = private_executable_bytes();
+        std::size_t previous_tls = free_tls_indices();
+        std::uintptr_t coordinator_identity = 0;
+#if defined(_MSC_VER)
+        constexpr std::size_t tls_per_generation = 1;
+#else
+        constexpr std::size_t tls_per_generation = 2;
+#endif
+        // The clean series ends at SOAK_CYCLES. The next generation retains one route explicitly, and two clean
+        // generations follow it.
+        constexpr int RETAINED_CYCLE = SOAK_CYCLES + 1;
+        constexpr int LAST_CYCLE = RETAINED_CYCLE + 2;
+        for (int cycle = 0; cycle <= LAST_CYCLE; ++cycle)
+        {
+            const bool retain = cycle == RETAINED_CYCLE;
+            const std::size_t retained_routes = cycle >= RETAINED_CYCLE ? 1 : 0;
+            Generation generation;
+            if (!load_generation("RESOURCE" + std::to_string(cycle), generation))
+                return fail("resources", "the generation did not load");
+            const std::string log_name = make_log_name("staged_gen_resources");
+            staged_gen::InitOptions options{};
+            options.enable_mid = 1;
+            options.retain_mid = retain ? 1 : 0;
+            options.log_file = log_name.c_str();
+            if (generation.init(&options) == 0 || generation.read_status().mid_calls != 6)
+                return fail("resources", "six mid callbacks did not execute");
+            // A retained route refuses the reload verdict and books one HookManager leak.
+            const int verdict = generation.shutdown();
+            const auto status = generation.read_status();
+            if (retain && (verdict != 0 || status.hook_manager_leaks != 1 || status.total_intentional_leaks != 1 ||
+                           status.parked_result != 3))
+                return fail("resources", "the parked route was not retained, reported, and bypassed");
+            if (!retain && (verdict == 0 || status.total_intentional_leaks != 0))
+                return fail("resources", "a clean generation retained a route");
+            if (cycle == 0)
+                coordinator_identity = status.coordinator_identity;
+            MEMORY_BASIC_INFORMATION coordinator_region{};
+            if (status.coordinator_identity == 0 || status.coordinator_identity != coordinator_identity ||
+                status.coordinator_live != 0 || status.coordinator_retained != retained_routes ||
+                status.coordinator_bytes != 45112 ||
+                VirtualQuery(
+                    reinterpret_cast<void *>(coordinator_identity),
+                    &coordinator_region,
+                    sizeof(coordinator_region)
+                ) != sizeof(coordinator_region) ||
+                coordinator_region.Type != MEM_MAPPED || coordinator_region.Protect != PAGE_READWRITE ||
+                coordinator_region.RegionSize != 12 * system.dwPageSize)
+                return fail("resources", "the fixed process owner changed or holds an unexplained route record");
+            const void *const marker = generation.marker;
+            if (!unload_generation(generation))
+                return fail("resources", "the generation did not unload");
+            // The retained route holds its module reference, so only a clean generation unmaps.
+            if (retain && !module_owns(marker))
+                return fail("resources", "the retained route lost its image");
+            if (!retain && !wait_for_unmap(marker))
+                return fail("resources", "the generation did not unmap");
+            if (!retain)
+                remove_unmapped_staged_file_best_effort(generation);
+            // A throw after each unmap faults if a handler from the unmapped image remains registered.
+            try
+            {
+                throw cycle;
+            }
+            catch (int observed)
+            {
+                if (observed != cycle)
+                    return fail("resources", "the post-unmap exception changed");
+            }
+            const CoordinatorObjects objects = coordinator_objects(coordinator_identity);
+            if (objects.views != 1 || objects.mutex_handles != 1 || objects.mapping_handles != 1)
+                return fail("resources", "the process holds other than one coordinator view and two handles");
+            const std::uint64_t bytes = private_executable_bytes();
+            const std::size_t tls = free_tls_indices();
+            std::fprintf(
+                stderr,
+                "resources cycle=%d retained=%d executable_delta=%lld tls_delta=%lld\n",
+                cycle,
+                retain ? 1 : 0,
+                static_cast<long long>(bytes) - static_cast<long long>(previous_bytes),
+                static_cast<long long>(previous_tls) - static_cast<long long>(tls)
+            );
+            // A retained route keeps the one near block that holds its generated ranges.
+            const std::uint64_t retained_bytes = retain ? system.dwAllocationGranularity : 0;
+            if (bytes != previous_bytes + system.dwPageSize + retained_bytes)
+                return fail("resources", "executable growth differs from one trap page per copy and retained blocks");
+            if (tls + tls_per_generation != previous_tls)
+                return fail("resources", "TLS consumption differs from the declared subsystem reservation");
+            previous_bytes = bytes;
+            previous_tls = tls;
+        }
+        return 0;
+#endif
     }
 
     int run_soak()
@@ -1025,6 +1286,10 @@ namespace
 int main(int argc, char **argv)
 {
     const std::string scenario = argc > 1 ? argv[1] : "";
+    if (scenario == "resources")
+    {
+        return run_resource_soak();
+    }
     if (scenario == "soak")
     {
         return run_soak();
