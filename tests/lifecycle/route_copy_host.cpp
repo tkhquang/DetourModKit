@@ -221,6 +221,8 @@ namespace
     int retry_refused_connection(Participant &first, Participant &second, unsigned char *page)
     {
         TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        // GetTickCount64 advances in whole timer ticks, so the refused two-second wait can read up to one tick short.
+        constexpr std::uint64_t REFUSED_WAIT_FLOOR_MS = 2000 - 16;
         const auto identity = first.run(Command::Identity);
         std::uintptr_t refused = 1;
         std::uint64_t elapsed = 0;
@@ -233,8 +235,9 @@ namespace
                 elapsed = GetTickCount64() - start;
             }
         );
-        if (identity == 0 || !held || refused != 0 || elapsed < 2000 || second.run(Command::Identity) != identity ||
-            second.run(Command::Install, page) == 0 || target() != 37 || second.run(Command::Reset) != 0)
+        if (identity == 0 || !held || refused != 0 || elapsed < REFUSED_WAIT_FLOOR_MS ||
+            second.run(Command::Identity) != identity || second.run(Command::Install, page) == 0 || target() != 37 ||
+            second.run(Command::Reset) != 0)
             return fail("a refused first connection disabled the participant");
         return 0;
     }
