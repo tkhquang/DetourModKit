@@ -138,7 +138,9 @@ Never load two generations by the same file name. If the loader maps the build o
 
 A retained image keeps its code mapped, but it can still contain live old behavior. Only documented `MessageHookKeepalive` and XInput retention become inert after teardown. The reference loader requests a restart when an accepted image stays mapped. Every retained image counts against the reload budget.
 
-A published mid hook frees its route block at teardown unless the backend cannot prove the chain idle: a thread inside it or still returning into it. That retention is booked as a `LeakSubsystem::HookManager` leak, so the verdict reports it instead of a silent block.
+An inline or mid hook retains its executable route at teardown when its storage cannot be freed safely. Causes include a failed idle proof, a refused or timed-out process coordinator, and a newer overlapping route in any participant. The retained route keeps its module reference, so the image stays mapped. The retention is booked as a `LeakSubsystem::HookManager` leak, and the warning names its cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator).
+
+Each linked copy that initializes the trap runtime retains one executable trap page. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the fixture budget for each toolchain.
 
 A custom staged-name loader can continue after an inert retention verdict. It must refuse every other pin and enforce count and byte budgets. `ExternalHost` removes the wheel pin, but every other unload proof still applies.
 
@@ -203,6 +205,8 @@ This table follows the reference topology.
 Do not pass C++ containers, pointers with ownership, exceptions, or standard-library objects across a mixed-toolchain boundary. Keep every pointer in the request valid for its documented lifetime.
 
 ### Threads, TLS, and static constructors
+
+TLS reservations persist until process exit. The [generation resource proof](../../design/testing.md#generation-resource-proof) records them for each toolchain.
 
 Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
 

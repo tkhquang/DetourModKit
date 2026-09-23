@@ -352,6 +352,24 @@ dmk_add_raw_proof(NAME Lifecycle.DestroyLockFailureRetainsRoute
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+dmk_add_raw_proof(NAME Lifecycle.ReconciledRouteReleasesProcessRecord
+  COMMAND $<TARGET_FILE:mid_route_retention> reconciled-reset
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownNamesCoordinator
+  COMMAND $<TARGET_FILE:mid_route_retention> refused-teardown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownCompletesRetention
+  COMMAND $<TARGET_FILE:mid_route_retention> refused-retention
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
 # A deadlock needs an isolated process so its timeout cannot wedge the shared unit binary.
 add_executable(input_gate_abba test_input_gate_abba.cpp)
 target_link_libraries(input_gate_abba PRIVATE DetourModKit dmk_coverage psapi)
@@ -1192,7 +1210,7 @@ endwhile()
 # The generation target links one archive instance. Test seams replace its window and XInput dependencies.
 add_library(staged_generation_dll SHARED staged_generation_dll.cpp)
 set_target_properties(staged_generation_dll PROPERTIES PREFIX "" OUTPUT_NAME "staged_generation_dll")
-target_link_libraries(staged_generation_dll PRIVATE DetourModKit dmk_coverage)
+target_link_libraries(staged_generation_dll PRIVATE DetourModKit safetyhook dmk_coverage)
 target_include_directories(staged_generation_dll PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
@@ -1346,3 +1364,69 @@ add_test(NAME Lifecycle.XInputTelemetryProofRejectsUnknownScenario
   COMMAND $<TARGET_FILE:xinput_detour_rundown> telemetry-invalid)
 set_tests_properties(Lifecycle.XInputTelemetryProofRejectsUnknownScenario PROPERTIES
   WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+
+foreach(participant IN ITEMS a b)
+  add_library(route_copy_${participant} SHARED route_copy_dll.cpp)
+  set_target_properties(route_copy_${participant} PROPERTIES PREFIX "")
+  target_link_libraries(route_copy_${participant} PRIVATE DetourModKit safetyhook dmk_coverage)
+  dmk_static_runtime(route_copy_${participant} SHARED)
+endforeach()
+add_executable(route_copy_host route_copy_host.cpp)
+target_link_libraries(route_copy_host PRIVATE dmk_coverage)
+target_compile_features(route_copy_host PRIVATE cxx_std_23)
+dmk_static_runtime(route_copy_host)
+add_dependencies(route_copy_host route_copy_a route_copy_b)
+add_dependencies(dmk_lifecycle_proof_hosts route_copy_host)
+add_test(NAME Lifecycle.RouteCopiesRejectUnknownScenario
+  COMMAND $<TARGET_FILE:route_copy_host> invalid-scenario)
+set_tests_properties(Lifecycle.RouteCopiesRejectUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+set(route_copy_proofs
+  Lifecycle.RouteCopiesSerializeConcurrentScans scans
+  Lifecycle.RouteCopiesSerializePatchAndScan patch
+  Lifecycle.RouteCopiesRetainLayeredDependencies layers
+  Lifecycle.RouteCopiesRetainInlineDependencies layers-inline
+  Lifecycle.RouteCopiesRetainOverlappingDependencies layers-overlap
+  Lifecycle.RouteCopiesReleaseOlderLayerAfterDrainFailure drain-leak
+  Lifecycle.RouteCopiesReleaseOlderLayerAfterAdapterDrainFailure adapter-leak
+  Lifecycle.RouteCoordinatorSurvivesParticipantUnload unload
+  Lifecycle.RouteCopiesRejectUncoordinatedReclamation missing
+  Lifecycle.RouteCopiesRejectIncompatibleCoordination incompatible
+  Lifecycle.RouteCopiesShareRegistrationCapacity capacity
+  Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout timeout
+  Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
+  Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
+  Lifecycle.RouteCopiesReportLayerConflict layer-conflict
+  Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause)
+while(route_copy_proofs)
+  list(POP_FRONT route_copy_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_copy_host> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_copy_host>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+set(route_copy_stub_proofs
+  Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub stub-page
+  Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait wait-export
+  Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread stub-thread)
+while(route_copy_stub_proofs)
+  list(POP_FRONT route_copy_stub_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_copy_host> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_copy_host>
+    TEST_TIMEOUT 30
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endwhile()
+
+dmk_add_raw_proof(NAME Lifecycle.StagedGenerationResourcesStayWithinBudget
+  COMMAND $<TARGET_FILE:staged_generation_soak> resources
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 300
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+if(DMK_ENABLE_SANITIZERS)
+  set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES SKIP_RETURN_CODE 77)
+endif()

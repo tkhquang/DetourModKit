@@ -16,7 +16,7 @@ Every such leak must meet these terms:
 - The reference releases after a clean off-loader-lock join (`detail::release_module_ref`, or `FreeLibraryAndExitThread` for the raw bootstrap worker). On a loader-lock detach it is left outstanding.
 - Do not take the reference from the detach path itself. The loader refuses to reference a module whose refcount already reached zero and unloads. See the `Hook` / `VmtHook` handle destructors, the bootstrap worker in `session.cpp`, and `Logger::shutdown_internal`.
 
-Mid-route continuation ownership and retention reside in the [hook note](hooking.md). XInput chain and pair attribution reside in the [input note](input.md).
+Mid-route continuation ownership, process coordination, and retention reside in the [hook note](hooking.md). XInput chain and pair attribution reside in the [input note](input.md).
 
 ## Loader-lock proof inventory
 

@@ -15,6 +15,8 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -104,12 +106,62 @@ namespace DetourModKit::detail
         return confirmed;
     }
 
-    /// Runs a managed backend enable and contains backend synchronization or allocation exceptions.
-    template <class Backend> [[nodiscard]] bool try_backend_enable(Backend &backend) noexcept
+    /// Names a backend toggle refusal that the process route coordinator decided before any mutation.
+    enum class CoordinatorRefusal : std::uint8_t
+    {
+        None,
+        LayerConflict,
+        Unavailable,
+    };
+
+    [[nodiscard]] inline CoordinatorRefusal coordinator_refusal(const safetyhook::InlineHook::Error &error) noexcept
+    {
+        switch (error.type)
+        {
+        case safetyhook::InlineHook::Error::LAYER_CONFLICT:
+            return CoordinatorRefusal::LayerConflict;
+        case safetyhook::InlineHook::Error::COORDINATION_UNAVAILABLE:
+            return CoordinatorRefusal::Unavailable;
+        default:
+            return CoordinatorRefusal::None;
+        }
+    }
+
+    [[nodiscard]] inline CoordinatorRefusal coordinator_refusal(const safetyhook::MidHook::Error &error) noexcept
+    {
+        return error.type == safetyhook::MidHook::Error::BAD_INLINE_HOOK ? coordinator_refusal(error.inline_hook_error)
+                                                                         : CoordinatorRefusal::None;
+    }
+
+    /// Returns the warning text for @p refusal, or an empty view for CoordinatorRefusal::None.
+    [[nodiscard]] constexpr std::string_view coordinator_refusal_description(CoordinatorRefusal refusal) noexcept
+    {
+        switch (refusal)
+        {
+        case CoordinatorRefusal::LayerConflict:
+            return "a newer participant owns the target";
+        case CoordinatorRefusal::Unavailable:
+            return "process coordinator unavailable or timed out";
+        default:
+            return {};
+        }
+    }
+
+    /**
+     * @brief Runs a managed backend enable and contains backend synchronization or allocation exceptions.
+     * @param refusal Receives the coordinator refusal of a failed enable when non-null.
+     */
+    template <class Backend>
+    [[nodiscard]] bool try_backend_enable(Backend &backend, CoordinatorRefusal *refusal = nullptr) noexcept
     {
         try
         {
-            return backend.enable().has_value();
+            const auto result = backend.enable();
+            if (!result && refusal != nullptr)
+            {
+                *refusal = coordinator_refusal(result.error());
+            }
+            return result.has_value();
         }
         catch (...)
         {
@@ -120,12 +172,21 @@ namespace DetourModKit::detail
         }
     }
 
-    /// Runs a managed backend disable and contains backend synchronization or allocation exceptions.
-    template <class Backend> [[nodiscard]] bool try_backend_disable(Backend &backend) noexcept
+    /**
+     * @brief Runs a managed backend disable and contains backend synchronization or allocation exceptions.
+     * @param refusal Receives the coordinator refusal of a failed disable when non-null.
+     */
+    template <class Backend>
+    [[nodiscard]] bool try_backend_disable(Backend &backend, CoordinatorRefusal *refusal = nullptr) noexcept
     {
         try
         {
-            const bool disabled = backend.disable().has_value();
+            const auto result = backend.disable();
+            if (!result && refusal != nullptr)
+            {
+                *refusal = coordinator_refusal(result.error());
+            }
+            const bool disabled = result.has_value();
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *probe = DetourModKit::detail::g_hook_backend_disable_probe)
             {

@@ -32,6 +32,7 @@ namespace DetourModKit
         {
             using DetourModKit::detail::apply_backend;
             using DetourModKit::detail::backend_value_or;
+            using DetourModKit::detail::CoordinatorRefusal;
             using DetourModKit::detail::emit_lifecycle;
             using DetourModKit::detail::enable_patch_is_confirmed;
             using DetourModKit::detail::inline_trampoline;
@@ -47,7 +48,8 @@ namespace DetourModKit
             /**
              * @brief Defers one warning until later-declared lock guards release.
              * @details Declare it before the call-gate lock and target slot. Its destructor runs after both guards
-             *          release. HookToggleWarning.* pins the four texts.
+             *          release. HookToggleWarning.* pins the four witness texts, and
+             *          Lifecycle.RouteCopiesReportCoordinatorRefusal pins the coordinator texts.
              */
             class DeferredToggleWarning
             {
@@ -310,10 +312,11 @@ namespace DetourModKit
                 m_impl->status.store(HookState::Enabling, std::memory_order_release);
             }
             // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
+            CoordinatorRefusal refusal = CoordinatorRefusal::None;
             const bool backend_enabled = backend_value_or(
                 m_impl->backend,
                 false,
-                [](auto &backend) noexcept { return try_backend_enable(backend); }
+                [&refusal](auto &backend) noexcept { return try_backend_enable(backend, &refusal); }
             );
             const bool patch_confirmed = backend_value_or(
                 m_impl->backend,
@@ -350,6 +353,18 @@ namespace DetourModKit
                     )apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                 }
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
+                if (refusal == CoordinatorRefusal::LayerConflict)
+                {
+                    return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", m_impl->target});
+                }
+                if (refusal == CoordinatorRefusal::Unavailable)
+                {
+                    deferred_warning.arm(
+                        "refused enable: process coordinator unavailable or timed out",
+                        m_impl->name,
+                        m_impl->target
+                    );
+                }
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
             }
 
@@ -455,10 +470,11 @@ namespace DetourModKit
             // Confirm the saved prologue is back before Disabled publication. The witness is taken whatever the
             // backend returns. An error can sit over restored bytes. A success without byte corroboration must not
             // publish Disabled.
+            CoordinatorRefusal refusal = CoordinatorRefusal::None;
             const bool backend_disabled = backend_value_or(
                 m_impl->backend,
                 false,
-                [](auto &backend) noexcept { return try_backend_disable(backend); }
+                [&refusal](auto &backend) noexcept { return try_backend_disable(backend, &refusal); }
             );
             const PatchWitness after = witness_of(m_impl->backend);
             if (after == PatchWitness::Original)
@@ -478,6 +494,15 @@ namespace DetourModKit
             // is_enabled() and a later disable retry agree with the conservative Active state.
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
             m_impl->status.store(HookState::Active, std::memory_order_release);
+            if (refusal == CoordinatorRefusal::LayerConflict)
+            {
+                return std::unexpected(Error{ErrorCode::LayerConflict, "hook::disable", m_impl->target});
+            }
+            if (refusal == CoordinatorRefusal::Unavailable)
+            {
+                deferred_warning
+                    .arm("refused disable: process coordinator unavailable or timed out", m_impl->name, m_impl->target);
+            }
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable"});
         }
     } // namespace hook

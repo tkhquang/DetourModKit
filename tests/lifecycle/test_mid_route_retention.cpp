@@ -441,7 +441,7 @@ namespace
     void observe_retention_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
     {
         if (level == DetourModKit::LogLevel::Warning &&
-            message.find("retained its published route chain") != std::string_view::npos)
+            message.find("retained its executable route") != std::string_view::npos)
         {
             ++s_retention_warnings;
             s_warning_after_release = !DetourModKit::hook::is_target_hooked(DetourModKit::Address{s_warning_target}) &&
@@ -901,7 +901,163 @@ namespace
                 return 4;
             }
         }
-        std::puts("PASS: destroy lock failure retains published and unpublished routes without a duplicate charge");
+
+        // A raw hook has no route control, so its trampoline and process record need their own retention.
+        auto raw = safetyhook::InlineHook::create(TARGETS[1], INLINE_DETOURS[1], safetyhook::InlineHook::StartDisabled);
+        if (!raw)
+        {
+            return 5;
+        }
+        const auto *const raw_trampoline = raw->trampoline().data();
+        const auto live_records = safetyhook::process_coordinator_snapshot_for_test();
+        safetyhook::g_destroy_lock_failure_target.store(reinterpret_cast<std::uint8_t *>(TARGETS[1]));
+        raw->reset();
+        const auto retained_records = safetyhook::process_coordinator_snapshot_for_test();
+        MEMORY_BASIC_INFORMATION raw_info{};
+        if (!raw->route_retained() || retained_records.live + 1 != live_records.live ||
+            retained_records.retained != live_records.retained + 1 ||
+            VirtualQuery(raw_trampoline, &raw_info, sizeof(raw_info)) != sizeof(raw_info) ||
+            raw_info.State != MEM_COMMIT)
+        {
+            std::fputs("FAIL: a raw destroy lock failure left a live process record for its trampoline\n", stderr);
+            return 6;
+        }
+        std::puts("PASS: destroy lock failure retains raw and routed storage without a duplicate charge");
+        return 0;
+    }
+
+    /**
+     * @brief Verifies that a route reconciled to its original bytes releases its process record.
+     */
+    int run_reconciled_reset()
+    {
+        const int unhooked = call_unfolded(TARGETS[2], 1);
+        auto created = safetyhook::InlineHook::create(
+            TARGETS[2],
+            INLINE_DETOURS[2],
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
+        if (!created || !created->enable() || call_unfolded(TARGETS[2], 1) != 1 + SEEDS[2])
+        {
+            return 2;
+        }
+        const auto registered = safetyhook::process_coordinator_snapshot_for_test();
+        // Another writer restores the prologue, and the owner reconciles after its byte witness.
+        auto *const target = reinterpret_cast<std::uint8_t *>(TARGETS[2]);
+        const auto &original = created->original_bytes();
+        DWORD protection = 0;
+        if (VirtualProtect(target, original.size(), PAGE_EXECUTE_READWRITE, &protection) == FALSE)
+        {
+            return 3;
+        }
+        std::memcpy(target, original.data(), original.size());
+        (void)VirtualProtect(target, original.size(), protection, &protection);
+        (void)FlushInstructionCache(GetCurrentProcess(), target, original.size());
+        created->reconcile_enabled(false);
+        created->reset();
+        const auto released = safetyhook::process_coordinator_snapshot_for_test();
+        if (created->route_retained() || released.live + 1 != registered.live ||
+            released.retained != registered.retained || call_unfolded(TARGETS[2], 1) != unhooked)
+        {
+            std::fputs("FAIL: a reconciled route retained its chain or kept its process record\n", stderr);
+            return 4;
+        }
+        std::puts("PASS: a reconciled route reclaims its chain and releases its process record");
+        return 0;
+    }
+
+    /**
+     * @brief Verifies that a coordinator refusal of the teardown restore names the retention of an armed patch.
+     * @details Only the restore acquisition fails, so the later proof and the raw layer check run under the
+     *          coordinator. A closed route sends callers to the bypass, and a raw patch still reaches its detour.
+     */
+    int run_refused_teardown()
+    {
+        constexpr std::string_view coordinator_reason = "process coordinator unavailable or timed out";
+        const int routed_unhooked = call_unfolded(TARGETS[3], 1);
+        auto routed = safetyhook::InlineHook::create(
+            TARGETS[3],
+            INLINE_DETOURS[3],
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
+        auto raw = safetyhook::InlineHook::create(TARGETS[4], INLINE_DETOURS[4], safetyhook::InlineHook::StartDisabled);
+        if (!routed || !raw || !routed->enable() || !raw->enable() || call_unfolded(TARGETS[3], 1) != 1 + SEEDS[3])
+        {
+            return 2;
+        }
+        safetyhook::g_coordinator_refusal_for_test.store(3);
+        routed->reset();
+        safetyhook::g_coordinator_refusal_for_test.store(3);
+        raw->reset();
+        safetyhook::g_coordinator_refusal_for_test.store(0);
+        if (!routed->route_retained() || routed->route_retention_reason() != coordinator_reason ||
+            !raw->route_retained() || raw->route_retention_reason() != coordinator_reason ||
+            call_unfolded(TARGETS[3], 1) != routed_unhooked || call_unfolded(TARGETS[4], 1) != 1 + SEEDS[4])
+        {
+            std::fputs("FAIL: a refused teardown restore did not name the coordinator\n", stderr);
+            return 3;
+        }
+        std::puts("PASS: a refused teardown restore names the coordinator for the armed patch");
+        return 0;
+    }
+
+    /**
+     * @brief Verifies that a retention under a refused teardown acquisition completes its charge and its record.
+     * @details Only the teardown acquisition fails. An unpublished route converts its reservation into one charge. A
+     *          later acquisition marks the raw record retained, so the older layer below it still disarms.
+     */
+    int run_refused_retention()
+    {
+        constexpr std::string_view coordinator_reason = "process coordinator unavailable or timed out";
+        const auto baseline = safetyhook::route_retention_stats();
+        auto unpublished = safetyhook::InlineHook::create(
+            TARGETS[5],
+            INLINE_DETOURS[5],
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
+        if (!unpublished)
+        {
+            return 2;
+        }
+        const safetyhook::RouteRetentionCost cost = unpublished->route_retention_for_test();
+        safetyhook::g_coordinator_refusal_for_test.store(3);
+        unpublished->reset();
+        const auto charged = safetyhook::route_retention_stats();
+        if (!unpublished->route_retained() || unpublished->route_retention_reason() != coordinator_reason ||
+            cost.committed == 0 || charged.committed_reserved != baseline.committed_reserved ||
+            charged.committed_charged != baseline.committed_charged + cost.committed)
+        {
+            std::fputs("FAIL: a refused unpublished teardown did not convert its reservation into a charge\n", stderr);
+            return 3;
+        }
+
+        // The newer layer never arms, so its saved prologue is the older patch.
+        const int unhooked = call_unfolded(TARGETS[4], 1);
+        auto older = safetyhook::InlineHook::create(TARGETS[4], INLINE_DETOURS[4]);
+        auto newer =
+            safetyhook::InlineHook::create(TARGETS[4], INLINE_DETOURS[3], safetyhook::InlineHook::StartDisabled);
+        if (!older || !newer || call_unfolded(TARGETS[4], 1) != 1 + SEEDS[4])
+        {
+            return 4;
+        }
+        const auto registered = safetyhook::process_coordinator_snapshot_for_test();
+        safetyhook::g_coordinator_refusal_for_test.store(3);
+        newer->reset();
+        const auto retained = safetyhook::process_coordinator_snapshot_for_test();
+        if (!newer->route_retained() || newer->route_retention_reason() != coordinator_reason ||
+            retained.live + 1 != registered.live || retained.retained != registered.retained + 1 || !older->disable() ||
+            call_unfolded(TARGETS[4], 1) != unhooked)
+        {
+            std::fputs("FAIL: a refused raw teardown left a live record over the older layer\n", stderr);
+            return 5;
+        }
+        std::puts("PASS: a refused teardown charges its unpublished route and marks its raw record retained");
         return 0;
     }
 
@@ -946,6 +1102,18 @@ int main(int argc, char **argv)
         if (scenario == "destroy-lock-failure")
         {
             return run_destroy_lock_failure();
+        }
+        if (scenario == "reconciled-reset")
+        {
+            return run_reconciled_reset();
+        }
+        if (scenario == "refused-teardown")
+        {
+            return run_refused_teardown();
+        }
+        if (scenario == "refused-retention")
+        {
+            return run_refused_retention();
         }
         return 2;
     }
