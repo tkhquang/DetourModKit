@@ -548,6 +548,14 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBe
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# A consume binding registered without a delivery index must leave its trigger to the game. Its own process because
+# the facade engine it starts publishes the process-global consume table.
+dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> consume-exhausted
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Negative control for the scenarios above, for the reason spelled out over the input_gate_abba control.
 add_test(NAME InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:input_tls_exhaustion> no-such-scenario)

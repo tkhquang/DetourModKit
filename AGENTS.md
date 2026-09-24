@@ -217,7 +217,7 @@ A `.cpp` must live beside the kind of header it implements. A TU for an installe
 - Apply these namespace rules:
 - Put all public API in `namespace DetourModKit`.
 - Do not use `using namespace` in headers.
-- Wrap `.cpp` definitions in an explicit `namespace DetourModKit { ... }` block.
+- Wrap library `.cpp` definitions in an explicit `namespace DetourModKit { ... }` block. A test translation unit can keep its `TEST` bodies and `main` at global scope, with file-local helpers in an anonymous namespace.
 - Use `namespace DetourModKit::detail { ... }` for a small sibling `detail` scope.
 - Use lowercase module namespaces.
 - Add a comment after the final brace of each namespace.

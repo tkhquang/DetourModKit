@@ -12,10 +12,12 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "DetourModKit/logger.hpp"
 #include "input_seam_cleanup.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
+#include "internal/input_test_seams.hpp"
 
 #include <windows.h>
 
@@ -200,6 +202,17 @@ namespace
             .trigger = input::Trigger::Hold,
             .combos = {{{keyboard_key(key)}, {}}},
             .on_state_change = std::move(callback),
+        };
+    }
+
+    input::ComboBinding make_consume_binding(std::string name, int button)
+    {
+        return input::ComboBinding{
+            .name = std::move(name),
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(button)}, {}}},
+            .consume = true,
+            .on_press = [] {},
         };
     }
 
@@ -752,6 +765,85 @@ namespace
         std::puts("TRACKED_DELIVERY_IS_ADMITTED");
         return 0;
     }
+
+    // A consume binding registered while no index exists refuses its callbacks, so it must leave its trigger to the
+    // game ([B-26]). The binding registered after the indices return is the positive control for the published table.
+    int run_consume_exhausted_case()
+    {
+        input::Input &manager = input::Input::instance();
+        const dmk_lifecycle::InputSeamOwner cleanup;
+
+        // Warm the facade, the logger that the refused reservation reports to, and this thread's runtime state before
+        // any index is taken, as worker_main does. The pending entries keep the gate alive after its guard ends, so the
+        // removal is what returns the warm-up index.
+        (void)log();
+        {
+            auto warm = manager.register_combo(make_hold_binding("consume_warm", KEY_A, [](bool) {}));
+            if (!warm)
+            {
+                std::fputs("FAIL: the warm-up registration failed\n", stderr);
+                return 80;
+            }
+        }
+        (void)manager.remove_bindings_by_name("consume_warm");
+        if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES)
+        {
+            std::fputs("FAIL: a delivery index stayed published before the exhaustion\n", stderr);
+            return 81;
+        }
+
+        std::optional<input::BindingGuard> unindexed;
+        {
+            const std::vector<DWORD> taken = exhaust_tls_indices();
+            auto registered = manager.register_combo(make_consume_binding("consume_without_index", GamepadCode::A));
+            release_tls_indices(taken);
+            if (taken.empty())
+            {
+                std::fputs("FAIL: the process had no TLS index to take, so nothing was exhausted\n", stderr);
+                return 82;
+            }
+            if (!registered)
+            {
+                std::fputs("FAIL: the registration without an index was refused\n", stderr);
+                return 83;
+            }
+            unindexed.emplace(std::move(*registered));
+        }
+        if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES)
+        {
+            std::fputs("FAIL: the registration inside the exhaustion found a published index\n", stderr);
+            return 84;
+        }
+        auto indexed = manager.register_combo(make_consume_binding("consume_with_index", GamepadCode::B));
+        if (!indexed)
+        {
+            std::fputs("FAIL: the registration with an index was refused\n", stderr);
+            return 85;
+        }
+
+        const auto started = manager.start(
+            input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}
+        );
+        // A headless host cannot hook XInput, so the engine needs the interception layer to publish its table.
+        if (!started || !detail::InputTestSeams::adopt_intercept_owner_for_test())
+        {
+            std::fputs("FAIL: the engine did not start and publish its consume rules\n", stderr);
+            return 86;
+        }
+        const std::size_t active = manager.consume_capacity().active;
+        if (active != 1)
+        {
+            std::fprintf(
+                stderr,
+                "FAIL: %u consume shapes are armed, but only the indexed binding can deliver\n",
+                static_cast<unsigned>(active)
+            );
+            return active == 0 ? 87 : 88;
+        }
+
+        std::puts("TLS_EXHAUSTION_LEAVES_CONSUME_DISARMED");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -772,8 +864,15 @@ int main(int argc, char **argv)
     {
         return run_abandoned_premise_case();
     }
+    if (argc == 2 && std::string_view{argv[1]} == "consume-exhausted")
+    {
+        return run_consume_exhausted_case();
+    }
     // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario it
     // was not registered for.
-    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available|store-failure|abandoned-premise>\n");
+    std::fprintf(
+        stderr,
+        "usage: input_tls_exhaustion <exhausted|available|store-failure|abandoned-premise|consume-exhausted>\n"
+    );
     return 1;
 }

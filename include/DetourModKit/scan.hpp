@@ -196,10 +196,10 @@ namespace DetourModKit::scan
      *          a signature must land on code.
      *
      *          Readable authority rule: a Readable scan returns @ref ErrorCode::NotAuthoritative when its scope
-     *          declares no exclusions and lies inside neither one mapped image nor one reserved allocation. A scope in
-     *          one allocation that crosses more than 64 `VirtualQuery` regions counts as unconfined. Such a scope also
-     *          covers caller copies of the query bytes that DMK cannot enumerate, so a match can be the query storage
-     *          itself. DMK always excludes the query storage that it owns.
+     *          declares no exclusions and lies inside neither one mapped image nor one reserved allocation. Outside a
+     *          mapped image, a scope in one allocation that crosses more than 64 `VirtualQuery` regions counts as
+     *          unconfined. Such a scope also covers caller copies of the query bytes that DMK cannot enumerate, so a
+     *          match can be the query storage itself. DMK always excludes the query storage that it owns.
      *
      *          The remedies are a confined scope, an Executable scan, or a declaration of every live caller copy
      *          through @ref ScanRequest::exclusions or the scan() overload with exclusions. Query bytes are data, so an
@@ -1305,8 +1305,10 @@ namespace DetourModKit::scan
          *          unreadable byte in @p region faults the host. The return is a raw pointer, not a Result, because
          *          there is no recoverable error to report. noexcept. A pattern allocation failure returns nullptr.
          * @note Setup/control-plane only: each call copies @p pattern into two heap buffers, or three with bounded
-         *       jumps, before the walk. A call with @p occurrence N restarts from `region.base`, so a cursor walk
-         *       passes occurrence 1 and advances `region.base` past each hit. Proof:
+         *       jumps, before the walk. A call with @p occurrence N restarts from `region.base`. For a pattern whose
+         *       `offset()` is zero, a cursor walk passes occurrence 1 and advances `region.base` past each hit. A
+         *       nonzero offset places the hit after the match start, so a walk for such a pattern keeps `region` and
+         *       raises @p occurrence. Proof:
          *       `ScannerUncheckedAllocationTest.CursorWalkFindsEveryNeedleAtAFixedPerCallCost`.
          */
         [[nodiscard]] const std::byte *

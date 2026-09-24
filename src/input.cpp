@@ -385,14 +385,18 @@ namespace DetourModKit
                     (void)log().try_log(
                         LogLevel::Error,
                         "Input: no TLS index is available for the delivery marker. Input callbacks are refused until "
-                        "a later registration reserves one."
+                        "a later registration reserves one, and a binding registered without one does not consume its "
+                        "trigger."
                     );
                 }
+                // A gate that found no delivery index refuses its callbacks, so its binding registers without consume
+                // and fails open ([B-26], InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed).
+                const bool consume = binding.consume && binding_gate->delivery_tls.reserved();
 
                 // Callback disable does not clear consume suppression, which reads InputBinding::consume. Clear by
                 // owner identity because empty names do not enter the name index. The weak token rejects late release.
                 std::function<void()> consume_release;
-                if (binding.consume)
+                if (consume)
                 {
                     const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
                     Input *const facade = this;
@@ -439,7 +443,7 @@ namespace DetourModKit
                     entry.keys = keys;
                     entry.modifiers = modifiers;
                     entry.trigger = binding.trigger;
-                    entry.consume = binding.consume;
+                    entry.consume = consume;
                     entry.consume_owner = consume_owner;
                     entry.lifecycle = lifecycle;
                     entry.gate = binding_gate;
