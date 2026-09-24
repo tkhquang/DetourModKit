@@ -13,6 +13,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <safetyhook.hpp>
+#include <safetyhook/os.hpp>
 
 #include <windows.h>
 #include <Xinput.h>
@@ -2481,7 +2482,8 @@ namespace
                     return false;
                 }
             }
-            else if (i + 3 >= region_size || region[i + 2] != 0xFF || region[i + 3] != 0x25)
+            else if (i + 3 >= region_size ||
+                     (region[i + 2] != 0xE9 && (region[i + 2] != 0xFF || region[i + 3] != 0x25)))
             {
                 return false;
             }
@@ -2668,7 +2670,7 @@ namespace
 
         // Every generated region resolves through the platform's dynamic table, against the gateway allocation as its
         // base. This is the structural half: it holds whether or not a thread is currently inside them.
-        for (int index = 0; index < 3; ++index)
+        for (int index = 0; index < 4; ++index)
         {
             DWORD64 image_base = 0;
             auto *const region = hook.route_region_for_test(index);
@@ -2680,7 +2682,8 @@ namespace
             }
         }
         const bool gateway_unwinds = virtually_unwind_flag_region(gateway, 160, 2, false);
-        const bool wrapper_unwinds = virtually_unwind_wrapper_region(wrapper, 64);
+        const bool wrapper_unwinds = virtually_unwind_wrapper_region(wrapper, 32) &&
+                                     virtually_unwind_wrapper_region(hook.route_region_for_test(3), 32);
         const bool exit_unwinds = virtually_unwind_flag_region(exit_thunk, 64, 1, true);
         if (!gateway_unwinds || !wrapper_unwinds || !exit_unwinds)
         {
@@ -2829,7 +2832,7 @@ namespace
                 std::fprintf(stderr, "FAIL: routed creation did not recover after the refusal\n");
                 return 134;
             }
-            for (int index = 0; index < 3; ++index)
+            for (int index = 0; index < 4; ++index)
             {
                 DWORD64 image_base = 0;
                 if (RtlLookupFunctionEntry(
@@ -2842,9 +2845,9 @@ namespace
                     return 135;
                 }
             }
-            // Never enabled: destruction must withdraw all three records before their shared storage is reusable.
-            std::array<std::uintptr_t, 3> regions{};
-            for (int index = 0; index < 3; ++index)
+            // Destruction must withdraw every record before its shared storage becomes reusable.
+            std::array<std::uintptr_t, 4> regions{};
+            for (int index = 0; index < 4; ++index)
             {
                 regions[static_cast<std::size_t>(index)] =
                     reinterpret_cast<std::uintptr_t>(recovered->route_region_for_test(index));
@@ -3168,7 +3171,7 @@ namespace
     int run_unwind_unregistration_refused_case()
     {
         const auto before = safetyhook::route_retention_stats();
-        std::array<std::uintptr_t, 3> regions{};
+        std::array<std::uintptr_t, 4> regions{};
         std::uintptr_t gateway = 0;
         std::size_t gateway_bytes = 0;
         {
@@ -3189,7 +3192,7 @@ namespace
                 return 149;
             }
             gateway_bytes = retained_logical - created->trampoline().size();
-            for (int index = 0; index < 3; ++index)
+            for (int index = 0; index < 4; ++index)
             {
                 regions[static_cast<std::size_t>(index)] =
                     reinterpret_cast<std::uintptr_t>(created->route_region_for_test(index));
@@ -3446,6 +3449,108 @@ namespace
         return 0;
     }
 
+    std::atomic<bool> s_chain_call_ready{false};
+    std::atomic<bool> s_chain_call_done{false};
+    std::atomic<bool> s_chain_fault_parked{false};
+    std::atomic<bool> s_chain_fault_release{false};
+    std::uintptr_t s_chain_fault_ip = 0;
+
+    LONG CALLBACK park_chain_fault(EXCEPTION_POINTERS *exception) noexcept
+    {
+        if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+            exception->ExceptionRecord->NumberParameters < 2 ||
+            exception->ExceptionRecord->ExceptionInformation[0] != 8 ||
+            exception->ContextRecord->Rip != s_chain_fault_ip)
+            return EXCEPTION_CONTINUE_SEARCH;
+        s_chain_fault_parked.store(true);
+        const auto deadline = GetTickCount64() + 10000;
+        while (!s_chain_fault_release.load())
+        {
+            if (GetTickCount64() >= deadline)
+                ExitProcess(9);
+            Sleep(1);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    void start_chain_call() noexcept
+    {
+        s_chain_call_ready.store(true);
+        const auto deadline = GetTickCount64() + 10000;
+        while (!s_chain_fault_parked.load() && !s_chain_call_done.load())
+        {
+            if (GetTickCount64() >= deadline)
+                ExitProcess(9);
+            Sleep(1);
+        }
+    }
+
+    int run_routed_chain_exception()
+    {
+        auto *const page =
+            static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (page == nullptr)
+            return 1;
+        constexpr std::uint8_t code[] = {
+            0x90,
+            0x90,
+            0x31,
+            0xC0,
+            0xC3,
+        };
+        std::memcpy(page, code, sizeof(code));
+        if (!FlushInstructionCache(GetCurrentProcess(), page, sizeof(code)))
+            return 2;
+        auto created = safetyhook::InlineHook::create(
+            page,
+            page,
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
+        if (!created || !created->enable())
+            return 3;
+        // Offset two names an instruction inside the route with no relocated-call return site.
+        s_chain_fault_ip = reinterpret_cast<std::uintptr_t>(created->trampoline().data() + 2);
+        void *const handler = AddVectoredExceptionHandler(1, &park_chain_fault);
+        if (handler == nullptr)
+            return 4;
+        int observed = 0;
+        std::thread caller{
+            [&observed]() -> void
+            {
+                const auto deadline = GetTickCount64() + 10000;
+                while (!s_chain_call_ready.load())
+                {
+                    if (GetTickCount64() >= deadline)
+                        ExitProcess(9);
+                    Sleep(1);
+                }
+                int (*const volatile target)() = reinterpret_cast<int (*)()>(s_chain_fault_ip);
+                observed = target();
+                s_chain_call_done.store(true);
+            }
+        };
+        safetyhook::g_trap_protected_probe = &start_chain_call;
+        created->reset();
+        safetyhook::g_trap_protected_probe = nullptr;
+        if (s_chain_fault_parked.load() && !created->route_retained())
+        {
+            std::fputs("FAIL: saved routed exception context lost its executable chain\n", stderr);
+            ExitProcess(1);
+        }
+        if (!s_chain_fault_parked.load() && created->route_retained())
+        {
+            std::fputs("FAIL: prevented route fault did not permit clean reclamation\n", stderr);
+            ExitProcess(1);
+        }
+        s_chain_fault_release.store(true);
+        caller.join();
+        RemoveVectoredExceptionHandler(handler);
+        VirtualFree(page, 0, MEM_RELEASE);
+        return observed == 0 ? 0 : 5;
+    }
+
     unsigned s_route_warnings = 0;
 
     void observe_xinput_route_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
@@ -3625,6 +3730,8 @@ int main(int argc, char **argv)
     dmk_lifecycle::configure_raw_proof_error_mode();
 
     const std::string_view selected_case{argv[1]};
+    if (selected_case == "routed-chain-exception")
+        return run_routed_chain_exception();
     if (selected_case == "telemetry-clean" || selected_case == "telemetry-primary" || selected_case == "telemetry-ex" ||
         selected_case == "telemetry-alias" || selected_case == "telemetry-rollback" ||
         selected_case == "telemetry-repeat")

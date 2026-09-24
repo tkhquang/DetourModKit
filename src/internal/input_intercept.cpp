@@ -7,6 +7,7 @@
  */
 
 #include "input_intercept.hpp"
+#include "internal/drain_backoff.hpp"
 #include "internal/hook_patch_witness.hpp"
 #include "platform.hpp"
 #include "DetourModKit/diagnostics.hpp"
@@ -16,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -663,14 +665,23 @@ namespace DetourModKit::detail
             return after;
         }
 
+        /// Bounds the wait for closed bypass calls that a target restore released.
+        constexpr auto XINPUT_BYPASS_DRAIN_TIMEOUT = std::chrono::seconds{1};
+
         /**
          * @brief Releases a hook after its target witnesses Original and its detour bodies drain.
+         * @details A closed bypass holds its route entry until the provider returns. Reset waits for those calls, so
+         *          an ordinary completion does not retain the chain. After expiry, reset retains a counted chain.
          * @return The retention reason, or null after a clean reset.
          */
         [[nodiscard]] const char *
         reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
         {
             original.store(nullptr, std::memory_order_seq_cst);
+            (void)drain_until_zero(
+                [&hook]() noexcept { return hook.route_entries(); },
+                std::chrono::steady_clock::now() + XINPUT_BYPASS_DRAIN_TIMEOUT
+            );
             hook.reset();
             const bool retained = hook.route_retained();
             if (retained)

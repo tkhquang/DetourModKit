@@ -301,6 +301,7 @@ namespace DetourModKit
              *          An idle route releases its executable storage, unwind records, and capacity charge together.
              *
              *          An unresolved continuation or nonlocal exit retains the backend, adapter, and module references.
+             *          Teardown inside a displaced callee retains those resources without a route drain wait.
              *          A route that the backend retains at reset keeps the same references and logs its reason.
              *          The loader lock, a newer layer, or an unproved restore also retain the backend.
              *          A retained patch keeps the target tracked as hooked.
@@ -308,7 +309,8 @@ namespace DetourModKit
              *
              *          A MID hook tombstones its callback before `[B-85]` rundown.
              *          No new callback begins after destruction returns.
-             *          The loader lock, a published unload phase, self-destruction, or an unrecorded entrant prevents a wait.
+             *          The loader lock, a published unload phase, self-destruction, or an unrecorded entrant prevents
+             *          a wait.
              *          Other mid teardown waits for admitted callbacks and adapter bodies. See @ref mid_at.
              * @warning INLINE hook quiescence is caller-owned. See @ref inline_at.
              * @note Setup/control-plane only: teardown mutates the target and can wait for callbacks and continuations.
@@ -739,6 +741,9 @@ namespace DetourModKit
          * @warning A retained route does not authorize provider unload. Every admitted callback and continuation needs
          *          its code providers until it exits. @ref Hook::release also keeps callback dispatch active.
          * @note Setup/control-plane only: the install claims an adapter and builds the routed chain.
+         * @note After a displaced call, an instruction with RSP as an explicit destination is unsupported, except ADD
+         *       of a nonnegative immediate. Creation fails before publication with @ref ErrorCode::BackendFailed and
+         *       logs the backend reason.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);
 

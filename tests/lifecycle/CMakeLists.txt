@@ -295,6 +295,7 @@ dmk_static_runtime(route_continuation_lifetime)
 add_dependencies(dmk_lifecycle_proof_hosts route_continuation_lifetime)
 
 set(route_continuation_proofs
+  Lifecycle.MidRouteBypassDuringIdleScanRetains scan-race
   Lifecycle.MidRouteSurvivesDormantFiber fiber
   Lifecycle.MidRouteSurvivesDormantTailCallee tail-fiber
   Lifecycle.MidRouteSurvivesExceptionContinuation exception
@@ -1501,3 +1502,45 @@ set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERT
 if(DMK_ENABLE_SANITIZERS)
   set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+add_library(routed_bypass_provider SHARED routed_bypass_provider.cpp)
+set_target_properties(routed_bypass_provider PROPERTIES PREFIX "" OUTPUT_NAME "dmk_routed_bypass_provider")
+dmk_static_runtime(routed_bypass_provider)
+add_executable(routed_bypass_continuation routed_bypass_continuation.cpp)
+target_link_libraries(routed_bypass_continuation PRIVATE DetourModKit safetyhook dmk_coverage onecore)
+target_include_directories(routed_bypass_continuation PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(routed_bypass_continuation PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(routed_bypass_continuation)
+add_dependencies(routed_bypass_continuation routed_bypass_provider)
+add_dependencies(dmk_lifecycle_proof_hosts routed_bypass_continuation)
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassSurvivesDormantFiber
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> fiber
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassCleanRoutesReclaim
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> clean
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassDrainsBeforeReclaim
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> drain
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+add_test(NAME Lifecycle.RoutedBypassProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> unknown)
+set_tests_properties(Lifecycle.RoutedBypassProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof"
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>)
+dmk_add_raw_proof(NAME Lifecycle.MidRouteStaleSlotRefusesCreation
+  COMMAND $<TARGET_FILE:mid_route_retention> stale-slot
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RoutedChainExceptionPreservesLifetime
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> routed-chain-exception
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InlineSelfTeardownReportsRetention
+  COMMAND $<TARGET_FILE:mid_route_retention> inline-self-teardown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")

@@ -272,7 +272,7 @@ The proof hosts:
   - `Lifecycle.RouteCoordinatorSurvivesParticipantUnload` verifies owner survival after unmap.
   - `Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub`, `Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread`, and `Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait` return skip code 77 when the backend protection exports share the target window. Both stub-page cases also return 77 when no candidate export shares the wait stub page. The fresh-thread case repeats the stub-page teardown on a new thread, whose first emulated TLS touch in the participant occurs during that teardown.
   - `Lifecycle.RouteCopiesRejectForeignCoordinatorView` creates the mapping in the host before any participant connects. It mirrors the version 1 header, and its live-view control fails when that layout changes. A wrong magic, version, or size must refuse the connection, even when the header names a view of the same section. A participant that kept that view fails the later canonical checks.
-- `test_mid_route_retention.cpp` provides `Lifecycle.PublishedMidRouteReclaimsUnlessParked`. A whole-address-space `VirtualQuery` census and backend counters verify five cycles of six published mid hooks, inline hooks, and never-enabled mid hooks. Separate cases verify one parked route, two layered routes, and relocated-call teardown from another thread or the callee itself. The generated callee exercises all four Windows x64 home slots. The [hook design note](../design/hooking.md) owns the reclamation contract under "Clean x64 mid teardown". The exit code reports any mismatch.
+- `test_mid_route_retention.cpp` provides `Lifecycle.PublishedMidRouteReclaimsUnlessParked`. A whole-address-space `VirtualQuery` census and backend counters verify five cycles of six published mid hooks, inline hooks, and never-enabled mid hooks. Separate cases verify one parked route, two layered routes, and relocated-call teardown from another thread or the callee itself. The generated callee exercises all four Windows x64 home slots. Self-teardown must finish within 500 ms. The [hook design note](../design/hooking.md) owns the reclamation contract under "Clean x64 mid teardown". The exit code reports any mismatch.
 
   Its retained-route warning probe checks that the ledger record no longer exists when the logger receives the warning.
 - `Lifecycle.TrapMappingPreservesTransactionDirection` uses the same host to verify byte and instruction-boundary maps, plus the actual enable and disable paths.
@@ -325,9 +325,15 @@ Three bounded negative controls drive that path on purpose: `InputLifecycleProof
 
 #### Mid-route continuations and XInput retention
 
+- `Lifecycle.RoutedChainExceptionPreservesLifetime` holds a saved instruction pointer at a non-return site during a routed restore. It requires retained code for a live context or clean reclamation when no execute fault occurs.
+- `routed_bypass_continuation.cpp` uses `dmk_routed_bypass_provider.dll` to verify dormant non-mid bypass execution after the host releases its provider reference. Its clean control repeats installation and teardown ten times. `Lifecycle.RoutedBypassDrainsBeforeReclaim` releases a parked caller into the counted bypass after the restore and requires clean reclamation after the provider call returns. Its unknown-scenario control rejects an invalid token.
+- `Lifecycle.MidRouteStaleSlotRefusesCreation` verifies the named refusal for ABI-correct displaced `call reg; sub rsp, 8` and `call reg; add rsp, -8` windows. Ten unhooked calls establish each result before creation. Refusal preserves the target bytes and capacity counters.
+- `Lifecycle.InlineSelfTeardownReportsRetention` verifies safe inline return, one accurate retention warning, and teardown within 500 ms.
+
 `route_continuation_lifetime.cpp` runs each scenario in a separate process. Its `Lifecycle.MidRoute*` cases cover these paths:
 
 - Dormant fibers, external tail callees, and repaired exception continuation after teardown.
+- Closed-bypass admission during the first idle scan, with a fiber that stays dormant through teardown. The proof requires mapped route code, safe resumption, one leak, and one warning.
 - Explicit retention after exception unwind.
 - Fall-through, return, direct and indirect branch exits.
 - Internal calls whose returns and direct, conditional, or indirect tail branches preserve ownership inside the displaced window.
