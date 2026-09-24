@@ -54,9 +54,8 @@ namespace DetourModKit::detail
 
     void pop_emit_frame(const EmitFrame &frame) noexcept
     {
-        // The matching push succeeded, so the expansion array for this index already exists on this thread and this
-        // store cannot fail for want of one. A dispatcher destroyed after a Drained rundown can return the index while
-        // an emit that pushed under it unwinds. The recorded index then restores only this thread's own slot.
+        // The matching push succeeded, so this store cannot fail for want of slot storage. An enclosing frame retains
+        // an owner. The final pop uses the null-restore exception in SharedTlsIndex.
         (void)::TlsSetValue(frame.tls_index, frame.prev);
     }
 

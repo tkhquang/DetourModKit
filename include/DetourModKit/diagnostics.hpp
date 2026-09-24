@@ -271,13 +271,14 @@ namespace DetourModKit
          *       the existing reference.
          * @note A subscription makes this dispatcher an owner of the emit-chain TLS index of this DMK copy. Session
          *       teardown returns that ownership when no subscription is live and no emit runs. Without an active
-         *       Session, memory::shutdown_cache() returns it. A later memory::shutdown_cache() call returns an
+         *       Session, memory::shutdown_cache() returns idle ownership. A live subscription keeps ownership silently,
+         *       with no leak record. A later memory::shutdown_cache() call returns an
          *       ownership that teardown kept, after the dispatcher becomes idle.
          * @note An authorized teardown waits up to one second for a running emit. It does not wait under the loader
          *       lock, inside a diagnostics handler, or while an untracked emit runs. An emit that still runs then keeps
-         *       the index. Each kept ownership records one @ref LeakSubsystem::Diagnostics event. Teardown does not log
-         *       under the loader lock, and it skips the release at process exit. `Lifecycle.DiagnosticsTlsIndex*` pins
-         *       this contract.
+         *       the index and records one @ref LeakSubsystem::Diagnostics event per kept ownership.
+         *       Teardown does not log under the loader lock, and it skips the release at process exit.
+         *       `Lifecycle.DiagnosticsTlsIndex*` pins this contract.
          * @warning Drop every subscription before Session teardown. A subscription that is live at Session teardown
          *          keeps the index and records one @ref LeakSubsystem::Diagnostics event.
          */

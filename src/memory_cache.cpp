@@ -980,20 +980,26 @@ namespace DetourModKit
                 return true;
             }
 
+#if !defined(_MSC_VER) && defined(_WIN64)
+            /** @brief Applies the Session retirement policy to a cache teardown. */
+            void shutdown_guarded_engine() noexcept
+            {
+                if (DetourModKit::detail::lifecycle().state() == DetourModKit::detail::LifecycleState::Stopping)
+                    detail::retire_session_guarded_engine();
+                else
+                    detail::release_guarded_engine();
+            }
+#endif
+
             /**
-             * @brief Abandons the cache without a wait when teardown lacks block authority.
-             * @details A wait on s_lifecycle_mutex under the loader lock can deadlock against an initializer that
-             *          creates the cleanup thread because thread creation takes the loader lock. This path stops and
-             *          attempts to detach the cleanup thread, drops the guarded engine, and unpublishes a Starting or
-             *          Running generation. It drains no readers and frees no shards.
+             * @brief Abandons the cache when teardown lacks block authority.
+             * @details A lifecycle-mutex wait can deadlock against thread creation under the loader lock.
+             *          The shutdown_cache contract owns the guarded-handler release exception.
              */
             void abandon_cache_unauthorized() noexcept
             {
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // Remove the vectored fault handler before module unload. This operation takes the VEH mutex and drains
-                // in-flight guarded accesses, so it is not wait-free. A handler in unmapped code faults the host.
-                // Therefore, the wait is safer than omission of handler removal.
-                detail::release_guarded_engine();
+                shutdown_guarded_engine();
 #endif
                 s_cleanup_thread_running.store(false, std::memory_order_release);
                 s_cleanup_cv.notify_one();
@@ -1504,12 +1510,6 @@ namespace DetourModKit
             // Advance the generation this session's cleanup thread binds to, after the shards are built.
             const std::uint64_t generation = s_lifecycle_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-#if !defined(_MSC_VER) && defined(_WIN64)
-            // MinGW has no frame-based SEH. A successful vectored-handler install avoids the per-call VirtualQuery
-            // fallback. Installation remains best-effort and independent of cache success.
-            detail::ensure_guarded_engine_installed();
-#endif
-
             s_cleanup_thread_running.store(true, std::memory_order_release);
             // Hold a counted reference before cleanup thread creation. A creation failure releases it below.
             s_cleanup_self_ref = acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
@@ -1603,6 +1603,13 @@ namespace DetourModKit
                 return false;
             }
 
+#if !defined(_MSC_VER) && defined(_WIN64)
+            // The reopen follows the Running publication, so a rolled-back start keeps a retired epoch closed
+            // (SessionTeardown.RolledBackCacheStartKeepsTheRetiredHandlerEpoch). The cache keepalive reference pins
+            // this image through a concurrent abandonment.
+            detail::reopen_guarded_engine();
+            detail::ensure_guarded_engine_installed();
+#endif
             return true;
         }
 
@@ -1671,9 +1678,7 @@ namespace DetourModKit
             if (state != LifecycleState::Running && !(state == LifecycleState::Stopped && s_cache_shards))
             {
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // The first guarded read installs the handler without init_cache, so a cache that never started
-                // still owns one. Lifecycle.GuardedReadHandlerRetiresWithTheSession proves this release.
-                detail::release_guarded_engine();
+                shutdown_guarded_engine();
 #endif
                 return;
             }
@@ -1740,10 +1745,7 @@ namespace DetourModKit
                 s_cleanup_requested.store(false, std::memory_order_relaxed);
 
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // The second of the two ~Session release sites. The never-started early return above is the first,
-                // and abandon_cache_unauthorized covers the loader-lock arm. remove_veh_handler drains in-flight
-                // guarded reads first and is idempotent. A later guarded read reinstalls the handler.
-                detail::release_guarded_engine();
+                shutdown_guarded_engine();
 #endif
 
                 // Publish Stopped last, under the lifecycle mutex, so the next init_cache admits a fresh start (which

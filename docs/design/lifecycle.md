@@ -35,6 +35,8 @@ Mid-route continuation ownership, process coordination, and retention reside in 
 - `Lifecycle.BootstrapWorkerDrainedUnloads` pins clean Session bootstrap teardown.
 - `Lifecycle.BootstrapProcessExitWithLiveWorker` pins Session bootstrap process exit.
 - `Lifecycle.FullLifecycleExit` pins process exit with every subsystem live.
+- `Lifecycle.GuardedReadDrainSkipsAtProcessExit` and `Lifecycle.GuardedReadLockSkipsAtProcessExit` prove the [`shutdown_cache` exit contract](../../include/DetourModKit/memory.hpp).
+- `Lifecycle.DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease` proves the native loader-state check without a published exit context.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
 - `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs.
 - `RegionLoaderBoundary.*` pins the Region boundary: allocation-free value operations, the loader-backed factories, and the loader-free `whole_process()`.
