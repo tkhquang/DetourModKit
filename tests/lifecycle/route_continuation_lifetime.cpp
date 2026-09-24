@@ -8,6 +8,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <safetyhook/inline_hook.hpp>
+#include <safetyhook/os.hpp>
 
 #include <windows.h>
 
@@ -45,9 +46,16 @@ namespace
     HANDLE s_fault_release = nullptr;
     int s_readable_value = EXPECTED_VALUE;
     unsigned s_continuation_warnings = 0;
+    unsigned s_retention_warnings = 0;
+    std::atomic<bool> s_fiber_dormant{false};
+    std::atomic<bool> s_fiber_resume{false};
 
     void observe_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
     {
+        if (level == DetourModKit::LogLevel::Warning && message.find("retained") != std::string_view::npos)
+        {
+            ++s_retention_warnings;
+        }
         if (level == DetourModKit::LogLevel::Warning &&
             message.find("unresolved continuation or nonlocal exit") != std::string_view::npos)
         {
@@ -396,6 +404,98 @@ namespace
         return 0;
     }
 
+    int run_scan_race()
+    {
+        Page page = make_target(false, false);
+        DetourModKit::hook::HookStack stack;
+        if (!page || !install(page.get(), stack))
+        {
+            return fail("scan race fixture setup failed");
+        }
+        s_target = reinterpret_cast<TargetFn>(page.get());
+        const TargetFn volatile target = s_target;
+        if (target() != EXPECTED_VALUE)
+        {
+            return fail("scan race control call failed");
+        }
+        const auto before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+        DetourModKit::detail::g_logger_record_probe = &observe_warning;
+        safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+        std::thread caller{
+            []() -> void
+            {
+                s_driver_fiber = ConvertThreadToFiber(nullptr);
+                void *const fiber = CreateFiber(0, &fiber_body, nullptr);
+                if (s_driver_fiber == nullptr || fiber == nullptr)
+                {
+                    ExitProcess(3);
+                }
+                SwitchToFiber(fiber);
+                s_fiber_dormant.store(true);
+                const auto deadline = GetTickCount64() + WAIT_MS;
+                while (!s_fiber_resume.load())
+                {
+                    if (GetTickCount64() >= deadline)
+                    {
+                        ExitProcess(4);
+                    }
+                    Sleep(1);
+                }
+                SwitchToFiber(fiber);
+                DeleteFiber(fiber);
+                ConvertFiberToThread();
+                s_driver_fiber = nullptr;
+            }
+        };
+        const auto deadline = GetTickCount64() + WAIT_MS;
+        while (!safetyhook::route_park_reached_for_test())
+        {
+            if (GetTickCount64() >= deadline)
+            {
+                ExitProcess(5);
+            }
+            Sleep(1);
+        }
+        safetyhook::g_route_scan_reached.store(false);
+        safetyhook::g_route_scan_hold.store(true);
+        std::thread teardown{[&stack]() -> void { stack.clear(); }};
+        while (!safetyhook::g_route_scan_reached.load())
+        {
+            if (GetTickCount64() >= deadline)
+            {
+                ExitProcess(6);
+            }
+            Sleep(1);
+        }
+        safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+        while (!s_fiber_dormant.load())
+        {
+            if (GetTickCount64() >= deadline)
+            {
+                ExitProcess(7);
+            }
+            Sleep(1);
+        }
+        safetyhook::g_route_scan_hold.store(false);
+        teardown.join();
+        if (!route_is_mapped())
+        {
+            std::fputs("FAIL: idle scan freed a dormant bypass continuation\n", stderr);
+            ExitProcess(8);
+        }
+        s_fiber_resume.store(true);
+        caller.join();
+        DetourModKit::detail::g_logger_record_probe = nullptr;
+        if (s_observed != EXPECTED_VALUE || s_callbacks.load() != 1 || s_retention_warnings != 1 ||
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager) !=
+                before + 1)
+        {
+            return fail("scan race lost its bypass result or retention attribution");
+        }
+        return 0;
+    }
+
     int run_exit(std::string_view scenario)
     {
         Page page{
@@ -652,6 +752,10 @@ int main(int argc, char **argv)
         return 2;
     }
     const std::string_view scenario{argv[1]};
+    if (scenario == "scan-race")
+    {
+        return run_scan_race();
+    }
     if (scenario == "return" || scenario == "branch" || scenario == "conditional" || scenario == "indirect" ||
         scenario == "internal" || scenario == "redirect" || scenario == "resume" || scenario == "ff" ||
         scenario == "state" || scenario == "metadata" || scenario == "resume-end" || scenario == "bypass" ||

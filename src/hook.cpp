@@ -1059,9 +1059,7 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Bounds the wait for backend-route entrants admitted before target restoration.
-         * @details Only the generated stub's own instructions remain here, so expiry is evidence of a parked or
-         *          indefinitely descheduled thread, not a slow one.
+         * @brief Bounds the wait for route entrants, displaced callees, and unresolved continuations.
          */
         constexpr auto ROUTE_DRAIN_TIMEOUT = std::chrono::seconds{1};
 
@@ -1324,9 +1322,13 @@ namespace DetourModKit
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
             coordinator.reset();
 
-            // An unresolved continuation keeps its route entry after the callback returns.
-            const bool route_drained =
-                mid_rundown != DetourModKit::detail::MidRundown::Drained || drain_backend_route(m_impl->backend);
+            const bool caller_owns_route = backend_value_or(
+                m_impl->backend,
+                true,
+                [](const auto &backend) noexcept { return backend.caller_owns_route(); }
+            );
+            const bool route_drained = mid_rundown != DetourModKit::detail::MidRundown::Drained ||
+                                       (!caller_owns_route && drain_backend_route(m_impl->backend));
 
             // Newest-first teardown occurs under the target install-serialization slot. Restore the prologue and
             // destroy the backend first. Release the ledger entry next and the module reference last.
@@ -1336,10 +1338,13 @@ namespace DetourModKit
             if (mid_rundown != DetourModKit::detail::MidRundown::Drained || !route_drained)
             {
                 // A nonlocal exit can abandon its entry. Retention keeps the same lifetime as an unresolved entrant.
-                const char *blocked_stage = mid_rundown == DetourModKit::detail::MidRundown::Unwaitable ? "callback"
-                                            : mid_rundown == DetourModKit::detail::MidRundown::Expired
-                                                ? "callback past its bounded drain"
-                                                : "unresolved continuation or nonlocal exit";
+                const char *blocked_stage =
+                    mid_rundown == DetourModKit::detail::MidRundown::Unwaitable
+                        ? "teardown cannot wait on the caller's callback"
+                    : mid_rundown == DetourModKit::detail::MidRundown::Expired ? "the callback drain expired"
+                    : caller_owns_route ? "an unresolved continuation or nonlocal exit "
+                                          "has a possible return on the caller stack"
+                                        : "an unresolved continuation or nonlocal exit did not drain";
                 // A live record refuses every older layer on this target.
                 (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.retain_route(); });
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
@@ -1347,9 +1352,8 @@ namespace DetourModKit
                 (void)ledger.release_hook(target, ledger_id);
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: mid hook '{}' at 0x{:0{}X} retained its backend after {}. "
-                    "The target is restored. The adapter and module references remain pinned. "
-                    "No new callback can enter.",
+                    "hook: '{}' at 0x{:0{}X} retained its backend because {}. "
+                    "The target is restored. The backend and module references remain pinned.",
                     name,
                     target,
                     sizeof(std::uintptr_t) * 2,
