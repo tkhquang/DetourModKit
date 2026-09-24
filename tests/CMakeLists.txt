@@ -415,6 +415,14 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteAllocatorReclaimsWholeBlock
     Lifecycle.MidRouteAccountingIncludesGeneratedStub
     Lifecycle.MidRouteSurvivesDormantFiber
+    Lifecycle.InlineSelfTeardownReportsRetention
+    Lifecycle.RoutedChainExceptionPreservesLifetime
+    Lifecycle.RoutedBypassSurvivesDormantFiber
+    Lifecycle.RoutedBypassCleanRoutesReclaim
+    Lifecycle.RoutedBypassDrainsBeforeReclaim
+    Lifecycle.RoutedBypassProofRejectsUnknownScenario
+    Lifecycle.MidRouteStaleSlotRefusesCreation
+    Lifecycle.MidRouteBypassDuringIdleScanRetains
     Lifecycle.MidRouteSurvivesDormantTailCallee
     Lifecycle.MidRouteSurvivesExceptionContinuation
     Lifecycle.MidRouteUnwindSettlesRouteOwnership
@@ -528,11 +536,12 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
     Lifecycle.VmtUnreadableModuleHeader
     Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader)
+  # --require checks each listed proof by name. The floor is the listed count plus this inventory test.
   set(lifecycle_inventory_command
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 154)
+    --minimum 218)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

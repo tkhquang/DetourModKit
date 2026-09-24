@@ -10,6 +10,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <safetyhook/inline_hook.hpp>
+#include <safetyhook/mid_hook.hpp>
 #include <safetyhook/os.hpp>
 
 #include <windows.h>
@@ -178,6 +179,7 @@ namespace
     std::atomic<bool> s_callee_hold{false};
     std::atomic<bool> s_callee_entered{false};
     std::atomic<DetourModKit::hook::HookStack *> s_teardown_from_callee{nullptr};
+    std::chrono::steady_clock::duration s_self_teardown_elapsed{};
 
     DMK_PROOF_NOINLINE int call_site_callee()
     {
@@ -189,7 +191,9 @@ namespace
         // The callee retires the hook itself: the calling thread still has to return into the trampoline.
         if (DetourModKit::hook::HookStack *const stack = s_teardown_from_callee.exchange(nullptr))
         {
+            const auto start = std::chrono::steady_clock::now();
             stack->clear();
+            s_self_teardown_elapsed = std::chrono::steady_clock::now() - start;
         }
         return CALLEE_VALUE;
     }
@@ -672,6 +676,11 @@ namespace
             }
             helper.join();
             observed = helper_result.load();
+            if (mode == CallSiteMode::TeardownFromCallee && s_self_teardown_elapsed >= std::chrono::milliseconds{500})
+            {
+                std::fputs("FAIL: self-teardown waited for its own route entry\n", stderr);
+                return base_code + 8;
+            }
             if (mode == CallSiteMode::Idle)
             {
                 // The helper is gone, so no thread is inside the chain or still returning into it.
@@ -1088,6 +1097,108 @@ namespace
         VirtualFree(page, 0, MEM_RELEASE);
         return code;
     }
+    TargetFn s_self_original = nullptr;
+    unsigned s_self_warning_count = 0;
+    bool s_self_warning_valid = true;
+
+    int inline_self_detour(int value)
+    {
+        return s_self_original(value);
+    }
+
+    void observe_self_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
+    {
+        if (level == DetourModKit::LogLevel::Warning && message.find("retained its backend") != std::string_view::npos)
+        {
+            ++s_self_warning_count;
+            s_self_warning_valid =
+                message.find("mid hook") == std::string_view::npos &&
+                message.find("adapter") == std::string_view::npos &&
+                message.find("because an unresolved continuation or nonlocal exit") != std::string_view::npos;
+        }
+    }
+
+    int run_inline_self_teardown()
+    {
+        auto *const page = make_call_site_target();
+        if (page == nullptr)
+            return 1;
+        DetourModKit::hook::HookStack stack;
+        auto created = DetourModKit::hook::inline_at(
+            {
+                .name = "inline self teardown",
+                .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(page)},
+            },
+            &inline_self_detour
+        );
+        if (!created)
+            return 2;
+        auto &held = stack.push(std::move(*created));
+        s_self_original = held.original<TargetFn>();
+        if (!held.enable())
+            return 3;
+        s_teardown_from_callee.store(&stack);
+        const auto before = leak_count();
+        DetourModKit::detail::g_logger_record_probe = &observe_self_warning;
+        const auto observed = call_unfolded(reinterpret_cast<TargetFn>(page), 0);
+        DetourModKit::detail::g_logger_record_probe = nullptr;
+        VirtualFree(page, 0, MEM_RELEASE);
+        if (observed != CALLEE_VALUE || leak_count() != before + 1 || s_self_warning_count != 1 ||
+            !s_self_warning_valid || s_self_teardown_elapsed >= std::chrono::milliseconds{500})
+        {
+            std::fputs("FAIL: inline self-teardown lost its return or accurate retention warning\n", stderr);
+            return 4;
+        }
+        return 0;
+    }
+
+    int run_stale_slot()
+    {
+        auto *const page =
+            static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (page == nullptr)
+            return 1;
+        std::uint8_t code[] = {
+            0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x05, 0x0B, 0x00, 0x00, 0x00, 0xFF, 0xD0, 0x48,
+            0x83, 0xEC, 0x08, 0x48, 0x83, 0xC4, 0x30, 0xC3, 0xB8, 37,   0,    0,    0,    0xC3,
+        };
+        // Each window lowers RSP by eight after the displaced call: `sub rsp, 8`, then `add rsp, -8`.
+        constexpr std::uint8_t adjustments[][2] = {{0xEC, 0x08}, {0xC4, 0xF8}};
+        for (const auto &adjustment : adjustments)
+        {
+            code[15] = adjustment[0];
+            code[16] = adjustment[1];
+            std::memcpy(page, code, sizeof(code));
+            if (!FlushInstructionCache(GetCurrentProcess(), page, sizeof(code)))
+                return 2;
+            const auto target = reinterpret_cast<int (*)()>(page);
+            const auto before = safetyhook::route_retention_stats();
+            for (int i = 0; i < 10; ++i)
+            {
+                int (*const volatile call)() = target;
+                if (call() != 37)
+                    return 3;
+            }
+            auto created = safetyhook::MidHook::create(page + 11, [](safetyhook::Context &) {});
+            if (created || created.error().type != safetyhook::MidHook::Error::BAD_INLINE_HOOK ||
+                created.error().inline_hook_error.type !=
+                    safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE)
+            {
+                std::fputs("FAIL: stale-slot window did not receive the named creation refusal\n", stderr);
+                return 4;
+            }
+            const auto after = safetyhook::route_retention_stats();
+            const bool intact = std::memcmp(page, code, sizeof(code)) == 0 &&
+                                after.logical_charged == before.logical_charged &&
+                                after.logical_reserved == before.logical_reserved &&
+                                after.committed_charged == before.committed_charged &&
+                                after.committed_reserved == before.committed_reserved;
+            if (!intact)
+                return 5;
+        }
+        VirtualFree(page, 0, MEM_RELEASE);
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -1095,6 +1206,14 @@ int main(int argc, char **argv)
     if (argc == 2)
     {
         const std::string_view scenario{argv[1]};
+        if (scenario == "inline-self-teardown")
+        {
+            return run_inline_self_teardown();
+        }
+        if (scenario == "stale-slot")
+        {
+            return run_stale_slot();
+        }
         if (scenario == "trap-mapping")
         {
             return run_trap_mapping();
