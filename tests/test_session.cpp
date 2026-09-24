@@ -1047,11 +1047,10 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
-// single subsystem in isolation; this activates ALL of them in one Session (the config registry and its auto-reload
-// watcher, an input binding, the memory cache, and the logger), then destroys the Session and asserts every leaf shut
-// down. It pins that ~Session runs the WHOLE ordered sequence (config watcher -> input -> memory cache -> config
-// registry -> logger, logger last) to completion when the entire stack coexists, so no leaf is skipped or
-// short-circuited by another's teardown.
+// single subsystem in isolation. This case activates the config registry and its auto-reload watcher, an input binding,
+// the memory cache, and the logger in one Session. It destroys the Session and asserts that each of those leaves shut
+// down, so no leaf is skipped or short-circuited by another's teardown.
+// Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession pins the diagnostics leaf and its place after the config registry.
 TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
 {
     input::Input::instance().shutdown(); // deterministic input baseline

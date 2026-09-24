@@ -445,6 +445,18 @@ TEST_F(DiagnosticsSnapshotTest, AggregatesLeakCounters)
     EXPECT_EQ(snapshot.total_intentional_leaks, 3u);
 }
 
+TEST_F(DiagnosticsSnapshotTest, AggregatesTheDiagnosticsSubsystem)
+{
+    diag::record_intentional_leak(LeakSubsystem::Diagnostics);
+
+    const diag::Snapshot snapshot = diag::collect();
+
+    EXPECT_EQ(diag::intentional_leak_count(LeakSubsystem::Diagnostics), 1u);
+    EXPECT_EQ(snapshot.intentional_leaks.size(), static_cast<std::size_t>(LeakSubsystem::Count));
+    EXPECT_EQ(snapshot.intentional_leaks[static_cast<std::size_t>(LeakSubsystem::Diagnostics)], 1u);
+    EXPECT_EQ(snapshot.total_intentional_leaks, 1u);
+}
+
 TEST_F(DiagnosticsSnapshotTest, AggregatesDriftSummary)
 {
     const std::array<rtti::DriftEntry, 3> drift{{

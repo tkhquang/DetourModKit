@@ -7,6 +7,7 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/config_reload_gate.hpp"
+#include "internal/diagnostics_population.hpp"
 #include "internal/input_binding_lifecycle.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/lifecycle_context.hpp"
@@ -413,9 +414,9 @@ namespace DetourModKit
             return mutex;
         }
 
-        // Reverse dependency order. The Session class contract in session.hpp publishes it and
-        // SessionTeardown.FullStackTeardownShutsEveryLeafDown proves it. Each leaf applies the shared
-        // blocking-teardown gate itself.
+        // Reverse dependency order. The Session class contract in session.hpp publishes it.
+        // SessionTeardown.FullStackTeardownShutsEveryLeafDown and Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession
+        // prove it. Each leaf applies the shared blocking-teardown gate itself.
         void run_subsystem_teardown() noexcept
         {
             // First: the watcher thread can fire on_reload into any state below.
@@ -423,6 +424,11 @@ namespace DetourModKit
             input::Input::instance().shutdown();
             memory::shutdown_cache();
             config::clear();
+            // After config::clear, because a config callback can own a subscription.
+            detail::release_diagnostics_emit_owners(
+                detail::DiagnosticsTeardown::Session,
+                detail::blocking_teardown_permitted()
+            );
             // Last: every prior step can still log.
             log().shutdown();
         }

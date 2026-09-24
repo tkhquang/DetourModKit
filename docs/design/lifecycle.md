@@ -29,7 +29,7 @@ Mid-route continuation ownership, process coordination, and retention reside in 
 - `AsyncLoggerTest.*LoaderLock*` pins the asynchronous logger boundary.
 - `FilesystemLoaderBoundary.*` pins the filesystem boundary.
 - `ProfilerLoaderBoundary.*` pins the profiler boundary.
-- `DiagnosticsLoaderBoundary.*` pins the diagnostics boundary.
+- `DiagnosticsLoaderBoundary.*` pins the diagnostics boundary. `Lifecycle.DiagnosticsTlsIndexLoaderLockReleaseNeverWaits` and `Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease` pin its teardown release.
 - `WheelHostProof.*` pins the WheelHost install, drain, and stop boundary.
 - `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` pins the Session direct route.
 - `Lifecycle.BootstrapWorkerDrainedUnloads` pins clean Session bootstrap teardown.
