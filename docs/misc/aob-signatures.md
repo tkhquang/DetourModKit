@@ -204,7 +204,7 @@ const auto match = sc::scan(pattern, DetourModKit::Region::host(), 1, sc::Pages:
 
 It applies `Pattern::offset()` exactly once, identically to `Pages::Executable`. The accepted set is a strict superset, so a pattern present in `.text` is found by both. Guard pages (`PAGE_GUARD`), no-access pages ( `PAGE_NOACCESS`), and uncommitted regions are skipped and never dereferenced.
 
-The scope must be confined. A readable sweep reads every committed readable page it covers. That includes the allocator pages that hold a caller's own copies of the query bytes. DMK cannot prove a wide readable hit is the target rather than the query finding itself. It always excludes the query representations it owns. Those are the compiled pattern's byte and mask buffers, the `scan::Pattern` object's storage, and the candidate ladder with its owned literals. A copy the caller retained is undiscoverable. A `Pages::Readable` scope confined to one mapped image or one reserved allocation is accepted. A wider one, `Region::whole_process()` or any span that crosses many allocations, fails closed with `ErrorCode::NotAuthoritative`. Narrow the scope, or declare your retained copies through the exclusion-taking `scan::scan` overload or `ScanRequest::exclusions`. A switch to `Pages::Executable` also clears the failure. Query bytes are data and never sit on a code page, so whole-process code discovery is unaffected.
+The scope must be confined. A `Pages::Readable` scan follows the Readable authority rule of `scan::Pages` in [scan.hpp](../../include/DetourModKit/scan.hpp). A `Region::whole_process()` scope with no declared exclusions therefore fails closed with `ErrorCode::NotAuthoritative`. Query bytes are data and never sit on a code page, so whole-process code discovery with `Pages::Executable` is unaffected.
 
 Two costs come with the wider reach:
 
@@ -324,7 +324,7 @@ for (const auto& o : owned) views.push_back(o.view());
 
 // The outer Result is the whole-batch signal; unwrap it before indexing the per-request inner vector.
 const auto batch = sc::resolve_batch(views, /*max_workers=*/4);
-if (!batch) { /* whole-batch OOM: batch.error().code == ErrorCode::OutOfMemory */ return; }
+if (!batch) { /* whole-batch failure: ErrorCode::OutOfMemory or ErrorCode::Unknown */ return; }
 const auto& results = *batch;
 // Index the inner vector (do not range-for over it: a bare std::expected element trips a
 // GCC libstdc++ <expected> equality-constraint recursion; indexed access sidesteps it).
@@ -333,7 +333,7 @@ for (std::size_t i = 0; i < results.size(); ++i) { /* results[i] is the Result<H
 
 Key properties:
 
-- **Whole-batch signal.** The outer `Result` fails with `Error{OutOfMemory}` only when the per-request result container itself cannot be allocated. A caller therefore cannot silently proceed on a truncated batch. This is the same shape as `hook::install_all`.
+- **Whole-batch signal.** The outer `Result` fails with `Error{OutOfMemory}` when the result container cannot be allocated, or with `Error{Unknown}` for any other whole-batch exception. A caller therefore cannot silently proceed on a truncated batch. This is the same shape as `hook::install_all`.
 - **Input-order results.** Inside the unwrapped vector, `(*batch)[i]` always corresponds to `views[i]`, regardless of which worker finished first.
 - **Per-request fail-closed.** A failure in one request never poisons the rest. `(*batch)[i].error()` carries the `Error` for that slot.
 - **Read-only sharing, no cloning.** `Pattern` is value-semantic and immutable. Workers share the caller's compiled patterns directly with no re-derive.
@@ -376,7 +376,7 @@ Error values (all unified under `ErrorCode`):
 | `InvalidArg` | malformed RIP-relative layout: the disp32 does not fit inside an x86-64 instruction of at most 15 bytes |
 | `RegionTooSmall` | (find-and-resolve) the search region is shorter than the prefix plus its 4-byte disp32 |
 | `PrefixNotFound` | (find-and-resolve) the opcode prefix never occurs in the search region (an all-decoy region instead surfaces the last decode failure below) |
-| `UnreadableDisplacement` | the SEH fault guard failed to read the disp32 bytes |
+| `UnreadableDisplacement` | the fault guard failed to read the disp32 bytes |
 | `ImplausibleTarget` | the resolved address is not a plausible user-mode pointer (a corrupt displacement that resolves to 0, a low guard-page address, or a kernel-range value) |
 
 ### One-step: find the prefix and resolve in the same call
@@ -496,7 +496,7 @@ struct ScanRequest
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;  // byte tiers scan this page class; Executable narrows to code
     bool require_executable_result = false; // final address must be code after any backend resolves it
-    std::span<const Region> exclusions{};   // caller-owned copies of the query bytes a match may not come from
+    std::span<const Region> exclusions{};   // caller-owned copies of the query bytes that no match can come from
 };
 
 struct OwnedScanRequest  // for stored / deferred resolution
@@ -544,8 +544,8 @@ struct Hit
 // Single resolve: tries candidates in order, returns first that resolves.
 [[nodiscard]] Result<Hit> resolve(const ScanRequest& request);
 
-// Fork-join batch; noexcept. The OUTER Result is the whole-batch signal (Error{OutOfMemory} when even the
-// result container cannot be allocated); the inner vector holds one Result<Hit> per request, in order.
+// Fork-join batch, noexcept. The outer Result is the whole-batch signal (Error{OutOfMemory} or Error{Unknown}).
+// The inner vector holds one Result<Hit> per request, in input order.
 [[nodiscard]] Result<std::vector<Result<Hit>>>
 resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 ```
@@ -556,7 +556,9 @@ resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0
 
 `pages` selects which page class the byte tiers scan. `Pages::Readable` (default) covers code and data. `Pages::Executable` narrows to code, so a byte signature that must land on an instruction cannot alias an identical run in a data section. `require_executable_result` additionally verifies every backend's final address, which matters when a RIP-relative byte match points to data or a text tier returns a data location.
 
-`resolve_batch` dispatches each request to the resolver concurrently. Unwrap the outer `Result`, where a whole-batch OOM failure lands (the same shape as `hook::install_all`). Then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address. For `direct` candidates it equals `match + walk_back`. For `rip_relative` candidates it is the already-resolved target of the displacement, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`. Call `to_string(result.error().code)` for a diagnostic string.
+`resolve_batch` dispatches each request to the resolver concurrently. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address. For `direct` candidates it equals `match + walk_back`. For `rip_relative` candidates it is the already-resolved target of the displacement, so callers can hook or call it directly. Errors are unified `ErrorCode` values on `result.error().code`.
+
+Unwrap the outer `Result`, where a whole-batch failure lands (the same shape as `hook::install_all`). Then read one `Result<Hit>` per request from the inner vector in input order. If error detail is not needed, use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address. Call `to_string(result.error().code)` for a diagnostic string.
 
 ### Basic usage
 
@@ -677,7 +679,7 @@ const sc::ScanRequest req = sc::borrow(k_candidates, "weapon_fire");
 const auto hit = sc::resolve(req);
 ```
 
-Use `Region::module_named("engine.dll")` when the target code lives in a separate module, such as an engine DLL loaded by a thin launcher EXE. There `Region::host()` scans the wrong image. `Region::whole_process()` searches all committed pages accepted by the selected `Pages` filter. It is the correct choice when the binary is packed or the target module is unknown. Pair it with `pages = sc::Pages::Executable`, because an unconfined `Pages::Readable` scope fails closed with `ErrorCode::NotAuthoritative` (see the readable-scanner section).
+If the target code lives in a separate module, use `Region::module_named("engine.dll")`. An engine DLL that a thin launcher EXE loads is such a module. In that case `Region::host()` scans the wrong image. `Region::whole_process()` searches all committed pages accepted by the selected `Pages` filter. It is the correct choice when the binary is packed or the target module is unknown. Pair it with `pages = sc::Pages::Executable`, because a `Pages::Readable` scan follows the Readable authority rule of `scan::Pages`.
 
 ### Reading a code constant (`read_code_constant`)
 

@@ -69,7 +69,7 @@ These notes document subsystem designs. Each note supports the `AGENTS.md` bound
 Archived benchmark snapshots. Record new measurements in a new folder rather than an edit of existing results.
 
 - [Scanner](analysis/scanner_bench_v3.x/README.md). Rare-byte anchor, prefilter, and batch resolver.
-- [Memory](analysis/memory_bench_v3.x/README.md). Validation predicate vs direct SEH-guarded read.
+- [Memory](analysis/memory_bench_v3.x/README.md). Validation predicate vs direct fault-guarded read.
 - [Memory (MinGW VEH)](analysis/memory_veh_bench_v3.x/README.md). Vectored-handler fault guard.
 - [EventDispatcher](analysis/event_dispatcher_bench_v3.1.0/README.md). Emit and subscribe throughput.
 - [AVX-512 verify tier](analysis/avx512_verify_icount/README.md). Instruction-count proxy for the verify throughput gate.

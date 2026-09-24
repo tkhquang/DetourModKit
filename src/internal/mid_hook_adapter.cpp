@@ -6,6 +6,7 @@
 #include "internal/mid_hook_adapter.hpp"
 
 #include "internal/drain_backoff.hpp"
+#include "internal/shared_tls_index.hpp"
 
 #include "DetourModKit/logger.hpp"
 
@@ -52,7 +53,7 @@ namespace DetourModKit::detail
     namespace
     {
         MidAdapterSlot s_mid_slots[MID_ADAPTER_CAPACITY];
-        std::atomic<DWORD> s_mid_entry_tls{TLS_OUT_OF_INDEXES};
+        constinit SharedTlsIndex s_mid_entry_tls;
 
         /// Defines the committed callback wait bound. Expiry pins the backend instead of a hang (MidHookDrainTest).
         constexpr auto MID_CALLBACK_DRAIN_TIMEOUT = std::chrono::seconds{5};
@@ -70,30 +71,9 @@ namespace DetourModKit::detail
         return s_mid_slots;
     }
 
-    std::atomic<DWORD> &mid_entry_tls_index() noexcept
+    DWORD mid_entry_tls_index() noexcept
     {
-        return s_mid_entry_tls;
-    }
-
-    bool ensure_mid_entry_tls() noexcept
-    {
-        if (s_mid_entry_tls.load(std::memory_order_acquire) != TLS_OUT_OF_INDEXES)
-        {
-            return true;
-        }
-        const DWORD fresh = ::TlsAlloc();
-        if (fresh == TLS_OUT_OF_INDEXES)
-        {
-            return false;
-        }
-        DWORD expected = TLS_OUT_OF_INDEXES;
-        if (!s_mid_entry_tls
-                 .compare_exchange_strong(expected, fresh, std::memory_order_acq_rel, std::memory_order_acquire))
-        {
-            // Another installer won. Its index is already public, and this slot contains no value.
-            ::TlsFree(fresh);
-        }
-        return true;
+        return s_mid_entry_tls.index();
     }
 
     bool thread_is_inside_mid_adapter(const MidAdapterSlot &slot) noexcept
@@ -104,7 +84,11 @@ namespace DetourModKit::detail
             // deadlocks while a wrong "yes" only pins.
             return true;
         }
-        const DWORD tls = s_mid_entry_tls.load(std::memory_order_acquire);
+        const DWORD tls = s_mid_entry_tls.index();
+        if (tls == TLS_OUT_OF_INDEXES)
+        {
+            return false;
+        }
         for (const auto *frame = static_cast<const MidEntryFrame *>(::TlsGetValue(tls)); frame != nullptr;
              frame = frame->prev)
         {
@@ -137,7 +121,7 @@ namespace DetourModKit::detail
         );
     }
 
-    std::size_t claim_mid_adapter_slot() noexcept
+    MidSlotClaim claim_mid_adapter_slot() noexcept
     {
         for (std::size_t index = 0; index < MID_ADAPTER_CAPACITY; ++index)
         {
@@ -149,15 +133,30 @@ namespace DetourModKit::detail
                     std::memory_order_relaxed
                 ))
             {
+                // Reserved on the thread that installs the hook, so no callback reserves an index on a host thread.
+                DWORD system_error = ERROR_SUCCESS;
+                if (s_mid_entry_tls.acquire(&system_error) == TLS_OUT_OF_INDEXES)
+                {
+                    s_mid_entry_tls.release();
+                    s_mid_slots[index].claimed.store(false, std::memory_order_release);
+                    return MidSlotClaim{
+                        .index = MID_ADAPTER_CAPACITY,
+                        .status = MidSlotClaimStatus::EntryIndexUnavailable,
+                        .system_error = system_error,
+                    };
+                }
                 s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
                 s_mid_slots[index].live.store(false, std::memory_order_relaxed);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 s_last_claimed_mid_slot.store(index, std::memory_order_release);
 #endif
-                return index;
+                return MidSlotClaim{
+                    .index = index,
+                    .status = MidSlotClaimStatus::Claimed,
+                };
             }
         }
-        return MID_ADAPTER_CAPACITY;
+        return MidSlotClaim{};
     }
 
     void release_mid_adapter_slot(std::size_t index) noexcept
@@ -170,6 +169,7 @@ namespace DetourModKit::detail
         // contents can be recycled. The slot storage itself is never reclaimed.
         s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
         s_mid_slots[index].claimed.store(false, std::memory_order_release);
+        s_mid_entry_tls.release();
     }
 
     MidRundown run_down_mid_slot(MidAdapterSlot &slot) noexcept

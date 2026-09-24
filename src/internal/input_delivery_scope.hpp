@@ -21,10 +21,11 @@
  *          captures have to run), so it uses @ref MandatoryDeliveryScope, which additionally records the thread in an
  *          allocation-free stack-local registry that cannot fail.
  *
- *          The depth is backed by a reserved Win32 TLS slot rather than thread_local because MinGW lowers thread_local
- *          to __emutls_get_address, which allocates on first use per thread and abort()s uncatchably under OOM (see
- *          mid_hook_adapter.hpp and event_dispatcher.cpp for the same reservation). Not installed.
+ *          A Win32 TLS slot holds the depth instead of `thread_local` (`[B-86]`). @ref DeliveryTlsOwner owns the slot.
+ *          Not installed.
  */
+
+#include <windows.h>
 
 #include <cstdint>
 
@@ -37,7 +38,7 @@ namespace DetourModKit::detail
     /// Seam signature; see set_delivery_scope_reservation_seam_for_test.
     using DeliveryScopeReservationSeam = void (*)() noexcept;
 
-    /// Runs a probe after the first reservation check and before its serialized recheck.
+    /// Runs a probe in owner registration while no index is published, before the registration reserves one.
     void set_delivery_scope_reservation_seam_for_test(DeliveryScopeReservationSeam seam) noexcept;
 
     /**
@@ -54,11 +55,39 @@ namespace DetourModKit::detail
 #endif
 
     /**
-     * @brief Reserves the delivery marker's Win32 TLS slot before callbacks can run.
-     * @return false when the process has no slot available, after which every ordinary delivery is refused.
+     * @class DeliveryTlsOwner
+     * @brief One owner registration on the delivery marker's Win32 TLS index.
+     * @details Every binding gate holds one, so the index outlives each frame that a gate can open. The last owner
+     *          returns the index. A registration that finds no index leaves every ordinary delivery refused until a
+     *          later registration reserves one (proofs: `Lifecycle.DeliveryTlsIndexReturnsWithTheLastGate`,
+     *          `Lifecycle.DeliveryTlsIndexStaysWithALiveGate`).
      * @note Setup/control-plane only.
      */
-    [[nodiscard]] bool reserve_delivery_scope_tls() noexcept;
+    class DeliveryTlsOwner
+    {
+    public:
+        DeliveryTlsOwner() noexcept;
+        ~DeliveryTlsOwner() noexcept;
+
+        DeliveryTlsOwner(const DeliveryTlsOwner &) = delete;
+        DeliveryTlsOwner &operator=(const DeliveryTlsOwner &) = delete;
+        DeliveryTlsOwner(DeliveryTlsOwner &&) = delete;
+        DeliveryTlsOwner &operator=(DeliveryTlsOwner &&) = delete;
+
+        /// Whether an index was published when this owner registered.
+        [[nodiscard]] bool reserved() const noexcept { return m_reserved; }
+
+    private:
+        bool m_reserved;
+    };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Returns the published delivery marker index, or TLS_OUT_OF_INDEXES.
+    [[nodiscard]] DWORD delivery_scope_tls_index_for_test() noexcept;
+
+    /// Returns the registered owner count of the delivery marker index.
+    [[nodiscard]] std::uint32_t delivery_scope_tls_owners_for_test() noexcept;
+#endif
 
     /**
      * @brief Reports whether the calling thread is currently executing input-gate consumer code.
@@ -101,11 +130,13 @@ namespace DetourModKit::detail
 
         /**
          * @brief Whether this frame is recorded, so the thread now reads as in-delivery.
-         * @return false when the reserved slot is unavailable or the per-thread store failed under host OOM.
+         * @return false when no owner published an index or the per-thread store failed under host OOM.
          */
         [[nodiscard]] bool admitted() const noexcept { return m_admitted; }
 
     private:
+        /// The index this frame incremented, so the destructor decrements that index and no other.
+        DWORD m_index;
         bool m_admitted;
     };
 

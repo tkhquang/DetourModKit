@@ -85,19 +85,15 @@ namespace DetourModKit::detail
     };
 
     /**
-     * @brief The Win32 TLS index holding this thread's MidEntryFrame chain head.
-     * @details Win32 TLS rather than thread_local: MinGW lowers thread_local to __emutls_get_address, which allocates
-     *          on every thread's first touch and takes a process-wide lock to do it, inside a callback reached from a
-     *          hooked function on an arbitrary host thread. A reserved Win32 index costs a TEB slot read instead.
-     *          Reserved by hook::mid_at before any adapter of its slot can run, so a live slot always has a valid
-     *          index. Recording a frame under it can still fail (an index past the TEB's inline slots is backed by a
-     *          lazily heap-allocated expansion array), which is why an entry that cannot be recorded is counted rather
-     *          than assumed absent.
+     * @brief The Win32 TLS index that holds this thread's MidEntryFrame chain head, or TLS_OUT_OF_INDEXES.
+     * @details The adapter uses it on arbitrary host threads, so it is a Win32 TLS index instead of `thread_local`
+     *          (`[B-86]`). Each claimed slot owns the index, so a live slot always has a valid index, and the last
+     *          released slot returns it. A retained route keeps its slot claimed, so its index stays reserved (proofs:
+     *          `Lifecycle.MidEntryTlsIndexReturnsWithTheLastSlot`, `Lifecycle.MidEntryTlsIndexStaysWithARetainedSlot`).
+     *          A frame store under it can still fail for an index past the TEB's inline slots. The adapter therefore
+     *          counts an entry that it cannot record, and never assumes that entry absent.
      */
-    [[nodiscard]] std::atomic<DWORD> &mid_entry_tls_index() noexcept;
-
-    /// Reserves the TLS index once. Returns false if the process has no index to give.
-    [[nodiscard]] bool ensure_mid_entry_tls() noexcept;
+    [[nodiscard]] DWORD mid_entry_tls_index() noexcept;
 
     /// True when the calling thread is currently inside @p slot's adapter body.
     [[nodiscard]] bool thread_is_inside_mid_adapter(const MidAdapterSlot &slot) noexcept;
@@ -180,10 +176,28 @@ namespace DetourModKit::detail
         return ::TlsSetValue(tls, frame) != FALSE;
     }
 
-    /// Takes ownership of a free slot, or returns @ref MID_ADAPTER_CAPACITY when the pool is full.
-    [[nodiscard]] std::size_t claim_mid_adapter_slot() noexcept;
+    /// The outcome kind of @ref claim_mid_adapter_slot.
+    enum class MidSlotClaimStatus : std::uint8_t
+    {
+        Claimed,
+        CapacityExhausted,
+        EntryIndexUnavailable
+    };
 
-    /// Returns a drained slot to the pool. Never call on a slot that has not been run down.
+    /// The outcome of @ref claim_mid_adapter_slot.
+    struct MidSlotClaim
+    {
+        /// The claimed pool index, or @ref MID_ADAPTER_CAPACITY when the claim failed.
+        std::size_t index{MID_ADAPTER_CAPACITY};
+        MidSlotClaimStatus status{MidSlotClaimStatus::CapacityExhausted};
+        /// GetLastError() from the failed entry-index reservation.
+        DWORD system_error{ERROR_SUCCESS};
+    };
+
+    /// Takes ownership of a free slot and of the entry TLS index that its adapter records frames under.
+    [[nodiscard]] MidSlotClaim claim_mid_adapter_slot() noexcept;
+
+    /// Returns a drained slot and its entry-index ownership to the pool. Never call on a slot that is not run down.
     void release_mid_adapter_slot(std::size_t index) noexcept;
 
     /// The outcome of @ref run_down_mid_slot.
@@ -245,7 +259,7 @@ namespace DetourModKit::detail
             {
                 if (const hook::MidHookFn detour = slot.detour.load(std::memory_order_acquire))
                 {
-                    const DWORD tls = mid_entry_tls_index().load(std::memory_order_acquire);
+                    const DWORD tls = mid_entry_tls_index();
                     MidEntryFrame frame{&slot, nullptr};
                     bool tracked = false;
                     if (tls != TLS_OUT_OF_INDEXES)

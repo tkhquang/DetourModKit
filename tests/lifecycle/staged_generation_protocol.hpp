@@ -82,6 +82,11 @@ namespace staged_gen
          * @details Teardown then retains that route. Requires enable_mid.
          */
         int retain_mid = 0;
+        /**
+         * @brief Subscribes the generation's namespace-scope dispatcher and emits one event when nonzero.
+         * @details The dispatcher lives until the image unloads, so its static destruction returns its TLS ownership.
+         */
+        int enable_dispatcher = 0;
     };
 
     /**
@@ -110,6 +115,8 @@ namespace staged_gen
         std::size_t coordinator_retained = 0;
         /// The value that the parked caller returned through the retained route, or 0.
         int parked_result = 0;
+        /// Events that the generation's dispatcher delivered.
+        std::uint64_t dispatched = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.

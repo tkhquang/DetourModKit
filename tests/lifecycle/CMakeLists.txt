@@ -509,7 +509,7 @@ set_tests_properties(InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario PR
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
   LABELS "lifecycle-proof")
 
-# Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
+# Exhausting every TLS index is process-wide, so this needs its own host.
 add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
 target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(input_tls_exhaustion PRIVATE
@@ -525,7 +525,7 @@ dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
-# Positive control. The case above proves a zero callback count, which a binding that never matched would also produce.
+# Positive control: the same facade drive on a process that never exhausted its indices.
 dmk_add_raw_proof(NAME InputLifecycleProof.TrackedDeliveryIsAdmitted
   COMMAND $<TARGET_FILE:input_tls_exhaustion> available
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
@@ -548,6 +548,14 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBe
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# A consume binding registered without a delivery index must leave its trigger to the game. Its own process because
+# the facade engine it starts publishes the process-global consume table.
+dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> consume-exhausted
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Negative control for the scenarios above, for the reason spelled out over the input_gate_abba control.
 add_test(NAME InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:input_tls_exhaustion> no-such-scenario)
@@ -555,6 +563,58 @@ set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScena
   WILL_FAIL TRUE
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  LABELS "lifecycle-proof")
+
+# Each DMK Win32 TLS index returns with its last owner and stays with a live one. Every scenario owns its process,
+# because a census reads the whole process and a defective return can write through another owner's index.
+add_executable(tls_index_return tls_index_return.cpp)
+target_link_libraries(tls_index_return PRIVATE DetourModKit dmk_coverage)
+target_include_directories(tls_index_return PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(tls_index_return PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(tls_index_return)
+add_dependencies(dmk_lifecycle_proof_hosts tls_index_return)
+
+foreach(tls_proof IN ITEMS
+    "MidEntryTlsIndexReturnsWithTheLastSlot|mid-return"
+    "MidEntryTlsIndexStaysWithARetainedSlot|mid-retained"
+    "MidEntryTlsIndexRefusalReleasesItsClaim|mid-exhausted"
+    "EmitTlsIndexReturnsWithTheLastSubscribedDispatcher|emit-return"
+    "EmitTlsIndexStaysWithALiveDispatcher|emit-live-owner"
+    "DeliveryTlsIndexReturnsWithTheLastGate|delivery-return"
+    "DeliveryTlsIndexStaysWithALiveGate|delivery-live-owner")
+  string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
+  list(GET tls_proof_parts 0 tls_proof_name)
+  list(GET tls_proof_parts 1 tls_proof_scenario)
+  dmk_add_raw_proof(NAME Lifecycle.${tls_proof_name}
+    COMMAND $<TARGET_FILE:tls_index_return> ${tls_proof_scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
+    TEST_TIMEOUT 60
+    LABELS "lifecycle-proof")
+endforeach()
+
+# The guarded-read index exists only on the MinGW vectored-handler arm, so MSVC reports the absent subject with 77.
+foreach(tls_proof IN ITEMS
+    "GuardedReadTlsIndexReturnsOnRelease|guarded-read-return"
+    "GuardedReadTlsIndexWaitsForTheInFlightAccess|guarded-read-in-flight")
+  string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
+  list(GET tls_proof_parts 0 tls_proof_name)
+  list(GET tls_proof_parts 1 tls_proof_scenario)
+  dmk_add_raw_proof(NAME Lifecycle.${tls_proof_name}
+    COMMAND $<TARGET_FILE:tls_index_return> ${tls_proof_scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
+    TEST_TIMEOUT 60
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endforeach()
+
+add_test(NAME Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:tls_index_return> no-such-scenario)
+set_tests_properties(Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
   LABELS "lifecycle-proof")
 
 # The reload servicer's reaper self-retirement (a config setter on the servicer thread calling clear()) is language and

@@ -2,10 +2,11 @@
  * @file memory_access.cpp
  * @brief Public faces of the guarded access surface: read_into, write_bytes, and the pointer-chain walk.
  *
- * These translation units hold no Structured Exception Handling and touch no Win32 directly: they validate arguments in
- * the v4 value vocabulary (Address / Region / Result / Error), call the SEH-confined engine in memory_guarded.cpp, and
- * map the engine's plain bool / status results onto ErrorCode. The header-side read<T> / write<T> templates forward
- * into read_into / write_bytes defined here, so the only typed-read machinery in the installed header is a bit_cast.
+ * These translation units hold no Structured Exception Handling and touch no Win32 directly. They validate arguments in
+ * the v4 value vocabulary (Address / Region / Result / Error) and call the fault-guard engine in memory_guarded.cpp.
+ * They map the engine's plain bool / status results onto ErrorCode. The header-side read<T> / write<T> templates
+ * forward into read_into / write_bytes defined here, so the only typed-read machinery in the installed header is a
+ * bit_cast.
  */
 
 #include "DetourModKit/memory.hpp"

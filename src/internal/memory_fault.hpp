@@ -3,7 +3,7 @@
 
 /**
  * @file memory_fault.hpp
- * @brief Shared fault-handling primitives for SEH-guarded foreign-memory operations and scanner sweeps.
+ * @brief Shared fault-handling primitives for fault-guarded foreign-memory operations and scanner sweeps.
  *
  * Foreign reads, writes, compare-exchange operations, and protection-gated scanner sweeps all run inside a Structured
  * Exception Handling frame on MSVC. Their filters must agree on which codes belong to an access within the guarded

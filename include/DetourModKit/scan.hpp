@@ -194,6 +194,17 @@ namespace DetourModKit::scan
      * @details Readable accepts every committed readable page, so one pass covers both code and data candidates.
      *          Executable narrows to committed execute-readable code pages only, the lower-false-positive choice when
      *          a signature must land on code.
+     *
+     *          Readable authority rule: a Readable scan returns @ref ErrorCode::NotAuthoritative when its scope
+     *          declares no exclusions and lies inside neither one mapped image nor one reserved allocation. Outside a
+     *          mapped image, a scope in one allocation that crosses more than 64 `VirtualQuery` regions counts as
+     *          unconfined. Such a scope also covers caller copies of the query bytes that DMK cannot enumerate, so a
+     *          match can be the query storage itself. DMK always excludes the query storage that it owns.
+     *
+     *          The remedies are a confined scope, an Executable scan, or a declaration of every live caller copy
+     *          through @ref ScanRequest::exclusions or the scan() overload with exclusions. Query bytes are data, so an
+     *          Executable scan stays authoritative on any scope.
+     *          Proof: `ScannerTrustProof.WholeProcessReadableScanCannotAuthorizeQueryOwnedMatch`.
      */
     enum class Pages : std::uint8_t
     {
@@ -360,9 +371,9 @@ namespace DetourModKit::scan
     /**
      * @brief Resolves a string-reference anchor inside one mapped image.
      * @param query The string and how to interpret its reference.
-     * @param scope Module image to search; defaults to the host executable. A scope confined to neither one mapped
-     *        image nor one reserved allocation returns @ref ErrorCode::NotAuthoritative. This entry point takes no
-     *        exclusion span and no page selector, so a confined scope is the only remedy.
+     * @param scope Module image to search, by default the host executable. Phase 1 follows the Readable authority rule
+     *        of @ref Pages. This entry point takes no exclusion span and no page selector, so a confined scope is the
+     *        only remedy.
      * @return The referencing-instruction (or enclosing-function, or pointer-slot) address, or an Error.
      * @details Two fail-closed phases. Phase 1 locates the single occurrence of @p query.text in the scope's readable
      *          pages. Zero returns @ref ErrorCode::StringNotFound, and more than one returns
@@ -905,11 +916,9 @@ namespace DetourModKit::scan
          */
         bool require_executable_result = false;
         /**
-         * @brief Caller-owned copies of the ladder's query bytes a match may not come from.
-         * @details Only needed for a @ref Pages::Readable scope confined to neither one mapped image nor one reserved
-         *          allocation, where a match could otherwise be the query finding its own storage; such a scope
-         *          resolves to @ref ErrorCode::NotAuthoritative while this is empty. DMK's own representations (the
-         *          ladder, its Patterns, and the compiled forms) are excluded regardless. Non-owning, like @ref ladder.
+         * @brief Caller-owned copies of the ladder's query bytes that no match can come from.
+         * @details A non-empty span satisfies the Readable authority rule of @ref Pages, so it must name every live
+         *          copy. Non-owning, like @ref ladder.
          */
         std::span<const Region> exclusions{};
     };
@@ -1057,43 +1066,42 @@ namespace DetourModKit::scan
      * @brief Resolves a candidate ladder to a single address, trying each tier until one resolves uniquely.
      * @param request The ladder, scope, and policy to resolve.
      * @return The resolved Hit, or an Error describing why no candidate resolved.
-     * @details The whole resolver surface in one call. Candidates are tried in @ref ScanRequest::order order; the first
-     *          that (for a byte tier) matches in scope, passes the uniqueness gate when required, and resolves to an
-     *          in-scope plausible address, or (for a text tier) resolves through its unique-only backend, wins. When
-     *          @ref ScanRequest::require_executable_result is true, every final address must also be execute-readable.
-     *          On a full direct miss with a non-Off fallback_policy, each Direct candidate's prologue is rebuilt as a
-     *          near/far JMP and retried to recover a target another mod already inline-hooked, subject to the policy's
-     *          identity witness. A byte tier whose own sweep was truncated (@ref ErrorCode::BudgetExceeded or
-     *          @ref ErrorCode::IncompleteScan) preempts that recovery, because "the direct candidates fully missed" is
-     *          the premise recovery rests on and a partly-read scope does not establish it; a recovery sweep that
-     *          itself skips a faulted region reports @ref ErrorCode::IncompleteScan rather than a miss. A text tier's
-     *          failure (@ref ErrorCode::MalformedQueryText, or @ref ErrorCode::NotAuthoritative or
-     *          @ref ErrorCode::IncompleteScan from its own readable sweep) does not preempt recovery, but is reported
-     *          in place of the generic miss when nothing resolves. An unconfined Pages::Readable scope that declares
-     *          no @ref ScanRequest::exclusions refuses the whole request with @ref ErrorCode::NotAuthoritative before
-     *          any candidate is graded. An out-of-range @ref ScanRequest::pages, @ref ScanRequest::order,
-     *          @ref ScanRequest::fallback_policy, or StringXref candidate encoding/return mode fails closed with
-     *          @ref ErrorCode::InvalidArg rather than selecting a permissive default. May allocate, so it is NOT
-     *          noexcept; the only throwing path is allocation failure.
+     * @details The whole resolver surface in one call. The resolver tries candidates in @ref ScanRequest::order order,
+     *          and the first candidate that resolves wins. A byte tier resolves when it matches in scope, passes the
+     *          uniqueness gate when required, and yields an in-scope plausible address. A text tier resolves through
+     *          its unique-only backend. When @ref ScanRequest::require_executable_result is true, every final address
+     *          must also be execute-readable.
+     *
+     *          On a full direct miss with a non-Off fallback_policy, the resolver rebuilds each Direct candidate's
+     *          prologue as a near/far JMP and retries it. This recovers a target that another mod already hooked
+     *          inline, subject to the policy's identity witness. A byte tier whose own sweep was truncated
+     *          (@ref ErrorCode::BudgetExceeded or @ref ErrorCode::IncompleteScan) preempts that recovery. Recovery
+     *          needs a full direct miss, and a partly read scope does not prove one. A recovery sweep that skips a
+     *          faulted region reports @ref ErrorCode::IncompleteScan instead of a miss.
+     *
+     *          A text tier failure does not preempt recovery. That failure is @ref ErrorCode::MalformedQueryText, or
+     *          @ref ErrorCode::NotAuthoritative or @ref ErrorCode::IncompleteScan from the tier's own readable sweep.
+     *          When nothing resolves, the result reports that failure in place of the generic miss.
+     *
+     *          A scope that fails the Readable authority rule of @ref Pages refuses the whole request before the
+     *          resolver grades any candidate. An out-of-range value fails closed with @ref ErrorCode::InvalidArg
+     *          instead of a permissive default. The checked values are @ref ScanRequest::pages,
+     *          @ref ScanRequest::order, @ref ScanRequest::fallback_policy, and the encoding and return mode of each
+     *          StringXref candidate. resolve() can allocate, so it is not noexcept. Only an allocation failure throws.
      * @note Setup/control-plane only: a cascade resolve walks the image and is a startup-time operation.
      */
     [[nodiscard]] Result<Hit> resolve(const ScanRequest &request);
 
     /**
-     * @brief Resolves a batch of requests concurrently, returning one Result per request in input order.
+     * @brief Resolves a batch of requests concurrently and returns one Result per request in input order.
      * @param requests The requests to resolve.
      * @param max_workers Upper bound on worker threads (0 = auto-select from hardware concurrency).
-     * @return On success, the inner vector holds one @ref Hit-or-Error per input request, in order. On a WHOLE-BATCH
-     *         failure (the per-request result container itself could not be allocated under true out-of-memory) the
-     *         OUTER Result carries Error{OutOfMemory} and there is no inner vector.
-     * @details noexcept by contract, and the two failure layers are distinct so no failure is ever silent. A
-     *          PER-REQUEST allocation failure is reported as that slot's Error{OutOfMemory}, and any other per-request
-     *          exception leaves that slot at the seeded Error{NoMatch}, so one failing request never sinks the batch.
-     *          A WHOLE-BATCH allocation failure, when even the seeded result vector cannot be built, is reported on
-     *          the outer Result instead of an easily-ignored empty vector, so a caller must unwrap the outer Result
-     *          before indexing and cannot silently proceed on a truncated batch. This mirrors @ref hook::install_all,
-     *          whose outer Result is likewise the whole-batch signal.
-     * @note Setup/control-plane only: spawns a worker pool and allocates; a startup-time batch, not a per-frame call.
+     * @return The outer Result holds one @ref Hit or Error per request, in input order. The outer Result fails with
+     *         Error{OutOfMemory} when the result vector cannot be allocated, and with Error{Unknown} for any other
+     *         whole-batch exception. A caller must unwrap it before it indexes a slot.
+     * @details A per-request allocation failure sets that slot to Error{OutOfMemory}. Any other per-request exception
+     *          leaves the seeded Error{NoMatch} in that slot.
+     * @note Setup/control-plane only: it spawns a worker pool and allocates, so run it at startup, not per frame.
      */
     [[nodiscard]] Result<std::vector<Result<Hit>>>
     resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
@@ -1105,10 +1113,12 @@ namespace DetourModKit::scan
      * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
      * @param pages Which page-protection class to accept (Readable superset by default, or Executable code-only).
      * @return The address of the Nth match (adjusted by the Pattern's `|` offset), or an Error.
-     * @details Page-gated. The sweep walks @p scope through the OS page map and reads only committed pages of the
-     *          requested class under a fault guard, so an unmapped or guard page inside the scope is skipped instead
-     *          of a host fault. A match that straddles two adjacent accepted regions is still found. For the raw
-     *          primitive where the caller guarantees readability, use @ref unchecked::find_pattern.
+     * @details The page-gated sweep walks @p scope through the OS page map and reads only committed pages of the
+     *          requested class under a fault guard. An unmapped or guard page inside the scope causes a skip, not a
+     *          host fault. A match that straddles two adjacent accepted regions is still found. Each call
+     *          rebuilds the engine pattern, can sample the haystack, and can query the loader for the authority check
+     *          before the walk. A cursor walk that calls scan() once per hit therefore repeats that setup for each
+     *          hit. @ref unchecked::find_pattern serves that loop over a range that the caller proves readable.
      *
      *          A miss is typed, because "not found" and "not searched" are different answers.
      *          @ref ErrorCode::NoMatch means the sweep traversed the whole scope and the pattern is absent.
@@ -1117,11 +1127,7 @@ namespace DetourModKit::scan
      *          spent its backtracking budget before the traversal was exhaustive. Neither truncation is a miss. An
      *          out-of-range @p pages value returns @ref ErrorCode::InvalidArg before the sweep starts.
      *
-     *          A @ref Pages::Readable scan returns @ref ErrorCode::NotAuthoritative when its scope is confined to
-     *          neither one mapped image nor one reserved allocation and declares no exclusions. Such a scope covers
-     *          the caller's own copies of the pattern bytes, which DMK cannot enumerate, so a match can be the query
-     *          that finds itself. Confine the scope, scan @ref Pages::Executable, or use the exclusion-taking
-     *          overload. DMK always excludes its own query representations, on every scope.
+     *          A @ref Pages::Readable scan follows the Readable authority rule of @ref Pages.
      * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
      *       call. noexcept; an allocation failure while preparing the scan surfaces as Error{OutOfMemory}.
      */
@@ -1132,9 +1138,8 @@ namespace DetourModKit::scan
      * @brief Scans one Pattern over a known scope while excluding caller-owned copies of the query bytes.
      * @param pattern The compiled signature.
      * @param scope The memory range to search.
-     * @param exclusions Spans holding the caller's own copies of the query material; a match intersecting one is not
-     *        counted. Passing a non-empty span is what makes an otherwise unprovable readable scope authoritative, so
-     *        it must actually name every live copy the caller holds.
+     * @param exclusions The caller's live copies of the query bytes. A match that intersects one is not counted. A
+     *        non-empty span satisfies the Readable authority rule of @ref Pages, so it must name every live copy.
      * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
      * @param pages Which page-protection class to accept.
      * @return The address of the Nth non-excluded match, or an Error.
@@ -1168,7 +1173,7 @@ namespace DetourModKit::scan
      * @param displacement_offset Byte offset from @p instruction to the disp32 field.
      * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32.
      * @return The resolved absolute address (`instruction + instruction_length + disp32`), or an Error.
-     * @details The displacement is read under an SEH fault guard. A resolved address that is not a plausible user-mode
+     * @details The displacement is read under a fault guard. A resolved address that is not a plausible user-mode
      *          pointer is rejected with ErrorCode::ImplausibleTarget rather than returned. For `FF 15`/`FF 25` forms
      *          the resolved value is the pointer slot, itself an in-image address. A malformed field layout returns
      *          ErrorCode::InvalidArg before any read.
@@ -1210,12 +1215,12 @@ namespace DetourModKit::scan
      * @brief Cheap heuristic: does @p addr look like the first byte of a real function body?
      * @param addr Absolute address to probe. A null @p addr returns false without reading memory.
      * @return true if the byte at @p addr is readable and not on the poison list; false otherwise.
-     * @details Reads exactly one byte from @p addr under an SEH fault guard and rejects a small blacklist of bytes that
-     *          are never the first opcode of a callable x86-64 function: 0x00 (zero-fill / NULL page), 0xCC (int3 pad),
-     *          and 0xC2 / 0xC3 (bare RET stub). It returns true for 0xE9 / 0xEB / the 0xFF 0x25 prefix of an indirect
-     *          JMP, so a target whose prologue is already overwritten by another inline hook still passes, which is
-     *          required for nested-hook scenarios. This is the negative complement to the resolve() prologue-recovery
-     *          fallback: use it to filter scan poison (a zero page or an alignment pad) after a resolve.
+     * @details Reads exactly one byte from @p addr under a fault guard. It rejects the bytes that never start a
+     *          callable x86-64 function: 0x00 (zero-fill / NULL page), 0xCC (int3 pad), and 0xC2 / 0xC3 (bare RET
+     *          stub). It returns true for 0xE9, 0xEB, and the 0xFF 0x25 prefix of an indirect JMP. A target whose
+     *          prologue another inline hook already overwrote therefore still passes, as nested hooks require. This is
+     *          the negative complement to the resolve() prologue-recovery fallback. Use it to filter scan poison (a
+     *          zero page or an alignment pad) after a resolve.
      * @note Callback-safe: a single guarded byte read, no allocation.
      */
     [[nodiscard]] bool is_likely_function_prologue(Address addr) noexcept;
@@ -1299,7 +1304,12 @@ namespace DetourModKit::scan
          * @details The unsafe twin of scan(): it performs no page filtering and uses raw SIMD/memchr loads, so an
          *          unreadable byte in @p region faults the host. The return is a raw pointer, not a Result, because
          *          there is no recoverable error to report. noexcept. A pattern allocation failure returns nullptr.
-         * @note Setup/control-plane only: prepares the engine pattern and performs a raw, page-unfiltered scan.
+         * @note Setup/control-plane only: each call copies @p pattern into two heap buffers, or three with bounded
+         *       jumps, before the walk. A call with @p occurrence N restarts from `region.base`. For a pattern whose
+         *       `offset()` is zero, a cursor walk passes occurrence 1 and advances `region.base` past each hit. A
+         *       nonzero offset places the hit after the match start, so a walk for such a pattern keeps `region` and
+         *       raises @p occurrence. Proof:
+         *       `ScannerUncheckedAllocationTest.CursorWalkFindsEveryNeedleAtAFixedPerCallCost`.
          */
         [[nodiscard]] const std::byte *
         find_pattern(Region region, const Pattern &pattern, std::size_t occurrence = 1) noexcept;

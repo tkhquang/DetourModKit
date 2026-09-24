@@ -211,12 +211,9 @@ namespace DetourModKit
         IncompleteScan,
         /**
          * @brief The scan could not prove its result unique because query-owned storage may participate in it.
-         * @details Raised by a readable-page scan whose scope is not confined to one mapped image or one reserved
-         *          allocation: DMK cannot discover caller-retained copies of the query bytes, so a match in that scope
-         *          is not authoritative. Confine the scope, scan Pages::Executable, or supply those copies as
-         *          exclusions. Also raised when more exclusion spans are declared than the bounded set holds after
-         *          merging, which would leave some query storage visible to the sweep; declare fewer, or narrow the
-         *          scope so fewer of them are in range.
+         * @details Raised under the Readable authority rule of @ref scan::Pages. Also raised when the declared
+         *          exclusion spans overflow the bounded set after a merge, which leaves some query storage visible to
+         *          the sweep. The remedy is fewer declared spans or a narrower scope.
          */
         NotAuthoritative,
         /// String xref: the query text is not well-formed UTF-8, or it violates the embedded-NUL policy.

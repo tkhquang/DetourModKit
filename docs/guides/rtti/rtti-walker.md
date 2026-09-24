@@ -45,7 +45,7 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 | `rtti::region_has_rtti(range?)` | You need to tell a type-name miss from a module that has no resolvable MSVC RTTI records at all. |
 | `rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle with per-call image-generation validation. |
 
-The forward entry points are noexcept and SEH-guarded. An unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are SEH-guarded as well and return `std::nullopt` / a zero count on any failure.
+The forward entry points are noexcept and fault-guarded. An unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are fault-guarded as well and return `std::nullopt` / a zero count on any failure.
 
 ## Common patterns
 
@@ -142,8 +142,8 @@ A successful resolve is cached and stamped with the resolving module's image gen
 
 ## Performance notes
 
-- The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall. The batched ColHead read still matters, because it keeps the walker to two guarded calls instead of four.
-- `vtable_is_type` reads `expected.size() + 1` name bytes in a single SEH frame and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
+- The walker issues two guarded reads per call on the cold path: the COL pointer at `vtable - 8` and one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall. The batched ColHead read still matters, because it keeps the walker to two guarded calls instead of four.
+- `vtable_is_type` reads `expected.size() + 1` name bytes in one guarded read and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters. On genuinely hot paths cache a `rtti::TypeIdentity`, because every walker call still runs the loader-querying COL prelude.
 - `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it reads each slot's object and vtable qwords, then compares against the cached vtable.
 

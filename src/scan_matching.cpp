@@ -1,12 +1,8 @@
 /**
  * @file scan_matching.cpp
- * @brief Public single-pattern matching: scan() (page-gated, occurrence + Pages), unchecked::find_pattern() (raw Nth),
- *        active_simd_level(), and is_likely_function_prologue().
- * @details Expresses the public matching surface in the Address / Region / Result vocabulary over the private engine.
- *          scan() walks the OS page map for the requested Pages class and reads only committed pages under a fault
- *          guard; the unchecked twin performs a raw, page-unfiltered scan the caller guarantees readable. The
- *          haystack-frequency anchor override accelerates the page-gated scan; the unchecked primitive uses the
- *          Pattern's compile-time anchor directly.
+ * @brief Public single-pattern matching: scan(), unchecked::find_pattern(), active_simd_level(), and
+ *        is_likely_function_prologue().
+ * @details scan.hpp owns each contract.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -119,21 +115,13 @@ namespace DetourModKit
                 return false;
             }
 
-            // Read the first opcode byte under a fault guard rather than is_readable + a raw dereference. is_readable
-            // is a TOCTOU illusion (the page can change or unmap between the check and the read), and the bare
-            // dereference would then fault the host. guarded_read returns nullopt on any fault.
             const auto b0 = detail::guarded_read<std::uint8_t>(addr.raw());
             if (!b0)
             {
                 return false;
             }
 
-            // Reject bytes that never begin a real function prologue, so an AOB match that landed in inter-function
-            // padding or past a function's end is filtered out instead of accepted as a target:
-            //   0x00 - zero fill / uninitialized page (decodes as `add [rax], al`)
-            //   0xCC - INT3, the alignment padding linkers insert between functions
-            //   0xC3 - RET (near return): a function epilogue, not a prologue
-            //   0xC2 - RET imm16: likewise a return, not a prologue
+            // is_likely_function_prologue in scan.hpp owns the poison list.
             return *b0 != 0x00 && *b0 != 0xCC && *b0 != 0xC2 && *b0 != 0xC3;
         }
 
@@ -147,9 +135,7 @@ namespace DetourModKit
                 }
                 try
                 {
-                    // The raw primitive does no page filtering, so the caller owns readability; it also does not
-                    // consult the haystack histogram (that override accelerates the page-gated scan), using the
-                    // Pattern's compile-time anchor directly.
+                    // No page filter and no haystack anchor override: the caller owns readability.
                     const std::size_t anchor = pattern.has_anchor() ? pattern.anchor_index() : pattern.size();
                     const detail::EnginePattern compiled = detail::engine_pattern_from(pattern, anchor);
                     return detail::find_pattern(region.base.ptr<const std::byte>(), region.size, compiled, occurrence);

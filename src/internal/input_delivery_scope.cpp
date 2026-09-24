@@ -1,6 +1,6 @@
 /**
  * @file input_delivery_scope.cpp
- * @brief Reserved-Win32-TLS depth plus the stack-local teardown registry behind input_delivery_scope.hpp.
+ * @brief Owned-Win32-TLS depth plus the stack-local teardown registry behind input_delivery_scope.hpp.
  * @details Every ordinary failure mode reports "not recorded" to the constructing frame and nothing at all to other
  *          threads, so a gate can refuse the delivery it was about to run instead of the marker guessing on its
  *          behalf. The teardown registry has no failure mode: its node lives on the caller's stack and the list is a
@@ -9,13 +9,14 @@
 
 #include "internal/input_delivery_scope.hpp"
 
+#include "internal/shared_tls_index.hpp"
+
 #include <windows.h>
 
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 
 namespace DetourModKit
 {
@@ -23,14 +24,8 @@ namespace DetourModKit
     {
         namespace
         {
-            constexpr DWORD TLS_UNAVAILABLE = TLS_OUT_OF_INDEXES - 1;
-
-            // Reserved TLS slot holding this thread's gate-delivery depth as an integer cast into the void* value.
-            // TLS_OUT_OF_INDEXES means reservation has not run; TLS_UNAVAILABLE records a permanent failure.
-            std::atomic<DWORD> s_depth_tls{TLS_OUT_OF_INDEXES};
-
-            // Serializes the one-time slot reservation. Control-plane only; the hot delivery path never reaches it.
-            std::mutex s_depth_tls_mutex;
+            // Owned TLS slot that holds this thread's gate-delivery depth as an integer cast into the void* value.
+            constinit SharedTlsIndex s_depth_tls;
 
             // Teardown registry. SRWLOCK_INIT is a constant initializer, so the lock is usable from the first
             // teardown in the process without a dynamic initializer that could itself fail or order badly.
@@ -118,57 +113,10 @@ namespace DetourModKit
                 return ::TlsSetValue(index, reinterpret_cast<void *>(depth)) != FALSE;
             }
 
-            bool ensure_depth_tls() noexcept
-            {
-                const DWORD current_index = s_depth_tls.load(std::memory_order_acquire);
-                if (current_index == TLS_UNAVAILABLE)
-                {
-                    return false;
-                }
-                if (current_index != TLS_OUT_OF_INDEXES)
-                {
-                    return true;
-                }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                if (s_reservation_seam != nullptr)
-                {
-                    s_reservation_seam();
-                }
-#endif
-                try
-                {
-                    std::scoped_lock lock{s_depth_tls_mutex};
-                    const DWORD locked_index = s_depth_tls.load(std::memory_order_relaxed);
-                    if (locked_index != TLS_OUT_OF_INDEXES)
-                    {
-                        return locked_index != TLS_UNAVAILABLE;
-                    }
-                    const DWORD index = ::TlsAlloc();
-                    if (index == TLS_OUT_OF_INDEXES)
-                    {
-                        s_depth_tls.store(TLS_UNAVAILABLE, std::memory_order_release);
-                        return false;
-                    }
-                    s_depth_tls.store(index, std::memory_order_release);
-                    return true;
-                }
-                catch (...)
-                {
-                    DWORD expected = TLS_OUT_OF_INDEXES;
-                    (void)s_depth_tls.compare_exchange_strong(
-                        expected,
-                        TLS_UNAVAILABLE,
-                        std::memory_order_release,
-                        std::memory_order_relaxed
-                    );
-                    return false;
-                }
-            }
-
             [[nodiscard]] bool depth_recorded_for_this_thread() noexcept
             {
-                const DWORD index = s_depth_tls.load(std::memory_order_acquire);
-                if (index == TLS_OUT_OF_INDEXES || index == TLS_UNAVAILABLE)
+                const DWORD index = s_depth_tls.index();
+                if (index == TLS_OUT_OF_INDEXES)
                 {
                     return false;
                 }
@@ -176,9 +124,20 @@ namespace DetourModKit
             }
         } // namespace
 
-        bool reserve_delivery_scope_tls() noexcept
+        DeliveryTlsOwner::DeliveryTlsOwner() noexcept
         {
-            return ensure_depth_tls();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_reservation_seam != nullptr && s_depth_tls.index() == TLS_OUT_OF_INDEXES)
+            {
+                s_reservation_seam();
+            }
+#endif
+            m_reserved = s_depth_tls.acquire() != TLS_OUT_OF_INDEXES;
+        }
+
+        DeliveryTlsOwner::~DeliveryTlsOwner() noexcept
+        {
+            s_depth_tls.release();
         }
 
         std::uint32_t current_native_thread_id() noexcept
@@ -190,6 +149,16 @@ namespace DetourModKit
         void set_delivery_scope_reservation_seam_for_test(DeliveryScopeReservationSeam seam) noexcept
         {
             s_reservation_seam = seam;
+        }
+
+        DWORD delivery_scope_tls_index_for_test() noexcept
+        {
+            return s_depth_tls.index();
+        }
+
+        std::uint32_t delivery_scope_tls_owners_for_test() noexcept
+        {
+            return s_depth_tls.owners();
         }
 
         bool set_delivery_scope_store_failure_for_test(bool fail) noexcept
@@ -237,13 +206,14 @@ namespace DetourModKit
             return teardown_registered(current_native_thread_id());
         }
 
-        DeliveryScope::DeliveryScope() noexcept : m_admitted(false)
+        DeliveryScope::DeliveryScope() noexcept : m_index(s_depth_tls.index()), m_admitted(false)
         {
-            if (!ensure_depth_tls())
+            // The enclosing gate owns the index, so it stays published until this frame ends.
+            if (m_index == TLS_OUT_OF_INDEXES)
             {
                 return;
             }
-            const DWORD index = s_depth_tls.load(std::memory_order_acquire);
+            const DWORD index = m_index;
             const auto depth = reinterpret_cast<std::uintptr_t>(::TlsGetValue(index));
             // A store can fail for a high slot index whose lazily heap-allocated TEB expansion array cannot be grown
             // under OOM. Leaving the depth understated would let a nested release wrongly conclude it is control-plane
@@ -261,11 +231,10 @@ namespace DetourModKit
             {
                 return;
             }
-            const DWORD index = s_depth_tls.load(std::memory_order_acquire);
-            const auto depth = reinterpret_cast<std::uintptr_t>(::TlsGetValue(index));
+            const auto depth = reinterpret_cast<std::uintptr_t>(::TlsGetValue(m_index));
             // The matching push succeeded, so this thread's expansion array for the slot already exists and the store
             // cannot fail for want of one. Floor at zero defensively.
-            (void)::TlsSetValue(index, reinterpret_cast<void *>(depth > 0 ? depth - 1 : 0));
+            (void)::TlsSetValue(m_index, reinterpret_cast<void *>(depth > 0 ? depth - 1 : 0));
         }
 
         MandatoryDeliveryScope::MandatoryDeliveryScope() noexcept

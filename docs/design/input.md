@@ -160,6 +160,8 @@ The two off-table forms reconstruct through different readers. A source-tagged t
 
 MinGW lowers `thread_local` to `__emutls_get_address`, which allocates on each thread's first touch and serializes on a process-wide mutex to do it. A detour entered from a game thread runs both inside a hooked function. Worse than either, libgcc's `emutls.c` calls `abort()` when that allocation fails. SIGABRT is not interceptable by a catch frame, so an enclosing `noexcept` boundary contains nothing. First-touch OOM is host death, not a reportable error. Reserve a Win32 TLS index at install time and read it from the callback instead.
 
+Each linked copy reserves its indices again, so an index that no owner returns exhausts the process TLS set across reloads. The last owner of each DMK index therefore returns it (`Lifecycle.StagedGenerationResourcesStayWithinBudget` and the `Lifecycle.*TlsIndex*` proofs).
+
 That primitive is not infallible either. An index past the TEB's inline slots is backed by a lazily heap-allocated expansion array, so a store can fail under memory pressure. Treat a failed store as unknown state rather than absence, and resolve that unknown where the record is read:
 
 - When the record only decides whether storage stays alive, pin it. `mid_hook_adapter.hpp` counts the unrecorded entry, so a rundown retains the stub instead of a conclusion that the thread is elsewhere and a free.

@@ -16,7 +16,6 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
-#include <span>
 #include <string_view>
 #include <vector>
 
@@ -25,12 +24,9 @@ namespace DetourModKit
     namespace detail
     {
         /**
-         * @brief Region-wide ceiling on total bounded-jump backtracking node visits for one segmented scan.
-         * @details The per-position @ref SEGMENT_MATCH_STEP_BUDGET caps one start position, but a non-anchored pattern
-         *          tries every start in a region and can otherwise degrade to O(region_size x per-position budget).
-         *          Work accumulates across all starts and suffix continuations of one physical region; exceeding the
-         *          ceiling marks the result truncated rather than spending unbounded time. An over-broad bounded-jump
-         *          pattern should add a literal to its leading segment instead.
+         * @brief Region-wide ceiling on bounded-jump node visits for one segmented scan (`[B-65]`).
+         * @details @ref SEGMENT_MATCH_STEP_BUDGET caps one start position. This ceiling caps the sum over every start
+         *          and suffix continuation of one physical region. A spent ceiling marks the result truncated.
          */
         inline constexpr std::size_t SEGMENT_MATCH_REGION_STEP_BUDGET = 1u << 26;
         static_assert(
@@ -41,10 +37,8 @@ namespace DetourModKit
         /**
          * @struct EnginePattern
          * @brief A heap-backed compiled AOB pattern with separate bytes and mask, plus a cached scan anchor.
-         * @details A position matches when (memory_byte ^ @ref bytes) & @ref mask == 0, so 0xFF marks a fully literal
-         *          byte, 0x00 a wildcard, and 0xF0 / 0x0F a per-nibble token. Byte values are pre-masked to their known
-         *          bits, which is what lets one plain compare be correct at every position without special-casing the
-         *          wildcard slots.
+         * @details A position matches when (memory_byte ^ @ref bytes) & @ref mask == 0. @ref PatternBuffer owns the
+         *          mask values, and @ref bytes holds values pre-masked to their known bits.
          */
         struct EnginePattern
         {
@@ -61,16 +55,11 @@ namespace DetourModKit
             std::ptrdiff_t offset = 0;
 
             /**
-             * @brief Cached anchor index selected by compile_anchor().
-             * @details find_pattern() drives its memchr sweep on the byte at this position. The anchor is confined to
-             *          segment 0 (the fixed run before the first bounded jump) because the matcher finds that run and
-             *          then extends across the variable gaps; a byte in a later segment sits at a gap-dependent address
-             *          the prefilter cannot sweep for.
-             *
-             *          Sentinel values:
+             * @brief Index of the byte that the memchr prefilter sweeps for, confined to segment 0 (`[B-55]`).
+             * @details Sentinel values:
              *          - `[0, size())`   valid anchor.
-             *          - `size()`        segment 0 has no fully-known byte to anchor on; the scan degenerates.
-             *          - `>= size() + 1` anchor not yet selected; find_pattern() picks one inline (slower path).
+             *          - `size()`        segment 0 has no fully-known byte, so the scan degenerates.
+             *          - `>= size() + 1` no anchor selected yet, so find_pattern() selects one inline (slower path).
              */
             std::size_t anchor = std::numeric_limits<std::size_t>::max();
 
@@ -111,12 +100,7 @@ namespace DetourModKit
 
             /**
              * @brief Selects and stores the rarest fully-known byte's index in segment 0 as the scan anchor.
-             * @details Scores each fully-known byte against a small byte-frequency table so one memchr pass produces
-             *          far fewer false candidate hits than anchoring on bytes[0]. Partially-masked nibble positions
-             *          cannot anchor: the prefilter needs one exact byte value. Ties break by first occurrence.
-             *          Idempotent and O(size()). A caller that mutates @ref bytes, @ref mask, or @ref jumps afterwards
-             *          MUST call it again or the cached anchor drifts. Not thread-safe with concurrent find_pattern()
-             *          on the same instance.
+             * @details Idempotent. A caller that changes @ref bytes, @ref mask, or @ref jumps must call it again.
              */
             void compile_anchor() noexcept;
         };
@@ -124,11 +108,9 @@ namespace DetourModKit
         /**
          * @brief Parses a space-separated AOB string into a compiled EnginePattern.
          * @param aob_str The AOB pattern string.
-         * @return The compiled pattern, or std::nullopt on any parse failure.
-         * @details Drives the single shared grammar through a heap-backed sink, so the runtime engine and the
-         *          compile-time scan::Pattern can never silently diverge. Unlike the fixed-array Pattern storage this
-         *          imposes no MAX_PATTERN_BYTES cap, so a long runtime pattern compiles here even when it would
-         *          overflow a literal Pattern; the jump count is still capped at MAX_PATTERN_JUMPS.
+         * @return The compiled pattern, or std::nullopt on any parse failure or allocation failure.
+         * @details The heap sink runs the shared grammar with no MAX_PATTERN_BYTES cap. The jump count keeps the
+         *          MAX_PATTERN_JUMPS cap.
          */
         [[nodiscard]] std::optional<EnginePattern> parse_aob(std::string_view aob_str);
 
@@ -158,10 +140,9 @@ namespace DetourModKit
 
         /**
          * @struct SegmentedScanBudget
-         * @brief Shared bounded-jump work state for one pattern over one physical readable region.
-         * @details The Nth-occurrence helpers continue from the byte after each prior match and pass the same state to
-         *          every suffix scan, so the region-wide ceiling cannot reset at a continuation boundary. Meaningful
-         *          only for one pattern and one contiguous region; flat patterns ignore it.
+         * @brief Bounded-jump work state for one pattern over one physical readable region.
+         * @details Every suffix scan of the region shares it, so the region-wide ceiling cannot reset at a
+         *          continuation boundary. Flat patterns ignore it.
          */
         struct SegmentedScanBudget
         {
@@ -218,8 +199,6 @@ namespace DetourModKit
          * @param occurrence Which occurrence to return (1-based). Passing 0 returns nullptr.
          * @param segmented_budget Shared bounded-jump work state for all suffix scans of this region.
          * @return Pointer to the Nth occurrence (adjusted by pattern.offset), or nullptr on a miss or truncated scan.
-         * @details Keeping the budget outside the suffix loop is what stops bounded-jump work from resetting after each
-         *          prior match. The state must belong to this one pattern and contiguous readable region.
          * @warning Same READABLE-RANGE PRECONDITION as the single-occurrence overload.
          */
         [[nodiscard]] const std::byte *find_pattern_nth(
@@ -230,27 +209,12 @@ namespace DetourModKit
             SegmentedScanBudget &segmented_budget
         );
 
-        /// Span convenience over the pointer+size single-occurrence matcher (same READABLE-RANGE precondition).
-        [[nodiscard]] inline const std::byte *
-        find_pattern(std::span<const std::byte> region, const EnginePattern &pattern)
-        {
-            return find_pattern(region.data(), region.size(), pattern);
-        }
-
-        /// Span convenience over the pointer+size Nth-occurrence matcher (same READABLE-RANGE precondition).
-        [[nodiscard]] inline const std::byte *
-        find_pattern(std::span<const std::byte> region, const EnginePattern &pattern, std::size_t occurrence)
-        {
-            return find_pattern(region.data(), region.size(), pattern, occurrence);
-        }
-
         /**
          * @brief Locates the leftmost match and reports its start, end, and resolved point.
          * @param segmented_budget Optional shared state for bounded-jump suffix continuations of one region.
          * @details The single dispatch point for both the flat fixed-width fast path and the segmented backtracking
          *          matcher. The offset is baked into RawMatch::point so it is applied exactly once regardless of gap
-         *          widths. When @p segmented_budget is supplied, bounded-jump work accumulates across every suffix
-         *          continuation over the same physical region.
+         *          widths.
          */
         [[nodiscard]] RawMatch find_pattern_raw(
             const std::byte *start_address,

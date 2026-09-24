@@ -5,11 +5,9 @@
  * @file internal/scan_exclusions.hpp
  * @brief The scan-time set of address spans a match may not come from: DMK's own query storage plus caller-declared
  *        copies of it.
- * @details Never installed. A page-gated readable sweep reads every committed page of its scope, including the heap and
- *          stack the caller's own query material lives on, so without this set a scan can find its needle in its own
- *          haystack and report the query's storage as the target. The set is built per call from live objects (the
- *          value Pattern, the compiled EnginePattern, ladder storage, string-query buffers) and consulted once per
- *          candidate match, so it costs nothing per scanned byte.
+ * @details Never installed. The Readable authority rule of @ref DetourModKit::scan::Pages states why a match must
+ *          not come from query storage. The set is built per call from live objects and checked once per candidate
+ *          match, so it costs nothing per scanned byte.
  */
 
 #include "internal/scan_engine.hpp"
@@ -165,9 +163,7 @@ namespace DetourModKit
 
         /**
          * @brief Adds caller-declared copies of the query.
-         * @details DMK can enumerate only the query representations it owns. A caller that keeps its own copy of the
-         *          pattern bytes alive during the scan declares them here; that declaration is what lets an otherwise
-         *          unprovable readable sweep return an authoritative result.
+         * @details A non-empty declaration satisfies the Readable authority rule of @ref scan::Pages.
          */
         inline void add_regions(ScanExclusions &exclusions, std::span<const Region> regions) noexcept
         {

@@ -2,9 +2,9 @@
  * @file rtti.cpp
  * @brief Implementation of MSVC RTTI introspection primitives.
  *
- * Walks RTTICompleteObjectLocator -> TypeDescriptor -> mangled name through SEH-guarded reads. The COL layout is read
- * in a single batch to minimise the number of guarded-read transitions; on MSVC each __try frame is essentially free,
- * while MinGW enters the VEH fault-containment path for each transition.
+ * Walks RTTICompleteObjectLocator -> TypeDescriptor -> mangled name through guarded reads. The walk reads the COL
+ * layout in one batch to minimize guarded-read transitions. On MSVC each __try frame is essentially free. On MinGW
+ * each transition enters the VEH fault-containment path.
  *
  * Every address derived from a COL field is bound-checked against the vtable's owning module range before being
  * dereferenced. This guarantees that a forged or corrupted COL cannot redirect the walker to read from another loaded
@@ -115,10 +115,10 @@ namespace DetourModKit
             return false;
         const std::uintptr_t col_addr = *col_ptr_opt;
 
-        // contains() above proved col_addr is in [base, end), but the guarded_read<ColHead> below pulls sizeof(ColHead)
-        // bytes, which a COL sitting within that many bytes of the module end would straddle past. The SEH guard
-        // faults cleanly on an unmapped straddle, but reject the whole-span overrun up front so the walk never reads
-        // COL fields out of an adjacent mapped image. (mod_range.end - col_addr cannot underflow: col_addr < end.)
+        // contains() above proved col_addr is in [base, end). The guarded_read<ColHead> below pulls sizeof(ColHead)
+        // bytes, so a COL that starts within that many bytes of the module end straddles the end. The fault guard fails
+        // cleanly on an unmapped straddle. The check rejects the whole-span overrun first, so the walk never reads COL
+        // fields out of an adjacent mapped image. (mod_range.end - col_addr cannot underflow: col_addr < end.)
         if (mod_range.end - col_addr < sizeof(ColHead))
             return false;
 

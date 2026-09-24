@@ -87,17 +87,23 @@ namespace DetourModKit::detail
         const void *dispatcher{nullptr};
         const void *type_tag{nullptr};
         EmitFrame *prev{nullptr};
+        /// The TLS index this frame was pushed under, so the pop restores that index and no other.
+        std::uint32_t tls_index{0xFFFFFFFFu};
     };
 
     /**
-     * @brief Reserves the emit chain's thread-local storage. Control-plane only; subscribe() calls it.
-     * @return false when the process has no index to give, which leaves every emit untracked and every rundown
-     *         Unwaitable rather than wrong.
-     * @details A Win32 TLS index rather than `thread_local`: emit_safe() is reached from hook callbacks on arbitrary
-     *          host threads, where the emutls first-touch allocation and uncatchable abort() are unacceptable
-     *          ([B-86]).
+     * @brief Registers one owner of the emit chain's Win32 TLS index. Control-plane only.
+     * @details subscribe() registers each dispatcher once, before its first handler publishes, and ~EventDispatcher
+     *          deregisters it. The last owner returns the index. A dispatcher that is never destroyed never returns it,
+     *          even after its image unmaps. While no owner holds an index, every emit is untracked and a concurrent
+     *          rundown returns Unwaitable instead of a wrong answer. emit_safe() runs on arbitrary host threads, so the
+     *          chain uses a Win32 TLS index instead of `thread_local` ([B-86]).
+     *          Proof: `Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher`.
      */
-    [[nodiscard]] bool ensure_emit_frame_tls() noexcept;
+    void acquire_emit_frame_owner() noexcept;
+
+    /// Deregisters one owner that @ref acquire_emit_frame_owner registered.
+    void release_emit_frame_owner() noexcept;
 
     /**
      * @brief Pushes @p frame onto the calling thread's emit chain.
@@ -356,6 +362,7 @@ namespace DetourModKit
          *          Takes no lock of ours and allocates nothing, so the noexcept destructor is total: the gate stores
          *          are atomic and idempotent, and a subscribe() racing this is already a caller lifetime violation.
          *          (The snapshot load still takes the STL's internal lock for atomic<shared_ptr>, as everywhere else.)
+         *          A dispatcher that ever published a handler also deregisters its emit-chain TLS ownership.
          * @warning Does not wait. Destroying a dispatcher while one of its handlers is running is a caller lifetime
          *          violation; use tombstone_and_wait() first when that is possible.
          */
@@ -365,6 +372,10 @@ namespace DetourModKit
             for (const auto &entry : *current)
             {
                 entry->gate->live.store(false, std::memory_order_seq_cst);
+            }
+            if (this->m_emit_owner)
+            {
+                detail::release_emit_frame_owner();
             }
         }
 
@@ -386,7 +397,8 @@ namespace DetourModKit
          *         nothing, which is a truthful failure the caller can act on. Retiring a handler is the operation that
          *         must never depend on an allocation, and it does not.
          * @note Copy-on-write allocates the entry node and a new handler list of size N+1.
-         *       The control path also reserves the process emit-chain TLS index, so emit() only reads that index.
+         *       The control path also registers this dispatcher as an emit-chain TLS owner, so emit() only reads the
+         *       index.
          *       A thread's first TlsSetValue can still allocate an expansion array for an index beyond the TEB inline
          *       slots. This mechanism reports allocation failure, while emutls aborts the process.
          */
@@ -411,9 +423,9 @@ namespace DetourModKit
                 return {};
             }
 
-            // Reserved here, on the control plane, so that emit() only ever READS the index. A failure leaves every
-            // rundown Unwaitable rather than wrong, which is why it does not fail the subscribe.
-            (void)detail::ensure_emit_frame_tls();
+            // Registered here, on the control plane and outside the writer mutex, so that emit() only ever READS the
+            // index. The first publish keeps the registration, and every other exit returns it.
+            EmitOwnerRegistration registration;
 
             const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
@@ -441,6 +453,11 @@ namespace DetourModKit
                 superseded = this->m_handlers.load(std::memory_order_acquire);
                 auto next = std::make_shared<HandlerList>(*superseded);
                 next->push_back(std::move(node));
+                if (!this->m_emit_owner)
+                {
+                    this->m_emit_owner = true;
+                    registration.held = false;
+                }
                 // Publish the new count first so a reader that sees 0 on the counter and skips the snapshot load cannot
                 // miss a handler that has already been installed in the snapshot.
                 this->m_handler_count.store(next->size(), std::memory_order_release);
@@ -865,6 +882,27 @@ namespace DetourModKit
             EmitGuard &operator=(EmitGuard &&) = delete;
         };
 
+        /// One emit-chain TLS ownership that subscribe() returns unless the dispatcher keeps it.
+        struct EmitOwnerRegistration
+        {
+            bool held{true};
+
+            EmitOwnerRegistration() noexcept { detail::acquire_emit_frame_owner(); }
+
+            ~EmitOwnerRegistration() noexcept
+            {
+                if (held)
+                {
+                    detail::release_emit_frame_owner();
+                }
+            }
+
+            EmitOwnerRegistration(const EmitOwnerRegistration &) = delete;
+            EmitOwnerRegistration &operator=(const EmitOwnerRegistration &) = delete;
+            EmitOwnerRegistration(EmitOwnerRegistration &&) = delete;
+            EmitOwnerRegistration &operator=(EmitOwnerRegistration &&) = delete;
+        };
+
         // alignas(64) keeps the hot atomics on their own cache line so the writer mutex and shared_ptr control-block
         // traffic do not produce false sharing with readers doing the fast-path counter load.
         alignas(64) mutable std::atomic<SharedList> m_handlers;
@@ -875,6 +913,8 @@ namespace DetourModKit
          * @details Read under m_writer_mutex by subscribe(), which is what closes the set the rundown drains.
          */
         std::atomic<bool> m_closed{false};
+        /// True once a publish kept an emit-chain TLS ownership. Written under m_writer_mutex.
+        bool m_emit_owner{false};
         mutable std::mutex m_writer_mutex; // serializes writers
         // Prevents Subscription::reset() from compacting a destroyed dispatcher.
         std::shared_ptr<void> m_alive;

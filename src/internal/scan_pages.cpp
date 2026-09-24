@@ -174,10 +174,7 @@ namespace DetourModKit
             // screens the faulting address rather than only the exception class.
             detail::fire_scan_fault_seam_for_test(detail::g_scan_region_fault_for_test);
 #endif
-            // One SegmentedScanBudget stays live across every find_pattern_raw suffix call below. A bounded-jump sweep
-            // whose per-position or region-wide backtracking budget was spent leaves the occurrence count a lower
-            // bound, exactly like a faulted-region skip. The flag is meaningful even when no match is found: a
-            // truncated no-match is not a proven absence.
+            // One SegmentedScanBudget spans every suffix call of this region. RawMatch owns the truncation contract.
             detail::SegmentedScanBudget segmented_budget{};
             detail::RawMatch match = detail::find_pattern_raw(region_start, scan_size, pattern, &segmented_budget);
             out_budget_exhausted = match.budget_exhausted;

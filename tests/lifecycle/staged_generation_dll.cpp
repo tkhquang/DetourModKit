@@ -2,7 +2,7 @@
  * @file staged_generation_dll.cpp
  * @brief Defines one reloadable test generation with its own DetourModKit archive.
  * @details The fixture runs the guide's Init and Shutdown sequence. The host controls each test seam before poll start.
- *          It exercises inline and mid hooks and omits VMT hooks.
+ *          It exercises inline and mid hooks, an input binding, and a subscribed dispatcher, and omits VMT hooks.
  */
 
 #include "DetourModKit/diagnostics.hpp"
@@ -72,6 +72,11 @@ namespace
     std::atomic<std::uint64_t> s_mid_calls{0};
     bool s_retain_mid = false;
     std::atomic<int> s_parked_result{0};
+
+    // Namespace scope, so the image's static destruction deregisters the dispatcher's emit-chain TLS ownership.
+    DetourModKit::EventDispatcher<int> s_dispatcher;
+    DetourModKit::Subscription s_subscription;
+    std::atomic<std::uint64_t> s_dispatched{0};
 
     template <int Value>
 #if defined(_MSC_VER)
@@ -195,6 +200,7 @@ namespace
     void roll_back_generation() noexcept
     {
         const bool prologues_restored = clear_generation_hooks();
+        s_subscription.reset();
         s_session.reset();
         DetourModKit::detail::g_input_key_state_probe = nullptr;
         DetourModKit::detail::set_xinput_module_override_for_test(nullptr);
@@ -265,6 +271,7 @@ extern "C"
         out->coordinator_retained = coordinator.retained;
         out->parked_result = s_parked_result.load(std::memory_order_acquire);
         out->init_calls = s_init_calls.load(std::memory_order_relaxed);
+        out->dispatched = s_dispatched.load(std::memory_order_relaxed);
     }
 
     /// Implements @ref staged_gen::ArmParkFn.
@@ -374,6 +381,19 @@ extern "C"
                 return 0;
             }
             s_retain_mid = options->enable_mid != 0 && options->retain_mid != 0;
+            if (options->enable_dispatcher != 0)
+            {
+                s_subscription = s_dispatcher.subscribe(
+                    [](const int &value) noexcept
+                    { s_dispatched.fetch_add(static_cast<std::uint64_t>(value), std::memory_order_relaxed); }
+                );
+                s_dispatcher.emit_safe(1);
+                if (!s_subscription.active() || s_dispatched.load(std::memory_order_relaxed) != 1)
+                {
+                    roll_back_generation();
+                    return 0;
+                }
+            }
             if (options->enable_probe_binding != 0)
             {
                 Result<input::BindingGuard> probe = input::register_combo(
@@ -537,6 +557,7 @@ extern "C"
             parked_caller.join();
         }
         const bool external_wheel = s_external_wheel;
+        s_subscription.reset();
         s_session.reset();
 
         detail::g_input_key_state_probe = nullptr;

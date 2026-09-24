@@ -9,57 +9,43 @@
 #include "DetourModKit/detail/event_dispatcher.hpp"
 
 #include "internal/drain_backoff.hpp"
+#include "internal/shared_tls_index.hpp"
 #include "platform.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <thread>
 
 namespace DetourModKit::detail
 {
     namespace
     {
-        /**
-         * @brief The TLS index holding this thread's EmitFrame chain head.
-         * @details Reserved by subscribe() before any emit of a subscribed dispatcher can run, so a dispatcher with
-         *          subscribers always has a valid index. TLS_OUT_OF_INDEXES means the process had none to give, which
-         *          leaves every emit untracked and every rundown Unwaitable rather than wrong.
-         */
-        std::atomic<DWORD> s_emit_tls_index{TLS_OUT_OF_INDEXES};
+        static_assert(sizeof(DWORD) == sizeof(std::uint32_t));
+
+        /// The TLS index that holds this thread's EmitFrame chain head. Each dispatcher with a publish owns it.
+        constinit SharedTlsIndex s_emit_tls;
 
         std::atomic<std::uint32_t> s_untracked_emit_frames{0};
     } // namespace
 
-    bool ensure_emit_frame_tls() noexcept
+    void acquire_emit_frame_owner() noexcept
     {
-        if (s_emit_tls_index.load(std::memory_order_acquire) != TLS_OUT_OF_INDEXES)
-        {
-            return true;
-        }
+        (void)s_emit_tls.acquire();
+    }
 
-        // Reserve first and publish with a CAS rather than serializing on a lock. A mutex here would be a static with a
-        // destructor on a path a late subscriber can still reach after this TU's statics are torn down; racing losers
-        // simply return their surplus index instead.
-        const DWORD index = ::TlsAlloc();
-        if (index == TLS_OUT_OF_INDEXES)
-        {
-            return false;
-        }
-        DWORD unreserved = TLS_OUT_OF_INDEXES;
-        if (!s_emit_tls_index
-                 .compare_exchange_strong(unreserved, index, std::memory_order_release, std::memory_order_relaxed))
-        {
-            ::TlsFree(index);
-        }
-        return true;
+    void release_emit_frame_owner() noexcept
+    {
+        s_emit_tls.release();
     }
 
     bool push_emit_frame(EmitFrame &frame) noexcept
     {
-        const DWORD index = s_emit_tls_index.load(std::memory_order_acquire);
+        const DWORD index = s_emit_tls.index();
         if (index == TLS_OUT_OF_INDEXES)
         {
             return false;
         }
+        frame.tls_index = index;
         frame.prev = static_cast<EmitFrame *>(::TlsGetValue(index));
         // A store can still fail: an index past the TEB's inline slots is backed by a lazily heap-allocated
         // expansion array. Report it rather than leave the chain claiming this thread is elsewhere.
@@ -68,19 +54,15 @@ namespace DetourModKit::detail
 
     void pop_emit_frame(const EmitFrame &frame) noexcept
     {
-        const DWORD index = s_emit_tls_index.load(std::memory_order_acquire);
-        if (index == TLS_OUT_OF_INDEXES)
-        {
-            return;
-        }
         // The matching push succeeded, so the expansion array for this index already exists on this thread and this
-        // store cannot fail for want of one.
-        (void)::TlsSetValue(index, frame.prev);
+        // store cannot fail for want of one. A dispatcher destroyed after a Drained rundown can return the index while
+        // an emit that pushed under it unwinds. The recorded index then restores only this thread's own slot.
+        (void)::TlsSetValue(frame.tls_index, frame.prev);
     }
 
     bool thread_is_emitting_dispatcher(const void *dispatcher) noexcept
     {
-        const DWORD index = s_emit_tls_index.load(std::memory_order_acquire);
+        const DWORD index = s_emit_tls.index();
         if (index == TLS_OUT_OF_INDEXES)
         {
             return false;
@@ -98,7 +80,7 @@ namespace DetourModKit::detail
 
     bool thread_is_emitting_type(const void *type_tag) noexcept
     {
-        const DWORD index = s_emit_tls_index.load(std::memory_order_acquire);
+        const DWORD index = s_emit_tls.index();
         if (index == TLS_OUT_OF_INDEXES)
         {
             return false;

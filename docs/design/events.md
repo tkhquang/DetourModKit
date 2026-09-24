@@ -8,7 +8,9 @@ Rules owned here: `[B-23]`, `[B-46]`, `[B-70]`, `[B-87]`.
 
 ### EventDispatcher
 
-`emit()` and `emit_safe()` read an acquire-loaded copy-on-write snapshot without a DMK mutex. The bounded STL lock remains, and the zero-subscriber path skips that load. Each entry owns a tombstone and in-flight gate for retirement, invocation, and drain. `tombstone_and_wait()` closes the dispatcher before the drain, and writers follow `[B-101]`. A reserved Win32 TLS index records each thread's emit chain, while an unrecordable frame returns `Unwaitable`. `emit()` propagates handler exceptions, while `emit_safe()` catches them and continues.
+`emit()` and `emit_safe()` read an acquire-loaded copy-on-write snapshot without a DMK mutex. The bounded STL lock remains, and the zero-subscriber path skips that load. Each entry owns a tombstone and in-flight gate for retirement, invocation, and drain. `tombstone_and_wait()` closes the dispatcher before the drain, and writers follow `[B-101]`. `emit()` propagates handler exceptions, while `emit_safe()` catches them and continues.
+
+A Win32 TLS index records each thread's emit chain, while an unrecordable frame returns `Unwaitable`. Each dispatcher that published a handler owns that index until its destruction, and the last owner returns it.
 
 Hot-path mechanism: Each live entry costs one snapshot load, linear iteration, and one atomic gate pass. The path has no DMK reader lock or successful-path allocation.
 

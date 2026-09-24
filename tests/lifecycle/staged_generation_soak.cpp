@@ -13,6 +13,7 @@
 #include "internal/input_intercept.hpp"
 
 #include "staged_generation_protocol.hpp"
+#include "tls_census.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -32,7 +33,6 @@
 
 #include <process.h>
 #include <windows.h>
-#include <winternl.h>
 
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
     uint32_t *mounted_hooks,
@@ -441,40 +441,6 @@ namespace
         return bytes;
     }
 
-    /**
-     * @brief Counts the clear bits of the process TLS bitmaps under the PEB lock.
-     * @details The census allocates no index, so a concurrent TlsAlloc in another thread never fails because of it.
-     *          Offsets 0x78 and 0x238 of the Windows x64 PEB hold TlsBitmap and TlsExpansionBitmap.
-     * @return Zero when ntdll exports no PEB lock, which fails the census.
-     */
-    std::size_t free_tls_indices() noexcept
-    {
-        struct TlsBitmap
-        {
-            ULONG size;
-            const ULONG *bits;
-        };
-        using PebLockFn = void(NTAPI *)();
-        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        const auto acquire =
-            reinterpret_cast<PebLockFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "RtlAcquirePebLock")));
-        const auto release =
-            reinterpret_cast<PebLockFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "RtlReleasePebLock")));
-        if (acquire == nullptr || release == nullptr)
-            return 0;
-        const auto *const peb = reinterpret_cast<const std::uint8_t *>(NtCurrentTeb()->ProcessEnvironmentBlock);
-        std::size_t count = 0;
-        acquire();
-        for (const std::size_t offset : {std::size_t{0x78}, std::size_t{0x238}})
-        {
-            const auto *const bitmap = *reinterpret_cast<const TlsBitmap *const *>(peb + offset);
-            for (ULONG bit = 0; bit < bitmap->size; ++bit)
-                count += ((bitmap->bits[bit / 32] >> (bit % 32)) & 1U) == 0 ? 1 : 0;
-        }
-        release();
-        return count;
-    }
-
     struct CoordinatorObjects
     {
         std::size_t views = 0;
@@ -584,13 +550,8 @@ namespace
         SYSTEM_INFO system{};
         GetSystemInfo(&system);
         std::uint64_t previous_bytes = private_executable_bytes();
-        std::size_t previous_tls = free_tls_indices();
+        std::size_t previous_tls = dmk_lifecycle::free_tls_indices();
         std::uintptr_t coordinator_identity = 0;
-#if defined(_MSC_VER)
-        constexpr std::size_t tls_per_generation = 1;
-#else
-        constexpr std::size_t tls_per_generation = 2;
-#endif
         // The clean series ends at SOAK_CYCLES. The next generation retains one route explicitly, and two clean
         // generations follow it.
         constexpr int RETAINED_CYCLE = SOAK_CYCLES + 1;
@@ -606,9 +567,12 @@ namespace
             staged_gen::InitOptions options{};
             options.enable_mid = 1;
             options.retain_mid = retain ? 1 : 0;
+            options.enable_probe_binding = 1;
+            options.enable_dispatcher = 1;
             options.log_file = log_name.c_str();
-            if (generation.init(&options) == 0 || generation.read_status().mid_calls != 6)
-                return fail("resources", "six mid callbacks did not execute");
+            if (generation.init(&options) == 0 || generation.read_status().mid_calls != 6 ||
+                generation.read_status().dispatched != 1)
+                return fail("resources", "six mid callbacks and one dispatched event did not execute");
             // A retained route refuses the reload verdict and books one HookManager leak.
             const int verdict = generation.shutdown();
             const auto status = generation.read_status();
@@ -655,7 +619,7 @@ namespace
             if (objects.views != 1 || objects.mutex_handles != 1 || objects.mapping_handles != 1)
                 return fail("resources", "the process holds other than one coordinator view and two handles");
             const std::uint64_t bytes = private_executable_bytes();
-            const std::size_t tls = free_tls_indices();
+            const std::size_t tls = dmk_lifecycle::free_tls_indices();
             std::fprintf(
                 stderr,
                 "resources cycle=%d retained=%d executable_delta=%lld tls_delta=%lld\n",
@@ -668,8 +632,11 @@ namespace
             const std::uint64_t retained_bytes = retain ? system.dwAllocationGranularity : 0;
             if (bytes != previous_bytes + system.dwPageSize + retained_bytes)
                 return fail("resources", "executable growth differs from one trap page per copy and retained blocks");
-            if (tls + tls_per_generation != previous_tls)
-                return fail("resources", "TLS consumption differs from the declared subsystem reservation");
+            // Every clean generation returns each TLS index it reserved. The retained generation stays mapped, so its
+            // claimed mid slot and its namespace-scope dispatcher each keep one index.
+            const std::size_t retained_tls = retain ? 2 : 0;
+            if (tls + retained_tls != previous_tls)
+                return fail("resources", "TLS consumption differs from the retained owner count");
             previous_bytes = bytes;
             previous_tls = tls;
         }
