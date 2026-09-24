@@ -680,6 +680,9 @@ namespace DetourModKit
          *          one @ref diagnostics::LeakSubsystem::MemoryCache event. A later @ref init_cache or
          *          @ref shutdown_cache call can reclaim the storage after the stalled reader exits. A clean shutdown
          *          releases the cache reference.
+         *
+         *          Without an active @ref Session, this call also returns the emit-chain TLS index of each idle
+         *          diagnostics dispatcher. @ref diagnostics::hook_lifecycle owns that contract.
          * @note Setup/control-plane only.
          */
         void shutdown_cache() noexcept;

@@ -11,6 +11,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
+#include "internal/diagnostics_population.hpp"
 #include "internal/drain_backoff.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/srw_shared_mutex.hpp"
@@ -1648,6 +1649,15 @@ namespace DetourModKit
             // Decide the block policy once for the whole teardown. A second query lets a concurrent publication split
             // one teardown across both policies.
             const bool may_block = DetourModKit::detail::blocking_teardown_permitted();
+            // Session teardown releases the diagnostics owners as its own leaf, so only a module without an active
+            // Session releases them here.
+            if (DetourModKit::detail::lifecycle().state() == DetourModKit::detail::LifecycleState::Stopped)
+            {
+                DetourModKit::detail::release_diagnostics_emit_owners(
+                    DetourModKit::detail::DiagnosticsTeardown::CacheShutdown,
+                    may_block
+                );
+            }
             if (!may_block)
             {
                 abandon_cache_unauthorized();

@@ -507,6 +507,16 @@ if(DMK_BUILD_TESTS)
     Lifecycle.DeliveryTlsIndexStaysWithALiveGate
     Lifecycle.GuardedReadTlsIndexReturnsOnRelease
     Lifecycle.GuardedReadTlsIndexWaitsForTheInFlightAccess
+    Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession
+    Lifecycle.DiagnosticsTlsIndexReturnsOnCacheShutdownWithoutASession
+    Lifecycle.DiagnosticsTlsIndexStaysThroughACacheRestart
+    Lifecycle.DiagnosticsTlsIndexStaysWithALiveSubscription
+    Lifecycle.DiagnosticsTlsIndexWaitsForARunningHandler
+    Lifecycle.DiagnosticsTlsIndexStaysWithAParkedHandler
+    Lifecycle.DiagnosticsTlsIndexTeardownInsideAHandlerNeverWaits
+    Lifecycle.DiagnosticsTlsIndexLoaderLockReleaseNeverWaits
+    Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease
+    Lifecycle.DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits
     Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
@@ -522,7 +532,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 144)
+    --minimum 154)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

@@ -87,6 +87,13 @@ namespace staged_gen
          * @details The dispatcher lives until the image unloads, so its static destruction returns its TLS ownership.
          */
         int enable_dispatcher = 0;
+        /**
+         * @brief Subscribes to both diagnostics dispatchers before the hooks install when nonzero.
+         * @details StagedShutdown drops both subscriptions after the hooks clear and before ~Session.
+         */
+        int enable_diagnostics = 0;
+        /// Keeps the hook lifecycle subscription live across ~Session when nonzero. Requires enable_diagnostics.
+        int retain_diagnostics = 0;
     };
 
     /**
@@ -117,6 +124,9 @@ namespace staged_gen
         int parked_result = 0;
         /// Events that the generation's dispatcher delivered.
         std::uint64_t dispatched = 0;
+        /// Hook lifecycle events that the generation's diagnostics subscription observed.
+        std::uint64_t lifecycle_events = 0;
+        std::uint64_t diagnostics_leaks = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.

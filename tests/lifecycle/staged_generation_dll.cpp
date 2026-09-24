@@ -2,7 +2,8 @@
  * @file staged_generation_dll.cpp
  * @brief Defines one reloadable test generation with its own DetourModKit archive.
  * @details The fixture runs the guide's Init and Shutdown sequence. The host controls each test seam before poll start.
- *          It exercises inline and mid hooks, an input binding, and a subscribed dispatcher, and omits VMT hooks.
+ *          It exercises inline and mid hooks, an input binding, a subscribed dispatcher, and both diagnostics
+ *          dispatchers, and omits VMT hooks.
  */
 
 #include "DetourModKit/diagnostics.hpp"
@@ -77,6 +78,11 @@ namespace
     DetourModKit::EventDispatcher<int> s_dispatcher;
     DetourModKit::Subscription s_subscription;
     std::atomic<std::uint64_t> s_dispatched{0};
+
+    DetourModKit::Subscription s_lifecycle_subscription;
+    DetourModKit::Subscription s_fault_subscription;
+    std::atomic<std::uint64_t> s_lifecycle_events{0};
+    bool s_retain_diagnostics = false;
 
     template <int Value>
 #if defined(_MSC_VER)
@@ -201,6 +207,8 @@ namespace
     {
         const bool prologues_restored = clear_generation_hooks();
         s_subscription.reset();
+        s_lifecycle_subscription.reset();
+        s_fault_subscription.reset();
         s_session.reset();
         DetourModKit::detail::g_input_key_state_probe = nullptr;
         DetourModKit::detail::set_xinput_module_override_for_test(nullptr);
@@ -272,6 +280,8 @@ extern "C"
         out->parked_result = s_parked_result.load(std::memory_order_acquire);
         out->init_calls = s_init_calls.load(std::memory_order_relaxed);
         out->dispatched = s_dispatched.load(std::memory_order_relaxed);
+        out->lifecycle_events = s_lifecycle_events.load(std::memory_order_relaxed);
+        out->diagnostics_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Diagnostics);
     }
 
     /// Implements @ref staged_gen::ArmParkFn.
@@ -332,6 +342,21 @@ extern "C"
                 return 0;
             }
             s_session.emplace(std::move(*started));
+            s_retain_diagnostics = options->enable_diagnostics != 0 && options->retain_diagnostics != 0;
+            if (options->enable_diagnostics != 0)
+            {
+                s_lifecycle_subscription = diagnostics::hook_lifecycle().subscribe(
+                    [](const diagnostics::HookLifecycleEvent &) noexcept
+                    { s_lifecycle_events.fetch_add(1, std::memory_order_relaxed); }
+                );
+                s_fault_subscription =
+                    diagnostics::scanner_faults().subscribe([](const diagnostics::ScannerFaultEvent &) noexcept {});
+                if (!s_lifecycle_subscription.active() || !s_fault_subscription.active())
+                {
+                    roll_back_generation();
+                    return 0;
+                }
+            }
 
             s_target_lib = ::LoadLibraryA(staged_gen::HOOK_TARGET_MODULE_NAME);
             TargetFn volatile target = reinterpret_cast<TargetFn>(
@@ -558,6 +583,12 @@ extern "C"
         }
         const bool external_wheel = s_external_wheel;
         s_subscription.reset();
+        // Dropped after the hooks clear, so the subscription observes each removal.
+        if (!s_retain_diagnostics)
+        {
+            s_lifecycle_subscription.reset();
+        }
+        s_fault_subscription.reset();
         s_session.reset();
 
         detail::g_input_key_state_probe = nullptr;
@@ -583,9 +614,11 @@ extern "C"
         const std::size_t total_leaks = diag::total_intentional_leaks();
         const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
                                   (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
+        // A kept diagnostics index can belong to a handler that still runs in this image.
+        const bool diagnostics_released = diag::intentional_leak_count(diag::LeakSubsystem::Diagnostics) == 0;
         // The local MessageHook backend retains at most one permanent keepalive. It never cleanly unloads; the
         // retained pin is the safety authority, and Shutdown still accepts the reload with it held.
-        const bool local_backend_safe = wndproc == 0 && message_hook <= 1 && xinput_inert &&
+        const bool local_backend_safe = wndproc == 0 && message_hook <= 1 && xinput_inert && diagnostics_released &&
                                         diag::total_module_pins() == message_hook + xinput_self + xinput_targets;
         const bool external_backend_safe = wndproc == 0 && message_hook == 0 && xinput_self == 0 &&
                                            xinput_targets == 0 && input_leaks == 0 && total_leaks == 0 &&
