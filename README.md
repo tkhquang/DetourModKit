@@ -184,8 +184,8 @@ void __stdcall Detour_PrintMessage(const char *message, int type)
 
 // Runs on the bootstrap worker thread, off the loader lock. An init failure is a returned
 // value logged on the worker, never a throw across the loader lock. A failed on_ready leaves
-// the generation mapped and Running: retire it with request_shutdown() here, or with
-// bootstrap_detach from DllMain.
+// the generation mapped and Running. Retire it with request_shutdown() here.
+// An off-loader-lock control thread can use shutdown_and_wait().
 dmk::Result<void> InitializeMyMod(dmk::Session &session)
 {
     dmk::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
@@ -210,6 +210,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     if (!installed)
     {
         session.log().error("Install failed: {}", installed.error().message());
+        dmk::request_shutdown();
         return std::unexpected(installed.error());
     }
 
@@ -224,6 +225,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         {
             g_print_hook.reset();
         }
+        dmk::request_shutdown();
         return std::unexpected(armed.error());
     }
 

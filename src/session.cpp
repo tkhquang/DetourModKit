@@ -11,6 +11,7 @@
 #include "internal/input_binding_lifecycle.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/lifecycle_context.hpp"
+#include "internal/memory_guarded.hpp"
 #include "platform.hpp"
 
 #include <windows.h>
@@ -33,6 +34,10 @@ namespace DetourModKit
 {
     namespace detail
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        void (*g_session_configure_test_hook)() = nullptr;
+#endif
+
         struct SessionBootstrapAccess
         {
             [[nodiscard]] static Session make(void *instance_mutex) noexcept { return Session(instance_mutex); }
@@ -389,9 +394,8 @@ namespace DetourModKit
                 break;
             }
 
-            // Identity only: UNCHANGED_REFCOUNT takes no reference, so module_handle() names the linking module without
-            // keeping it mapped. The bootstrap worker's keepalive is the separate counted reference bootstrap_core
-            // acquires before CreateThread. A code address in this archive resolves to the mod's own HMODULE.
+            // This identity takes no reference. The bootstrap worker acquires its separate keepalive before
+            // CreateThread.
             constexpr DWORD CAPTURE_FLAGS =
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
             HMODULE captured_module = nullptr;
@@ -414,9 +418,11 @@ namespace DetourModKit
             return mutex;
         }
 
-        // Reverse dependency order. The Session class contract in session.hpp publishes it.
-        // SessionTeardown.FullStackTeardownShutsEveryLeafDown and Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession
-        // prove it. Each leaf applies the shared blocking-teardown gate itself.
+        /**
+         * @brief Applies the subsystem order in the Session contract.
+         * @details SessionTeardown.FullStackTeardownShutsEveryLeafDown proves leaf completion.
+         *          Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession pins the diagnostics release after config::clear.
+         */
         void run_subsystem_teardown() noexcept
         {
             // First: the watcher thread can fire on_reload into any state below.
@@ -474,10 +480,10 @@ namespace DetourModKit
             detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
         }
 
-        // Retires the worker identity, releases the reference bootstrap_core handed the worker, and exits the thread
-        // atomically. FreeLibraryAndExitThread never returns, so the pin count decrements first and the thread never
-        // returns through code the release may unmap. The release can be the terminal one when the consumer already
-        // dropped its LoadLibrary reference after request_shutdown().
+        /**
+         * @brief Retires the worker identity and releases its module reference on thread exit.
+         * @details FreeLibraryAndExitThread cannot return through code that its final reference release unmaps.
+         */
         [[noreturn]] void exit_bootstrap_worker(HMODULE self_ref) noexcept
         {
             detail::lifecycle().clear_worker_thread();
@@ -557,6 +563,9 @@ namespace DetourModKit
                         "logging.\n"
                     );
                 }
+#if !defined(_MSC_VER) && defined(_WIN64)
+                detail::reopen_guarded_engine();
+#endif
                 detail::lifecycle().mark_running();
 
                 if (const BootstrapReadyFn ready_fn = s_on_ready_fn; ready_fn != nullptr || s_on_ready)
@@ -656,8 +665,7 @@ namespace DetourModKit
                 s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
                 return std::unexpected(instance_mutex.error());
             }
-            // The identity begin_session published is the handle DllMain received, so the consumer forwards attach
-            // without threading it through.
+            // begin_session publishes the DllMain module identity without a consumer-supplied handle.
             (void)DisableThreadLibraryCalls(detail::lifecycle().module());
 
             if (!s_bootstrap_logger_info.stage(info))
@@ -802,6 +810,10 @@ namespace DetourModKit
         // enable_async_mode contains its failures, so this catch owns only configuration.
         try
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const auto probe = detail::g_session_configure_test_hook)
+                probe();
+#endif
             Logger::configure(
                 info.name,
                 info.log_file,
@@ -834,6 +846,9 @@ namespace DetourModKit
         }
 
         // Setup succeeded. The session now owns the single-session slot and mutex handle until release().
+#if !defined(_MSC_VER) && defined(_WIN64)
+        detail::reopen_guarded_engine();
+#endif
         detail::lifecycle().mark_running();
         return Session(*instance_mutex);
     }
@@ -1055,8 +1070,9 @@ namespace DetourModKit
 
     namespace
     {
-        // The composed off-loader-lock drain both prepare_logic_dll_unload forms run. drain_input runs the input half
-        // inside the budget left after the config half begins. `[B-74]` owns the transaction contract.
+        /**
+         * @brief Runs both halves of the [B-74] transaction under one deadline.
+         */
         template <typename DrainInput>
             requires std::is_nothrow_invocable_r_v<input::CallbackDrainStatus, DrainInput, std::chrono::milliseconds>
         [[nodiscard]] LogicDllUnloadStatus
@@ -1114,9 +1130,7 @@ namespace DetourModKit
                 status = LogicDllUnloadStatus::InProgress;
             }
 
-            // The composed transaction did not certify unmapping, so leave the rundown unresolved. Marking it pending
-            // also closes staging admission. Keeping both set is what refuses a start() that re-arms callbacks over
-            // storage this transaction never proved gone.
+            // The unresolved drain closes admission until a later transaction proves the old callbacks gone.
             detail::mark_input_callback_drain_pending();
             return status;
         }

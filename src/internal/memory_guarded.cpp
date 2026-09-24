@@ -11,6 +11,7 @@
 
 #include "internal/memory_guarded.hpp"
 #include "internal/memory_fault.hpp"
+#include "internal/lifecycle_context.hpp"
 
 #include "DetourModKit/memory.hpp"
 
@@ -322,6 +323,7 @@ namespace DetourModKit
         };
 
         std::atomic<void *> s_veh_handle{nullptr};
+        std::atomic<bool> s_veh_session_retired{false};
         // remove_veh_handler returns the index after the drain and the unlink, when no armed access can hold it. A
         // failed install keeps the index until that return (Lifecycle.GuardedReadTlsIndexReturnsOnRelease).
         std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
@@ -444,17 +446,9 @@ namespace DetourModKit
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        // Install the handler on first demand and permit installation after teardown, with a fresh index. On failure,
-        // the null handle routes byte-copy guards to the VirtualQuery fallback. In-place region guards fail closed
-        // before access to the foreign range.
-        void ensure_veh_installed() noexcept
+        /** @brief Installs the handler with a reserved index. The caller holds s_veh_lock. */
+        void install_veh_handler_locked() noexcept
         {
-            if (s_veh_handle.load(std::memory_order_acquire) != nullptr)
-                return;
-
-            VehLockGuard lock;
-            if (s_veh_handle.load(std::memory_order_relaxed) != nullptr)
-                return;
             if (s_veh_tls_index.load(std::memory_order_relaxed) == TLS_OUT_OF_INDEXES)
             {
                 const DWORD slot = TlsAlloc();
@@ -468,9 +462,29 @@ namespace DetourModKit
             s_veh_handle.store(handle, std::memory_order_release);
         }
 
-        void remove_veh_handler() noexcept
+        void ensure_veh_installed() noexcept
         {
+            if (s_veh_handle.load(std::memory_order_acquire) != nullptr)
+                return;
+            if (s_veh_session_retired.load(std::memory_order_acquire))
+                return;
+
             VehLockGuard lock;
+            if (s_veh_session_retired.load(std::memory_order_relaxed))
+                return;
+            if (s_veh_handle.load(std::memory_order_relaxed) != nullptr)
+                return;
+            install_veh_handler_locked();
+        }
+
+        void remove_veh_handler(bool retire_session = false) noexcept
+        {
+            // A terminated thread can retain the control lock or an in-flight stripe.
+            if (detail::process_is_exiting())
+                return;
+            VehLockGuard lock;
+            if (retire_session)
+                s_veh_session_retired.store(true, std::memory_order_release);
             void *const handle = s_veh_handle.load(std::memory_order_relaxed);
             if (handle != nullptr)
             {
@@ -646,6 +660,17 @@ namespace DetourModKit
         remove_veh_handler();
     }
 
+    void detail::retire_session_guarded_engine() noexcept
+    {
+        remove_veh_handler(true);
+    }
+
+    void detail::reopen_guarded_engine() noexcept
+    {
+        VehLockGuard lock;
+        s_veh_session_retired.store(false, std::memory_order_release);
+    }
+
     bool
     detail::run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept
     {
@@ -680,6 +705,37 @@ namespace DetourModKit
         s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
         return completed;
     }
+
+    namespace
+    {
+        /**
+         * @brief Runs an in-place update, with a call-scoped handler after Session retirement.
+         * @details The retired epoch refuses lazy installation. An update that installs the handler removes it before
+         *          it returns, so a VmtHook that outlives its Session restores objects and leaves no handler. A failed
+         *          installation leaves the region closed. A removal after a concurrent reopen is an ordinary release,
+         *          and the next guarded access installs the handler again.
+         */
+        [[nodiscard]] bool
+        run_guarded_update(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept
+        {
+            bool call_scoped = false;
+            // A nested access must not wait on the lock. See inside_guarded_access.
+            if (!inside_guarded_access() && s_veh_session_retired.load(std::memory_order_acquire))
+            {
+                VehLockGuard lock;
+                if (s_veh_session_retired.load(std::memory_order_relaxed) &&
+                    s_veh_handle.load(std::memory_order_relaxed) == nullptr)
+                {
+                    install_veh_handler_locked();
+                    call_scoped = true;
+                }
+            }
+            const bool completed = detail::run_guarded_region(lo, hi, fn, ctx);
+            if (call_scoped)
+                remove_veh_handler();
+            return completed;
+        }
+    } // namespace
 #endif // !_MSC_VER && _WIN64
 
     bool detail::guarded_read_bytes(
@@ -853,7 +909,7 @@ namespace DetourModKit
             return false;
         }
 #else
-        if (!run_guarded_region(address, address + word_bytes, &compare_exchange_word, &context))
+        if (!run_guarded_update(address, address + word_bytes, &compare_exchange_word, &context))
         {
             return false;
         }
@@ -971,6 +1027,12 @@ namespace DetourModKit
     std::uint32_t detail::guarded_engine_tls_index_for_test() noexcept
     {
         return s_veh_tls_index.load(std::memory_order_acquire);
+    }
+
+    void detail::with_guarded_engine_lock_for_test(void (*callback)(void *) noexcept, void *context) noexcept
+    {
+        VehLockGuard lock;
+        callback(context);
     }
 
     void detail::set_guard_arm_failure_for_test(bool fail) noexcept

@@ -185,7 +185,7 @@ When several handles target the same address, destroy them newest-first. `hook::
 
 ### Session teardown owns the process-wide subsystems
 
-`~Session` first clears its input scope. It then stops the config watcher, input, memory cache, and config registry. It returns the TLS index of the diagnostics dispatchers and stops the logger last. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
+The [`Session` contract](../../../include/DetourModKit/session.hpp) owns the subsystem teardown order. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
 
 Destroy the `Session` before `FreeLibrary`. If code skips this step, the old sink and async writer can outlive the image.
 
@@ -206,9 +206,11 @@ Do not pass C++ containers, pointers with ownership, exceptions, or standard-lib
 
 ### Threads, TLS, and static constructors
 
-Each DMK TLS index returns with its last owner. A clean generation therefore returns every index that it reserved. Session teardown returns the index of `diagnostics::hook_lifecycle()` and `diagnostics::scanner_faults()` when no subscription to them is live. The `hook_lifecycle()` contract states when teardown keeps that index. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
+Each DMK TLS index returns with its last owner. A clean generation therefore returns every DMK index that it reserved. The [`hook_lifecycle()` contract](../../../include/DetourModKit/diagnostics.hpp) owns diagnostics teardown. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
 
 A MinGW generation that imports `libwinpthread-1.dll` takes one TLS index on each fresh load that it uses, and the runtime never returns it. A host that keeps the runtime loaded avoids that cost. With the runtime kept loaded, a thread that used emulated TLS inside a generation must exit before that generation unloads. A C++ exception or a `thread_local` access is such a use. Otherwise the thread exit calls a destructor in the unmapped image, the runtime keeps its key lock, and the next key creation hangs.
+
+The MinGW GCC 15.1 reference logic DLL with a static runtime consumes one TLS index per reload after loader warm-up. That measurement applies to the reference DLL, not every static runtime. Measure the exact linked runtime before a deployment budget includes this cost.
 
 Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
 
@@ -251,7 +253,7 @@ The host links the archive and owns every DetourModKit object. The logic DLL lin
 
 `prepare_logic_dll_unload(binding_names)` retires named input bindings and closes callback admission. It requests watcher and reload-servicer stop, then waits to one end-to-end deadline.
 
-`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed with the rundown pending. Only a later drain that completes clears that state. The session-level `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not.
+`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. [`[B-74]`](../../design/lifecycle.md) owns the timeout and admission rules.
 
 `prepare_logic_dll_unload_all()` clears every input binding but keeps the poll thread alive. Use it only when the DLL that unloads owns the whole process-wide input and config surface. The registry is process-scoped, so the all-bindings form also retires a sibling DLL's bindings. Prefer the named-list overload when several logic DLLs share one instance.
 
@@ -259,9 +261,7 @@ After `FreeLibrary`, verify the unmap. Probe an export address captured before t
 
 ### Binding guards during the drain
 
-Drop a consumer-owned `BindingGuard` before, during, or after the drain. Before the drop, release every lock or join that its callback or capture destructor can wait on, or the two threads can deadlock.
-
-[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the transaction contract and the binding-guard rules. The `prepare_logic_dll_unload` contract in `session.hpp` states what a retained guard still does.
+[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the transaction contract and the binding-guard drain rules. The `BindingGuard` contract in `input.hpp` owns the lock and join rule for guard destruction. The `prepare_logic_dll_unload` contract in `session.hpp` states what a retained guard still does.
 
 ## Idempotency on a second `Init()`
 
