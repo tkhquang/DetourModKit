@@ -328,8 +328,7 @@ namespace DetourModKit
                 // One lifecycle shared by this registration's gate and every exploded engine entry: the gate reads its
                 // tombstone as a resurrection guard, and each entry carries it so a poll-cycle callback staged before a
                 // remove / clear / cardinality-changing rebind is refused at dispatch. Allocated once here so the gate
-                // and entries share one identity. This call also reserves the delivery marker's TLS slot, which has to
-                // happen on a control thread before the wrappers below can be dispatched to.
+                // and entries share one identity.
                 auto lifecycle = detail::make_binding_lifecycle();
 
                 const bool is_hold = binding.trigger == Trigger::Hold;
@@ -373,6 +372,21 @@ namespace DetourModKit
                     press_wrapper = [gate]() { gate->deliver(); };
                     gate_release = [gate]() { gate->release(); };
                     binding_gate = gate;
+                }
+                // The gate registered its delivery marker ownership on this control thread, before any dispatch. A
+                // reservation re-arms the warning, so each episode without an index logs once.
+                static std::atomic<bool> s_tls_warned{false};
+                if (binding_gate->delivery_tls.reserved())
+                {
+                    s_tls_warned.store(false, std::memory_order_relaxed);
+                }
+                else if (!s_tls_warned.exchange(true, std::memory_order_relaxed))
+                {
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "Input: no TLS index is available for the delivery marker. Input callbacks are refused until "
+                        "a later registration reserves one."
+                    );
                 }
 
                 // Callback disable does not clear consume suppression, which reads InputBinding::consume. Clear by

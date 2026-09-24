@@ -5,8 +5,9 @@
  *          that has consumed every TLS index before DetourModKit reserves its slot cannot record a delivery frame, and
  *          the only answer that keeps the public rundown promise true is to refuse the delivery before consumer code
  *          starts. The `exhausted` scenario asserts that refusal and that one thread's unrecordable frame never makes
- *          another thread read as callback-entrant; `available` is the positive control that the same drive really
- *          does deliver when a slot exists. Exit status is the oracle.
+ *          another thread read as callback-entrant. It then returns the indices and requires the next registration to
+ *          reserve one, so the refusal lasts only while no owner holds an index. `available` is the positive control
+ *          that the same drive delivers when a slot exists. Exit status is the oracle.
  */
 
 #include "DetourModKit/input.hpp"
@@ -24,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -53,11 +55,9 @@ namespace
     std::atomic<bool> s_worker_release{false};
     std::atomic<int> s_reservation_arrivals{0};
 
-    // Exactly two arrivals, and the wait is unbounded on purpose. The seam this runs from is reachable only while the
-    // marker's slot is still unreserved (input_delivery_scope.cpp), so it closes the instant either racer wins the
-    // serialized allocation, and the caller installs it around nothing but its own two reserve calls. A third arrival
-    // would therefore need a third thread inside that window, and the scenario starts the poll thread only after the
-    // seam is cleared and the worker joined, by which point the slot has latched unavailable and the seam is dead.
+    // Exactly two arrivals, and the wait is unbounded on purpose. The seam runs in owner registration while no index is
+    // published (input_delivery_scope.cpp). The caller installs it around nothing but its own two registrations and
+    // clears it before any other registration runs, so a third arrival cannot occur.
     void rendezvous_first_reservation() noexcept
     {
         s_reservation_arrivals.fetch_add(1, std::memory_order_acq_rel);
@@ -77,7 +77,8 @@ namespace
         {
             std::this_thread::yield();
         }
-        s_worker_reservation_succeeded.store(detail::reserve_delivery_scope_tls(), std::memory_order_release);
+        const detail::DeliveryTlsOwner owner;
+        s_worker_reservation_succeeded.store(owner.reserved(), std::memory_order_release);
         s_worker_reservation_finished.store(true, std::memory_order_release);
         const detail::DeliveryScope scope;
         s_worker_scope_admitted.store(scope.admitted(), std::memory_order_relaxed);
@@ -103,15 +104,9 @@ namespace
         detail::PressGate *gate;
     };
 
-    // Runs after marker reservation has failed permanently. CreateThread deliberately bypasses std::thread so this is
-    // a foreign host thread on MinGW: the teardown owner must still be the exact, allocation-free Win32 identity.
-    DWORD WINAPI native_teardown_owner_probe(void *) noexcept
+    // Self-release and disposal re-entry for native_teardown_owner_probe, in its own frame so the seam wraps each exit.
+    DWORD run_native_teardown_owner_body() noexcept
     {
-        if (detail::current_native_thread_id() != static_cast<std::uint32_t>(::GetCurrentThreadId()))
-        {
-            return 16;
-        }
-
         std::atomic<int> balancing{0};
         detail::HoldGate hold;
         hold.forwarded_active = true;
@@ -139,6 +134,24 @@ namespace
             return 18;
         }
         return 0;
+    }
+
+    // Runs with this thread's depth store refused, so the marker records nothing for it. CreateThread deliberately
+    // bypasses std::thread so this is a foreign host thread on MinGW: the teardown owner must still be the exact,
+    // allocation-free Win32 identity.
+    DWORD WINAPI native_teardown_owner_probe(void *) noexcept
+    {
+        if (detail::current_native_thread_id() != static_cast<std::uint32_t>(::GetCurrentThreadId()))
+        {
+            return 16;
+        }
+        if (!detail::set_delivery_scope_store_failure_for_test(true))
+        {
+            return 24;
+        }
+        const DWORD status = run_native_teardown_owner_body();
+        (void)detail::set_delivery_scope_store_failure_for_test(false);
+        return status;
     }
 
     [[nodiscard]] int run_native_teardown_owner_probe() noexcept
@@ -370,7 +383,9 @@ namespace
         int status = 0;
         detail::set_delivery_scope_reservation_seam_for_test(&rendezvous_first_reservation);
         s_worker_scope_open.store(true, std::memory_order_release);
-        const bool main_reservation_succeeded = detail::reserve_delivery_scope_tls();
+        std::optional<detail::DeliveryTlsOwner> main_owner;
+        main_owner.emplace();
+        const bool main_reservation_succeeded = main_owner->reserved();
         while (!s_worker_reservation_finished.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
@@ -492,13 +507,26 @@ namespace
             std::fputs("FAIL: another thread's unrecordable frame made this thread read as callback-entrant\n", stderr);
             status = 8;
         }
-        // Hand the indices back before anything is allowed to enter or leave this window. The refusal under test is
-        // latched, so the facade drive below still observes it on a process whose TLS is available again. The order
-        // matters for the harness rather than for the subject: the MSVC C runtime's thread-exit path faults
-        // intermittently while every index is taken, so no thread may start or finish inside the window.
+        // Hand the indices back before anything is allowed to enter or leave this window. The order protects the
+        // harness, not the subject. The MSVC C runtime's thread-exit path faults intermittently while every index is
+        // taken, so a thread must not start or finish inside the window.
         release_tls_indices(taken);
         s_worker_release.store(true, std::memory_order_release);
         worker.join();
+        // Every registration inside the window found no index, so none is published yet. Only main_owner is still
+        // registered, and its release must leave no owner behind.
+        if (status == 0 && (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES ||
+                            detail::delivery_scope_tls_owners_for_test() != 1))
+        {
+            std::fputs("FAIL: a registration that found no index left a wrong index or owner count\n", stderr);
+            status = 13;
+        }
+        main_owner.reset();
+        if (status == 0 && detail::delivery_scope_tls_owners_for_test() != 0)
+        {
+            std::fputs("FAIL: the release of a registration that found no index left an owner behind\n", stderr);
+            status = 25;
+        }
         if (status == 0)
         {
             status = run_native_teardown_owner_probe();
@@ -512,6 +540,13 @@ namespace
             return status;
         }
 
+        // No owner is registered now, so the facade registration below must reserve an index itself. The refusal
+        // therefore ends at the next registration, without a teardown.
+        if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES)
+        {
+            std::fputs("FAIL: an index stayed published after its last owner retired\n", stderr);
+            return 26;
+        }
         int error_code = 0;
         const int edges = facade_hold_edges(error_code);
         if (edges < 0)
@@ -519,19 +554,19 @@ namespace
             std::fprintf(stderr, "FAIL: the facade drive could not be set up (%d)\n", error_code);
             return error_code;
         }
-        if (edges != 0)
+        if (edges == 0)
         {
-            std::fputs("FAIL: the poll thread delivered a held edge with no delivery marker available\n", stderr);
-            return 13;
+            std::fputs("FAIL: the facade registration after exhaustion did not reserve an index\n", stderr);
+            return 23;
         }
 
         std::puts("TLS_EXHAUSTION_REFUSES_UNTRACKED_DELIVERY");
         return 0;
     }
 
-    // Distinct status range from run_exhausted_case, which owns 2 through 22: both scenarios are the same binary
-    // writing to the same stderr, so a bare exit code has to name one scenario rather than two. The codes
-    // facade_hold_edges reports are shared deliberately, because they mean the same thing in both.
+    // Distinct status range from run_exhausted_case, which owns 2 through 26. Both scenarios share one binary and one
+    // stderr, so a bare exit code must name one scenario. The codes that facade_hold_edges reports are shared
+    // deliberately, because they mean the same thing in both.
     // The reservation can succeed and the per-thread store still fail: a reserved index past the TEB's inline slots is
     // backed by a lazily heap-allocated expansion array, so the first store on a thread that has never used a high
     // index allocates. Exhausting TLS indices cannot reach that branch, and a delivery admitted with an unrecorded
@@ -539,7 +574,8 @@ namespace
     // through 54 are this scenario's, distinct from the other two.
     int run_store_failure_case()
     {
-        if (!detail::reserve_delivery_scope_tls())
+        const detail::DeliveryTlsOwner owner;
+        if (!owner.reserved())
         {
             std::fputs("FAIL: the delivery marker could not reserve its slot on an unexhausted process\n", stderr);
             return 40;
@@ -709,7 +745,7 @@ namespace
         }
         if (edges == 0)
         {
-            std::fputs("FAIL: the facade drive produced no held edge, so the refusal case proves nothing\n", stderr);
+            std::fputs("FAIL: the facade drive produced no held edge on a process with free indices\n", stderr);
             return 32;
         }
 

@@ -461,13 +461,27 @@ namespace DetourModKit
         void ensure_guarded_engine_installed() noexcept;
 
         /**
-         * @brief Drains in-flight guarded accesses, then removes the MinGW vectored fault handler.
+         * @brief Drains in-flight guarded accesses, then removes the MinGW vectored fault handler and returns its TLS
+         *        index.
          * @details Called on memory-subsystem teardown so the handler cannot dangle into freed code if the DMK module
          *          is unloaded. It waits for every guarded access already committed to the handler path to finish
          *          before unregistering, so a fault can never arrive after the handler is gone. Idempotent and
-         *          re-installable: a later guarded access re-installs a fresh handler. A no-op on MSVC.
+         *          re-installable: a later guarded access re-installs a fresh handler with a fresh index, which the
+         *          next release returns. A no-op on MSVC.
          */
         void release_guarded_engine() noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /// Returns the guarded-read TLS index, or 0xFFFFFFFF while none is reserved.
+        [[nodiscard]] std::uint32_t guarded_engine_tls_index_for_test() noexcept;
+
+        /**
+         * @brief Makes the calling thread's guard-arm store report failure, or clears that state.
+         * @details No host can fail the arm store on demand. A refused arm routes a copy or write to its fallback and
+         *          fails a region closed.
+         */
+        void set_guard_arm_failure_for_test(bool fail) noexcept;
+#endif
 #endif
     } // namespace detail
 } // namespace DetourModKit

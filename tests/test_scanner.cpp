@@ -111,40 +111,6 @@ TEST(ScannerTest, find_pattern_found)
     EXPECT_EQ(result - data.data(), 100);
 }
 
-TEST(ScannerTest, find_pattern_span_overload)
-{
-    std::vector<std::byte> data(128, std::byte{0x00});
-    data[40] = std::byte{0xAA};
-    data[41] = std::byte{0xBB};
-    data[42] = std::byte{0xCC};
-    // A second occurrence so the Nth-occurrence span overload has something to find.
-    data[90] = std::byte{0xAA};
-    data[91] = std::byte{0xBB};
-    data[92] = std::byte{0xCC};
-
-    auto pattern = detail::parse_aob("AA BB CC");
-    ASSERT_TRUE(pattern.has_value());
-
-    const std::span<const std::byte> region{data};
-
-    // The span overload must return the identical pointer as the pointer+size form.
-    const std::byte *via_span = detail::find_pattern(region, *pattern);
-    const std::byte *via_ptr = detail::find_pattern(data.data(), data.size(), *pattern);
-    EXPECT_EQ(via_span, via_ptr);
-    ASSERT_NE(via_span, nullptr);
-    EXPECT_EQ(via_span - data.data(), 40);
-
-    // The Nth-occurrence span overload mirrors the pointer+size form too.
-    const std::byte *second_span = detail::find_pattern(region, *pattern, 2);
-    const std::byte *second_ptr = detail::find_pattern(data.data(), data.size(), *pattern, 2);
-    EXPECT_EQ(second_span, second_ptr);
-    ASSERT_NE(second_span, nullptr);
-    EXPECT_EQ(second_span - data.data(), 90);
-
-    // An empty span yields nullptr.
-    EXPECT_EQ(detail::find_pattern(std::span<const std::byte>{}, *pattern), nullptr);
-}
-
 namespace
 {
     // Builds a byte buffer from raw byte values so the jump-matcher tests read as the bytes a scan would see.

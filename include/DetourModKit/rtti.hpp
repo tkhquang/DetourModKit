@@ -177,10 +177,9 @@ namespace DetourModKit
 
         /**
          * @brief Tests whether the MSVC RTTI mangled name for @p vtable equals @p expected exactly.
-         * @details Performs a byte-exact comparison of the mangled name plus the terminating NUL, rejecting both proper
-         *          prefix and substring matches. The read is bounded by the length of @p expected plus one byte, so no
-         *          allocation occurs and the per-call cost is dominated by the SEH-guarded read of @p expected.size() +
-         *          1 bytes from the name buffer.
+         * @details Compares the mangled name plus the terminating NUL byte for byte, so a proper prefix or a substring
+         *          does not match. One guarded read of @p expected.size() + 1 bytes from the name buffer performs the
+         *          compare with no allocation.
          * @param vtable Runtime vtable pointer.
          * @param expected Mangled name to compare against. Must be non-empty and shorter than @ref MAX_TYPE_NAME_LEN.
          * @return true on exact match; false on mismatch, on any read failure, or when @p expected is empty or
