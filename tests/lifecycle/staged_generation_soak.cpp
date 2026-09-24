@@ -552,13 +552,18 @@ namespace
         std::uint64_t previous_bytes = private_executable_bytes();
         std::size_t previous_tls = dmk_lifecycle::free_tls_indices();
         std::uintptr_t coordinator_identity = 0;
-        // The clean series ends at SOAK_CYCLES. The next generation retains one route explicitly, and two clean
-        // generations follow it.
+        // The clean series ends at SOAK_CYCLES. The next generation retains one route explicitly. The one after it
+        // keeps a diagnostics subscription live across ~Session, and two clean generations follow.
         constexpr int RETAINED_CYCLE = SOAK_CYCLES + 1;
-        constexpr int LAST_CYCLE = RETAINED_CYCLE + 2;
+        constexpr int DIAGNOSTICS_RETAINED_CYCLE = RETAINED_CYCLE + 1;
+        constexpr int LAST_CYCLE = DIAGNOSTICS_RETAINED_CYCLE + 2;
+        // Seven hooks each emit Created and Enabled during Init and Removed during Shutdown.
+        constexpr std::uint64_t INIT_LIFECYCLE_EVENTS = 14;
+        constexpr std::uint64_t SHUTDOWN_LIFECYCLE_EVENTS = 21;
         for (int cycle = 0; cycle <= LAST_CYCLE; ++cycle)
         {
             const bool retain = cycle == RETAINED_CYCLE;
+            const bool retain_diagnostics = cycle == DIAGNOSTICS_RETAINED_CYCLE;
             const std::size_t retained_routes = cycle >= RETAINED_CYCLE ? 1 : 0;
             Generation generation;
             if (!load_generation("RESOURCE" + std::to_string(cycle), generation))
@@ -569,18 +574,27 @@ namespace
             options.retain_mid = retain ? 1 : 0;
             options.enable_probe_binding = 1;
             options.enable_dispatcher = 1;
+            options.enable_diagnostics = 1;
+            options.retain_diagnostics = retain_diagnostics ? 1 : 0;
             options.log_file = log_name.c_str();
             if (generation.init(&options) == 0 || generation.read_status().mid_calls != 6 ||
-                generation.read_status().dispatched != 1)
-                return fail("resources", "six mid callbacks and one dispatched event did not execute");
-            // A retained route refuses the reload verdict and books one HookManager leak.
+                generation.read_status().dispatched != 1 ||
+                generation.read_status().lifecycle_events != INIT_LIFECYCLE_EVENTS)
+                return fail("resources", "six mid callbacks, one dispatched event, and 14 hook events did not execute");
+            // A retained route refuses the reload verdict and books one HookManager leak. A diagnostics subscription
+            // that outlives ~Session refuses it with one Diagnostics leak.
             const int verdict = generation.shutdown();
             const auto status = generation.read_status();
+            if (status.lifecycle_events != SHUTDOWN_LIFECYCLE_EVENTS)
+                return fail("resources", "the diagnostics subscription did not observe every hook removal");
             if (retain && (verdict != 0 || status.hook_manager_leaks != 1 || status.total_intentional_leaks != 1 ||
                            status.parked_result != 3))
                 return fail("resources", "the parked route was not retained, reported, and bypassed");
-            if (!retain && (verdict == 0 || status.total_intentional_leaks != 0))
-                return fail("resources", "a clean generation retained a route");
+            if (retain_diagnostics &&
+                (verdict != 0 || status.diagnostics_leaks != 1 || status.total_intentional_leaks != 1))
+                return fail("resources", "the live diagnostics subscription did not refuse the reload with one leak");
+            if (!retain && !retain_diagnostics && (verdict == 0 || status.total_intentional_leaks != 0))
+                return fail("resources", "a clean generation retained a route or a diagnostics index");
             if (cycle == 0)
                 coordinator_identity = status.coordinator_identity;
             MEMORY_BASIC_INFORMATION coordinator_region{};
@@ -596,14 +610,15 @@ namespace
                 coordinator_region.RegionSize != 12 * system.dwPageSize)
                 return fail("resources", "the fixed process owner changed or holds an unexplained route record");
             const void *const marker = generation.marker;
-            if (!unload_generation(generation))
+            // The loader keeps a refused generation mapped. The retained route also holds its module reference, so
+            // only a clean generation unmaps.
+            if (!retain_diagnostics && !unload_generation(generation))
                 return fail("resources", "the generation did not unload");
-            // The retained route holds its module reference, so only a clean generation unmaps.
-            if (retain && !module_owns(marker))
-                return fail("resources", "the retained route lost its image");
-            if (!retain && !wait_for_unmap(marker))
+            if ((retain || retain_diagnostics) && !module_owns(marker))
+                return fail("resources", "the retained generation lost its image");
+            if (!retain && !retain_diagnostics && !wait_for_unmap(marker))
                 return fail("resources", "the generation did not unmap");
-            if (!retain)
+            if (!retain && !retain_diagnostics)
                 remove_unmapped_staged_file_best_effort(generation);
             // A throw after each unmap faults if a handler from the unmapped image remains registered.
             try
@@ -624,7 +639,7 @@ namespace
                 stderr,
                 "resources cycle=%d retained=%d executable_delta=%lld tls_delta=%lld\n",
                 cycle,
-                retain ? 1 : 0,
+                (retain || retain_diagnostics) ? 1 : 0,
                 static_cast<long long>(bytes) - static_cast<long long>(previous_bytes),
                 static_cast<long long>(previous_tls) - static_cast<long long>(tls)
             );
@@ -633,8 +648,9 @@ namespace
             if (bytes != previous_bytes + system.dwPageSize + retained_bytes)
                 return fail("resources", "executable growth differs from one trap page per copy and retained blocks");
             // Every clean generation returns each TLS index it reserved. The retained generation stays mapped, so its
-            // claimed mid slot and its namespace-scope dispatcher each keep one index.
-            const std::size_t retained_tls = retain ? 2 : 0;
+            // claimed mid slot and its namespace-scope dispatcher each keep one index. The refused diagnostics
+            // generation keeps the one emit index that its live subscription and that dispatcher share.
+            const std::size_t retained_tls = retain ? 2 : (retain_diagnostics ? 1 : 0);
             if (tls + retained_tls != previous_tls)
                 return fail("resources", "TLS consumption differs from the retained owner count");
             previous_bytes = bytes;

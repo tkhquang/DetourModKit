@@ -1,7 +1,7 @@
 #ifndef DETOURMODKIT_TEST_LOADER_LOCK_SCOPE_HPP
 #define DETOURMODKIT_TEST_LOADER_LOCK_SCOPE_HPP
 
-// The forced probe is a DMK_ENABLE_TEST_SEAMS seam, so this fixture serves the gtest binary that defines it.
+// The forced probe is a DMK_ENABLE_TEST_SEAMS seam, so this fixture serves each test target that defines it.
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 

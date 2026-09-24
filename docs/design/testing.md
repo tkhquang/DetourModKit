@@ -144,13 +144,13 @@ White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_in
 
 ## Generation resource proof
 
-`Lifecycle.StagedGenerationResourcesStayWithinBudget` exercises six mid hooks per fresh DLL. It also exercises one inline hook, one input binding, and one subscribed namespace-scope dispatcher, and it omits VMT hooks. The first 101 generations must unmap and leave no route record or intentional leak.
+`Lifecycle.StagedGenerationResourcesStayWithinBudget` exercises six mid hooks per fresh DLL. It also exercises one inline hook, one input binding, one subscribed namespace-scope dispatcher, and subscriptions to both diagnostics dispatchers. It omits VMT hooks. The hook lifecycle subscription must observe 14 events during Init and 21 after Shutdown. The first 101 generations must unmap and leave no route record or intentional leak.
 
-The next generation parks one caller before the entry count of its first mid route and then tears down. It must book one HookManager leak, keep one retained route record, and stay mapped. The released caller must return the target value through the route bypass. Two clean generations follow, and the retained record must remain.
+The next generation parks one caller before the entry count of its first mid route and then tears down. It must book one HookManager leak, keep one retained route record, and stay mapped. The released caller must return the target value through the route bypass. The generation after it keeps its hook lifecycle subscription live across `~Session`. Its Shutdown must refuse the reload with one `Diagnostics` leak, and the loader keeps it mapped. Two clean generations follow, and the retained record must remain.
 
 The host measures executable bytes with `VirtualQuery`. Each generation retains exactly one executable trap page. A retained route also retains one allocation-granularity block.
 
-The host counts free TLS indices in the process TLS bitmaps under the PEB lock. Every clean generation returns each TLS index that it reserved, on both toolchains. The retained generation keeps two indices, one for its claimed mid slot and one for its dispatcher. The host stages one discarded copy before its baseline, because the first host staging takes platform TLS indices. The MinGW host first holds one initialized `libwinpthread-1.dll` load, because each new load of that runtime takes a TLS index that its unload never returns.
+The host counts free TLS indices in the process TLS bitmaps under the PEB lock. Every clean generation returns each TLS index that it reserved, on both toolchains. The retained generation keeps two indices, one for its claimed mid slot and one for its dispatcher. The refused diagnostics generation keeps one emit index. The host stages one discarded copy before its baseline, because the first host staging takes platform TLS indices. The MinGW host first holds one initialized `libwinpthread-1.dll` load, because each new load of that runtime takes a TLS index that its unload never returns.
 
 The coordinator mapping must preserve its address and size and hold only the expected retained record. After each unload, the process must hold one view of the coordinator section and one handle each to its lock and section. The [hook note](hooking.md#process-route-coordinator) owns its fixed budget.
 

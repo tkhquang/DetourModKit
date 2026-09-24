@@ -38,6 +38,25 @@ namespace DetourModKit::detail
             auto snap = dispatcher.m_handlers.load(std::memory_order_acquire);
             return snap.use_count() - 1;
         }
+
+        using Release = typename EventDispatcher<Event>::EmitOwnerRelease;
+
+        [[nodiscard]] static Release
+        release_idle_emit_owner(EventDispatcher<Event> &dispatcher, bool may_prune) noexcept
+        {
+            return dispatcher.release_idle_emit_owner(may_prune);
+        }
+
+        /// Reads the ownership flag. Call it only while no writer runs.
+        [[nodiscard]] static bool owns_emit_index(const EventDispatcher<Event> &dispatcher) noexcept
+        {
+            return dispatcher.m_emit_owner;
+        }
+
+        [[nodiscard]] static std::mutex &writer_mutex(EventDispatcher<Event> &dispatcher) noexcept
+        {
+            return dispatcher.m_writer_mutex;
+        }
     };
 } // namespace DetourModKit::detail
 
@@ -1327,6 +1346,243 @@ TEST(DispatchCow, ClearStillDestroysTheRetiredCallableExactlyOnce)
     EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed) - destroys_before, 1)
         << "clear must release the retired consumer callable";
     EXPECT_TRUE(dispatcher.empty());
+}
+
+namespace
+{
+    using ReleaseAccess = detail::EventDispatcherTestAccess<SimpleEvent>;
+    using Release = ReleaseAccess::Release;
+
+    /// Parks one handler invocation on its own thread until the case resumes it.
+    class ParkedHandler
+    {
+    public:
+        explicit ParkedHandler(EventDispatcher<SimpleEvent> &dispatcher)
+            : m_subscription(dispatcher.subscribe(
+                  [this](const SimpleEvent &) noexcept
+                  {
+                      m_parked.store(true, std::memory_order_release);
+                      while (!m_proceed.load(std::memory_order_acquire))
+                      {
+                          std::this_thread::yield();
+                      }
+                  }
+              )),
+              m_emitter([&dispatcher] { dispatcher.emit_safe(SimpleEvent{1}); })
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!m_parked.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::yield();
+            }
+        }
+
+        ~ParkedHandler() { resume(); }
+
+        ParkedHandler(const ParkedHandler &) = delete;
+        ParkedHandler &operator=(const ParkedHandler &) = delete;
+        ParkedHandler(ParkedHandler &&) = delete;
+        ParkedHandler &operator=(ParkedHandler &&) = delete;
+
+        [[nodiscard]] bool parked() const noexcept { return m_parked.load(std::memory_order_acquire); }
+
+        [[nodiscard]] Subscription &subscription() noexcept { return m_subscription; }
+
+        /// Lets the handler return and joins the emitting thread.
+        void resume()
+        {
+            m_proceed.store(true, std::memory_order_release);
+            if (m_emitter.joinable())
+            {
+                m_emitter.join();
+            }
+        }
+
+    private:
+        std::atomic<bool> m_parked{false};
+        std::atomic<bool> m_proceed{false};
+        Subscription m_subscription;
+        std::thread m_emitter;
+    };
+} // namespace
+
+TEST(EventDispatcherEmitOwnerRelease, ReportsNotOwnerBeforeAnyPublish)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::NotOwner);
+    EXPECT_FALSE(ReleaseAccess::owns_emit_index(dispatcher));
+}
+
+TEST(EventDispatcherEmitOwnerRelease, LiveSubscriptionKeepsTheOwnership)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int calls = 0;
+    Subscription sub = dispatcher.subscribe([&calls](const SimpleEvent &) { ++calls; });
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::LiveSubscription);
+    EXPECT_TRUE(ReleaseAccess::owns_emit_index(dispatcher));
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(calls, 1) << "a refused release leaves the live handler in place";
+}
+
+TEST(EventDispatcherEmitOwnerRelease, IdleReleasePrunesRetiredSlotsAndLaterSubscribeRegistersAgain)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    CowCounters counters;
+    Subscription first = dispatcher.subscribe(CountingTarget{&counters});
+    Subscription second = dispatcher.subscribe([](const SimpleEvent &) {});
+    first.tombstone();
+    second.tombstone();
+    ASSERT_EQ(dispatcher.subscriber_count(), 2u) << "a tombstone keeps the retired slot published";
+    const int destroys_before = counters.destroys.load(std::memory_order_relaxed);
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
+    EXPECT_FALSE(ReleaseAccess::owns_emit_index(dispatcher));
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u) << "the release prunes the retired slots";
+    EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed) - destroys_before, 1)
+        << "the prune destroys the retired callable once";
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::NotOwner);
+
+    int calls = 0;
+    bool tracked = false;
+    Subscription third = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            ++calls;
+            tracked = detail::thread_is_emitting_dispatcher(&dispatcher);
+        }
+    );
+    EXPECT_TRUE(ReleaseAccess::owns_emit_index(dispatcher)) << "a later subscribe registers through the first publish";
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(tracked) << "an emit after a new registration records its frame";
+}
+
+TEST(EventDispatcherEmitOwnerRelease, ReleaseWithoutThePruneKeepsRetiredSlotsAndCallables)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    CowCounters counters;
+    Subscription sub = dispatcher.subscribe(CountingTarget{&counters});
+    sub.tombstone();
+    const int destroys_before = counters.destroys.load(std::memory_order_relaxed);
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, false), Release::Released);
+    EXPECT_FALSE(ReleaseAccess::owns_emit_index(dispatcher));
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u) << "a loader-lock release keeps the retired slot";
+    EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed), destroys_before)
+        << "a loader-lock release destroys no consumer callable";
+}
+
+TEST(EventDispatcherEmitOwnerRelease, HandlerRunningAfterResetKeepsTheOwnership)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    ParkedHandler parked{dispatcher};
+    ASSERT_TRUE(parked.parked());
+    parked.subscription().reset();
+    ASSERT_EQ(dispatcher.subscriber_count(), 0u) << "reset compacts the running entry out of the current list";
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Busy)
+        << "the superseded list that the running emit holds must keep the ownership";
+    EXPECT_TRUE(ReleaseAccess::owns_emit_index(dispatcher));
+    parked.resume();
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
+}
+
+TEST(EventDispatcherEmitOwnerRelease, HandlerRunningAfterTombstoneKeepsTheOwnership)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    ParkedHandler parked{dispatcher};
+    ASSERT_TRUE(parked.parked());
+    parked.subscription().tombstone();
+    ASSERT_EQ(dispatcher.subscriber_count(), 1u) << "a tombstone keeps the running entry in the current list";
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Busy)
+        << "the admitted invocation in the current list must keep the ownership";
+    parked.resume();
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
+}
+
+TEST(EventDispatcherEmitOwnerRelease, HandlerRunningAcrossClearKeepsTheOwnership)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    ParkedHandler parked{dispatcher};
+    ASSERT_TRUE(parked.parked());
+    dispatcher.clear();
+    ASSERT_EQ(dispatcher.subscriber_count(), 0u);
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Busy)
+        << "the list that clear superseded keeps the ownership while its handler runs";
+    parked.resume();
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
+}
+
+TEST(EventDispatcherEmitOwnerRelease, HandlerRunningAcrossSubscribeChurnKeepsTheOwnership)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    ParkedHandler parked{dispatcher};
+    ASSERT_TRUE(parked.parked());
+    parked.subscription().reset();
+    for (int i = 0; i < 3; ++i)
+    {
+        Subscription churn = dispatcher.subscribe([](const SimpleEvent &) {});
+        churn.reset();
+    }
+    ASSERT_EQ(dispatcher.subscriber_count(), 0u);
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Busy)
+        << "every list that a subscribe or compaction publishes must share the epoch of the held list";
+    parked.resume();
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
+}
+
+TEST(EventDispatcherEmitOwnerRelease, ReleaseInsideItsOwnEmitIsUnwaitable)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    Release inside = Release::Released;
+    Subscription sub;
+    sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            sub.tombstone();
+            inside = ReleaseAccess::release_idle_emit_owner(dispatcher, true);
+        }
+    );
+    dispatcher.emit(SimpleEvent{1});
+
+    EXPECT_EQ(inside, Release::Unwaitable) << "a release inside its own emit waits on the calling thread";
+    EXPECT_TRUE(ReleaseAccess::owns_emit_index(dispatcher));
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released)
+        << "a retry after the emit returns the ownership";
+}
+
+TEST(EventDispatcherEmitOwnerRelease, ContendedWriterMutexIsBusy)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    Subscription sub = dispatcher.subscribe([](const SimpleEvent &) {});
+    sub.reset();
+    std::atomic<bool> held{false};
+    std::atomic<bool> done{false};
+    std::thread holder(
+        [&]
+        {
+            const std::scoped_lock lock{ReleaseAccess::writer_mutex(dispatcher)};
+            held.store(true, std::memory_order_release);
+            while (!done.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    );
+    while (!held.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Busy)
+        << "the release never waits for the writer mutex";
+    done.store(true, std::memory_order_release);
+    holder.join();
+    EXPECT_EQ(ReleaseAccess::release_idle_emit_owner(dispatcher, true), Release::Released);
 }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)

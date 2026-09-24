@@ -185,7 +185,7 @@ When several handles target the same address, destroy them newest-first. `hook::
 
 ### Session teardown owns the process-wide subsystems
 
-`~Session` first clears its input scope. It then stops the config watcher, input, memory cache, config registry, and logger. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
+`~Session` first clears its input scope. It then stops the config watcher, input, memory cache, and config registry. It returns the TLS index of the diagnostics dispatchers and stops the logger last. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
 
 Destroy the `Session` before `FreeLibrary`. If code skips this step, the old sink and async writer can outlive the image.
 
@@ -206,7 +206,7 @@ Do not pass C++ containers, pointers with ownership, exceptions, or standard-lib
 
 ### Threads, TLS, and static constructors
 
-Each DMK TLS index returns with its last owner. A clean generation therefore returns every index that it reserved, unless it subscribed to `diagnostics::hook_lifecycle()` or `diagnostics::scanner_faults()`. Those dispatchers are never destroyed, so a subscription makes one of them an owner that never returns its index, even after `FreeLibrary`. Each generation that subscribes therefore consumes one TLS index until the process exits. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
+Each DMK TLS index returns with its last owner. A clean generation therefore returns every index that it reserved. Session teardown returns the index of `diagnostics::hook_lifecycle()` and `diagnostics::scanner_faults()` when no subscription to them is live. The `hook_lifecycle()` contract states when teardown keeps that index. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
 
 A MinGW generation that imports `libwinpthread-1.dll` takes one TLS index on each fresh load that it uses, and the runtime never returns it. A host that keeps the runtime loaded avoids that cost. With the runtime kept loaded, a thread that used emulated TLS inside a generation must exit before that generation unloads. A C++ exception or a `thread_local` access is such a use. Otherwise the thread exit calls a destructor in the unmapped image, the runtime keeps its key lock, and the next key creation hangs.
 
@@ -235,7 +235,7 @@ Read pin counters after `~Session`, because XInput retention occurs there. The c
 
 Latch the first hook restore failure across retries. Keep every saved original pointer and target-module reference after a failure. A retained inline route can still enter the detour.
 
-With the local wheel backend, accept only the documented inert pin and leak set. With `ExternalHost`, require zero logic-image pins and intentional leaks. Refuse every other nonzero reason.
+With the local wheel backend, accept only the documented inert pin and leak set. With `ExternalHost`, require zero logic-image pins and intentional leaks. Refuse every other nonzero reason. On either backend, refuse a `LeakSubsystem::Diagnostics` event, because a diagnostics handler can still run in the image.
 
 ## Advanced topology: DetourModKit in a persistent host
 

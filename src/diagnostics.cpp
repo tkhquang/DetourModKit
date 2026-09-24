@@ -9,10 +9,16 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/diagnostics_population.hpp"
+#include "internal/drain_backoff.hpp"
+#include "internal/lifecycle_context.hpp"
+
+#include <windows.h>
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <new>
 
 namespace DetourModKit
@@ -21,6 +27,10 @@ namespace DetourModKit
     {
         namespace
         {
+            // Published once each dispatcher exists, so teardown never constructs one.
+            constinit std::atomic<EventDispatcher<ScannerFaultEvent> *> s_scanner_faults{nullptr};
+            constinit std::atomic<EventDispatcher<HookLifecycleEvent> *> s_hook_lifecycle{nullptr};
+
             constexpr std::size_t LEAK_SUBSYSTEM_COUNT = static_cast<std::size_t>(LeakSubsystem::Count);
 
             // One independent event tally per subsystem. Relaxed throughout: the counters carry no ordering obligation
@@ -114,8 +124,12 @@ namespace DetourModKit
             alignas(
                 EventDispatcher<ScannerFaultEvent>
             ) static unsigned char storage[sizeof(EventDispatcher<ScannerFaultEvent>)];
-            static EventDispatcher<ScannerFaultEvent> *const dispatcher =
-                ::new (static_cast<void *>(storage)) EventDispatcher<ScannerFaultEvent>();
+            static EventDispatcher<ScannerFaultEvent> *const dispatcher = []
+            {
+                auto *const created = ::new (static_cast<void *>(storage)) EventDispatcher<ScannerFaultEvent>();
+                s_scanner_faults.store(created, std::memory_order_release);
+                return created;
+            }();
             return *dispatcher;
         }
 
@@ -125,8 +139,12 @@ namespace DetourModKit
             alignas(
                 EventDispatcher<HookLifecycleEvent>
             ) static unsigned char storage[sizeof(EventDispatcher<HookLifecycleEvent>)];
-            static EventDispatcher<HookLifecycleEvent> *const dispatcher =
-                ::new (static_cast<void *>(storage)) EventDispatcher<HookLifecycleEvent>();
+            static EventDispatcher<HookLifecycleEvent> *const dispatcher = []
+            {
+                auto *const created = ::new (static_cast<void *>(storage)) EventDispatcher<HookLifecycleEvent>();
+                s_hook_lifecycle.store(created, std::memory_order_release);
+                return created;
+            }();
             return *dispatcher;
         }
 
@@ -177,4 +195,176 @@ namespace DetourModKit
             return snapshot;
         }
     } // namespace diagnostics
+
+    namespace detail
+    {
+        struct DiagnosticsEmitOwner
+        {
+            /// The event-independent form of the dispatcher's release outcome.
+            enum class Outcome : std::uint8_t
+            {
+                Returned,
+                LiveSubscription,
+                Busy,
+                Unwaitable
+            };
+
+            template <typename Event>
+            [[nodiscard]] static Outcome release(EventDispatcher<Event> &dispatcher, bool may_prune) noexcept
+            {
+                using Release = typename EventDispatcher<Event>::EmitOwnerRelease;
+                switch (dispatcher.release_idle_emit_owner(may_prune))
+                {
+                case Release::Released:
+                case Release::NotOwner:
+                    return Outcome::Returned;
+                case Release::LiveSubscription:
+                    return Outcome::LiveSubscription;
+                case Release::Busy:
+                    return Outcome::Busy;
+                case Release::Unwaitable:
+                    break;
+                }
+                return Outcome::Unwaitable;
+            }
+        };
+
+        namespace
+        {
+            using Outcome = DiagnosticsEmitOwner::Outcome;
+
+            /// Bounds the teardown wait for a diagnostics emit. Expiry keeps the index ([B-73]).
+            constexpr auto DIAGNOSTICS_DRAIN_TIMEOUT = std::chrono::seconds{1};
+
+            // One releaser at a time settles the records below.
+            constinit std::atomic_flag s_release_running{};
+            // Set while a kept ownership holds its one LeakSubsystem::Diagnostics record.
+            constinit std::atomic<bool> s_scanner_faults_recorded{false};
+            constinit std::atomic<bool> s_hook_lifecycle_recorded{false};
+
+            /// The teardown result of one diagnostics dispatcher.
+            struct KeptIndex
+            {
+                const char *dispatcher_name;
+                Outcome outcome;
+                std::atomic<bool> &recorded;
+            };
+
+            [[nodiscard]] bool process_is_exiting() noexcept
+            {
+                if (lifecycle().loader_context() == LoaderContext::ProcessExit)
+                {
+                    return true;
+                }
+                // A consumer without bootstrap_detach publishes no context, so the loader supplies the answer.
+                using ShutdownProbe = BOOLEAN(NTAPI *)();
+                const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+                // GCC treats void (*)() as compatible with every function type.
+                using AnyFunction = void (*)();
+                const auto probe = ntdll != nullptr ? reinterpret_cast<ShutdownProbe>(reinterpret_cast<AnyFunction>(
+                                                          ::GetProcAddress(ntdll, "RtlDllShutdownInProgress")
+                                                      ))
+                                                    : nullptr;
+                return probe != nullptr && probe() != FALSE;
+            }
+
+            [[nodiscard]] const char *kept_cause(Outcome outcome) noexcept
+            {
+                switch (outcome)
+                {
+                case Outcome::LiveSubscription:
+                    return "a subscription is still live. Drop every subscription before Session teardown";
+                case Outcome::Busy:
+                    return "an emit still held a handler list";
+                case Outcome::Returned:
+                case Outcome::Unwaitable:
+                    break;
+                }
+                return "the teardown ran inside a diagnostics emit or while an untracked emit ran";
+            }
+
+            void settle(const KeptIndex &kept, DiagnosticsTeardown teardown, bool may_block) noexcept
+            {
+                if (kept.outcome == Outcome::Returned)
+                {
+                    kept.recorded.store(false, std::memory_order_relaxed);
+                    return;
+                }
+                // Outside Session teardown, a live subscription is an ordinary owner, for example across a cache
+                // restart.
+                if (kept.outcome == Outcome::LiveSubscription && teardown == DiagnosticsTeardown::CacheShutdown)
+                {
+                    return;
+                }
+                if (kept.recorded.exchange(true, std::memory_order_relaxed))
+                {
+                    return;
+                }
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Diagnostics);
+                if (!may_block)
+                {
+                    return;
+                }
+                try
+                {
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "Diagnostics: the {} dispatcher kept its emit TLS index at teardown. Cause: {}.",
+                        kept.dispatcher_name,
+                        kept_cause(kept.outcome)
+                    );
+                }
+                catch (...)
+                {
+                }
+            }
+        } // namespace
+
+        void release_diagnostics_emit_owners(DiagnosticsTeardown teardown, bool may_block) noexcept
+        {
+            // The index dies with the process, and a killed thread can still hold a list lock.
+            if (process_is_exiting())
+            {
+                return;
+            }
+            auto *const hooks = diagnostics::s_hook_lifecycle.load(std::memory_order_acquire);
+            auto *const scans = diagnostics::s_scanner_faults.load(std::memory_order_acquire);
+            if ((hooks == nullptr && scans == nullptr) || s_release_running.test_and_set(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            // A wait from inside a diagnostics emit, or beside an untracked emit, can wait on this thread.
+            const bool may_wait = may_block && !(hooks != nullptr && thread_is_emitting_dispatcher(hooks)) &&
+                                  !(scans != nullptr && thread_is_emitting_dispatcher(scans)) &&
+                                  untracked_emit_frames().load(std::memory_order_seq_cst) == 0;
+            const auto release_hooks = [hooks, may_block]() noexcept
+            { return hooks != nullptr ? DiagnosticsEmitOwner::release(*hooks, may_block) : Outcome::Returned; };
+            const auto release_scans = [scans, may_block]() noexcept
+            { return scans != nullptr ? DiagnosticsEmitOwner::release(*scans, may_block) : Outcome::Returned; };
+            Outcome hook_outcome = release_hooks();
+            Outcome scan_outcome = release_scans();
+            if (may_wait)
+            {
+                const auto deadline = std::chrono::steady_clock::now() + DIAGNOSTICS_DRAIN_TIMEOUT;
+                DrainBackoff backoff;
+                while ((hook_outcome == Outcome::Busy || scan_outcome == Outcome::Busy) &&
+                       std::chrono::steady_clock::now() < deadline)
+                {
+                    backoff.pause();
+                    if (hook_outcome == Outcome::Busy)
+                    {
+                        hook_outcome = release_hooks();
+                    }
+                    if (scan_outcome == Outcome::Busy)
+                    {
+                        scan_outcome = release_scans();
+                    }
+                }
+            }
+            settle({"hook_lifecycle", hook_outcome, s_hook_lifecycle_recorded}, teardown, may_block);
+            settle({"scanner_faults", scan_outcome, s_scanner_faults_recorded}, teardown, may_block);
+            s_release_running.clear(std::memory_order_release);
+        }
+    } // namespace detail
 } // namespace DetourModKit

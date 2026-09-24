@@ -3,7 +3,7 @@
 
 /**
  * @file diagnostics_population.hpp
- * @brief Defines constant-initialized module-pin, hook-population, and lifecycle counters.
+ * @brief Declares the diagnostics state that other translation units update or retire.
  */
 
 #include <array>
@@ -153,6 +153,24 @@ namespace DetourModKit::detail
             }
         }
     } // namespace module_pin_observability
+
+    /// Names the teardown that returns the emit-chain TLS ownership of the diagnostics dispatchers.
+    enum class DiagnosticsTeardown : std::uint8_t
+    {
+        /// memory::shutdown_cache() without an active Session. A live subscription stays an owner without a record.
+        CacheShutdown,
+        /// Session teardown. A live subscription is a kept index.
+        Session
+    };
+
+    /**
+     * @brief Returns the emit-chain TLS ownership of each idle diagnostics dispatcher.
+     * @param teardown The teardown that calls. It decides whether a live subscription is a kept index.
+     * @param may_block The caller's teardown gate. False never waits, prunes, or logs.
+     * @details @ref DetourModKit::diagnostics::hook_lifecycle owns the contract. A concurrent call returns at once and
+     *          leaves the outcome to the call in progress.
+     */
+    void release_diagnostics_emit_owners(DiagnosticsTeardown teardown, bool may_block) noexcept;
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_DIAGNOSTICS_POPULATION_HPP

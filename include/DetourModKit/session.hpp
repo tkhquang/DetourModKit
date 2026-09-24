@@ -68,13 +68,12 @@ namespace DetourModKit
      * @details Session::start(ModInfo) is the synchronous, directly-held path. bootstrap_attach(ModInfo, on_ready) is
      *          the hosted path. The private release() path owns the teardown order. ~Session and active move-assignment
      *          call it. scope().clear() releases this session's input bindings first, in reverse insertion order. The
-     *          process-wide subsystems then tear down
-     *          in reverse dependency order. The order is the config auto-reload watcher, the input poll thread, the
-     *          memory cache, the config registry, and the logger. The logger stays last because every prior step can
-     *          still log. Each subsystem shutdown applies
-     *          its own teardown gate: join when the caller is authorized and the loader-lock probe does not
-     *          veto, otherwise abandon and retain. Hooks are not owned by the Session: each hook lives in a
-     *          caller-held Hook handle and unhooks when that handle drops.
+     *          process-wide subsystems then tear down in reverse dependency order. The order is the config auto-reload
+     *          watcher, the input poll thread, the memory cache, the config registry, the diagnostics TLS index, and
+     *          the logger. The logger stays last because every prior step can still log. Each subsystem shutdown
+     *          applies its own teardown gate: join when the caller is authorized and the loader-lock probe does not
+     *          veto, otherwise abandon and retain. Hooks are not owned by the Session: each hook lives in a caller-held
+     *          Hook handle and unhooks when that handle drops.
      * @note A Session is move-only. A moved-from or abandon()ed Session is inert: its destructor does nothing. One
      *       Session is active at a time. A second start() returns ErrorCode::SessionAlreadyActive, and a second
      *       bootstrap entry returns the code that identifies the current bootstrap slot owner.

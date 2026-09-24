@@ -3,19 +3,27 @@
  * @brief Fresh-process proofs that each DMK Win32 TLS index returns with its last owner and stays with a live one.
  * @details The return scenarios reserve an index, read the process TLS bitmaps, and require the exact return after the
  *          last owner retires. The live-owner scenarios keep one owner live across another owner's release and require
- *          the index to stay reserved and usable. Exit status is the oracle.
+ *          the index to stay reserved and usable. The diagnostics scenarios drive the teardown release of the two
+ *          never-destroyed diagnostics dispatchers. Exit status is the oracle.
  */
 
+#include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/memory.hpp"
+#include "DetourModKit/session.hpp"
 
+#include "internal/drain_backoff.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/memory_fault.hpp"
 #include "internal/memory_guarded.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/log_capture.hpp"
 #include "tls_census.hpp"
 
+#include <process.h>
 #include <windows.h>
 
 #include <atomic>
@@ -23,8 +31,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -333,15 +347,14 @@ namespace
             if (live_probe.calls != 1 || !live_probe.tracked)
                 return fail(44, "the live dispatcher lost its emit frame record");
 
-            // The diagnostics dispatchers are never destroyed, so a subscription registers an owner that never returns
-            // its index.
+            // A diagnostics dispatcher is never destroyed. Only a teardown returns its ownership, and none runs here.
             Subscription lifecycle_subscription =
                 diagnostics::hook_lifecycle().subscribe([](const diagnostics::HookLifecycleEvent &) noexcept {});
             if (!lifecycle_subscription.active())
                 return fail(45, "the diagnostics subscription was refused");
         }
         if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
-            return fail(46, "the never-destroyed diagnostics dispatcher did not keep its index");
+            return fail(46, "the diagnostics dispatcher returned its index without a teardown");
         std::puts("EMIT_TLS_INDEX_STAYS_WITH_A_LIVE_DISPATCHER");
         return 0;
     }
@@ -626,6 +639,613 @@ namespace
         return status;
 #endif
     }
+
+    // The diagnostics teardown waits up to one second for a running emit. These bounds sit on either side of it.
+    constexpr auto HANDLER_RESUME_DELAY = 200ms;
+    constexpr auto WAITED_FLOOR = 150ms;
+    constexpr auto TEARDOWN_WAIT_FLOOR = 900ms;
+    constexpr auto NO_WAIT_CEILING = 500ms;
+
+    [[nodiscard]] std::size_t diagnostics_leaks() noexcept
+    {
+        return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Diagnostics);
+    }
+
+    void emit_lifecycle() noexcept
+    {
+        diagnostics::hook_lifecycle().emit_safe(
+            diagnostics::HookLifecycleEvent{
+                .name = "tls_index_return",
+                .transition = diagnostics::HookTransition::Created,
+            }
+        );
+    }
+
+    void emit_scanner_fault() noexcept
+    {
+        diagnostics::scanner_faults().emit_safe(
+            diagnostics::ScannerFaultEvent{
+                .faulted_regions = 1,
+            }
+        );
+    }
+
+    [[nodiscard]] std::chrono::milliseconds elapsed_since(std::chrono::steady_clock::time_point start) noexcept
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    }
+
+    /// Counts diagnostics handler calls and records whether the last one ran inside a tracked frame.
+    struct DiagnosticsProbe
+    {
+        std::atomic<int> calls{0};
+        std::atomic<bool> tracked{false};
+    };
+
+    template <class Event>
+    [[nodiscard]] Subscription subscribe_probe(EventDispatcher<Event> &dispatcher, DiagnosticsProbe &probe)
+    {
+        return dispatcher.subscribe(
+            [&dispatcher, &probe](const Event &) noexcept
+            {
+                probe.calls.fetch_add(1, std::memory_order_relaxed);
+                probe.tracked.store(detail::thread_is_emitting_dispatcher(&dispatcher), std::memory_order_relaxed);
+            }
+        );
+    }
+
+    /// Returns true when one emit on each dispatcher reached its subscription inside a tracked frame.
+    [[nodiscard]] bool diagnostics_emits_tracked(Subscription &lifecycle, Subscription &faults, DiagnosticsProbe &probe)
+    {
+        const int before = probe.calls.load(std::memory_order_relaxed);
+        emit_lifecycle();
+        const bool lifecycle_tracked = probe.tracked.load(std::memory_order_relaxed);
+        probe.tracked.store(false, std::memory_order_relaxed);
+        emit_scanner_fault();
+        return lifecycle.active() && faults.active() && lifecycle_tracked &&
+               probe.tracked.load(std::memory_order_relaxed) &&
+               probe.calls.load(std::memory_order_relaxed) == before + 2;
+    }
+
+    [[nodiscard]] std::string session_log_name(const char *tag)
+    {
+        return std::string("tls_index_return_") + tag + "_" + std::to_string(_getpid()) + ".log";
+    }
+
+    [[nodiscard]] bool start_session(std::optional<Session> &session, const std::string &log_file) noexcept
+    {
+        Result<Session> started = Session::start(
+            ModInfo{
+                .name = "TLS_INDEX_RETURN",
+                .log_file = log_file,
+            }
+        );
+        if (!started)
+            return false;
+        session.emplace(std::move(*started));
+        return true;
+    }
+
+    [[nodiscard]] std::string read_text(const std::string &path)
+    {
+        std::ifstream in(path);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+
+    void remove_file(const std::string &path) noexcept
+    {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+
+    /**
+     * @brief Runs one subscribe, emit, and teardown cycle on both dispatchers before a census.
+     * @details The first cycle constructs both dispatchers and the logger state that a later census must not count.
+     */
+    [[nodiscard]] bool warm_diagnostics(const std::string &log_file)
+    {
+        warm_runtime();
+        std::optional<Session> session;
+        if (!log_file.empty() && !start_session(session, log_file))
+            return false;
+        DiagnosticsProbe probe;
+        bool tracked = false;
+        {
+            Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+            Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
+            tracked = diagnostics_emits_tracked(lifecycle, faults, probe);
+        }
+        session.reset();
+        memory::shutdown_cache();
+        return tracked && diagnostics_leaks() == 0;
+    }
+
+    /// Parks one diagnostics handler invocation on its own thread until the case resumes it.
+    template <class Event> class ParkedHandler
+    {
+    public:
+        ParkedHandler(EventDispatcher<Event> &dispatcher, void (*emit)() noexcept)
+            : m_dispatcher(dispatcher), m_subscription(dispatcher.subscribe(
+                                            [this](const Event &) noexcept
+                                            {
+                                                m_parked.store(true, std::memory_order_release);
+                                                while (!m_proceed.load(std::memory_order_acquire))
+                                                    std::this_thread::yield();
+                                                m_tracked_after_resume.store(
+                                                    detail::thread_is_emitting_dispatcher(&m_dispatcher),
+                                                    std::memory_order_release
+                                                );
+                                            }
+                                        )),
+              m_emitter(emit)
+        {
+        }
+
+        ~ParkedHandler() { resume(); }
+
+        ParkedHandler(const ParkedHandler &) = delete;
+        ParkedHandler &operator=(const ParkedHandler &) = delete;
+        ParkedHandler(ParkedHandler &&) = delete;
+        ParkedHandler &operator=(ParkedHandler &&) = delete;
+
+        [[nodiscard]] bool wait_parked() noexcept
+        {
+            return wait_until([this] { return m_parked.load(std::memory_order_acquire); });
+        }
+
+        /// Compacts the running entry out of the current list.
+        void reset_subscription() noexcept { m_subscription.reset(); }
+
+        /// Lets the handler return without a join.
+        void signal() noexcept { m_proceed.store(true, std::memory_order_release); }
+
+        void resume()
+        {
+            signal();
+            if (m_emitter.joinable())
+                m_emitter.join();
+        }
+
+        [[nodiscard]] bool tracked_after_resume() const noexcept
+        {
+            return m_tracked_after_resume.load(std::memory_order_acquire);
+        }
+
+    private:
+        EventDispatcher<Event> &m_dispatcher;
+        std::atomic<bool> m_parked{false};
+        std::atomic<bool> m_proceed{false};
+        std::atomic<bool> m_tracked_after_resume{false};
+        Subscription m_subscription;
+        std::thread m_emitter;
+    };
+
+    /// Counts each destruction of a callable copy that still owns the counter.
+    class CountedHandler
+    {
+    public:
+        explicit CountedHandler(std::atomic<int> *destroyed) noexcept : m_destroyed(destroyed) {}
+        CountedHandler(const CountedHandler &other) noexcept = default;
+        CountedHandler &operator=(const CountedHandler &) = delete;
+        CountedHandler(CountedHandler &&other) noexcept : m_destroyed(std::exchange(other.m_destroyed, nullptr)) {}
+        CountedHandler &operator=(CountedHandler &&) = delete;
+        ~CountedHandler() noexcept
+        {
+            if (m_destroyed != nullptr)
+                m_destroyed->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void operator()(const diagnostics::HookLifecycleEvent &) const noexcept {}
+
+    private:
+        std::atomic<int> *m_destroyed;
+    };
+
+    int run_diagnostics_session()
+    {
+        const std::string log_file = session_log_name("session");
+        if (!warm_diagnostics(log_file))
+            return fail(100, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        std::optional<Session> session;
+        if (!start_session(session, log_file))
+            return fail(101, "the Session did not start");
+        DiagnosticsProbe probe;
+        {
+            const auto lifecycle =
+                std::make_shared<Subscription>(subscribe_probe(diagnostics::hook_lifecycle(), probe));
+            Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
+            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                return fail(102, "two diagnostics subscriptions did not share exactly one TLS index");
+            if (!diagnostics_emits_tracked(*lifecycle, faults, probe))
+                return fail(103, "a diagnostics emit was not tracked");
+            // The production emit path, a hook transition, also records its frame.
+            probe.tracked.store(false, std::memory_order_relaxed);
+            if (!mid_cycle(&tls_target_3) || !probe.tracked.load(std::memory_order_relaxed))
+                return fail(104, "a hook transition emit was not tracked");
+            // A config callback keeps the lifecycle subscription live until config::clear() inside ~Session.
+            config::bind_int("TlsIndexReturn", "Owner", "tls_index_return_owner", [lifecycle](int) noexcept {}, 0);
+        }
+        session.reset();
+        if (dmk_lifecycle::free_tls_indices() != baseline)
+            return fail(105, "Session teardown did not return the diagnostics TLS index");
+        if (diagnostics_leaks() != 0)
+            return fail(106, "a clean Session teardown recorded a diagnostics leak");
+
+        // A later subscription reserves a fresh index through the first publish and records its frames.
+        {
+            Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+            Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
+            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                return fail(107, "a later subscription did not reserve exactly one TLS index");
+            if (!diagnostics_emits_tracked(lifecycle, faults, probe))
+                return fail(108, "an emit after the teardown release was not tracked");
+        }
+        memory::shutdown_cache();
+        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+            return fail(109, "the later subscription's index did not return");
+        remove_file(log_file);
+        std::puts("DIAGNOSTICS_TLS_INDEX_RETURNS_WITH_THE_SESSION");
+        return 0;
+    }
+
+    int run_diagnostics_cache_shutdown()
+    {
+        if (!warm_diagnostics({}))
+            return fail(110, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        DiagnosticsProbe probe;
+        {
+            Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+            Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
+            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                return fail(111, "two diagnostics subscriptions did not share exactly one TLS index");
+            // A live subscription stays an ordinary owner across a cache shutdown without a Session.
+            memory::shutdown_cache();
+            if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+                return fail(112, "a cache shutdown under a live subscription returned the index or recorded a leak");
+            if (!diagnostics_emits_tracked(lifecycle, faults, probe))
+                return fail(113, "an emit after the cache shutdown was not tracked");
+        }
+        memory::shutdown_cache();
+        if (dmk_lifecycle::free_tls_indices() != baseline)
+            return fail(114, "a cache shutdown without a Session did not return the index");
+        if (diagnostics_leaks() != 0)
+            return fail(115, "a clean cache shutdown recorded a diagnostics leak");
+        std::puts("DIAGNOSTICS_TLS_INDEX_RETURNS_ON_CACHE_SHUTDOWN_WITHOUT_A_SESSION");
+        return 0;
+    }
+
+    int run_diagnostics_cache_restart()
+    {
+        const std::string log_file = session_log_name("restart");
+        if (!warm_diagnostics(log_file))
+            return fail(120, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        std::optional<Session> session;
+        if (!start_session(session, log_file))
+            return fail(121, "the Session did not start");
+        DiagnosticsProbe probe;
+        {
+            Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+            Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
+            // A cache restart inside a Session is ordinary operation, not a teardown.
+            memory::shutdown_cache();
+            if (!memory::init_cache())
+                return fail(122, "the cache did not restart");
+            memory::shutdown_cache();
+            if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+                return fail(123, "a cache restart inside a Session returned the index or recorded a leak");
+            if (!diagnostics_emits_tracked(lifecycle, faults, probe))
+                return fail(124, "an emit after the cache restart was not tracked");
+        }
+        // Inside a Session, the Session teardown owns the release.
+        memory::shutdown_cache();
+        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            return fail(125, "a cache shutdown inside a Session returned the index");
+        session.reset();
+        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+            return fail(126, "Session teardown after a cache restart did not return the index cleanly");
+        remove_file(log_file);
+        std::puts("DIAGNOSTICS_TLS_INDEX_STAYS_THROUGH_A_CACHE_RESTART");
+        return 0;
+    }
+
+    int run_diagnostics_live()
+    {
+        const std::string log_file = session_log_name("live");
+        if (!warm_diagnostics(log_file))
+            return fail(130, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        DiagnosticsProbe probe;
+        Subscription lifecycle;
+        {
+            std::optional<Session> session;
+            if (!start_session(session, log_file))
+                return fail(131, "the Session did not start");
+            lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+        }
+        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            return fail(132, "Session teardown returned the index under a live subscription");
+        if (diagnostics_leaks() != 1)
+            return fail(133, "the index kept by a live subscription did not record one diagnostics leak");
+        const std::string text = read_text(log_file);
+        if (text.find("hook_lifecycle dispatcher kept its emit TLS index") == std::string::npos ||
+            text.find("a subscription is still live") == std::string::npos)
+            return fail(134, "the kept index did not log its cause");
+        probe.tracked.store(false, std::memory_order_relaxed);
+        emit_lifecycle();
+        if (!probe.tracked.load(std::memory_order_relaxed))
+            return fail(135, "an emit on the kept index was not tracked");
+        {
+            std::optional<Session> session;
+            if (!start_session(session, log_file))
+                return fail(136, "the second Session did not start");
+        }
+        if (diagnostics_leaks() != 1)
+            return fail(137, "a second teardown counted the same kept index again");
+        lifecycle.reset();
+        memory::shutdown_cache();
+        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1)
+            return fail(138, "a later cache shutdown did not return the kept index");
+        // A return ends that ownership, so a new kept ownership records again.
+        {
+            std::optional<Session> session;
+            if (!start_session(session, log_file))
+                return fail(131, "the Session did not start");
+            lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+        }
+        lifecycle.reset();
+        memory::shutdown_cache();
+        if (diagnostics_leaks() != 2 || dmk_lifecycle::free_tls_indices() != baseline)
+            return fail(139, "a new kept ownership after a return did not record again");
+        remove_file(log_file);
+        std::puts("DIAGNOSTICS_TLS_INDEX_STAYS_WITH_A_LIVE_SUBSCRIPTION");
+        return 0;
+    }
+
+    int run_diagnostics_running()
+    {
+        const std::string log_file = session_log_name("running");
+        if (!warm_diagnostics(log_file))
+            return fail(140, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        std::optional<Session> session;
+        if (!start_session(session, log_file))
+            return fail(141, "the Session did not start");
+        ParkedHandler<diagnostics::HookLifecycleEvent> parked{diagnostics::hook_lifecycle(), &emit_lifecycle};
+        if (!parked.wait_parked())
+            return fail(142, "the diagnostics handler never parked");
+        // reset() compacts the running entry out of the current list, so only the held list shows the handler.
+        parked.reset_subscription();
+        std::thread resumer(
+            [&parked]
+            {
+                std::this_thread::sleep_for(HANDLER_RESUME_DELAY);
+                parked.signal();
+            }
+        );
+        const auto start = std::chrono::steady_clock::now();
+        session.reset();
+        const auto waited = elapsed_since(start);
+        resumer.join();
+        parked.resume();
+        if (waited < WAITED_FLOOR || waited >= TEARDOWN_WAIT_FLOOR)
+            return fail(143, "Session teardown did not wait for the running handler inside its bound");
+        if (!parked.tracked_after_resume())
+            return fail(144, "the index was returned while the handler still ran");
+        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+            return fail(145, "the teardown that outwaited the handler did not return the index cleanly");
+        remove_file(log_file);
+        std::puts("DIAGNOSTICS_TLS_INDEX_WAITS_FOR_A_RUNNING_HANDLER");
+        return 0;
+    }
+
+    int run_diagnostics_parked()
+    {
+        const std::string log_file = session_log_name("parked");
+        if (!warm_diagnostics(log_file))
+            return fail(150, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        std::optional<Session> session;
+        if (!start_session(session, log_file))
+            return fail(151, "the Session did not start");
+        ParkedHandler<diagnostics::HookLifecycleEvent> parked{diagnostics::hook_lifecycle(), &emit_lifecycle};
+        if (!parked.wait_parked())
+            return fail(152, "the diagnostics handler never parked");
+        parked.reset_subscription();
+        const auto start = std::chrono::steady_clock::now();
+        session.reset();
+        const auto waited = elapsed_since(start);
+        int status = 0;
+        if (waited < TEARDOWN_WAIT_FLOOR)
+            status = fail(153, "Session teardown did not wait out its bound for the parked handler");
+        if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            status = fail(154, "Session teardown returned the index under a parked handler");
+        if (status == 0 && diagnostics_leaks() != 1)
+            status = fail(155, "the index kept by a parked handler did not record one diagnostics leak");
+        if (status == 0 && read_text(log_file).find("an emit still held a handler list") == std::string::npos)
+            status = fail(156, "the kept index did not log its cause");
+        parked.resume();
+        if (status == 0 && !parked.tracked_after_resume())
+            status = fail(157, "the parked handler lost its tracked frame");
+        memory::shutdown_cache();
+        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+            status = fail(158, "a later cache shutdown did not return the kept index");
+        if (status == 0)
+        {
+            remove_file(log_file);
+            std::puts("DIAGNOSTICS_TLS_INDEX_STAYS_WITH_A_PARKED_HANDLER");
+        }
+        return status;
+    }
+
+    int run_diagnostics_self()
+    {
+        if (!warm_diagnostics({}))
+            return fail(160, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        // The other dispatcher holds a running handler too, so a wait on either lasts the whole bound.
+        ParkedHandler<diagnostics::ScannerFaultEvent> parked{diagnostics::scanner_faults(), &emit_scanner_fault};
+        if (!parked.wait_parked())
+            return fail(161, "the scanner-fault handler never parked");
+        parked.reset_subscription();
+        std::chrono::milliseconds waited{-1};
+        std::uint64_t pauses = ~std::uint64_t{0};
+        Subscription self;
+        self = diagnostics::hook_lifecycle().subscribe(
+            [&](const diagnostics::HookLifecycleEvent &) noexcept
+            {
+                self.tombstone();
+                const std::uint64_t pauses_before = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                                                    detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+                const auto start = std::chrono::steady_clock::now();
+                memory::shutdown_cache();
+                waited = elapsed_since(start);
+                pauses = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                         detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) - pauses_before;
+            }
+        );
+        emit_lifecycle();
+        int status = 0;
+        if (pauses != 0 || waited >= NO_WAIT_CEILING)
+            status = fail(162, "a teardown inside a diagnostics handler waited");
+        if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            status = fail(163, "a teardown inside a diagnostics handler returned the index");
+        if (status == 0 && diagnostics_leaks() != 2)
+            status = fail(164, "the two kept ownerships did not record one diagnostics leak each");
+        self.reset();
+        parked.resume();
+        memory::shutdown_cache();
+        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 2))
+            status = fail(165, "a later cache shutdown did not return the kept index");
+        if (status == 0)
+            std::puts("DIAGNOSTICS_TLS_INDEX_TEARDOWN_INSIDE_A_HANDLER_NEVER_WAITS");
+        return status;
+    }
+
+    int run_diagnostics_loader_lock()
+    {
+        if (!warm_diagnostics({}))
+            return fail(170, "the warm-up diagnostics cycle was not tracked");
+        const dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Trace};
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+
+        // An idle owner returns its index in one attempt, without the prune and its callable destruction.
+        std::atomic<int> destroyed{0};
+        Subscription retired = diagnostics::hook_lifecycle().subscribe(CountedHandler{&destroyed});
+        retired.tombstone();
+        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            return fail(171, "the retired subscription did not hold exactly one TLS index");
+        const int destroyed_before = destroyed.load(std::memory_order_relaxed);
+        {
+            const dmk_test::ForcedLoaderProbe held;
+            memory::shutdown_cache();
+        }
+        if (dmk_lifecycle::free_tls_indices() != baseline ||
+            destroyed.load(std::memory_order_relaxed) != destroyed_before || diagnostics_leaks() != 0)
+            return fail(172, "a loader-lock release did not return the idle index without a callable destruction");
+        retired.reset();
+
+        // A running handler keeps the index at once, with a record and no log.
+        int status = 0;
+        {
+            ParkedHandler<diagnostics::HookLifecycleEvent> parked{diagnostics::hook_lifecycle(), &emit_lifecycle};
+            if (!parked.wait_parked())
+                return fail(173, "the diagnostics handler never parked");
+            parked.reset_subscription();
+            const std::uint64_t pauses_before = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                                                detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+            const auto start = std::chrono::steady_clock::now();
+            {
+                const dmk_test::ForcedLoaderProbe held;
+                memory::shutdown_cache();
+            }
+            const auto waited = elapsed_since(start);
+            const std::uint64_t pauses = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                                         detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) - pauses_before;
+            if (pauses != 0 || waited >= NO_WAIT_CEILING)
+                status = fail(174, "a loader-lock release waited for a running handler");
+            if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                status = fail(175, "a loader-lock release returned the index under a running handler");
+            if (status == 0 && diagnostics_leaks() != 1)
+                status = fail(176, "the index kept under the loader lock did not record one diagnostics leak");
+            if (status == 0 && capture.read_all().find("kept its emit TLS index") != std::string::npos)
+                status = fail(177, "a loader-lock release logged");
+        }
+        memory::shutdown_cache();
+        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+            status = fail(178, "a later cache shutdown did not return the kept index");
+        if (status == 0)
+            std::puts("DIAGNOSTICS_TLS_INDEX_LOADER_LOCK_RELEASE_NEVER_WAITS");
+        return status;
+    }
+
+    int run_diagnostics_process_exit()
+    {
+        if (!warm_diagnostics({}))
+            return fail(180, "the warm-up diagnostics cycle was not tracked");
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        DiagnosticsProbe probe;
+        {
+            Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
+            emit_lifecycle();
+            if (!probe.tracked.load(std::memory_order_relaxed))
+                return fail(181, "the diagnostics emit was not tracked");
+        }
+        {
+            const dmk_test::ForcedLoaderProbe held;
+            detail::lifecycle().set_loader_context(detail::LoaderContext::ProcessExit);
+            memory::shutdown_cache();
+        }
+        if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+            return fail(182, "a process-exit teardown touched the diagnostics ownership");
+        memory::shutdown_cache();
+        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+            return fail(183, "a later cache shutdown did not return the idle index");
+        std::puts("DIAGNOSTICS_TLS_INDEX_PROCESS_EXIT_SKIPS_THE_RELEASE");
+        return 0;
+    }
+
+    int run_diagnostics_untracked()
+    {
+        if (!warm_diagnostics({}))
+            return fail(190, "the warm-up diagnostics cycle was not tracked");
+        const dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Trace};
+        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        int status = 0;
+        {
+            ParkedHandler<diagnostics::HookLifecycleEvent> parked{diagnostics::hook_lifecycle(), &emit_lifecycle};
+            if (!parked.wait_parked())
+                return fail(191, "the diagnostics handler never parked");
+            parked.reset_subscription();
+            // An emit without a recorded frame can run on the teardown thread, so the teardown cannot prove that a wait
+            // ends.
+            detail::untracked_emit_frames().fetch_add(1, std::memory_order_seq_cst);
+            const std::uint64_t pauses_before = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                                                detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+            const auto start = std::chrono::steady_clock::now();
+            memory::shutdown_cache();
+            const auto waited = elapsed_since(start);
+            const std::uint64_t pauses = detail::g_drain_backoff_yields.load(std::memory_order_relaxed) +
+                                         detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) - pauses_before;
+            detail::untracked_emit_frames().fetch_sub(1, std::memory_order_seq_cst);
+            if (pauses != 0 || waited >= NO_WAIT_CEILING)
+                status = fail(192, "a teardown waited while an untracked emit ran");
+            if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                status = fail(193, "a teardown returned the index while an untracked emit ran");
+            if (status == 0 && diagnostics_leaks() != 1)
+                status = fail(194, "the index kept while an untracked emit ran did not record one diagnostics leak");
+            if (status == 0 && capture.read_all().find("or while an untracked emit ran") == std::string::npos)
+                status = fail(195, "the kept index did not log its cause");
+        }
+        memory::shutdown_cache();
+        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+            status = fail(196, "a later cache shutdown did not return the kept index");
+        if (status == 0)
+            std::puts("DIAGNOSTICS_TLS_INDEX_TEARDOWN_WITH_AN_UNTRACKED_EMIT_NEVER_WAITS");
+        return status;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -649,10 +1269,32 @@ int main(int argc, char **argv)
         return run_guarded_read_return();
     if (scenario == "guarded-read-in-flight")
         return run_guarded_read_in_flight();
+    if (scenario == "diagnostics-session")
+        return run_diagnostics_session();
+    if (scenario == "diagnostics-cache-shutdown")
+        return run_diagnostics_cache_shutdown();
+    if (scenario == "diagnostics-cache-restart")
+        return run_diagnostics_cache_restart();
+    if (scenario == "diagnostics-live")
+        return run_diagnostics_live();
+    if (scenario == "diagnostics-running")
+        return run_diagnostics_running();
+    if (scenario == "diagnostics-parked")
+        return run_diagnostics_parked();
+    if (scenario == "diagnostics-self")
+        return run_diagnostics_self();
+    if (scenario == "diagnostics-loader-lock")
+        return run_diagnostics_loader_lock();
+    if (scenario == "diagnostics-process-exit")
+        return run_diagnostics_process_exit();
+    if (scenario == "diagnostics-untracked")
+        return run_diagnostics_untracked();
     // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario.
     std::fputs(
         "usage: tls_index_return <mid-return|mid-retained|mid-exhausted|emit-return|emit-live-owner|delivery-return|"
-        "delivery-live-owner|guarded-read-return|guarded-read-in-flight>\n",
+        "delivery-live-owner|guarded-read-return|guarded-read-in-flight|diagnostics-session|"
+        "diagnostics-cache-shutdown|diagnostics-cache-restart|diagnostics-live|diagnostics-running|diagnostics-parked|"
+        "diagnostics-self|diagnostics-loader-lock|diagnostics-process-exit|diagnostics-untracked>\n",
         stderr
     );
     return 1;

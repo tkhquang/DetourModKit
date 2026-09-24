@@ -571,7 +571,8 @@ add_executable(tls_index_return tls_index_return.cpp)
 target_link_libraries(tls_index_return PRIVATE DetourModKit dmk_coverage)
 target_include_directories(tls_index_return PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(tls_index_return PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(tls_index_return)
 add_dependencies(dmk_lifecycle_proof_hosts tls_index_return)
@@ -583,7 +584,17 @@ foreach(tls_proof IN ITEMS
     "EmitTlsIndexReturnsWithTheLastSubscribedDispatcher|emit-return"
     "EmitTlsIndexStaysWithALiveDispatcher|emit-live-owner"
     "DeliveryTlsIndexReturnsWithTheLastGate|delivery-return"
-    "DeliveryTlsIndexStaysWithALiveGate|delivery-live-owner")
+    "DeliveryTlsIndexStaysWithALiveGate|delivery-live-owner"
+    "DiagnosticsTlsIndexReturnsWithTheSession|diagnostics-session"
+    "DiagnosticsTlsIndexReturnsOnCacheShutdownWithoutASession|diagnostics-cache-shutdown"
+    "DiagnosticsTlsIndexStaysThroughACacheRestart|diagnostics-cache-restart"
+    "DiagnosticsTlsIndexStaysWithALiveSubscription|diagnostics-live"
+    "DiagnosticsTlsIndexWaitsForARunningHandler|diagnostics-running"
+    "DiagnosticsTlsIndexStaysWithAParkedHandler|diagnostics-parked"
+    "DiagnosticsTlsIndexTeardownInsideAHandlerNeverWaits|diagnostics-self"
+    "DiagnosticsTlsIndexLoaderLockReleaseNeverWaits|diagnostics-loader-lock"
+    "DiagnosticsTlsIndexProcessExitSkipsTheRelease|diagnostics-process-exit"
+    "DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits|diagnostics-untracked")
   string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
   list(GET tls_proof_parts 0 tls_proof_name)
   list(GET tls_proof_parts 1 tls_proof_scenario)
