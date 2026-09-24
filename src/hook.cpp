@@ -1322,6 +1322,9 @@ namespace DetourModKit
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
             coordinator.reset();
 
+            // A callback frame resolves through mid_rundown. Otherwise only a displaced call can return into this
+            // route from the caller stack. A hook from inline_at publishes no gateway, and a mid gateway reaches its
+            // stub without a wrapper call.
             const bool caller_owns_route = backend_value_or(
                 m_impl->backend,
                 true,
