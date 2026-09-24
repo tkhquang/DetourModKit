@@ -135,6 +135,9 @@ namespace DetourModKit
              *          itself inside a delivery.
              */
             [[nodiscard]] virtual bool retire(std::chrono::steady_clock::time_point deadline) = 0;
+
+            /// Keeps the delivery marker's TLS index published while this gate can open a frame.
+            DeliveryTlsOwner delivery_tls;
         };
 
         /**

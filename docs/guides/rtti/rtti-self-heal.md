@@ -241,7 +241,7 @@ A drift report is the signal that a patch moved a layout. When it shows a field 
 | Mode | Handling |
 |------|----------|
 | `slot` / `base` below `0x10000` | L1 `false`, L3 `BadDescriptor`. No memory touched. |
-| Unmapped page at a slot | the SEH-guarded read returns nothing -> non-match, never a fault. |
+| Unmapped page at a slot | the guarded read returns nothing -> non-match, never a fault. |
 | Slot is neither a pointer-to-object nor a direct vtable | both resolve attempts fail -> slot skipped. |
 | Forged COL / non-x64 signature / `pSelf` mismatch / out-of-range RVA | the prelude's bound-check + cross-check guards reject it -> slot skipped. |
 | Empty/oversized name, bad enum, `window` over the cap | `BadDescriptor` before any read. |

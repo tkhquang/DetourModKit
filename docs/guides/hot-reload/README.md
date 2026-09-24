@@ -206,7 +206,9 @@ Do not pass C++ containers, pointers with ownership, exceptions, or standard-lib
 
 ### Threads, TLS, and static constructors
 
-TLS reservations persist until process exit. The [generation resource proof](../../design/testing.md#generation-resource-proof) records them for each toolchain.
+Each DMK TLS index returns with its last owner. A clean generation therefore returns every index that it reserved, unless it subscribed to `diagnostics::hook_lifecycle()` or `diagnostics::scanner_faults()`. Those dispatchers are never destroyed, so a subscription makes one of them an owner that never returns its index, even after `FreeLibrary`. Each generation that subscribes therefore consumes one TLS index until the process exits. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
+
+A MinGW generation that imports `libwinpthread-1.dll` takes one TLS index on each fresh load that it uses, and the runtime never returns it. A host that keeps the runtime loaded avoids that cost. With the runtime kept loaded, a thread that used emulated TLS inside a generation must exit before that generation unloads. A C++ exception or a `thread_local` access is such a use. Otherwise the thread exit calls a destructor in the unmapped image, the runtime keeps its key lock, and the next key creation hangs.
 
 Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
 

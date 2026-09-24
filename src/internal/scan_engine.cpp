@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <new>
 #include <optional>
+#include <span>
 #include <vector>
 
 // DMK_ARCH_X64 in defines.hpp rejects every other target, so SSE2 and the AVX2 intrinsic headers are always present
@@ -373,12 +374,7 @@ namespace DetourModKit
 
     std::optional<detail::EnginePattern> detail::parse_aob(std::string_view aob_str)
     {
-        // Parse through the shared grammar into a heap-backed sink so the runtime engine and scan::Pattern accept the
-        // same DSL, while long runtime patterns keep using growable storage instead of the literal type's fixed cap.
-        // The heap-backed sink grows the pattern vectors as it parses, so an adversarial or very long AOB (a string of
-        // arbitrary length routed here by find_string_xref) can exhaust memory. Catch that here and fail closed to
-        // nullopt rather than letting bad_alloc escape. The parse_aob callers already treat nullopt as an unusable
-        // pattern, so this degrades to a clean scan miss instead of terminating the host.
+        // An unbounded AOB can exhaust the heap sink, so bad_alloc fails closed to nullopt.
         try
         {
             EnginePatternSink sink;

@@ -1693,14 +1693,6 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::mid_at"});
             }
-            // Reserve the entry TLS index before dispatch becomes possible. A later acquire allocates on a host thread
-            // during a callback.
-            if (!DetourModKit::detail::ensure_mid_entry_tls())
-            {
-                const DWORD tls_error = ::GetLastError();
-                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", tls_error});
-            }
             ModuleRefGuard self_ref(acquire_hook_self_ref());
             if (self_ref.get() == nullptr)
             {
@@ -1715,12 +1707,18 @@ namespace DetourModKit
             }
             // One adapter exists per live mid hook. MidAdapterSlotGuard releases the slot on every failure path below.
             // No adapter entry occurred because StartDisabled leaves the target unpatched until enable().
-            const std::size_t slot_index = DetourModKit::detail::claim_mid_adapter_slot();
-            if (slot_index >= DetourModKit::detail::MID_ADAPTER_CAPACITY)
+            const DetourModKit::detail::MidSlotClaim claim = DetourModKit::detail::claim_mid_adapter_slot();
+            if (claim.status == DetourModKit::detail::MidSlotClaimStatus::EntryIndexUnavailable)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", claim.system_error});
+            }
+            if (claim.status != DetourModKit::detail::MidSlotClaimStatus::Claimed)
             {
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::MidHookCapacityExhausted, "hook::mid_at", target});
             }
+            const std::size_t slot_index = claim.index;
             MidAdapterSlotGuard slot_guard(slot_index);
             DetourModKit::detail::MidAdapterSlot &slot = DetourModKit::detail::mid_adapter_slots()[slot_index];
             slot.target.store(target, std::memory_order_relaxed);

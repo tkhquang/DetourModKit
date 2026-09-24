@@ -144,16 +144,16 @@ White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_in
 
 ## Generation resource proof
 
-`Lifecycle.StagedGenerationResourcesStayWithinBudget` exercises six mid hooks per fresh DLL. It also exercises one inline hook and omits VMT hooks. The first 101 generations must unmap and leave no route record or intentional leak.
+`Lifecycle.StagedGenerationResourcesStayWithinBudget` exercises six mid hooks per fresh DLL. It also exercises one inline hook, one input binding, and one subscribed namespace-scope dispatcher, and it omits VMT hooks. The first 101 generations must unmap and leave no route record or intentional leak.
 
 The next generation parks one caller before the entry count of its first mid route and then tears down. It must book one HookManager leak, keep one retained route record, and stay mapped. The released caller must return the target value through the route bypass. Two clean generations follow, and the retained record must remain.
 
 The host measures executable bytes with `VirtualQuery`. Each generation retains exactly one executable trap page. A retained route also retains one allocation-granularity block.
 
-The host counts free TLS indices in the process TLS bitmaps under the PEB lock. Each generation, the first included, reserves two TLS indices under MinGW and one under MSVC. The host stages one discarded copy before its baseline, because the first host staging takes platform TLS indices. The MinGW host first holds one initialized `libwinpthread-1.dll` load, because each new load of that runtime takes a TLS index that its unload never returns.
+The host counts free TLS indices in the process TLS bitmaps under the PEB lock. Every clean generation returns each TLS index that it reserved, on both toolchains. The retained generation keeps two indices, one for its claimed mid slot and one for its dispatcher. The host stages one discarded copy before its baseline, because the first host staging takes platform TLS indices. The MinGW host first holds one initialized `libwinpthread-1.dll` load, because each new load of that runtime takes a TLS index that its unload never returns.
 
 The coordinator mapping must preserve its address and size and hold only the expected retained record. After each unload, the process must hold one view of the coordinator section and one handle each to its lock and section. The [hook note](hooking.md#process-route-coordinator) owns its fixed budget.
 
 The exact census requires an uninstrumented process. ASan retains separate executable VEH wrapper pages, so the census returns skip code 77 under ASan. The `Lifecycle.RouteCopies*` proofs still execute under ASan.
 
-`Lifecycle.RouteCopiesRetainLayeredDependencies` verifies layered retention across participants. The caller resumes after both loader references drop. A forced unreported route retention must fail the generation resource proof. A disabled coordinator must fail the cross-copy schedule or dependency proof.
+`Lifecycle.RouteCopiesRetainLayeredDependencies` verifies layered retention across participants. The caller resumes after both loader references drop. A forced unreported route retention must fail the generation resource proof, and so must a TLS owner that never returns its index. A disabled coordinator must fail the cross-copy schedule or dependency proof.

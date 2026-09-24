@@ -140,13 +140,7 @@ namespace DetourModKit
          * @param range The scope the sweep will read.
          * @param pages The page class the sweep accepts.
          * @param exclusions Caller-declared copies of the query material; a non-empty span asserts completeness.
-         * @details A readable sweep reads every committed page of its scope, so a scope that spans arbitrary process
-         *          memory also covers the allocator pages the caller's own copies of the query bytes live on. DMK
-         *          excludes every query representation it owns, but it cannot discover a caller-retained copy, so such
-         *          a scope can only report that the query found itself. A scope confined to one mapped image or to one
-         *          memory allocation is fine: the caller named exactly what it wanted searched. An executable-page
-         *          sweep is always authoritative, because no query representation is placed on an execute-readable
-         *          page.
+         * @details Implements the Readable authority rule of @ref scan::Pages.
          */
         [[nodiscard]] bool readable_scan_is_authoritative(
             ModuleSpan range,

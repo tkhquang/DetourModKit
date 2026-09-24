@@ -1785,7 +1785,9 @@ TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
 
 TEST(SessionHotReload, TypedPreparationRefusesSelfDelivery)
 {
+    const DetourModKit::detail::DeliveryTlsOwner delivery_tls;
     const DetourModKit::detail::DeliveryScope delivery;
+    ASSERT_TRUE(delivery.admitted());
     EXPECT_EQ(prepare_logic_dll_unload({}), LogicDllUnloadStatus::SelfDelivery);
 }
 

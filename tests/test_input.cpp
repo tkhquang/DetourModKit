@@ -4974,7 +4974,8 @@ TEST(InputLifecycleProof, StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures)
 // itself: the span's own thread must read as callback-entrant with no depth to lean on.
 TEST(BindingGateTest, TeardownConsumerCodeIsIdentifiedWhenTheDepthStoreRefuses)
 {
-    ASSERT_TRUE(detail::reserve_delivery_scope_tls());
+    const detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
     ASSERT_TRUE(detail::set_delivery_scope_store_failure_for_test(true));
 
     std::atomic<int> balancing{0};
@@ -5008,7 +5009,8 @@ TEST(BindingGateTest, TeardownConsumerCodeIsIdentifiedWhenTheDepthStoreRefuses)
 // unrelated thread would read itself as callback-entrant and skip the rundown its contract promises.
 TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
 {
-    ASSERT_TRUE(detail::reserve_delivery_scope_tls());
+    const detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
 
     std::atomic<bool> inside_callback{false};
     std::atomic<bool> unrelated_saw_itself_in_delivery{true};
@@ -5464,6 +5466,8 @@ TEST(BindingGateTest, PressGateSelfReleaseFromCallbackDoesNotDeadlock)
 // answer would let that release return while a callback is still reading the caller's state.
 TEST(BindingGateTest, DeliveryMarkerIsExactPerThread)
 {
+    const detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
     EXPECT_FALSE(detail::current_thread_in_delivery());
 
     std::atomic<bool> scope_open{false};
@@ -5501,6 +5505,8 @@ TEST(BindingGateTest, DeliveryMarkerIsExactPerThread)
 // A nested delivery (a callback that drives a second gate) must not clear the outer frame when it unwinds.
 TEST(BindingGateTest, DeliveryMarkerNestsWithoutLosingDepth)
 {
+    const detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
     {
         const detail::DeliveryScope outer;
         ASSERT_TRUE(outer.admitted());

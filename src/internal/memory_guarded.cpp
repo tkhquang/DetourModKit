@@ -25,7 +25,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
 #include <thread>
 
 namespace DetourModKit
@@ -306,11 +305,41 @@ namespace DetourModKit
             volatile std::uintptr_t fault_address;
         };
 
-        std::mutex s_veh_mutex;
+        // Constant-initialized and trivially destructible, so install and removal stay usable during static
+        // destruction (`[B-47]`).
+        SRWLOCK s_veh_lock = SRWLOCK_INIT;
+
+        /// Holds s_veh_lock exclusively for one scope.
+        struct VehLockGuard
+        {
+            VehLockGuard() noexcept { AcquireSRWLockExclusive(&s_veh_lock); }
+            ~VehLockGuard() noexcept { ReleaseSRWLockExclusive(&s_veh_lock); }
+
+            VehLockGuard(const VehLockGuard &) = delete;
+            VehLockGuard &operator=(const VehLockGuard &) = delete;
+            VehLockGuard(VehLockGuard &&) = delete;
+            VehLockGuard &operator=(VehLockGuard &&) = delete;
+        };
+
         std::atomic<void *> s_veh_handle{nullptr};
-        // The process-lifetime TLS index never becomes free. Handler removal cannot invalidate an index held by a
-        // concurrent access.
+        // remove_veh_handler returns the index after the drain and the unlink, when no armed access can hold it. A
+        // failed install keeps the index until that return (Lifecycle.GuardedReadTlsIndexReturnsOnRelease).
         std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<std::uint32_t> s_seam_veh_arm_failure_thread{0};
+#endif
+
+        // Arms @p guard in this thread's slot. The first store of an index past the TEB's inline slots can fail. An
+        // unarmed access must not touch the foreign range.
+        [[nodiscard]] bool arm_veh_guard(DWORD slot, VehAccessGuard *guard) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_seam_veh_arm_failure_thread.load(std::memory_order_relaxed) == GetCurrentThreadId())
+                return false;
+#endif
+            return TlsSetValue(slot, guard) != FALSE;
+        }
 
         // Cache-line-padded counters stripe current guarded-path accesses and avoid contention on one global line.
         // The release_guarded_engine function drains the sum to zero before handler removal. The handle-null store,
@@ -349,7 +378,7 @@ namespace DetourModKit
         }
 
         // Return true when this thread already executes a guarded access. A nested access must not call
-        // ensure_veh_installed. A wait on s_veh_mutex deadlocks with remove_veh_handler, which holds that mutex until
+        // ensure_veh_installed. A wait on s_veh_lock deadlocks with remove_veh_handler, which holds that lock until
         // this thread exits. The omitted install loses nothing. After teardown, the seq_cst handle load routes a
         // nested access to the fallback.
         [[nodiscard]] inline bool inside_guarded_access() noexcept
@@ -415,15 +444,15 @@ namespace DetourModKit
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        // Install the handler on first demand and permit installation after teardown. On failure, the null handle
-        // routes byte-copy guards to the VirtualQuery fallback. In-place region guards fail closed before access to
-        // the foreign range.
+        // Install the handler on first demand and permit installation after teardown, with a fresh index. On failure,
+        // the null handle routes byte-copy guards to the VirtualQuery fallback. In-place region guards fail closed
+        // before access to the foreign range.
         void ensure_veh_installed() noexcept
         {
             if (s_veh_handle.load(std::memory_order_acquire) != nullptr)
                 return;
 
-            std::lock_guard<std::mutex> lock(s_veh_mutex);
+            VehLockGuard lock;
             if (s_veh_handle.load(std::memory_order_relaxed) != nullptr)
                 return;
             if (s_veh_tls_index.load(std::memory_order_relaxed) == TLS_OUT_OF_INDEXES)
@@ -441,24 +470,33 @@ namespace DetourModKit
 
         void remove_veh_handler() noexcept
         {
-            std::lock_guard<std::mutex> lock(s_veh_mutex);
+            VehLockGuard lock;
             void *const handle = s_veh_handle.load(std::memory_order_relaxed);
-            if (handle == nullptr)
-                return;
-            // Stop new guarded accesses, then wait for each access already committed to the handler path. No fault can
-            // arrive after handler removal. The seq_cst store pairs with the helpers' seq_cst stripe fetch_add and
-            // handle load under Dekker. The sum below cannot read zero while such an access is live.
-            s_veh_handle.store(nullptr, std::memory_order_seq_cst);
-            int spins = 0;
-            while (veh_in_flight_total() > 0)
+            if (handle != nullptr)
             {
-                if (spins < 4096)
-                    std::this_thread::yield();
-                else
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
-                ++spins;
+                // Stop new guarded accesses, then wait for each access already committed to the handler path. No fault
+                // can arrive after handler removal. The seq_cst store pairs with the helpers' seq_cst stripe fetch_add
+                // and handle load under Dekker. The sum below cannot read zero while such an access is live.
+                s_veh_handle.store(nullptr, std::memory_order_seq_cst);
+                int spins = 0;
+                while (veh_in_flight_total() > 0)
+                {
+                    if (spins < 4096)
+                        std::this_thread::yield();
+                    else
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    ++spins;
+                }
+                RemoveVectoredExceptionHandler(handle);
             }
-            RemoveVectoredExceptionHandler(handle);
+            // A failed AddVectoredExceptionHandler leaves an index with no handle, so the return runs on both paths.
+            // The reset precedes TlsFree, so a later install reserves a fresh index instead of one another module owns.
+            const DWORD slot = s_veh_tls_index.load(std::memory_order_relaxed);
+            if (slot != TLS_OUT_OF_INDEXES)
+            {
+                s_veh_tls_index.store(TLS_OUT_OF_INDEXES, std::memory_order_release);
+                (void)TlsFree(slot);
+            }
         }
 
         // Copy [src, src + len) into out under the vectored handler. Raw inline asm hides the single rep movsb from
@@ -486,8 +524,10 @@ namespace DetourModKit
                 return false;
             }
 
-            // Arm after the setjmp captures env and before the read.
-            TlsSetValue(slot, &guard);
+            // Arm after the setjmp captures env and before the read. An unarmed copy takes the fallback, which never
+            // faults.
+            if (!arm_veh_guard(slot, &guard)) [[unlikely]]
+                return virtualquery_validated_copy(guard.guard_lo, out, len);
 
             void *dst = out;
             const void *cur = src;
@@ -514,7 +554,8 @@ namespace DetourModKit
                                                       : detail::GuardedWriteStatus::MayBePartial;
             }
 
-            TlsSetValue(slot, &guard);
+            if (!arm_veh_guard(slot, &guard)) [[unlikely]]
+                return virtualquery_validated_write(address, source, bytes);
             copy_with_fault_progress(reinterpret_cast<void *>(address), source, bytes);
             TlsSetValue(slot, enclosing);
             return detail::GuardedWriteStatus::Ok;
@@ -540,7 +581,9 @@ namespace DetourModKit
                 return false;
             }
 
-            TlsSetValue(slot, &guard);
+            // An unarmed region fails closed before fn touches the range.
+            if (!arm_veh_guard(slot, &guard)) [[unlikely]]
+                return false;
             fn(ctx);
             TlsSetValue(slot, enclosing);
             return true;
@@ -923,5 +966,17 @@ namespace DetourModKit
     {
         s_seam_guard_rearm_fails.store(fail, std::memory_order_relaxed);
     }
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+    std::uint32_t detail::guarded_engine_tls_index_for_test() noexcept
+    {
+        return s_veh_tls_index.load(std::memory_order_acquire);
+    }
+
+    void detail::set_guard_arm_failure_for_test(bool fail) noexcept
+    {
+        s_seam_veh_arm_failure_thread.store(fail ? GetCurrentThreadId() : 0, std::memory_order_relaxed);
+    }
+#endif
 #endif
 } // namespace DetourModKit
