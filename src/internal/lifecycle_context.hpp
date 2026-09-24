@@ -117,6 +117,9 @@ namespace DetourModKit::detail
     /// The one process-global session control block.
     [[nodiscard]] LifecycleContext &lifecycle() noexcept;
 
+    /** @brief Reports process termination from the published context or the native loader state. */
+    [[nodiscard]] bool process_is_exiting() noexcept;
+
     /**
      * @brief Reports whether the caller is authorized to block, before the loader-lock veto is applied.
      * @details Either the published phase is @ref LoaderContext::Normal or @ref LoaderContext::ExplicitDrain, which

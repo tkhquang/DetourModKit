@@ -93,12 +93,13 @@ namespace DetourModKit::detail
 
     /**
      * @brief Registers one owner of the emit chain's Win32 TLS index. Control-plane only.
-     * @details subscribe() registers each dispatcher once, before its first handler publishes. ~EventDispatcher
-     *          deregisters it, and teardown deregisters an idle diagnostics dispatcher. The last owner returns the
-     *          index. While no owner holds an index, every emit is untracked and a concurrent rundown returns
-     *          Unwaitable instead of a wrong answer. emit_safe() runs on arbitrary host threads, so the chain uses a
-     *          Win32 TLS index instead of `thread_local` ([B-86]).
-     *          Proof: `Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher`.
+     * @details subscribe() registers the dispatcher before its first handler publishes. A later subscription can
+     *          register it again after teardown returns that ownership. Destruction also returns ownership.
+     *          The last owner returns the index. Without an index, emits are untracked and concurrent rundown returns
+     *          Unwaitable.
+     *
+     *          Arbitrary host threads use a Win32 TLS index instead of thread_local ([B-86]).
+     *          Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher proves the return.
      */
     void acquire_emit_frame_owner() noexcept;
 

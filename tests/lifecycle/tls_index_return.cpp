@@ -1246,11 +1246,89 @@ namespace
             std::puts("DIAGNOSTICS_TLS_INDEX_TEARDOWN_WITH_AN_UNTRACKED_EMIT_NEVER_WAITS");
         return status;
     }
+    int run_loader_shutdown_child(int schedule, const char *marker)
+    {
+        const HMODULE fixture = LoadLibraryW(L"process_exit_release_dll.dll");
+        if (fixture == nullptr)
+            return fail(200, "the process-exit fixture did not load");
+        using Prepare = int (*)(int, const wchar_t *);
+        const auto prepare =
+            reinterpret_cast<Prepare>(reinterpret_cast<void *>(GetProcAddress(fixture, "dmk_prepare_process_exit")));
+        if (prepare == nullptr || prepare(schedule, std::filesystem::path(marker).c_str()) != 0)
+            return fail(201, "the process-exit resource did not park");
+        // Return through main so the loader terminates the parked thread before DLL_PROCESS_DETACH.
+        return 0;
+    }
+
+    int run_loader_shutdown(int schedule)
+    {
+#if defined(_MSC_VER)
+        if (schedule != 2)
+            return SKIP_EXIT_CODE;
+#endif
+        static unsigned int s_marker_counter = 0;
+        const auto marker = std::filesystem::temp_directory_path() / ("dmk_exit_" + std::to_string(_getpid()) + "_" +
+                                                                      std::to_string(s_marker_counter++) + ".marker");
+        wchar_t executable[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, executable, MAX_PATH) == 0)
+            return fail(202, "the host path was unavailable");
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" process-exit-child " +
+                               std::to_wstring(schedule) + L" \"" + marker.wstring() + L"\"";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION child{};
+        if (!CreateProcessW(
+                executable,
+                command.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                nullptr,
+                &startup,
+                &child
+            ))
+            return fail(203, "the exit child did not start");
+        CloseHandle(child.hThread);
+        const DWORD wait = WaitForSingleObject(child.hProcess, 10000);
+        if (wait != WAIT_OBJECT_0)
+        {
+            TerminateProcess(child.hProcess, 204);
+            WaitForSingleObject(child.hProcess, 5000);
+        }
+        DWORD code = 0;
+        GetExitCodeProcess(child.hProcess, &code);
+        CloseHandle(child.hProcess);
+        std::ifstream stream(marker, std::ios::binary);
+        const std::string contents{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        stream.close();
+        std::error_code ignored;
+        std::filesystem::remove(marker, ignored);
+        if (wait != WAIT_OBJECT_0 || code != 0)
+            return fail(204, "the child did not exit cleanly within the deadline");
+        if (contents != std::string("EXIT_RELEASE_RETURNED", sizeof("EXIT_RELEASE_RETURNED")))
+            return fail(205, "the loader teardown did not return without a diagnostics leak");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && std::string_view{argv[1]} == "process-exit-child")
+    {
+        const std::string_view schedule{argv[2]};
+        if (schedule != "0" && schedule != "1" && schedule != "2")
+            return 1;
+        return run_loader_shutdown_child(argv[2][0] - '0', argv[3]);
+    }
     const std::string_view scenario = argc == 2 ? std::string_view{argv[1]} : std::string_view{};
+    if (scenario == "guarded-process-exit")
+        return run_loader_shutdown(0);
+    if (scenario == "guarded-lock-process-exit")
+        return run_loader_shutdown(1);
+    if (scenario == "diagnostics-loader-shutdown")
+        return run_loader_shutdown(2);
     if (scenario == "mid-return")
         return run_mid_return();
     if (scenario == "mid-retained")

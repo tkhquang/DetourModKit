@@ -258,7 +258,8 @@ endwhile()
 add_library(veh_unmap_dll SHARED veh_unmap_dll.cpp)
 set_target_properties(veh_unmap_dll PROPERTIES PREFIX "" OUTPUT_NAME "veh_unmap_dll")
 target_link_libraries(veh_unmap_dll PRIVATE DetourModKit dmk_coverage)
-target_include_directories(veh_unmap_dll PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(veh_unmap_dll PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(veh_unmap_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(veh_unmap_dll SHARED)
 
 add_executable(veh_survives_unmap veh_survives_unmap.cpp)
@@ -269,7 +270,10 @@ add_dependencies(dmk_lifecycle_proof_hosts veh_survives_unmap)
 set(veh_survives_unmap_proofs
   Lifecycle.GuardedReadHandlerRetiresWithTheSession                  session
   Lifecycle.GuardedReadHandlerRetiresOnCacheShutdownWithoutASession  hook-only
-  Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache         with-init-cache)
+  Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache         with-init-cache
+  Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession    hook-outlives-session
+  Lifecycle.GuardedReadHandlerReopensOnSessionRestart               session-restart
+  Lifecycle.GuardedReadHandlerReopensOnCacheRestart                 cache-restart)
 while(veh_survives_unmap_proofs)
   list(POP_FRONT veh_survives_unmap_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}
@@ -569,6 +573,13 @@ set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScena
 # Each DMK Win32 TLS index returns with its last owner and stays with a live one. Every scenario owns its process,
 # because a census reads the whole process and a defective return can write through another owner's index.
 add_executable(tls_index_return tls_index_return.cpp)
+add_library(process_exit_release_dll SHARED process_exit_release_dll.cpp)
+set_target_properties(process_exit_release_dll PROPERTIES PREFIX "")
+target_link_libraries(process_exit_release_dll PRIVATE DetourModKit dmk_coverage)
+target_include_directories(process_exit_release_dll PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(process_exit_release_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(process_exit_release_dll SHARED)
+add_dependencies(tls_index_return process_exit_release_dll)
 target_link_libraries(tls_index_return PRIVATE DetourModKit dmk_coverage)
 target_include_directories(tls_index_return PRIVATE
   ${PROJECT_SOURCE_DIR}/include
@@ -595,6 +606,7 @@ foreach(tls_proof IN ITEMS
     "DiagnosticsTlsIndexTeardownInsideAHandlerNeverWaits|diagnostics-self"
     "DiagnosticsTlsIndexLoaderLockReleaseNeverWaits|diagnostics-loader-lock"
     "DiagnosticsTlsIndexProcessExitSkipsTheRelease|diagnostics-process-exit"
+    "DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease|diagnostics-loader-shutdown"
     "DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits|diagnostics-untracked")
   string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
   list(GET tls_proof_parts 0 tls_proof_name)
@@ -609,7 +621,9 @@ endforeach()
 # The guarded-read index exists only on the MinGW vectored-handler arm, so MSVC reports the absent subject with 77.
 foreach(tls_proof IN ITEMS
     "GuardedReadTlsIndexReturnsOnRelease|guarded-read-return"
-    "GuardedReadTlsIndexWaitsForTheInFlightAccess|guarded-read-in-flight")
+    "GuardedReadTlsIndexWaitsForTheInFlightAccess|guarded-read-in-flight"
+    "GuardedReadDrainSkipsAtProcessExit|guarded-process-exit"
+    "GuardedReadLockSkipsAtProcessExit|guarded-lock-process-exit")
   string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
   list(GET tls_proof_parts 0 tls_proof_name)
   list(GET tls_proof_parts 1 tls_proof_scenario)

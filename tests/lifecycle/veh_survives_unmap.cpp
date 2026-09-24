@@ -1,15 +1,10 @@
 /**
  * @file veh_survives_unmap.cpp
- * @brief Proves that the MinGW guarded-read vectored handler retires with the logic image that installed it.
- * @details Loads veh_unmap_dll.dll, runs one hook generation under the selected teardown, unloads the image, and proves
- *          the unmap. It then dispatches two exceptions: a continuable RaiseException that the host's own last-position
- *          handler continues, and a C++ throw. A first-position handler that outlived its image executes unmapped code
- *          inside the dispatcher, so the process dies instead of returning. Exit status is the oracle. `session` tears
- *          down through ~Session with no init_cache. `hook-only` has no Session and calls memory::shutdown_cache().
- *          `with-init-cache` is the positive control whose full cache shutdown always released the handler. MSVC
- *          contains guarded reads in frame-based SEH and installs no handler, so the host skips there.
+ * @brief Verifies exception dispatch after a fixture with a MinGW guarded handler unloads.
+ * @details The host proves the unmap before a native exception and a C++ throw. MSVC uses SEH and skips this proof.
  */
 
+#include <process.h>
 #include <windows.h>
 
 #include <cstdint>
@@ -36,6 +31,14 @@ namespace
         {
             return 2;
         }
+        if (std::strcmp(scenario, "hook-outlives-session") == 0)
+        {
+            return 3;
+        }
+        if (std::strcmp(scenario, "session-restart") == 0)
+            return 4;
+        if (std::strcmp(scenario, "cache-restart") == 0)
+            return 5;
         return -1;
     }
 
@@ -46,7 +49,11 @@ namespace
         {
             return false;
         }
-        std::fprintf(stderr, "usage: veh_survives_unmap <session|hook-only|with-init-cache>\n");
+        std::fprintf(
+            stderr,
+            "usage: veh_survives_unmap "
+            "<session|hook-only|with-init-cache|hook-outlives-session|session-restart|cache-restart>\n"
+        );
         return true;
     }
 } // namespace
@@ -127,8 +134,7 @@ int main(int argc, char **argv)
     dispatch_exceptions();
 
     const std::filesystem::path log_path =
-        std::filesystem::temp_directory_path() /
-        ("dmk_veh_unmap_" + std::to_string(static_cast<unsigned long>(GetCurrentProcessId())) + ".log");
+        std::filesystem::temp_directory_path() / ("dmk_veh_unmap_" + std::to_string(_getpid()) + "_0.log");
     const std::string log_file = log_path.string();
 
     const HMODULE image = LoadLibraryW(L"veh_unmap_dll.dll");
@@ -164,13 +170,13 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "FAIL[%s]: the image stayed mapped after FreeLibrary\n", scenario);
         return 23;
     }
-    if (veh_unmap_target(7) != 8)
+    int (*volatile restored)(int) noexcept = &veh_unmap_target;
+    if (restored(7) != 8)
     {
         std::fprintf(stderr, "FAIL[%s]: the target did not return to its original bytes\n", scenario);
         return 24;
     }
 
-    // The claim.
     dispatch_exceptions();
 
     std::error_code ignored;

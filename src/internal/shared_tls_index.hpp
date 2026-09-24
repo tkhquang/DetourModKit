@@ -15,12 +15,14 @@ namespace DetourModKit::detail
 {
     /**
      * @brief One Win32 TLS index that counted owners share.
-     * @details An owner is an object whose lifetime spans every write through the index on any thread. Each acquire
-     *          reserves an index while none is published. The last release unpublishes the index before TlsFree, so a
-     *          later acquire reserves a fresh one. The owner count and the index share one word, so a reservation
-     *          cannot interleave with a return. A reader with a stale index reads only its own slot, which TlsFree
-     *          zeroes, so a read needs no owner. Constant initialization and a trivial destructor keep the object
-     *          usable after static destruction (`[B-47]`).
+     * @details An owner is an object whose lifetime spans every write through the index on any thread. The one
+     *          exception is a restore of null that runs before other code on its thread (pop_emit_frame). Each acquire
+     *          reserves an index when none is published. The last release unpublishes the index before TlsFree. A
+     *          later acquire reserves a fresh index. The owner count and index share one word, so a reservation cannot
+     *          interleave with a return.
+     *
+     *          A reader with a stale index reads its own slot, which TlsFree zeroes, so a read needs no owner.
+     *          Constant initialization and a trivial destructor permit use after static destruction ([B-47]).
      */
     class SharedTlsIndex
     {

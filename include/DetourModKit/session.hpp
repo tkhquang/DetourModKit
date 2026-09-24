@@ -189,8 +189,8 @@ namespace DetourModKit
      *          allocate, load INIs, install hooks, and register bindings into session.scope(). It then blocks on the
      *          event until bootstrap_detach(), request_shutdown(), or shutdown_and_wait() wakes it, and destroys the
      *          Session off the loader lock. The worker logs an @p on_ready failure as a value and keeps the generation
-     *          mapped and Running. Retire it with request_shutdown() from the callback or bootstrap_detach() from
-     *          DllMain.
+     *          mapped and Running. Retire it with request_shutdown() from the callback or any thread.
+     *          An off-loader-lock control thread can use shutdown_and_wait().
      * @param info Mod identity, gating, and async-logger settings.
      * @param on_ready Called once on the worker thread with the live Session. A null value registers no callback.
      * @return An empty Result once the worker is published, or ProcessMismatch, InstanceAlreadyRunning,
