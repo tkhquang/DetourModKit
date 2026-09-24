@@ -1604,6 +1604,9 @@ namespace DetourModKit
             }
 
 #if !defined(_MSC_VER) && defined(_WIN64)
+            // The reopen follows the Running publication, so a rolled-back start keeps a retired epoch closed
+            // (SessionTeardown.RolledBackCacheStartKeepsTheRetiredHandlerEpoch). The cache keepalive reference pins
+            // this image through a concurrent abandonment.
             detail::reopen_guarded_engine();
             detail::ensure_guarded_engine_installed();
 #endif

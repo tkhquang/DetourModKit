@@ -45,6 +45,8 @@ namespace DetourModKit::detail
     extern void (*g_logger_publication_probe)();
     extern void (*g_logger_post_publication_probe)();
     extern void (*g_session_configure_test_hook)();
+    extern void (*g_memory_cache_before_running_publish_test_hook)();
+    void memory_cache_abandon_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 #if defined(_MSC_VER)
@@ -1305,6 +1307,30 @@ TEST_F(SessionTeardown, VmtHookOutlivingTheSessionRestoresItsObject)
     EXPECT_EQ(DetourModKit::detail::guarded_engine_tls_index_for_test(), TLS_OUT_OF_INDEXES)
         << "the restore must not leave a guarded-read handler after Session retirement";
 #endif
+}
+
+// A cache start that a concurrent abandonment rolls back must keep the retired handler epoch closed.
+TEST_F(SessionTeardown, RolledBackCacheStartKeepsTheRetiredHandlerEpoch)
+{
+    memory::shutdown_cache();
+    {
+        Result<Session> rs = start_local_session("SESS_TEST", "sess_test_rolled_back_cache.log");
+        ASSERT_TRUE(rs.has_value()) << rs.error().message();
+    }
+
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = []()
+    { DetourModKit::detail::memory_cache_abandon_for_test(); };
+    const bool started = memory::init_cache(32, 5000);
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = nullptr;
+    EXPECT_FALSE(started);
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+    const std::uint64_t value = 42;
+    EXPECT_EQ(memory::read<std::uint64_t>(Address{reinterpret_cast<std::uintptr_t>(&value)}).value_or(0), value);
+    EXPECT_EQ(DetourModKit::detail::guarded_engine_tls_index_for_test(), TLS_OUT_OF_INDEXES)
+        << "a rolled-back cache start must not reopen lazy handler installation";
+#endif
+    memory::shutdown_cache();
 }
 
 // Async bootstrap / bootstrap_detach

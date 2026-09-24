@@ -210,6 +210,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     if (!installed)
     {
         session.log().error("Install failed: {}", installed.error().message());
+        dmk::request_shutdown();
         return std::unexpected(installed.error());
     }
 
@@ -224,6 +225,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         {
             g_print_hook.reset();
         }
+        dmk::request_shutdown();
         return std::unexpected(armed.error());
     }
 

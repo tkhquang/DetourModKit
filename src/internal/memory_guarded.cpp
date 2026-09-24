@@ -711,7 +711,9 @@ namespace DetourModKit
         /**
          * @brief Runs an in-place update, with a call-scoped handler after Session retirement.
          * @details The retired epoch refuses lazy installation. An update that installs the handler removes it before
-         *          it returns, so a VmtHook that outlives its Session restores objects and leaves no handler.
+         *          it returns, so a VmtHook that outlives its Session restores objects and leaves no handler. A failed
+         *          installation leaves the region closed. A removal after a concurrent reopen is an ordinary release,
+         *          and the next guarded access installs the handler again.
          */
         [[nodiscard]] bool
         run_guarded_update(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept
