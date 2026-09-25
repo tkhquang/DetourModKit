@@ -417,7 +417,8 @@ int main(int argc, char **argv)
         scenario != "timeout" && scenario != "stub-page" && scenario != "layers-overlap" && scenario != "drain-leak" &&
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
         scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "stale-layer-conflict" &&
-        scenario != "refusal-cause" && scenario != "foreign-view")
+        scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
+        scenario != "teardown-retry" && scenario != "teardown-retry-armed")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -477,10 +478,22 @@ int main(int argc, char **argv)
             return fail("uncoordinated reclamation released a reachable record");
         return 0;
     }
-    if (scenario == "timeout")
+    if (scenario == "teardown-retry" || scenario == "teardown-retry-armed")
     {
         const auto trampoline = first.run(Command::Trampoline);
-        if (first.run(Command::Disable) == 0)
+        if (scenario == "teardown-retry" && first.run(Command::Disable) == 0)
+            return fail("the route did not disarm before the transient refusal");
+        first.run(Command::RefuseNextAcquisition);
+        if (first.run(Command::Reset) != 0 || first.run(Command::Warnings) != 0 || second.run(Command::Records) != 0 ||
+            executable(trampoline) || std::memcmp(page, code.data(), code.size()) != 0 || target() != 37)
+            return fail("a transient coordinator refusal prevented clean teardown");
+        return 0;
+    }
+    if (scenario == "timeout" || scenario == "timeout-armed")
+    {
+        const bool armed = scenario == "timeout-armed";
+        const auto trampoline = first.run(Command::Trampoline);
+        if (!armed && first.run(Command::Disable) == 0)
             return fail("the route did not close before contention");
         std::uintptr_t retained = 0;
         std::uint64_t elapsed = 0;
@@ -493,8 +506,17 @@ int main(int argc, char **argv)
                 elapsed = GetTickCount64() - start;
             }
         );
+        const auto records = second.run(Command::Records);
+        std::printf(
+            "coordinator teardown: armed=%u elapsed_ms=%llu leaks=%llu records=%llu\n",
+            armed ? 1U : 0U,
+            static_cast<unsigned long long>(elapsed),
+            static_cast<unsigned long long>(retained),
+            static_cast<unsigned long long>(records)
+        );
         if (!entered || elapsed < 2000 || elapsed > 12000 || retained != 1 || first.run(Command::Warnings) != 1 ||
-            !executable(trampoline))
+            records != 1 || !executable(trampoline) || target() != 37 || first.run(Command::Hits) != 1 ||
+            (std::memcmp(page, code.data(), code.size()) != 0) != armed)
             return fail("a coordinator timeout did not retain and report the route");
         return 0;
     }

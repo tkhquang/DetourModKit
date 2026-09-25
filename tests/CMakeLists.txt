@@ -510,6 +510,9 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesRejectUncoordinatedReclamation
     Lifecycle.RouteCopiesRejectIncompatibleCoordination
     Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout
+    Lifecycle.RouteCopiesRetainArmedHookAfterCoordinatorTimeout
+    Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal
+    Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal
     Lifecycle.RouteCopiesShareRegistrationCapacity
     Lifecycle.RouteCopiesRetryRefusedConnection
     Lifecycle.RouteCopiesRejectForeignCoordinatorView

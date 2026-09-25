@@ -1489,6 +1489,9 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesRejectIncompatibleCoordination incompatible
   Lifecycle.RouteCopiesShareRegistrationCapacity capacity
   Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout timeout
+  Lifecycle.RouteCopiesRetainArmedHookAfterCoordinatorTimeout timeout-armed
+  Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal teardown-retry
+  Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal teardown-retry-armed
   Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
   Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
   Lifecycle.RouteCopiesReportLayerConflict layer-conflict
