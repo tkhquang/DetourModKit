@@ -40,6 +40,7 @@ namespace route_copy
         DependentRetentions,
         HoldAdapter,
         ReleaseAdapter,
+        Enabled,
     };
 
     /** @brief Host events that delimit ownership of the process coordinator. */

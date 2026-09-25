@@ -23,6 +23,7 @@
 
 #include "platform.hpp"
 #include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/proof_section.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -38,14 +39,14 @@ using namespace DetourModKit::hook;
 
 namespace
 {
-    // Real, hookable targets: DMK_TEST_NOINLINE plus a volatile result forces a real call with a patchable prologue.
-    DMK_TEST_NOINLINE int loader_reject_target_a(int x)
+    // Real, hookable targets: DMK_PROOF_TARGET plus a volatile result forces a real call with a patchable prologue.
+    DMK_PROOF_TARGET int loader_reject_target_a(int x)
     {
         volatile int r = x + 3;
         return r;
     }
 
-    DMK_TEST_NOINLINE int loader_reject_target_b(int x)
+    DMK_PROOF_TARGET int loader_reject_target_b(int x)
     {
         volatile int r = x + 7;
         return r;

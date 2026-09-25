@@ -31,6 +31,7 @@
 #include "internal/hook_publication.hpp"
 #include "internal/hook_ledger.hpp"
 
+#include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "test_alloc_probe.hpp"
 
@@ -47,23 +48,23 @@ using namespace DetourModKit::hook;
 #define DMK_TEST_NOINLINE
 #endif
 
-// Real, hookable functions used as inline/mid hook targets. DMK_TEST_NOINLINE plus a volatile result forces a real call
+// Real, hookable functions used as inline/mid hook targets. DMK_PROOF_TARGET plus a volatile result forces a real call
 // to the patched entry, so a post-teardown call observes the restored prologue rather than a constant-folded value.
 namespace
 {
-    DMK_TEST_NOINLINE int echo(int x)
+    DMK_PROOF_TARGET int echo(int x)
     {
         volatile int r = x;
         return r;
     }
 
-    DMK_TEST_NOINLINE int real_hook_target_add(int a, int b)
+    DMK_PROOF_TARGET int real_hook_target_add(int a, int b)
     {
         volatile int r = a + b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int real_hook_target_mul(int a, int b)
+    DMK_PROOF_TARGET int real_hook_target_mul(int a, int b)
     {
         volatile int r = a * b;
         return r;
@@ -72,25 +73,25 @@ namespace
     // Dedicated targets for the release()/leak tests. release() intentionally leaks an installed detour for the process
     // lifetime, so a leaked hook must never land on a target a later test expects to be clean. Each leak test uses its
     // own function here, touched by no other test.
-    DMK_TEST_NOINLINE int leak_target_inline(int x)
+    DMK_PROOF_TARGET int leak_target_inline(int x)
     {
         volatile int r = x;
         return r;
     }
 
-    DMK_TEST_NOINLINE int leak_target_disengaged(int x)
+    DMK_PROOF_TARGET int leak_target_disengaged(int x)
     {
         volatile int r = x;
         return r;
     }
 
-    DMK_TEST_NOINLINE int leak_target_mid(int a, int b)
+    DMK_PROOF_TARGET int leak_target_mid(int a, int b)
     {
         volatile int r = a + b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int leak_target_lifecycle(int a, int b)
+    DMK_PROOF_TARGET int leak_target_lifecycle(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -99,7 +100,7 @@ namespace
     // Dedicated target for the layered oldest-first teardown test. Destroying the older of two layered hooks first
     // leaks the older backend for the process lifetime (the leak-on-inversion containment), so this target must be
     // touched by no other test.
-    DMK_TEST_NOINLINE int leak_target_layered(int a, int b)
+    DMK_PROOF_TARGET int leak_target_layered(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -107,7 +108,7 @@ namespace
 
     // Dedicated target for the ledger synchronization-failure proof. A teardown that cannot claim the target's slot
     // cannot prove restoring is safe, so it retains the patch for the process lifetime; no other test may touch this.
-    DMK_TEST_NOINLINE int leak_target_ledger_sync(int a, int b)
+    DMK_PROOF_TARGET int leak_target_ledger_sync(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -115,14 +116,14 @@ namespace
 
     // Dedicated target for the retained-id layering proofs. The first hook is released (deliberately leaked) and stays
     // patched for the process lifetime, so no other test may touch this address.
-    DMK_TEST_NOINLINE int leak_target_retained_id(int a, int b)
+    DMK_PROOF_TARGET int leak_target_retained_id(int a, int b)
     {
         volatile int r = a + b + 5;
         return r;
     }
 
     // Dedicated target for the inverse retained-id proof: a pinned NEWER layer over a live older one.
-    DMK_TEST_NOINLINE int leak_target_retained_newer(int a, int b)
+    DMK_PROOF_TARGET int leak_target_retained_newer(int a, int b)
     {
         volatile int r = a + b + 7;
         return r;
@@ -130,7 +131,7 @@ namespace
 
     // Dedicated target for the outranked-toggle proof: a pinned NEWER layer over an older one that stays live and
     // keeps trying to write the target's bytes.
-    DMK_TEST_NOINLINE int leak_target_retained_conflict(int a, int b)
+    DMK_PROOF_TARGET int leak_target_retained_conflict(int a, int b)
     {
         volatile int r = a + b + 19;
         return r;
@@ -138,14 +139,14 @@ namespace
 
     // Dedicated target for the release-verb leak-accounting proof; release() leaves it patched for the process
     // lifetime.
-    DMK_TEST_NOINLINE int leak_target_release_booked(int a, int b)
+    DMK_PROOF_TARGET int leak_target_release_booked(int a, int b)
     {
         volatile int r = a + b + 11;
         return r;
     }
 
     // Dedicated target for the disabled release proof; release() retains the backend without arming this address.
-    DMK_TEST_NOINLINE int leak_target_release_disabled(int a, int b)
+    DMK_PROOF_TARGET int leak_target_release_disabled(int a, int b)
     {
         volatile int r = a + b + 17;
         return r;
@@ -153,43 +154,43 @@ namespace
 
     // Dedicated target for the strict-install-after-a-pin proof. Each GoogleTest case runs in its own ctest process,
     // so that case builds its own pin and cannot borrow one from a sibling.
-    DMK_TEST_NOINLINE int leak_target_retained_strict(int a, int b)
+    DMK_PROOF_TARGET int leak_target_retained_strict(int a, int b)
     {
         volatile int r = a + b + 13;
         return r;
     }
 
-    DMK_TEST_NOINLINE int ledger_commit_failure_target(int a, int b)
+    DMK_PROOF_TARGET int ledger_commit_failure_target(int a, int b)
     {
         volatile int r = a + b + 3;
         return r;
     }
 
-    DMK_TEST_NOINLINE int witness_failure_inline_target(int value)
+    DMK_PROOF_TARGET int witness_failure_inline_target(int value)
     {
         const volatile int result = value + 17;
         return result;
     }
 
-    DMK_TEST_NOINLINE int witness_failure_mid_target(int a, int b)
+    DMK_PROOF_TARGET int witness_failure_mid_target(int a, int b)
     {
         const volatile int result = a - b;
         return result;
     }
 
-    DMK_TEST_NOINLINE int publication_proof_target(int value)
+    DMK_PROOF_TARGET int publication_proof_target(int value)
     {
         const volatile int result = value + 1;
         return result;
     }
 
-    DMK_TEST_NOINLINE int publication_proof_mid_target(int a, int b)
+    DMK_PROOF_TARGET int publication_proof_mid_target(int a, int b)
     {
         const volatile int result = a * b;
         return result;
     }
 
-    DMK_TEST_NOINLINE int oom_publication_target(int value)
+    DMK_PROOF_TARGET int oom_publication_target(int value)
     {
         const volatile int result = value + 3;
         return result;
@@ -220,7 +221,7 @@ namespace
     // only a move-only type makes an lvalue dispatch ill-formed at the call site.
     using OwnedIntFn = int (*)(std::unique_ptr<int>);
 
-    DMK_TEST_NOINLINE int consume_owned_int(std::unique_ptr<int> owned) noexcept
+    DMK_PROOF_TARGET int consume_owned_int(std::unique_ptr<int> owned) noexcept
     {
         volatile int r = owned ? *owned : -1;
         return r;
@@ -245,7 +246,7 @@ namespace
 
     using CopyOnlyIntFn = int (*)(CopyOnlyInt);
 
-    DMK_TEST_NOINLINE int consume_copy_only_int(CopyOnlyInt owned) noexcept
+    DMK_PROOF_TARGET int consume_copy_only_int(CopyOnlyInt owned) noexcept
     {
         volatile int result = owned.value;
         return result;
@@ -2015,15 +2016,14 @@ TEST(HookMid, MovedFromMidHandleIsInert)
 namespace
 {
     // Real, hookable functions used as install_all scan targets. Their first bytes are scanned by AOB so the deferred
-    // OwnedScanRequest resolves to the function entry. DMK_TEST_NOINLINE keeps them out of line so they have a real
-    // prologue to hook.
-    DMK_TEST_NOINLINE int install_target_one(int x)
+    // OwnedScanRequest resolves to the function entry.
+    DMK_PROOF_TARGET int install_target_one(int x)
     {
         volatile int r = x + 1;
         return r;
     }
 
-    DMK_TEST_NOINLINE int install_target_two(int x)
+    DMK_PROOF_TARGET int install_target_two(int x)
     {
         volatile int r = x + 2;
         return r;
@@ -4420,13 +4420,13 @@ namespace
     // Dedicated targets for the HookStack ordering tests. HookStack always restores newest-first (the safe order), so
     // these are left cleanly unhooked after every test; giving the ordering cases their own functions still keeps them
     // isolated from the shared real_hook_target_* functions other tests call.
-    DMK_TEST_NOINLINE int stack_target_primary(int a, int b)
+    DMK_PROOF_TARGET int stack_target_primary(int a, int b)
     {
         volatile int r = a + b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int stack_target_secondary(int a, int b)
+    DMK_PROOF_TARGET int stack_target_secondary(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -4440,7 +4440,7 @@ namespace
     }
 
     // Dedicated single-arg target and two distinct detours for the layered-while-disabled characterization below.
-    DMK_TEST_NOINLINE int layered_disabled_target(int x)
+    DMK_PROOF_TARGET int layered_disabled_target(int x)
     {
         volatile int r = x;
         return r;
@@ -4457,7 +4457,7 @@ namespace
     }
 
     // Dedicated target for the concurrent is_enabled query proof.
-    DMK_TEST_NOINLINE int gate_query_target(int x)
+    DMK_PROOF_TARGET int gate_query_target(int x)
     {
         volatile int r = x;
         return r;
@@ -4471,7 +4471,7 @@ namespace
     // Dedicated target and two distinct detours for the layer-state proofs. Kept separate from the fixtures above
     // because those are consumed by a test asserting a different outcome, and distinct bodies (+1000 vs +2000) keep
     // MSVC /OPT:ICF from folding the two detours into one address.
-    DMK_TEST_NOINLINE int layer_state_target(int x)
+    DMK_PROOF_TARGET int layer_state_target(int x)
     {
         volatile int r = x;
         return r;
@@ -4490,7 +4490,7 @@ namespace
     // Dedicated targets for the unrestorable-teardown proofs. Those proofs' whole point is that the target stays
     // patched for the process lifetime, so each needs its own entry and none may be shared with a case expecting a
     // pristine one. Distinct detour bodies also keep MSVC /OPT:ICF from folding them to one address.
-    DMK_TEST_NOINLINE int teardown_pin_target(int x)
+    DMK_PROOF_TARGET int teardown_pin_target(int x)
     {
         volatile int r = x;
         return r;
@@ -4501,7 +4501,7 @@ namespace
         return x + 4000;
     }
 
-    DMK_TEST_NOINLINE int teardown_throw_target(int x)
+    DMK_PROOF_TARGET int teardown_throw_target(int x)
     {
         volatile int r = x;
         return r;
@@ -5115,7 +5115,7 @@ namespace
     std::atomic<int> s_reentrant_detour_calls{0};
     Hook *s_reentrant_hook = nullptr;
 
-    DMK_TEST_NOINLINE int reentrant_target(int n)
+    DMK_PROOF_TARGET int reentrant_target(int n)
     {
         if (n <= 0)
         {
@@ -5140,7 +5140,7 @@ namespace
     std::atomic<bool> s_original_parked{false};
     std::atomic<bool> s_release_original{false};
 
-    DMK_TEST_NOINLINE int parking_original(int x)
+    DMK_PROOF_TARGET int parking_original(int x)
     {
         s_original_parked.store(true, std::memory_order_release);
         while (!s_release_original.load(std::memory_order_acquire))

@@ -8,14 +8,14 @@
 #include <safetyhook/inline_hook.hpp>
 #include <safetyhook/os.hpp>
 
+#include <windows.h>
+
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
-
-#include <windows.h>
 
 namespace DetourModKit::detail
 {
@@ -142,6 +142,8 @@ extern "C" __declspec(dllexport) std::uintptr_t route_copy_command(route_copy::C
             return s_hook && s_hook->disable().has_value();
         case Command::Enable:
             return s_hook && s_hook->enable().has_value();
+        case Command::Enabled:
+            return s_hook && s_hook->is_enabled();
         case Command::EnableLayerConflict:
         case Command::DisableLayerConflict:
         {

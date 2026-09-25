@@ -4,10 +4,7 @@
 /**
  * @file log_capture.hpp
  * @brief Redirects the process logger to a private file for one scope and reads the captured text back.
- *
- * Sync mode is forced because a test inspects the file right after the logging call returns. The destructor parks the
- * logger on a stable per-process file so the capture file's handle is released before the remove. A later capture or
- * test reconfigures the sink as it needs.
+ * @details Sync mode is forced because a test inspects the file right after the logging call returns.
  */
 
 #include "DetourModKit/logger.hpp"
@@ -25,10 +22,16 @@
 
 namespace dmk_test
 {
-    /// Captures every record at or above @p level for the fixture's lifetime and restores the prior level after it.
+    /**
+     * @brief Captures every logger record at or above a level for the lifetime of the fixture.
+     */
     class LoggerFileCapture
     {
     public:
+        /**
+         * @brief Points the process logger at a new capture file in synchronous mode.
+         * @param level The lowest level to capture. The destructor restores the prior level.
+         */
         explicit LoggerFileCapture(DetourModKit::LogLevel level = DetourModKit::LogLevel::Trace)
         {
             static std::atomic<int> s_counter{0};
@@ -46,14 +49,31 @@ namespace dmk_test
             logger.set_log_level(level);
         }
 
-        ~LoggerFileCapture()
+        /**
+         * @brief Parks the logger on a per-process file, restores the prior level and mode, and removes the capture.
+         * @details Parking releases the capture handle before the remove. A failed step is skipped. A failed park
+         *          leaves the capture file open, so the file stays in the temporary directory.
+         */
+        ~LoggerFileCapture() noexcept
         {
             DetourModKit::Logger &logger = DetourModKit::log();
             logger.flush();
-            const std::filesystem::path parking =
-                std::filesystem::temp_directory_path() / ("dmk_capture_parked_" + std::to_string(_getpid()) + ".log");
-            DetourModKit::Logger::configure("PARKED", parking.string(), "%H:%M:%S");
-            logger.set_log_level(m_previous_level);
+            try
+            {
+                const std::filesystem::path parking = std::filesystem::temp_directory_path() /
+                                                      ("dmk_capture_parked_" + std::to_string(_getpid()) + ".log");
+                DetourModKit::Logger::configure("PARKED", parking.string(), "%H:%M:%S");
+            }
+            catch (...)
+            {
+            }
+            try
+            {
+                logger.set_log_level(m_previous_level);
+            }
+            catch (...)
+            {
+            }
             if (m_previous_async)
             {
                 logger.enable_async_mode();

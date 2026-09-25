@@ -17,6 +17,7 @@
 
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/diagnostics.hpp"
+#include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "internal/drain_backoff.hpp"
 
@@ -52,13 +53,13 @@ using namespace DetourModKit::hook;
 
 namespace
 {
-    DMK_TEST_NOINLINE int sum_first_second(int a, int b)
+    DMK_PROOF_TARGET int sum_first_second(int a, int b)
     {
         volatile int r = a + b; // a<-rcx, b<-rdx
         return r;
     }
 
-    DMK_TEST_NOINLINE int return_third(int a, int b, int c)
+    DMK_PROOF_TARGET int return_third(int a, int b, int c)
     {
         (void)a;
         (void)b;
@@ -66,13 +67,13 @@ namespace
         return r;
     }
 
-    DMK_TEST_NOINLINE int read_probe(int a, int b, int c)
+    DMK_PROOF_TARGET int read_probe(int a, int b, int c)
     {
         volatile int r = a + b + c;
         return r;
     }
 
-    DMK_TEST_NOINLINE int rip_original()
+    DMK_PROOF_TARGET int rip_original()
     {
         volatile int r = 11;
         return r;
@@ -84,7 +85,7 @@ namespace
         return r;
     }
 
-    DMK_TEST_NOINLINE float pass_float(float x)
+    DMK_PROOF_TARGET float pass_float(float x)
     {
         volatile float r = x; // x <- xmm0 (Win64 float-arg ABI)
         return r;
@@ -470,55 +471,55 @@ namespace
         return indirect(args...);
     }
 
-    DMK_TEST_NOINLINE int throwing_site(int a)
+    DMK_PROOF_TARGET int throwing_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int recursion_site(int depth)
+    DMK_PROOF_TARGET int recursion_site(int depth)
     {
         volatile int result = depth;
         return result;
     }
 
-    DMK_TEST_NOINLINE int rundown_site(int a)
+    DMK_PROOF_TARGET int rundown_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int self_destroy_site(int a)
+    DMK_PROOF_TARGET int self_destroy_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int pinned_site(int a)
+    DMK_PROOF_TARGET int pinned_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int pinned_rundown_site(int a)
+    DMK_PROOF_TARGET int pinned_rundown_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int late_entrant_site(int a)
+    DMK_PROOF_TARGET int late_entrant_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int route_timeout_site(int a)
+    DMK_PROOF_TARGET int route_timeout_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int untracked_self_destroy_site(int a)
+    DMK_PROOF_TARGET int untracked_self_destroy_site(int a)
     {
         volatile int result = a;
         return result;
@@ -1126,7 +1127,7 @@ namespace
     // A family of distinct hookable functions. Each instantiation returns a different constant, so neither inlining nor
     // MSVC's identical-COMDAT folding can collapse them into one address, and the ledger refuses a second hook on the
     // same target, so distinct addresses are what make a pool-exhaustion test possible at all.
-    template <int N> DMK_TEST_NOINLINE int pool_site()
+    template <int N> DMK_PROOF_TARGET int pool_site()
     {
         volatile int result = N;
         return result;

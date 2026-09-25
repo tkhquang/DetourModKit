@@ -21,6 +21,7 @@
 
 #include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/log_capture.hpp"
+#include "fixtures/proof_section.hpp"
 #include "tls_census.hpp"
 
 #include <process.h>
@@ -80,44 +81,11 @@ namespace
         warm.join();
     }
 
-#if defined(_MSC_VER)
-#define DMK_PROOF_NOINLINE __declspec(noinline)
-#else
-#define DMK_PROOF_NOINLINE __attribute__((noinline))
-#endif
-
     volatile int s_sink = 0;
 
-    // docs/design/testing.md owns the private-section rule. Distinct seeds prevent code folding, and volatile work
-    // preserves enough prologue bytes for the patch.
-#if defined(_MSC_VER)
-#pragma code_seg(push, ".proof")
-#define DMK_PROOF_TARGET DMK_PROOF_NOINLINE
-#else
-#define DMK_PROOF_TARGET __attribute__((section(".proof"))) DMK_PROOF_NOINLINE
-#endif
-#define DMK_TLS_TARGET(NAME, SEED)                                                                                     \
-    DMK_PROOF_TARGET int NAME(int value)                                                                               \
-    {                                                                                                                  \
-        constexpr std::uint32_t SEED_VALUE = static_cast<std::uint32_t>(SEED);                                         \
-        volatile std::uint32_t accumulator = static_cast<std::uint32_t>(value) * SEED_VALUE;                           \
-        for (std::uint32_t i = 0; i < 8; ++i)                                                                          \
-        {                                                                                                              \
-            accumulator = accumulator + ((accumulator >> 3) ^ (i * SEED_VALUE));                                       \
-            accumulator = accumulator ^ (accumulator << 5);                                                            \
-        }                                                                                                              \
-        const int bounded = static_cast<int>(accumulator & 0xFFFFu);                                                   \
-        s_sink = bounded;                                                                                              \
-        return bounded + (SEED);                                                                                       \
-    }
-    DMK_TLS_TARGET(tls_target_3, 3)
-    DMK_TLS_TARGET(tls_target_5, 5)
-    DMK_TLS_TARGET(tls_target_7, 7)
-#undef DMK_TLS_TARGET
-#undef DMK_PROOF_TARGET
-#if defined(_MSC_VER)
-#pragma code_seg(pop)
-#endif
+    DMK_PROOF_SEEDED_TARGET(tls_target_3, 3)
+    DMK_PROOF_SEEDED_TARGET(tls_target_5, 5)
+    DMK_PROOF_SEEDED_TARGET(tls_target_7, 7)
 
     using Target = int (*)(int);
 
@@ -593,7 +561,9 @@ namespace
             return fail(82, "the parked region had no index or no page");
 
         // This thread must not run a guarded access while the release holds the engine lock.
-        ParkedRegion region{.page = page.address()};
+        ParkedRegion region{
+            .page = page.address(),
+        };
         std::atomic<bool> region_completed{true};
         std::atomic<bool> released{false};
         std::thread accessor(

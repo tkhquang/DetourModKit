@@ -5,6 +5,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 
+#include "fixtures/proof_section.hpp"
 #include "raw_proof_error_mode.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
@@ -34,12 +35,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#if defined(_MSC_VER)
-#define DMK_LIFECYCLE_NOINLINE __declspec(noinline)
-#else
-#define DMK_LIFECYCLE_NOINLINE [[gnu::noinline]]
-#endif
 
 #if defined(_MSC_VER)
 #include <crtdbg.h>
@@ -2326,23 +2321,11 @@ namespace
     // RUNTIME_FUNCTION is unwound as a leaf: the unwinder reads a return address out of the middle of the shadow
     // space and walks into nonsense. These cases hold the generated addresses and assert the platform's own answer.
 
-    // Alone on the pages of a private image section (docs/design/testing.md, "In-image hook targets live in their own
-    // section").
-#if defined(_MSC_VER)
-#pragma code_seg(push, ".proof")
-#define DMK_PROOF_TARGET DMK_LIFECYCLE_NOINLINE
-#else
-#define DMK_PROOF_TARGET __attribute__((section(".proof"))) DMK_LIFECYCLE_NOINLINE
-#endif
     DMK_PROOF_TARGET int routed_unwind_target(int a, int b)
     {
         volatile int result = a + b;
         return result;
     }
-#undef DMK_PROOF_TARGET
-#if defined(_MSC_VER)
-#pragma code_seg(pop)
-#endif
 
     std::atomic<int> s_routed_detour_calls{0};
     // Frames observed inside the gateway allocation while unwinding out of the detour.
@@ -3557,7 +3540,9 @@ namespace
     {
         if (level == DetourModKit::LogLevel::Warning && message.starts_with("XInput route retention:"))
         {
-            (void)DetourModKit::detail::intercept_owned_by(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER);
+            // The query takes the interception lock exclusively. A warning under that lock deadlocks here, and the
+            // CTest timeout fails the case.
+            (void)xinput_pair_coverage_for_test();
             ++s_route_warnings;
         }
     }
@@ -3568,6 +3553,7 @@ namespace
         const bool alias = scenario == "telemetry-alias";
         const bool clean = scenario == "telemetry-clean";
         const bool rollback = scenario == "telemetry-rollback";
+        const bool repeat = scenario == "telemetry-repeat";
         HMODULE module = LoadLibraryW(alias ? L"dmk_xinput_proxy_alias.dll" : L"dmk_xinput_proxy_local.dll");
         if (module == nullptr)
         {
@@ -3663,8 +3649,24 @@ namespace
         const auto after =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
         const auto warnings = s_route_warnings;
+        // Without the owner, each repeated uninstall returns at the owner guard.
         uninstall();
         uninstall();
+        const auto refused =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        if (repeat)
+        {
+            // A renewed owner passes the guard, so each uninstall resets the already reported members again.
+            for (int i = 0; i < 2; ++i)
+            {
+                if (!adopt_owner_for_test(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+                {
+                    std::fprintf(stderr, "FAIL: the repeated uninstall could not renew its owner\n");
+                    return 1;
+                }
+                uninstall();
+            }
+        }
         const auto repeated =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
         const auto capacity_after = safetyhook::route_retention_stats();
@@ -3673,8 +3675,8 @@ namespace
         DetourModKit::detail::g_logger_record_probe = old_probe;
         set_xinput_module_override_for_test(nullptr);
         const bool module_lifetime = release_host_reference();
-        if (!module_lifetime || after - before != expected || warnings != expected || repeated != after ||
-            s_route_warnings != warnings ||
+        if (!module_lifetime || after - before != expected || warnings != expected || refused != after ||
+            repeated != after || s_route_warnings != warnings ||
             DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) !=
                 expected ||
             DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=

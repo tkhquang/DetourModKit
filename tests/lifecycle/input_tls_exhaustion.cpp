@@ -822,7 +822,10 @@ namespace
         }
 
         const auto started = manager.start(
-            input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}
+            input::Input::Settings{
+                .poll_interval = std::chrono::milliseconds{1},
+                .require_focus = false,
+            }
         );
         // A headless host cannot hook XInput, so the engine needs the interception layer to publish its table.
         if (!started || !detail::InputTestSeams::adopt_intercept_owner_for_test())

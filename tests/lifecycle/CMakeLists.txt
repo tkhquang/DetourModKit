@@ -38,7 +38,8 @@ add_executable(hook_static_order test_hook_static_order.cpp)
 target_link_libraries(hook_static_order PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(hook_static_order PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(hook_static_order PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(hook_static_order)
 add_dependencies(dmk_lifecycle_proof_hosts hook_static_order)
@@ -335,7 +336,7 @@ endwhile()
 # the backend for route_retention_stats(). It therefore runs in its own host rather than the shared unit binary.
 add_executable(mid_route_retention test_mid_route_retention.cpp)
 target_link_libraries(mid_route_retention PRIVATE DetourModKit safetyhook dmk_coverage)
-target_include_directories(mid_route_retention PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(mid_route_retention PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests)
 dmk_static_runtime(mid_route_retention)
 add_dependencies(dmk_lifecycle_proof_hosts mid_route_retention)
 
@@ -371,6 +372,12 @@ dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownNamesCoordinator
 
 dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownCompletesRetention
   COMMAND $<TARGET_FILE:mid_route_retention> refused-retention
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProofSectionHoldsOnlyItsTargets
+  COMMAND $<TARGET_FILE:mid_route_retention> proof-section
   WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
@@ -728,12 +735,12 @@ dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
 # Retention scenarios latch process-lifetime raw hook storage, while exception scenarios replace global allocation or
 # backend behavior. Isolate every case, and give the reference-balance case sole ownership of its XInput module load.
 add_executable(xinput_detour_rundown xinput_detour_rundown.cpp)
-# The routed-unwind scenarios assert against the generated regions themselves, so this one host names the backend
-# directly. Every other test target deliberately carries no backend include path.
+# The routed-unwind scenarios assert against the generated regions themselves, so this host names the backend directly.
 target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit safetyhook dmk_coverage psapi)
 target_include_directories(xinput_detour_rundown PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(xinput_detour_rundown PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_detour_rundown)
 add_dependencies(dmk_lifecycle_proof_hosts xinput_detour_rundown)
@@ -1222,7 +1229,8 @@ add_executable(full_lifecycle test_full_lifecycle.cpp)
 target_link_libraries(full_lifecycle PRIVATE DetourModKit dmk_coverage)
 target_include_directories(full_lifecycle PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 dmk_static_runtime(full_lifecycle)
 add_dependencies(dmk_lifecycle_proof_hosts full_lifecycle)
 
@@ -1299,7 +1307,8 @@ set_target_properties(staged_generation_dll PROPERTIES PREFIX "" OUTPUT_NAME "st
 target_link_libraries(staged_generation_dll PRIVATE DetourModKit safetyhook dmk_coverage)
 target_include_directories(staged_generation_dll PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(staged_generation_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
 add_dependencies(staged_generation_dll hook_target_lib xinput_forwarding_proxy_local)
 dmk_static_runtime(staged_generation_dll SHARED)
@@ -1483,6 +1492,7 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
   Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
   Lifecycle.RouteCopiesReportLayerConflict layer-conflict
+  Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict stale-layer-conflict
   Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause)
 while(route_copy_proofs)
   list(POP_FRONT route_copy_proofs proof_name scenario)

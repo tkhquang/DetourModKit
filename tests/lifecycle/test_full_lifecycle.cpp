@@ -28,6 +28,8 @@
 
 #include "internal/lifecycle_context.hpp"
 
+#include "fixtures/proof_section.hpp"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -53,13 +55,7 @@ namespace
     constexpr int CYCLE_COUNT = 6;
     constexpr auto READY_TIMEOUT = 20s;
 
-#if defined(_MSC_VER)
-#define DMK_PROOF_NOINLINE __declspec(noinline)
-#else
-#define DMK_PROOF_NOINLINE __attribute__((noinline))
-#endif
-
-    DMK_PROOF_NOINLINE int lifecycle_target(int x)
+    DMK_PROOF_TARGET int lifecycle_target(int x)
     {
         volatile int result = x;
         return result;

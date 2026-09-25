@@ -15,6 +15,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 
+#include "fixtures/proof_section.hpp"
 #include "staged_generation_protocol.hpp"
 
 #include <safetyhook/inline_hook.hpp>
@@ -84,14 +85,7 @@ namespace
     std::atomic<std::uint64_t> s_lifecycle_events{0};
     bool s_retain_diagnostics = false;
 
-    template <int Value>
-#if defined(_MSC_VER)
-    __declspec(noinline) __declspec(code_seg(".proof"))
-#else
-    __attribute__((noinline, section(".proof")))
-#endif
-    int
-    mid_target() noexcept
+    template <int Value> DMK_PROOF_TARGET int mid_target() noexcept
     {
         volatile int value = Value;
         return value + value + value;
