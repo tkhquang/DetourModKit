@@ -110,7 +110,9 @@ The build is Win64 only. Every library translation unit includes `<windows.h>`, 
 
 ### In-image hook targets live in their own section
 
-A proof that hooks a function in its own image must place that function in a private code section. A toggle transaction temporarily removes execute access from the target page. If a backend handler or its helpers share that page, the handler can fault under its own lock and deadlock. MSVC uses `#pragma code_seg`, and GCC uses `__attribute__((section))`. `test_mid_route_retention.cpp` and `xinput_detour_rundown.cpp` demonstrate this separation. A target in another image cannot share that page.
+Mark each inline or mid hook target that test code defines in its own image with `DMK_PROOF_TARGET` from `tests/fixtures/proof_section.hpp`. Detours, generated code, and targets in another image need no mark.
+
+The macro places the function in the private `.proof` code section. A toggle transaction temporarily removes execute access from the target page. If a backend handler or its helpers share that page, the handler can fault under its own lock and deadlock. An incremental MSVC link puts its jump table in the first code section, which can be `.proof`. `tests/CMakeLists.txt` therefore links each MSVC test target with `/INCREMENTAL:NO`. `Lifecycle.ProofSectionHoldsOnlyItsTargets` verifies that no other code precedes the targets in `.proof`.
 
 ### CTest execution timeouts
 

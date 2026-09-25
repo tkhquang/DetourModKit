@@ -9,6 +9,8 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "fixtures/proof_section.hpp"
+
 #include <safetyhook/inline_hook.hpp>
 #include <safetyhook/mid_hook.hpp>
 #include <safetyhook/os.hpp>
@@ -48,43 +50,15 @@ namespace
     // A retained x64 mid chain stays charged at three granules: stub block, trampoline block, and gateway block.
     constexpr std::uint64_t CHARGED_BYTES_PER_CHAIN = 3 * BLOCK_BYTES;
 
-    volatile int s_sink = 0;
     volatile int s_mid_hits = 0;
     volatile int s_inline_hits = 0;
 
-    // docs/design/testing.md owns the private-section rule. Distinct seeds prevent code folding, and volatile work
-    // preserves enough prologue bytes for either patch form. Unsigned arithmetic avoids overflow.
-#if defined(_MSC_VER)
-#pragma code_seg(push, ".proof")
-#define DMK_PROOF_TARGET DMK_PROOF_NOINLINE
-#else
-#define DMK_PROOF_TARGET __attribute__((section(".proof"))) DMK_PROOF_NOINLINE
-#endif
-#define DMK_ROUTE_TARGET(NAME, SEED)                                                                                   \
-    DMK_PROOF_TARGET int NAME(int value)                                                                               \
-    {                                                                                                                  \
-        constexpr std::uint32_t SEED_VALUE = static_cast<std::uint32_t>(SEED);                                         \
-        volatile std::uint32_t accumulator = static_cast<std::uint32_t>(value) * SEED_VALUE;                           \
-        for (std::uint32_t i = 0; i < 8; ++i)                                                                          \
-        {                                                                                                              \
-            accumulator = accumulator + ((accumulator >> 3) ^ (i * SEED_VALUE));                                       \
-            accumulator = accumulator ^ (accumulator << 5);                                                            \
-        }                                                                                                              \
-        const int bounded = static_cast<int>(accumulator & 0xFFFFu);                                                   \
-        s_sink = bounded;                                                                                              \
-        return bounded + (SEED);                                                                                       \
-    }
-    DMK_ROUTE_TARGET(route_target_3, 3)
-    DMK_ROUTE_TARGET(route_target_5, 5)
-    DMK_ROUTE_TARGET(route_target_7, 7)
-    DMK_ROUTE_TARGET(route_target_11, 11)
-    DMK_ROUTE_TARGET(route_target_13, 13)
-    DMK_ROUTE_TARGET(route_target_17, 17)
-#undef DMK_ROUTE_TARGET
-#undef DMK_PROOF_TARGET
-#if defined(_MSC_VER)
-#pragma code_seg(pop)
-#endif
+    DMK_PROOF_SEEDED_TARGET(route_target_3, 3)
+    DMK_PROOF_SEEDED_TARGET(route_target_5, 5)
+    DMK_PROOF_SEEDED_TARGET(route_target_7, 7)
+    DMK_PROOF_SEEDED_TARGET(route_target_11, 11)
+    DMK_PROOF_SEEDED_TARGET(route_target_13, 13)
+    DMK_PROOF_SEEDED_TARGET(route_target_17, 17)
 
     template <int Seed> int route_inline_detour(int value)
     {
@@ -1199,6 +1173,51 @@ namespace
         VirtualFree(page, 0, MEM_RELEASE);
         return 0;
     }
+
+    /**
+     * @brief Verifies that each route target resides in `.proof` and only padding precedes the first target.
+     * @details An incremental MSVC link fails this check when its jump table precedes the targets in `.proof`.
+     */
+    int run_proof_section()
+    {
+        const auto *const image = reinterpret_cast<const std::uint8_t *>(GetModuleHandleW(nullptr));
+        const auto *const headers = reinterpret_cast<const IMAGE_NT_HEADERS *>(
+            image + reinterpret_cast<const IMAGE_DOS_HEADER *>(image)->e_lfanew
+        );
+        const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(headers);
+        const IMAGE_SECTION_HEADER *const sections_end = section + headers->FileHeader.NumberOfSections;
+        constexpr std::uint8_t NAME[IMAGE_SIZEOF_SHORT_NAME] = {'.', 'p', 'r', 'o', 'o', 'f'};
+        while (section != sections_end && std::memcmp(section->Name, NAME, sizeof(NAME)) != 0)
+            ++section;
+        if (section == sections_end)
+        {
+            std::fputs("FAIL: the image has no .proof section\n", stderr);
+            return 1;
+        }
+        const std::uint8_t *const begin = image + section->VirtualAddress;
+        const std::uint8_t *const end = begin + section->Misc.VirtualSize;
+        const std::uint8_t *first = end;
+        for (const TargetFn target : TARGETS)
+        {
+            const auto *const address = reinterpret_cast<const std::uint8_t *>(target);
+            if (address < begin || address >= end)
+            {
+                std::fputs("FAIL: a route target lies outside .proof\n", stderr);
+                return 2;
+            }
+            if (address < first)
+                first = address;
+        }
+        for (const std::uint8_t *cursor = begin; cursor != first; ++cursor)
+        {
+            if (*cursor != 0xCC && *cursor != 0x90 && *cursor != 0x00)
+            {
+                std::fputs("FAIL: other code precedes the route targets in .proof\n", stderr);
+                return 3;
+            }
+        }
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -1233,6 +1252,10 @@ int main(int argc, char **argv)
         if (scenario == "refused-retention")
         {
             return run_refused_retention();
+        }
+        if (scenario == "proof-section")
+        {
+            return run_proof_section();
         }
         return 2;
     }

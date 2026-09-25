@@ -32,6 +32,7 @@
 #include "platform.hpp"
 #include "fixtures/intercept_lease.hpp"
 #include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/proof_section.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -1220,7 +1221,7 @@ TEST_F(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
 // before teardown is already unhooked, and teardown still runs its non-hook steps cleanly.
 namespace
 {
-    DMK_TEST_NOINLINE int session_raii_target(int x)
+    DMK_PROOF_TARGET int session_raii_target(int x)
     {
         volatile int r = x + 1;
         return r;
@@ -1722,7 +1723,7 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
 
 namespace
 {
-    DMK_TEST_NOINLINE int logic_unload_target_add(int a, int b)
+    DMK_PROOF_TARGET int logic_unload_target_add(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -1731,7 +1732,7 @@ namespace
     {
         return a + b + 1;
     }
-    DMK_TEST_NOINLINE int logic_unload_target_sub(int a, int b)
+    DMK_PROOF_TARGET int logic_unload_target_sub(int a, int b)
     {
         volatile int r = a - b;
         return r;

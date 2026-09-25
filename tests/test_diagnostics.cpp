@@ -20,6 +20,7 @@
 #include "platform.hpp"
 
 #include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/proof_section.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -60,25 +61,25 @@ namespace
     };
 
     // Distinct real targets so the lifecycle cases install a genuine hook (the event source the dispatcher reports on).
-    DMK_TEST_NOINLINE int lifecycle_target_add(int a, int b)
+    DMK_PROOF_TARGET int lifecycle_target_add(int a, int b)
     {
         volatile int r = a + b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int lifecycle_target_mul(int a, int b)
+    DMK_PROOF_TARGET int lifecycle_target_mul(int a, int b)
     {
         volatile int r = a * b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int lifecycle_target_layered(int a, int b)
+    DMK_PROOF_TARGET int lifecycle_target_layered(int a, int b)
     {
         volatile int r = a - b;
         return r;
     }
 
-    DMK_TEST_NOINLINE int lifecycle_target_mid(int a, int b)
+    DMK_PROOF_TARGET int lifecycle_target_mid(int a, int b)
     {
         volatile int r = a / (b != 0 ? b : 1);
         return r;
