@@ -41,6 +41,7 @@ namespace route_copy
         HoldAdapter,
         ReleaseAdapter,
         Enabled,
+        RefuseNextAcquisition,
     };
 
     /** @brief Host events that delimit ownership of the process coordinator. */

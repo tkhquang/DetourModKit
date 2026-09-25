@@ -167,6 +167,9 @@ extern "C" __declspec(dllexport) std::uintptr_t route_copy_command(route_copy::C
         case Command::Unavailable:
             safetyhook::g_coordinator_refusal_for_test = 1;
             return 1;
+        case Command::RefuseNextAcquisition:
+            safetyhook::g_coordinator_refusal_for_test = 3;
+            return 1;
         case Command::Incompatible:
             safetyhook::g_coordinator_refusal_for_test = 2;
             return 1;
