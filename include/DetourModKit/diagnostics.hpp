@@ -94,8 +94,8 @@ namespace DetourModKit
          *          Its live count equals successful acquires minus releases.
          *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
          *          XInputTarget refers to an XInput provider module.
-         * @note After Session teardown, MessageHookKeepalive and a retained XInput pair or chain are inert.
-         *       Other open self-module reasons can identify live code.
+         * @note After Session teardown, MessageHookKeepalive is inert. A retained XInput pair or chain may still
+         *       forward calls. Other open self-module reasons can identify live code.
          */
         enum class ModulePinReason : std::uint8_t
         {
