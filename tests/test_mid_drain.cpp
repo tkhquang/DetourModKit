@@ -21,18 +21,11 @@
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+#include "fixtures/proof_section.hpp"
 #include "internal/drain_backoff.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
-
-#if defined(_MSC_VER)
-#define DMK_TEST_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_TEST_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_TEST_NOINLINE
-#endif
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
 namespace DetourModKit::detail
@@ -56,13 +49,13 @@ namespace
         return indirect(args...);
     }
 
-    DMK_TEST_NOINLINE int callback_expiry_site(int a)
+    DMK_PROOF_TARGET int callback_expiry_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int entry_expiry_site(int a)
+    DMK_PROOF_TARGET int entry_expiry_site(int a)
     {
         volatile int result = a;
         return result;

@@ -354,6 +354,33 @@ namespace
         return 0;
     }
 
+    int reconcile_stale_state_before_layer_conflict(
+        Participant &first,
+        Participant &second,
+        unsigned char *page,
+        const std::array<unsigned char, 11> &code
+    )
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        // A foreign restore leaves the older hook Active over Original bytes. Its arm reconciles that state to
+        // Disabled before the coordinator refuses it under the newer layer.
+        if (first.run(Command::Install, page) == 0 || first.run(Command::Enabled) == 0)
+            return fail("the older participant did not arm");
+        std::memcpy(page, code.data(), code.size());
+        FlushInstructionCache(GetCurrentProcess(), page, code.size());
+        if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 ||
+            std::memcmp(page, code.data(), code.size()) != 0)
+            return fail("the newer participant did not save and restore the original prologue");
+        if (first.run(Command::EnableLayerConflict) == 0 || first.run(Command::Enabled) != 0 ||
+            std::memcmp(page, code.data(), code.size()) != 0 || target() != 37 || first.run(Command::Hits) != 0)
+            return fail("the refused arm did not publish the reconciled Disabled state");
+        if (second.run(Command::Reset) != 0 || first.run(Command::Enable) == 0 || target() != 37 ||
+            first.run(Command::Hits) != 1 || first.run(Command::Reset) != 0 ||
+            std::memcmp(page, code.data(), code.size()) != 0)
+            return fail("the reconciled older hook did not arm after the newer layer retired");
+        return 0;
+    }
+
     // A held coordinator refuses an arm, a disarm, and the teardown restore of an armed hook. Each warning names the
     // cause.
     int report_coordinator_refusal(Participant &first, Participant &second, unsigned char *page)
@@ -389,8 +416,8 @@ int main(int argc, char **argv)
         scenario != "layers-inline" && scenario != "missing" && scenario != "incompatible" && scenario != "capacity" &&
         scenario != "timeout" && scenario != "stub-page" && scenario != "layers-overlap" && scenario != "drain-leak" &&
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
-        scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "refusal-cause" &&
-        scenario != "foreign-view")
+        scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "stale-layer-conflict" &&
+        scenario != "refusal-cause" && scenario != "foreign-view")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -414,6 +441,8 @@ int main(int argc, char **argv)
         return fail("participants did not share the same data owner");
     if (scenario == "layer-conflict")
         return report_layer_conflict(first, second, page, code);
+    if (scenario == "stale-layer-conflict")
+        return reconcile_stale_state_before_layer_conflict(first, second, page, code);
     if (scenario == "refusal-cause")
         return report_coordinator_refusal(first, second, page);
     if (scenario == "scans")

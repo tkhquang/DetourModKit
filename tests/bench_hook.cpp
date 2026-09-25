@@ -13,6 +13,7 @@
 #include "DetourModKit/hook.hpp"
 
 #include "bench_gate.hpp"
+#include "fixtures/proof_section.hpp"
 
 #include <windows.h>
 
@@ -30,14 +31,6 @@ using namespace DetourModKit;
 using namespace DetourModKit::hook;
 using namespace std::chrono;
 
-#if defined(_MSC_VER)
-#define DMK_BENCH_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_BENCH_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_BENCH_NOINLINE
-#endif
-
 namespace
 {
     using TargetFn = int (*)(int);
@@ -47,7 +40,7 @@ namespace
 
     // A real, hookable body. The volatile result keeps the call at the patched entry, so the measurement times the
     // dispatch rather than a constant the optimizer folded at the call site.
-    DMK_BENCH_NOINLINE int bench_hook_target(int x)
+    DMK_PROOF_TARGET int bench_hook_target(int x)
     {
         volatile int r = x;
         return r;

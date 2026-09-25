@@ -94,7 +94,7 @@ namespace DetourModKit
          *          Its live count equals successful acquires minus releases.
          *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
          *          XInputTarget refers to an XInput provider module.
-         * @note After Session teardown, MessageHookKeepalive and a retained XInput pair are inert.
+         * @note After Session teardown, MessageHookKeepalive and a retained XInput pair or chain are inert.
          *       Other open self-module reasons can identify live code.
          */
         enum class ModulePinReason : std::uint8_t
@@ -115,7 +115,7 @@ namespace DetourModKit
             LifecycleReaper,
             /// Reserved inert value for the WndProc keepalive. It keeps this numeric slot and never counts.
             WndprocKeepalive,
-            /// Tracks the XInput self-reference until rollback or a proved clean uninstall.
+            /// Tracks the XInput self-reference until a rollback or uninstall that retains no XInput chain.
             XInputKeepalive,
             /** @brief Tracks an XInput provider reference paired with @ref XInputKeepalive. */
             XInputTarget,
