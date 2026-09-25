@@ -4,10 +4,10 @@
 /**
  * @file internal/hook_backend.hpp
  * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
- * @details hook.hpp forward-declares the nested Impl of every backend-owning handle and holds it behind a
- *          std::unique_ptr. Those bodies are completed here, where safetyhook.hpp is visible. docs/design/hooking.md
- *          ("Backend confinement") owns the island list and scripts/check_header_hygiene.py gates it. hook.hpp owns
- *          the rule that hook::MidContext stays incomplete, so no definition of it belongs here.
+ * @details hook.hpp holds each backend-owning handle's nested Impl behind std::unique_ptr. This header completes those
+ *          bodies with safetyhook.hpp visible. scripts/check_header_hygiene.py owns and gates BACKEND_SOURCE_ISLANDS.
+ *          docs/design/hooking.md ("Backend confinement") describes the islands. hook.hpp owns the rule that
+ *          hook::MidContext stays incomplete, so no definition belongs here.
  */
 
 #include "DetourModKit/hook.hpp"
