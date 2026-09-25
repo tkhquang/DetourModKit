@@ -73,6 +73,8 @@ Timeout, missing state, incompatible state, or abandoned ownership refuses unsaf
 
 When another thread holds the coordinator throughout teardown, DMK makes at most four acquisitions per disarmed mid hook and two per armed hook. The coordinator timeout budgets total eight and four seconds, respectively, apart from scheduler delay.
 
+The [refusal measurements](../analysis/coordinator_refusal_v4/README.md) record both paths. `Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal` and `Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal` verify clean reclamation after one refused DMK acquisition.
+
 Retained DMK routes also preserve their adapter and counted module reference. A DMK drain failure or a destroy lock failure records its leaked route as retained.
 
 Foreign libraries outside this protocol remain outside its guarantee. The existing target-lifetime and saved-context contracts still apply. No public coordinator API or package target exists.
