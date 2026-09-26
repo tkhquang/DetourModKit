@@ -140,22 +140,24 @@ DMK's worker module references pin DMK, not consumer callbacks. Before the drain
 
 A binding still inside its callback at the deadline is reported `TimedOut` with the callable deliberately intact. A destroyed callable that a poll thread still runs frees the code out from under it.
 
+A failed engine cache rebuild that clears the name index never lets a named drain report `Drained` over a live binding (`InputLifecycleProof.NamedDrainAfterDegradedIndexRetiresTheBinding`).
+
 With those preconditions met, `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DMK worker callable remains. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` never authorize `FreeLibrary`.
 
 The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed with the rundown pending but releases transaction ownership, so an off-loader retry can finish. Only a retry that completes the drain clears the pending state. `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not (`InputLifecycleProof.TimedOutDrainCannotBeReopenedByAnAdmittedStart`, `SessionHotReload.ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin`).
 
 ### [B-90]
 
-A `join()` from the joined thread raises `std::system_error`, which terminates the host out of the surrounding `noexcept`. An owner destroyed there frees state that the still-running body reads. A bare detach loses the rundown that the teardown was supposed to perform.
+A `join()` from the joined thread raises `std::system_error`, which terminates the host out of the surrounding `noexcept`. An owner destroyed there frees state that the still-running body reads. A bare detach loses the rundown that the teardown was supposed to perform. On a control thread inside an input delivery, a join can deadlock instead, because the poll thread can wait on that delivery's gate.
 
 Instead, take these steps:
 
-1. Detect the self case and request stop.
+1. Detect the self case or an input delivery on this thread, and request stop.
 2. Publish the observable "no longer running" state.
 3. Precommit a self-keepalive before worker publication.
 4. Hand the facade's external reference to the process-lifetime reaper (`src/internal/lifecycle_reaper.hpp`). The reaper must invoke the ordinary shutdown while the owner is still alive and wait for the body to return. It clears the self-keepalive only after the complete rundown, and only then releases its reference. A destructor that joins from inside itself ends the owner's lifetime while the body can still read its members.
 
-Such a call is asynchronous by contract. Say so in the public documentation, because a caller must not assume that the rundown finished when the call returns.
+Such a call is asynchronous by contract. Say so in the public documentation, because a caller must not assume that the rundown finished when the call returns. `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread` verifies the control-thread arm.
 
 The queue must not depend on the heap. The reaper reserves its queue nodes up front, since the retirements that most need it happen under memory pressure. A queue that still refuses leaves the precommitted owner retention intact. A retirement with no rundown callback is refused rather than queued, because an owner whose worker cannot be run down must never be released.
 

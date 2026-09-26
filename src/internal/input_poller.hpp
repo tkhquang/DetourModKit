@@ -238,6 +238,9 @@ namespace DetourModKit
              *          archives.
              */
             void publish_consume_rules_for_test() noexcept;
+
+            /// Test-only: false while a failed cache rebuild leaves name lookups on the scan fallback.
+            [[nodiscard]] bool name_index_authoritative_for_test() const noexcept;
 #endif
 
             /// Sets whether the poller gates on foreground focus. Thread-safe; takes effect immediately.
@@ -278,18 +281,20 @@ namespace DetourModKit
             /**
              * @brief Stops the poll thread.
              * @details Joins and delivers final Hold releases. Idempotent.
-             * @note A poll-thread call only requests stop and makes self_retiring() true.
+             * @note A call on the poll thread or inside an input delivery only requests stop and makes self_retiring()
+             *       true.
              * @note Loader-lock or failed-join teardown keeps the owner, module reference, and detours retained.
              */
             void shutdown() noexcept;
 
             /**
-             * @brief Reports that shutdown() was reached on the poll thread and could not finish there.
-             * @details True only after such a call. The owner must then hand its external reference to the lifecycle
-             *          reaper instead of destroying the poller inline, because destroying it here would either
-             *          self-join or free members the still running poll loop is reading. The reaper calls shutdown()
-             *          again on its own thread, where the join, the detour uninstall, and the final
-             *          on_state_change(false) rundown are safe, and releases its reference only once that returns.
+             * @brief Reports that shutdown() was reached from a binding callback and deferred its rundown.
+             * @details True only after a call on the poll thread or inside an input delivery on another thread. The
+             *          owner then hands its external reference to the lifecycle reaper and does not destroy the poller
+             *          inline. A join there self-joins, or waits on a poll thread parked on the caller's own delivery.
+             *          The reaper calls shutdown() again on its own thread, where the join, the detour uninstall, and
+             *          the final on_state_change(false) rundown are safe. It releases its reference after that call
+             *          returns.
              */
             [[nodiscard]] bool self_retiring() const noexcept
             {
@@ -311,8 +316,8 @@ namespace DetourModKit
              * @details Call once the worker is running and before the poller is reachable from another thread, so no
              *          teardown can find it unprotected and none has to allocate to retain it. The deliberate
              *          self-reference is cleared by shutdown() only after a completed join and rundown, or when there
-             *          is no worker to run down at all. A poll-thread call returns with it still held, pending the
-             *          off-thread re-entry that completes the rundown; the loader-lock, failed-join, and unaccepted
+             *          is no worker to run down at all. A call from a binding callback returns with it still held until
+             *          the off-thread re-entry completes the rundown. The loader-lock, failed-join, and unaccepted
              *          retirement paths keep it permanently.
              * @param owner The shared owner of this poller.
              */
@@ -439,18 +444,16 @@ namespace DetourModKit
                 /**
                  * @brief Clear every derived cache.
                  * @details For a caller that already reshaped m_bindings. The prior name index maps names to old
-                 *          positions, so retaining it could address past the new binding array; empty is the only
-                 *          index-safe answer.
+                 *          positions, and a retained index can address past the new binding array. Empty is the only
+                 *          index-safe answer (see m_name_index_authoritative).
                  */
                 ClearIndexSafe,
                 /**
                  * @brief Keep the previous lookup caches, but still disarm gamepad consume suppression.
                  * @details For a caller that changed only a flag on an existing binding. Cardinality, order, and names
-                 *          are untouched, so the name and modifier caches still describe m_bindings exactly and
-                 *          discarding them would disable name lookup, and widen firing by emptying the strict-match
-                 *          modifier set, over a change that invalidated neither. Suppression is not retained: the flag
-                 *          change may have been a retirement, and a retained rule list would outlive the binding that
-                 *          owned it.
+                 *          are untouched, so the name and modifier caches still describe m_bindings exactly. A discard of
+                 *          them empties the strict-match modifier set and widens firing over a change that invalidated
+                 *          neither cache. The suppression rules still clear, because the flag change can be a retirement.
                  */
                 Retain
             };
@@ -482,6 +485,21 @@ namespace DetourModKit
                 DeferredDiagnostics &diagnostics,
                 CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe
             ) noexcept;
+
+            /**
+             * @brief Requires m_bindings_rw_mutex. Calls @p visit with the index of every binding @p name addresses.
+             * @details Scans m_bindings while m_name_index_authoritative is false. An empty name addresses no binding.
+             *          Allocation-free.
+             * @return true when at least one binding matched.
+             */
+            template <typename Visit> bool for_each_named_locked(std::string_view name, Visit &&visit) const;
+
+            /**
+             * @brief Requires m_bindings_rw_mutex. Returns the ascending indices that @p name addresses.
+             * @details One exact allocation. Empty when the name addresses no binding.
+             * @throws std::bad_alloc when the allocation fails.
+             */
+            [[nodiscard]] std::vector<std::size_t> named_indices_locked(std::string_view name) const;
 
             /**
              * @brief Builds all fallible derived state for @p bindings without a member-state change.
@@ -518,6 +536,10 @@ namespace DetourModKit
             mutable SrwSharedMutex m_bindings_rw_mutex;
             std::vector<InputBinding> m_bindings;
             std::unordered_map<std::string, std::vector<std::size_t>, StringHash, std::equal_to<>> m_name_index;
+            // False after a ClearIndexSafe rebuild failure left m_name_index empty over a nonempty m_bindings. Name
+            // lookups then scan, so a degraded index cannot report a live binding as absent ([B-74]). Guarded by
+            // m_bindings_rw_mutex.
+            bool m_name_index_authoritative{true};
             std::vector<InputCode> m_known_modifiers;
             // Advances on every binding-set reshape; an input::BindingToken captures this at acquire time and a query
             // whose token generation no longer matches fails closed. Guarded by m_bindings_rw_mutex.
@@ -525,7 +547,7 @@ namespace DetourModKit
             std::chrono::milliseconds m_poll_interval;
             std::atomic<bool> m_require_focus;
             std::atomic<bool> m_running{false};
-            // Set when shutdown() ran on the poll thread and deferred the rundown. See self_retiring().
+            // Set when shutdown() ran from a binding callback and deferred the rundown. See self_retiring().
             std::atomic<bool> m_self_retiring{false};
             // Set when shutdown() cannot prove that owner destruction is safe. See requires_abandonment().
             std::atomic<bool> m_requires_abandonment{false};

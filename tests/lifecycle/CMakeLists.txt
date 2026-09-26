@@ -829,6 +829,37 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownB
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# A rebind on a control thread delivers the hold release inside the gate delivery. The poll thread's next delivery for
+# the rebuilt binding waits for that release. A shutdown() join from that release deadlocks, so a watchdog exit code is
+# the oracle. Threading behavior: both toolchains. The release-only arm is the synchronous external-shutdown control.
+add_executable(input_control_thread_shutdown input_control_thread_shutdown.cpp)
+target_link_libraries(input_control_thread_shutdown PRIVATE DetourModKit dmk_coverage)
+target_include_directories(input_control_thread_shutdown PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_control_thread_shutdown PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_control_thread_shutdown)
+add_dependencies(dmk_lifecycle_proof_hosts input_control_thread_shutdown)
+
+dmk_add_raw_proof(NAME Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> shutdown-in-release
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ControlThreadReleaseWithoutShutdownRunsDown
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> release-only
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Bounded negative cleanup control. The release parks after its shutdown() call while the main thread abandons the
+# premise. Exit zero requires the parked body released, the deferred rundown observed complete, and then the seams
+# cleared.
+dmk_add_raw_proof(NAME Lifecycle.ControlThreadShutdownAbandonedPremiseRunsDownBeforeClearing
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> abandoned-premise
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # First-use singleton state is allocation and language behavior, so these run on both toolchains. The driver replaces
 # plain global operator new for its single- and concurrent-OOM modes and supplies a successful control.
 add_executable(input_first_use_oom input_first_use_oom.cpp)

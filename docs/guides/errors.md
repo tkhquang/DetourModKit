@@ -84,7 +84,7 @@ The categories are `General`, `Hook`, `Scan`, `Memory`, `Rtti`, `Manifest`, and 
 
 ## The `GetLastError()` detail slot
 
-For a Win32 lifecycle failure, `ErrorCode::SystemCallFailed` carries the raw `GetLastError()` value in `Error::detail` (`[B-69]`). Read it to recover the OS reason:
+For a Win32 lifecycle failure, `ErrorCode::SystemCallFailed` carries the raw `GetLastError()` value in `Error::detail` (`[B-69]`). A function that reports another value documents it, as `Input::start` does. Read it to recover the OS reason:
 
 ```cpp
 auto opened = dmk::Session::start(info);

@@ -1527,6 +1527,80 @@ TEST_F(InterceptMessageHookTest, CleanupBlockedRejectsASameThreadSuccessor)
     uninstall(successor);
 }
 
+// A failed migration leaves the old hook mounted on a CleanupBlocked route. An owner republish, which install_xinput
+// performs through the same publish_owner, must keep capture closed until a Ready mount arms it.
+TEST_F(InterceptMessageHookTest, RepublishOnCleanupBlockedRouteKeepsCaptureOff)
+{
+    PumpingThread worker;
+    ASSERT_NE(worker.thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker.thread_id()));
+
+    set_message_unhook_failure_for_test(true);
+    ASSERT_FALSE(install_message_hook(owner(), GetCurrentThreadId()));
+    set_message_unhook_failure_for_test(false);
+    ASSERT_EQ(message_hook_route_state(), WheelRouteState::CleanupBlocked);
+    ASSERT_EQ(message_hook_thread_id(), worker.thread_id());
+
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner()));
+    EXPECT_FALSE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()));
+    EXPECT_FALSE(process_wheel_message_for_test(false, WHEEL_DELTA));
+    EXPECT_EQ(take_wheel_counts(owner()), (std::array<int, 4>{}));
+
+    worker.stop();
+    ASSERT_TRUE(
+        wait_until([] { return message_hook_route_state() == WheelRouteState::Retryable; }, std::chrono::seconds(2))
+    );
+    ASSERT_TRUE(mount_here());
+    (void)process_wheel_message_for_test(false, WHEEL_DELTA);
+    EXPECT_EQ(take_wheel_counts(owner()), (std::array<int, 4>{1, 0, 0, 0}));
+}
+
+// A migration whose admitted-phase drain times out leaves the old hook mounted on a Retryable route. The same
+// republish must keep capture closed there too, and the next migration re-arms it on Ready.
+TEST_F(InterceptMessageHookTest, RepublishOnRetryableRouteKeepsCaptureOff)
+{
+    PumpingThread worker;
+    ASSERT_NE(worker.thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker.thread_id()));
+
+    s_wheel_capture_entry_reached.store(false, std::memory_order_release);
+    s_release_wheel_capture_entry.store(false, std::memory_order_release);
+    DetourModKit::detail::set_wheel_capture_entry_seam(&park_wheel_capture_entry);
+    set_wheel_drain_timeout_for_test(50);
+    std::jthread parked([] { (void)process_wheel_message_for_test(false, WHEEL_DELTA); });
+    // Destroyed before the jthread joins, so a fatal assertion cannot leave the frame parked.
+    struct ParkedRelease
+    {
+        ~ParkedRelease()
+        {
+            s_release_wheel_capture_entry.store(true, std::memory_order_release);
+            DetourModKit::detail::set_wheel_capture_entry_seam(nullptr);
+            set_wheel_drain_timeout_for_test(0);
+        }
+    } parked_release;
+    ASSERT_TRUE(wait_until(
+        [] { return s_wheel_capture_entry_reached.load(std::memory_order_acquire); },
+        std::chrono::seconds(5)
+    ));
+
+    ASSERT_FALSE(install_message_hook(owner(), GetCurrentThreadId()));
+    ASSERT_EQ(message_hook_route_state(), WheelRouteState::Retryable);
+    ASSERT_EQ(message_hook_thread_id(), worker.thread_id());
+    s_release_wheel_capture_entry.store(true, std::memory_order_release);
+    parked.join();
+    DetourModKit::detail::set_wheel_capture_entry_seam(nullptr);
+    set_wheel_drain_timeout_for_test(0);
+
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner()));
+    EXPECT_FALSE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()));
+    EXPECT_FALSE(process_wheel_message_for_test(false, WHEEL_DELTA));
+    EXPECT_EQ(take_wheel_counts(owner()), (std::array<int, 4>{}));
+
+    ASSERT_TRUE(mount_here());
+    (void)process_wheel_message_for_test(false, WHEEL_DELTA);
+    EXPECT_EQ(take_wheel_counts(owner()), (std::array<int, 4>{1, 0, 0, 0}));
+}
+
 TEST_F(InterceptMessageHookTest, UninstallDrainsAParkedAdmittedPhase)
 {
     ASSERT_TRUE(mount_here());
@@ -2510,9 +2584,9 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
         FAIL() << "the consume wheel binding never armed the swallow mask, so the disarm below would prove nothing";
     }
 
-    // Sweep allocation budgets until one lets the reshape land but fails the cache rebuild that follows it. An emptied
-    // name index is that catch's signature: a budget too low fails add_binding before the reshape and leaves the poller
-    // untouched, and one too high rebuilds successfully.
+    // Sweep allocation budgets until one lets the reshape land but fails the cache rebuild that follows it. A
+    // non-authoritative name index is the signature of that catch. A budget too low fails add_binding before the
+    // reshape and leaves the poller untouched. A budget too high rebuilds successfully.
     bool reached_rebuild_failure = false;
     for (long long budget = 0; budget <= 64 && !reached_rebuild_failure; ++budget)
     {
@@ -2525,7 +2599,7 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
             dmk_test::AllocFailScope fail(budget);
             added = poller.add_binding(std::move(extra));
         }
-        reached_rebuild_failure = added && !poller.acquire_binding_token(WHEEL_NAME).valid();
+        reached_rebuild_failure = added && !poller.name_index_authoritative_for_test();
     }
     if (!reached_rebuild_failure)
     {

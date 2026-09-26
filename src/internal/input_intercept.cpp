@@ -206,6 +206,13 @@ namespace DetourModKit::detail
         void clear_data_plane_locked(std::uint64_t wheel_epoch) noexcept;
 
         /**
+         * @brief Requires s_intercept_mutex. Reports whether wheel capture can open.
+         * @details True with no mounted wheel hook, where an open capture is inert, or on a Ready route. A hook that a
+         *          failed migration or removal left on a Retryable or CleanupBlocked route keeps capture closed.
+         */
+        [[nodiscard]] bool wheel_capture_armable_locked() noexcept;
+
+        /**
          * @brief Closes wheel capture and advances its epoch so an already-entered frame cannot write into a
          *        successor.
          * @return The newly published disabled epoch.
@@ -227,15 +234,19 @@ namespace DetourModKit::detail
 
         /**
          * @brief Requires s_intercept_mutex. Publishes the owner after an installation is ready and re-opens wheel
-         *        capture for it.
+         *        capture for it when wheel_capture_armable_locked() allows it.
          * @details The arm action occurs here, not at each install site, so ownership itself controls the association.
-         *          An arm with no mounted wheel hook is inert.
+         *          The Ready store in install_message_hook publishes again, so a route that later becomes Ready arms.
          */
         void publish_owner(std::uint64_t owner) noexcept
         {
+            const bool arm = wheel_capture_armable_locked();
             const DataPlaneLockGuard data_lock;
             s_intercept_owner.store(owner, std::memory_order_release);
-            s_wheel_capture_state.fetch_or(WHEEL_CAPTURE_ENABLED, std::memory_order_seq_cst);
+            if (arm)
+            {
+                s_wheel_capture_state.fetch_or(WHEEL_CAPTURE_ENABLED, std::memory_order_seq_cst);
+            }
         }
 
         /**
@@ -1188,6 +1199,13 @@ namespace DetourModKit::detail
         HANDLE s_msg_hook_thread = nullptr;
         std::uint64_t s_msg_hook_mount_generation = 0;
         std::atomic<std::uint8_t> s_msg_hook_route_state{static_cast<std::uint8_t>(WheelRouteState::TargetWait)};
+
+        bool wheel_capture_armable_locked() noexcept
+        {
+            return s_msg_hook.load(std::memory_order_relaxed) == nullptr ||
+                   s_msg_hook_route_state.load(std::memory_order_relaxed) ==
+                       static_cast<std::uint8_t>(WheelRouteState::Ready);
+        }
 
         // Counts callback frames inside a wheel admission phase (count admission or consume finalization). The
         // control plane drains it, bounded, after an epoch advance so no admitted decision reaches a successor

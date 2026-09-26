@@ -4368,7 +4368,10 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
     const std::uint16_t button = gamepad_mask(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+    // The INI set consume by name after registration, so only an unconditional release clear lifts it ([B-27]).
     guard.release();
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u)
+        << "the guard release left the INI-enabled consume rule published";
     input::Input::instance().shutdown();
 }
 
