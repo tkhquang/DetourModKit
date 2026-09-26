@@ -332,7 +332,10 @@ namespace DetourModKit
         InstanceAlreadyRunning,
         /// start()/bootstrap() was called while a Session is already active in this process (a caller sequencing bug).
         SessionAlreadyActive,
-        /// A Win32 lifecycle operation failed; Error::detail = GetLastError().
+        /**
+         * @brief A system lifecycle operation failed.
+         * @details Error::detail carries GetLastError() unless the function that reports it documents another value.
+         */
         SystemCallFailed,
         /// A bootstrap lifecycle operation raced a concurrent attach, a drain, or the previous generation's retirement.
         SessionShutdownInProgress,

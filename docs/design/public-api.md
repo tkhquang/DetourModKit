@@ -76,7 +76,7 @@ The existing `Logger` constructor and `configure` form one settled exception. Th
 
 ### [B-69]
 
-`error.hpp` documents that `SystemCallFailed`'s `detail` carries `GetLastError()`, and `detail::acquire_module_ref` restores the thread's last-error on failure precisely so its caller can read it. A failure site that builds `Error{SystemCallFailed, where}` with no detail leaves the consumer with a read of 0.
+`error.hpp` documents that `SystemCallFailed`'s `detail` carries `GetLastError()` for a Win32 failure. `detail::acquire_module_ref` restores the thread's last-error on failure precisely so its caller can read it. A failure site that builds `Error{SystemCallFailed, where}` with no detail leaves the consumer with a read of 0.
 
 Capture `::GetLastError()` into a local the instant the primitive returns failure. Any intervening call (a ledger `release_hook`, a log, an allocation) can overwrite the thread's last-error. Then build the Error from that captured local. The three `acquire_hook_self_ref` failure branches in `hook.cpp` do this. The DWORD widens into the `std::uintptr_t detail` slot without narrowing.
 
