@@ -1733,6 +1733,35 @@ TEST(ManifestAdoptTest, AdoptsByteKindAndOutlivesSourceLadder)
     EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(0x200));
 }
 
+TEST(ManifestAdoptTest, StrayExportModuleKeepsTheFallbackScope)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x20, 0x30, 0x40});
+
+    // The anchor ignores export_module for every kind except ExportName, so the adopted signature must ignore it too.
+    const sc::Candidate cands[] = {
+        sc::Candidate::direct("marker", sc::Pattern::compile("DE AD BE EF 10 20 30 40").value())
+    };
+    an::Anchor anchor{};
+    anchor.label = "marker";
+    anchor.kind = an::AnchorKind::RipGlobal;
+    anchor.site = cands;
+    const auto clean = mf::Signature::adopt(anchor);
+    ASSERT_TRUE(clean.has_value()) << clean.error().message();
+
+    anchor.export_module = "kernel32.dll";
+    const auto stray = mf::Signature::adopt(anchor);
+    ASSERT_TRUE(stray.has_value()) << stray.error().message();
+    EXPECT_TRUE(stray->record().module.empty());
+    EXPECT_EQ(stray->scope().base.raw(), dmk::Region::host().base.raw());
+    EXPECT_EQ(stray->current_fingerprint(), clean->current_fingerprint());
+
+    const an::ResolvedAnchor resolved = stray->resolve(page.range());
+    EXPECT_EQ(resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(0x200));
+}
+
 TEST(ManifestAdoptTest, CodeOperandByteWidthDomainFailsClosed)
 {
     const sc::Candidate candidates[] = {sc::Candidate::direct("disp8", sc::Pattern::literal("8A 45 FF"))};
@@ -2877,6 +2906,36 @@ TEST(ManifestGrammarTest, NoSeparatorAndEmptyKeyLinesFailClosedInEverySection)
     }
 }
 
+// parse reads only the `[manifest]` header and `sig.` sections. Any other section, and a key line before the first
+// header, carries state that parse never reads and the next save drops. Each fails closed.
+TEST(ManifestGrammarTest, UnknownSectionsAndKeysBeforeTheFirstHeaderFailClosed)
+{
+    struct Rejection
+    {
+        std::string text;
+        const char *what;
+    };
+
+    const std::vector<Rejection> rejected = {
+        {header_text() + "[extra]\nnote = x\n" + manual_section("x", 1), "unknown section with a key"},
+        {header_text() + manual_section("x", 1) + "[extra]\n", "empty unknown section"},
+        {header_text() + "[sgi.player]\nkind = manual\nmanual_value = 1\n", "misspelled sig prefix"},
+        {header_text() + "[sig]\nkind = manual\nmanual_value = 1\n", "sig without a dot"},
+        {header_text() + "[manifest.extra]\nnote = x\n" + manual_section("x", 1), "manifest-prefixed section"},
+        {"note = x\n" + header_text() + manual_section("x", 1), "key before the first header"},
+    };
+    for (const Rejection &r : rejected)
+    {
+        const auto parsed = mf::parse(r.text);
+        ASSERT_FALSE(parsed.has_value()) << r.what << ": expected rejection";
+        EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine) << r.what;
+    }
+
+    const auto commented = mf::parse("; note\n" + header_text() + manual_section("x", 1));
+    ASSERT_TRUE(commented.has_value()) << commented.error().message();
+    EXPECT_EQ(commented->records.size(), 1u);
+}
+
 // This case drops `=` from serialized xref_encoding evidence. The complete manifest must fail closed.
 TEST(ManifestGrammarTest, DroppedSeparatorInSerializedRecordFailsClosed)
 {
@@ -3493,14 +3552,14 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         EXPECT_EQ(encode_over.error().code, dmk::ErrorCode::SizeTooLarge);
     }
 
-    // max_sections (unknown padding sections are counted before the merge).
+    // max_sections (every section counts before the merge).
     {
         const auto padded = [](std::size_t pad)
         {
             std::string t = header_text(); // one section
             for (std::size_t i = 0; i < pad; ++i)
             {
-                t += std::format("[pad.{}]\n", i);
+                t += manual_section(std::format("pad{}", i), 1);
             }
             return t;
         };
@@ -3619,7 +3678,7 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
 
     // Pin the conservative values themselves at their exact boundaries.
     {
-        const mf::ManifestLimits defaults = mf::ManifestLimits::conservative();
+        constexpr mf::ManifestLimits defaults = mf::ManifestLimits::conservative();
 
         std::string records_at_cap = header_text();
         for (std::size_t i = 0; i < defaults.max_records; ++i)
@@ -3656,13 +3715,21 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(keys_over.has_value());
         EXPECT_EQ(keys_over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        std::string sections_at_cap = header_text();
-        for (std::size_t i = 1; i < defaults.max_sections; ++i)
+        // The default section cap is the count the default record and rung caps admit: the header, every record, and
+        // every rung. Records and rungs at their own caps therefore never exceed it, so rungs under a raised rung cap
+        // isolate the section cap.
+        static_assert(defaults.max_sections == 1 + defaults.max_records * (1 + defaults.max_rungs_per_record));
+        mf::ManifestLimits section_limits = defaults;
+        section_limits.max_rungs_per_record = defaults.max_sections;
+        const auto padding_rung = [](std::size_t index)
+        { return std::format("[sig.s.rung.{}]\nmode = direct\npattern = DE AD\n", index); };
+        std::string sections_at_cap = header_text() + "[sig.s]\nkind = rip_global\n";
+        for (std::size_t i = 2; i < defaults.max_sections; ++i)
         {
-            sections_at_cap += std::format("[padding.{}]\n", i);
+            sections_at_cap += padding_rung(i - 2);
         }
-        ASSERT_TRUE(mf::parse(sections_at_cap).has_value());
-        const auto sections_over = mf::parse(sections_at_cap + "[padding.over]\n");
+        ASSERT_TRUE(mf::parse(sections_at_cap, section_limits).has_value());
+        const auto sections_over = mf::parse(sections_at_cap + padding_rung(defaults.max_sections - 2), section_limits);
         ASSERT_FALSE(sections_over.has_value());
         EXPECT_EQ(sections_over.error().code, dmk::ErrorCode::SizeTooLarge);
 

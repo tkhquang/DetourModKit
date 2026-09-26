@@ -192,7 +192,7 @@ EXPECT_EQ(found->raw(), reinterpret_cast<uintptr_t>(fn));
 - Hook lifecycle: install, enable, disable, release, RAII destructor unhook, re-enable.
 - Original invocation: `Hook::original<Fn>()` (typed trampoline) and `Hook::call<Ret>(Args...)` (guarded by the per-hook mutex).
 - Batch install: `hook::install_all` Mandatory / BestEffort severities and per-row `InstallOutcome`.
-- noexcept-batch degradation: `scan::resolve_batch` and `hook::install_all` degrade rather than terminate under injected out-of-memory (the thread-local `dmk_test::AllocFailScope` injector). A `resolve_batch` container-allocation failure is signalled by the outer `Result<...>` as `Error{OutOfMemory}`. A per-request `bad_alloc` degrades only that slot, with no throw past the `noexcept` boundary.
+- noexcept-batch degradation: `scan::resolve_batch` and `hook::install_all` degrade rather than terminate under injected out-of-memory (the thread-local `dmk_test::AllocFailScope` injector). A `resolve_batch` container-allocation failure is signalled by the outer `Result<...>` as `Error{OutOfMemory}`. A per-request `bad_alloc` degrades only that slot, with no throw past the `noexcept` boundary. `StringXrefTest.AllocationFailureIsNeverReportedAsAMiss` fails every allocation of a string-xref resolve in turn and requires the site or the allocation failure, never a miss.
 - Concurrent access: multi-threaded hook creation stress tests.
 - Cross-module hooks: DLL exports hooked and verified through integration tests.
 - AOB scan pipeline: `scan::scan` / `scan::resolve` finds patterns in loaded DLLs, then `hook::inline_at(InlineRequest{.target = scan::OwnedScanRequest{...}})` hooks the result.

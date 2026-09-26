@@ -76,6 +76,8 @@ The reserved keys (`kind`, `binding`, `pattern`, ...) and the `manifest` / `sig.
 
 A key the parser never reads for its section also fails closed (`MalformedLine`). That covers a wholly-unknown key, or an evidence key inert for the record's kind (`xref_text` on a `vtable_identity` record, a `walk_back` on a non-`direct` rung, a binding sub-key for the wrong `binding`). Such a key keeps no state and vanishes on the next `save`, so a silent ignore of it lets a hand-edited file drift from what DetourModKit acts on. The `manifest::parse` contract also covers raw key-line errors. A dropped separator can silently restore its in-code default. Rejection keeps the file and the resolved contract in agreement.
 
+A section other than `[manifest]` or a `sig.`-prefixed section fails the same way (`MalformedLine`), and so does a key line before the first section header. Neither holds state that `parse` reads.
+
 The manifest is a separate file from the settings INI that a mod loads through `config.hpp`, whose keys are the mod author's own vocabulary. By convention its name is `<Mod>.signatures.ini`, but `manifest::load` accepts any path.
 
 ### Resource caps and identity safety

@@ -32,8 +32,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -43,18 +45,19 @@ namespace DetourModKit
 {
     namespace detail
     {
+        /// True for a `std::initializer_list` specialization.
+        template <class T> inline constexpr bool is_initializer_list_v = false;
+        template <class U> inline constexpr bool is_initializer_list_v<std::initializer_list<U>> = true;
+
         /**
-         * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
-         *        `std::basic_string_view`.
+         * @brief Trait that is true for every `std::ranges::view` and every `std::initializer_list`.
          * @details `[B-21]` A view is trivially copyable, but its bit-copy stores the view's pointer and length. Typed
-         *          `write<T>` rejects every view, even byte spans. Only `write_in_place` routes a byte span to its
-         *          byte-span overload. Use `write_bytes` for other views. Constraint sites inspect
-         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past.
+         *          `write<T>` rejects every view, even byte spans. Only `write_in_place` has a byte-span overload,
+         *          which a contiguous byte view reaches through its span conversion. Use `write_bytes` for other views.
+         *          Constraint sites inspect `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past.
          */
-        template <class T> inline constexpr bool is_non_owning_view_v = false;
-        template <class U, std::size_t Extent> inline constexpr bool is_non_owning_view_v<std::span<U, Extent>> = true;
-        template <class CharT, class Traits>
-        inline constexpr bool is_non_owning_view_v<std::basic_string_view<CharT, Traits>> = true;
+        template <class T>
+        inline constexpr bool is_non_owning_view_v = std::ranges::view<T> || is_initializer_list_v<T>;
 
         /**
          * @brief Opt-in trait for aggregate types whose every object representation may be read from foreign bytes.
@@ -417,9 +420,9 @@ namespace DetourModKit
          * @return The propagated @ref write_in_place result.
          * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract and
          *          seam warning apply. This is the typed per-frame store.
-         * @note Constrained against any non-owning view. A mutable `std::span<std::byte>` routes to the byte-span
-         *       overload above. Any other view is a compile error instead of a silent bit-copy of the view object.
-         *       @ref detail::is_non_owning_view_v owns the rationale.
+         * @note Constrained against any non-owning view. A mutable `std::span<std::byte>` or another contiguous byte
+         *       view routes to the byte-span overload above. Any other view is a compile error instead of a silent
+         *       bit-copy of the view object. @ref detail::is_non_owning_view_v owns the rationale.
          * @note Callback-safe (see @ref write_in_place).
          */
         template <class T>
