@@ -157,7 +157,18 @@ namespace DetourModKit
             // Guarded by the process-wide VMT object gate.
             std::vector<ObjectBinding> object_bindings;
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
-            std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
+
+            /**
+             * @brief One hooked slot: the original pointer read from the clone and the backend's slot patch.
+             * @details The node exists before the backend stores the slot, so @ref VmtHook::original resolves from
+             *          the instant a detour can run. VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore pins it.
+             */
+            struct MethodHook
+            {
+                void *original{nullptr};
+                safetyhook::VmHook backend;
+            };
+            std::unordered_map<std::size_t, MethodHook> method_hooks;
 
             Impl(
                 safetyhook::VmtHook hook,

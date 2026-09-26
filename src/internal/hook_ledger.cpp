@@ -12,12 +12,26 @@ namespace DetourModKit
         void (*g_hook_ledger_lock_probe)() = nullptr;
 #endif
 
+        HookLedger::HookLedger() : m_by_target(std::make_unique<std::unordered_map<std::uintptr_t, TargetEntry>>()) {}
+
+        HookLedger::HookLedger(InertTag) noexcept {}
+
         HookLedger &HookLedger::instance() noexcept
         {
-            // Constructed once into static storage and never destroyed. Default construction is noexcept and leaves
-            // the containers empty, so first use requires no bookkeeping allocation.
+            // Constructed once into static storage and never destroyed. The target map allocates, so a first-use
+            // failure publishes the inert ledger instead of a throw across this noexcept accessor.
             alignas(HookLedger) static unsigned char storage[sizeof(HookLedger)];
-            static HookLedger *const ledger = ::new (static_cast<void *>(storage)) HookLedger();
+            static HookLedger *const ledger = []() noexcept -> HookLedger *
+            {
+                try
+                {
+                    return ::new (static_cast<void *>(storage)) HookLedger();
+                }
+                catch (...)
+                {
+                    return ::new (static_cast<void *>(storage)) HookLedger(InertTag{});
+                }
+            }();
             return *ledger;
         }
 
@@ -41,6 +55,10 @@ namespace DetourModKit
 
         HookLedger::Reservation HookLedger::try_reserve_hook(std::uintptr_t target, bool refuse_if_hooked) noexcept
         {
+            if (inert())
+            {
+                return Reservation{ReserveStatus::OutOfMemory, 0, false};
+            }
             const std::uint64_t id = m_next_id.fetch_add(1, std::memory_order_relaxed);
             try
             {
@@ -49,8 +67,8 @@ namespace DetourModKit
                 {
                     return Reservation{ReserveStatus::OutOfMemory, 0, false};
                 }
-                const auto it = m_by_target.find(target);
-                const bool preexisting = (it != m_by_target.end());
+                const auto it = m_by_target->find(target);
+                const bool preexisting = (it != m_by_target->end());
                 if (preexisting && refuse_if_hooked)
                 {
                     // Exact same-kit duplicate: refuse without reserving. The id is skipped (ids are a monotonic
@@ -73,15 +91,15 @@ namespace DetourModKit
                     TargetEntry entry;
                     entry.order.push_back(id);
                     entry.pending.push_back(id);
-                    m_by_target.emplace(target, std::move(entry));
+                    m_by_target->emplace(target, std::move(entry));
                 }
 
                 m_install_cv.wait(
                     guard,
                     [this, target, id]
                     {
-                        const auto current = m_by_target.find(target);
-                        return current != m_by_target.end() && !current->second.pending.empty() &&
+                        const auto current = m_by_target->find(target);
+                        return current != m_by_target->end() && !current->second.pending.empty() &&
                                current->second.pending.front() == id;
                     }
                 );
@@ -96,13 +114,17 @@ namespace DetourModKit
 
         bool HookLedger::commit_hook(std::uintptr_t target, std::uint64_t id) noexcept
         {
+            if (inert())
+            {
+                return false;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
                 return false;
             }
-            auto it = m_by_target.find(target);
-            if (it == m_by_target.end())
+            auto it = m_by_target->find(target);
+            if (it == m_by_target->end())
             {
                 return false;
             }
@@ -119,6 +141,10 @@ namespace DetourModKit
 
         std::size_t HookLedger::release_hook(std::uintptr_t target, std::uint64_t id) noexcept
         {
+            if (inert())
+            {
+                return 1;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
@@ -126,8 +152,8 @@ namespace DetourModKit
                 // caller leaks its backend rather than restoring bytes a newer layer may still depend on.
                 return 1;
             }
-            auto it = m_by_target.find(target);
-            if (it == m_by_target.end())
+            auto it = m_by_target->find(target);
+            if (it == m_by_target->end())
             {
                 return 0;
             }
@@ -150,7 +176,7 @@ namespace DetourModKit
             order.erase(found);
             if (order.empty())
             {
-                m_by_target.erase(it);
+                m_by_target->erase(it);
             }
             m_install_cv.notify_all();
             return newer;
@@ -158,13 +184,17 @@ namespace DetourModKit
 
         std::size_t HookLedger::acquire_target_slot(std::uintptr_t target, std::uint64_t id) noexcept
         {
+            if (inert())
+            {
+                return 1;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
                 return 1;
             }
-            auto it = m_by_target.find(target);
-            if (it == m_by_target.end())
+            auto it = m_by_target->find(target);
+            if (it == m_by_target->end())
             {
                 // Without the ledger entry there is no serialization guarantee. Fail closed.
                 return 1;
@@ -191,15 +221,15 @@ namespace DetourModKit
                 guard,
                 [this, target, id]
                 {
-                    const auto current = m_by_target.find(target);
-                    return current != m_by_target.end() && !current->second.pending.empty() &&
+                    const auto current = m_by_target->find(target);
+                    return current != m_by_target->end() && !current->second.pending.empty() &&
                            current->second.pending.front() == id;
                 }
             );
             // Re-find under the still-held lock (a concurrent emplace/erase may have rehashed the map while we waited)
             // and measure the newer-live count at the instant the slot is owned.
-            const auto current = m_by_target.find(target);
-            if (current == m_by_target.end())
+            const auto current = m_by_target->find(target);
+            if (current == m_by_target->end())
             {
                 return 1;
             }
@@ -214,13 +244,17 @@ namespace DetourModKit
 
         void HookLedger::release_target_slot(std::uintptr_t target, std::uint64_t id) noexcept
         {
+            if (inert())
+            {
+                return;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
                 return;
             }
-            auto it = m_by_target.find(target);
-            if (it == m_by_target.end())
+            auto it = m_by_target->find(target);
+            if (it == m_by_target->end())
             {
                 return;
             }
@@ -235,6 +269,10 @@ namespace DetourModKit
 
         bool HookLedger::is_target_hooked(std::uintptr_t target) const noexcept
         {
+            if (inert())
+            {
+                return true;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
@@ -242,11 +280,15 @@ namespace DetourModKit
                 // patching over a layer this instance cannot currently see.
                 return true;
             }
-            return m_by_target.find(target) != m_by_target.end();
+            return m_by_target->find(target) != m_by_target->end();
         }
 
         std::optional<std::uint64_t> HookLedger::try_record_vmt(std::uintptr_t cloned_base) noexcept
         {
+            if (inert())
+            {
+                return std::nullopt;
+            }
             const std::uint64_t id = m_next_id.fetch_add(1, std::memory_order_relaxed);
             try
             {
@@ -267,6 +309,10 @@ namespace DetourModKit
 
         void HookLedger::release_vmt(std::uint64_t id) noexcept
         {
+            if (inert())
+            {
+                return;
+            }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
@@ -280,6 +326,10 @@ namespace DetourModKit
             if (vptr == 0)
             {
                 return false;
+            }
+            if (inert())
+            {
+                return true;
             }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())

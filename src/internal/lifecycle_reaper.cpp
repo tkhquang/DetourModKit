@@ -57,7 +57,8 @@ namespace DetourModKit::detail
         class Reaper
         {
         public:
-            Reaper() noexcept
+            // Not noexcept: the list members allocate on the MSVC STL, and reaper_instance contains that throw.
+            Reaper()
             {
                 // A permanent worker requires a permanent module reference before its code can run.
                 const HMODULE self_ref =
@@ -228,8 +229,20 @@ namespace DetourModKit::detail
 
         Reaper *reaper_instance() noexcept
         {
-            // Static destruction cannot safely join this permanent worker under the loader lock.
-            static Reaper *const s_reaper = new (std::nothrow) Reaper();
+            // Static destruction cannot safely join this permanent worker under the loader lock. A first-use
+            // allocation failure latches a null reaper, so every caller takes its retain-and-detach path (`[B-91]`).
+            // Lifecycle.ReaperFirstUseOomFailsClosed pins the latch.
+            static Reaper *const s_reaper = []() noexcept -> Reaper *
+            {
+                try
+                {
+                    return new (std::nothrow) Reaper();
+                }
+                catch (...)
+                {
+                    return nullptr;
+                }
+            }();
             return s_reaper;
         }
     } // namespace

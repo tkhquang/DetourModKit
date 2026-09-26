@@ -1,8 +1,6 @@
 /**
  * @file filesystem.cpp
- * @brief Implementation of file system utilities.
- *
- * Provides functions for file system operations, such as retrieving the directory of the currently executing module.
+ * @brief Module directory resolution and its never-destroyed caches.
  */
 
 #include "DetourModKit/filesystem.hpp"
@@ -10,6 +8,7 @@
 #include <windows.h>
 #include <filesystem>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -137,10 +136,12 @@ namespace DetourModKit
 
     std::wstring DetourModKit::filesystem::get_runtime_directory()
     {
-        // C++11 magic statics guarantee thread-safe, one-time initialization. The module directory never changes at
-        // runtime, so caching is safe.
-        static const std::wstring cached_directory = resolve_module_directory();
-        return cached_directory;
+        // Never-destroyed storage (`[B-47]`): Logger::configure reads this cache after static destruction.
+        // Lifecycle.LoggerConfigureAfterPathCacheDestruction pins the late read.
+        alignas(std::wstring) static unsigned char storage[sizeof(std::wstring)];
+        static const std::wstring *const cached_directory =
+            ::new (static_cast<void *>(storage)) std::wstring(resolve_module_directory());
+        return *cached_directory;
     }
 
     namespace
@@ -174,7 +175,9 @@ namespace DetourModKit
 
     std::string DetourModKit::filesystem::get_runtime_directory_utf8()
     {
-        static const std::string cached_directory_utf8 = to_utf8(get_runtime_directory());
-        return cached_directory_utf8;
+        alignas(std::string) static unsigned char storage[sizeof(std::string)];
+        static const std::string *const cached_directory_utf8 =
+            ::new (static_cast<void *>(storage)) std::string(to_utf8(get_runtime_directory()));
+        return *cached_directory_utf8;
     }
 } // namespace DetourModKit

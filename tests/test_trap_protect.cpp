@@ -10,13 +10,20 @@
 #endif
 #include <windows.h>
 
+#include "DetourModKit/address.hpp"
+#include "DetourModKit/memory.hpp"
+#include "DetourModKit/region.hpp"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <stdexcept>
+#include <thread>
 
 // The backend bridge header src/internal/hook_backend.hpp is a confined backend island
 // (scripts/check_header_hygiene.py). Its <safetyhook.hpp> include does not reach test TUs, so this TU redeclares the
@@ -397,5 +404,144 @@ TEST(TrapProtect, RefusesMultiBytePatchOnTheWindowFlushCodePages)
         EXPECT_FALSE(mutation_ran);
         EXPECT_EQ(calls_after, calls_before);
     }
+}
+
+namespace
+{
+    // Opens one backend trap window over @p span and @p trampoline on a second thread. The window waits for the
+    // caller's attempt flag, stays open for a further 100 ms, and records whether the caller returned meanwhile.
+    class TrapWindow
+    {
+    public:
+        TrapWindow(const TwoRegionReservation &span, const ScratchTrampoline &trampoline)
+            : m_thread(
+                  [this, &span, &trampoline]
+                  {
+                      using namespace std::chrono_literals;
+                      const TrapTransactionOutcome outcome =
+                          DetourModKit::detail::drive_backend_trap_transaction_for_test(
+                              span.straddle(),
+                              trampoline.base(),
+                              PATCH_LEN,
+                              [this]
+                              {
+                                  m_open.store(true, std::memory_order_release);
+                                  for (int i = 0; i < 2000 && !m_attempted.load(std::memory_order_acquire); ++i)
+                                  {
+                                      std::this_thread::sleep_for(1ms);
+                                  }
+                                  std::this_thread::sleep_for(100ms);
+                                  m_returned_inside.store(
+                                      m_returned.load(std::memory_order_acquire),
+                                      std::memory_order_release
+                                  );
+                              }
+                          );
+                      m_restored = outcome == TrapTransactionOutcome::Restored;
+                  }
+              )
+        {
+            while (!m_open.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+
+        ~TrapWindow() noexcept
+        {
+            if (m_thread.joinable())
+            {
+                m_thread.join();
+            }
+        }
+
+        TrapWindow(const TrapWindow &) = delete;
+        TrapWindow &operator=(const TrapWindow &) = delete;
+
+        /// Runs @p operation while the window is open and joins the window afterwards.
+        template <class Operation> auto run(Operation &&operation)
+        {
+            m_attempted.store(true, std::memory_order_release);
+            auto result = operation();
+            m_returned.store(true, std::memory_order_release);
+            m_thread.join();
+            return result;
+        }
+
+        [[nodiscard]] bool returned_inside_window() const noexcept
+        {
+            return m_returned_inside.load(std::memory_order_acquire);
+        }
+
+        [[nodiscard]] bool restored() const noexcept { return m_restored; }
+
+    private:
+        std::atomic<bool> m_open{false};
+        std::atomic<bool> m_attempted{false};
+        std::atomic<bool> m_returned{false};
+        std::atomic<bool> m_returned_inside{false};
+        bool m_restored{false};
+        std::thread m_thread;
+    };
+} // namespace
+
+// A backend trap window holds its pages at PAGE_READWRITE under the process coordinator. A protection capture inside
+// that window records the transient value as the original (`[B-18]`). Its restore then leaves the page non-executable
+// after the backend restores the real protection. The capture must wait for the window to close.
+TEST(TrapProtect, ProtectGuardWaitsForTheBackendTrapWindow)
+{
+    TwoRegionReservation span;
+    ASSERT_TRUE(span.ok());
+    ScratchTrampoline trampoline;
+    ASSERT_TRUE(trampoline.ok());
+    const SeamGuard guard;
+
+    TrapWindow window(span, trampoline);
+    DetourModKit::Result<DetourModKit::memory::ProtectGuard> made = window.run(
+        [&]
+        {
+            return DetourModKit::memory::ProtectGuard::make(
+                DetourModKit::Region{DetourModKit::Address{span.first_page()}, PAGE},
+                DetourModKit::Prot::RW
+            );
+        }
+    );
+    EXPECT_TRUE(window.restored());
+    EXPECT_FALSE(window.returned_inside_window());
+    ASSERT_TRUE(made.has_value()) << made.error().message();
+    EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_READWRITE));
+    {
+        const DetourModKit::memory::ProtectGuard release = std::move(*made);
+    }
+    EXPECT_EQ(protection_of(span.first_page()), static_cast<DWORD>(PAGE_EXECUTE_READ));
+}
+
+// The patch_code slow path changes protection through the same capture. Its target is a page outside the window, so
+// the guarded fast path faults and the slow path meets the coordinator that the window holds.
+TEST(TrapProtect, PatchCodeSlowPathWaitsForTheBackendTrapWindow)
+{
+    TwoRegionReservation span;
+    ASSERT_TRUE(span.ok());
+    ScratchTrampoline trampoline;
+    ASSERT_TRUE(trampoline.ok());
+    ScratchTrampoline target;
+    ASSERT_TRUE(target.ok());
+    DWORD previous = 0;
+    ASSERT_NE(::VirtualProtect(target.base(), PAGE, PAGE_EXECUTE_READ, &previous), FALSE);
+    const SeamGuard guard;
+
+    TrapWindow window(span, trampoline);
+    const DetourModKit::Result<void> patched = window.run(
+        [&]
+        {
+            const std::array<std::byte, 1> ret{std::byte{0xC3}};
+            return DetourModKit::memory::patch_code(DetourModKit::Address{target.base()}, ret);
+        }
+    );
+    EXPECT_TRUE(window.restored());
+    EXPECT_FALSE(window.returned_inside_window());
+    ASSERT_TRUE(patched.has_value()) << patched.error().message();
+    EXPECT_EQ(*target.base(), 0xC3);
+    EXPECT_EQ(protection_of(target.base()), static_cast<DWORD>(PAGE_EXECUTE_READ));
 }
 #endif // DMK_ENABLE_TEST_SEAMS

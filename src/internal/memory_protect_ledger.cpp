@@ -9,6 +9,8 @@
 
 #include "internal/memory_guarded.hpp"
 
+#include "internal/hook_coordinator.hpp"
+
 #include "DetourModKit/memory.hpp"
 
 #include <windows.h>
@@ -147,11 +149,23 @@ namespace DetourModKit
             ProtectionLedgerLock &operator=(ProtectionLedgerLock &&) = delete;
         };
 
-        // The ledger intentionally has process lifetime so late teardown cannot observe a destroyed registry.
+        // The ledger intentionally has process lifetime so late teardown cannot observe a destroyed registry. Its
+        // constructor allocates on the MSVC STL, so a first-use failure latches a null ledger and every transaction
+        // fails closed (`[B-91]`). Lifecycle.ProtectionLedgerFirstUseOomFailsClosed pins the latch.
         [[nodiscard]] std::unordered_map<std::uintptr_t, PageProtectionState> *protection_ledger() noexcept
         {
             static std::unordered_map<std::uintptr_t, PageProtectionState> *const ledger =
-                new (std::nothrow) std::unordered_map<std::uintptr_t, PageProtectionState>();
+                []() noexcept -> std::unordered_map<std::uintptr_t, PageProtectionState> *
+            {
+                try
+                {
+                    return new std::unordered_map<std::uintptr_t, PageProtectionState>();
+                }
+                catch (...)
+                {
+                    return nullptr;
+                }
+            }();
             return ledger;
         }
 
@@ -349,6 +363,9 @@ namespace DetourModKit
         std::uint32_t &os_error
     ) noexcept
     {
+        // The coordinator excludes a backend trap window, whose transient protection this restore must not interleave
+        // with (`[B-18]`). A refused coordinator still restores, because a page left writable is the worse outcome.
+        const detail::BackendCoordinatorHold coordinator;
         ProtectionLedgerLock lock;
         return restore_segments_locked(segments, count, os_error);
     }
@@ -405,6 +422,15 @@ namespace DetourModKit
         if (span_end < address || address < memory::USERSPACE_PTR_MIN || span_end > memory::USERSPACE_PTR_MAX)
         {
             return {0, ProtectionChangeStatus::ChangeFailed, ERROR_INVALID_ADDRESS};
+        }
+
+        // A backend trap window holds a code page at PAGE_READWRITE under the process coordinator. The capture below
+        // must not record that transient value as the original (`[B-18]`), so a refused coordinator fails closed.
+        // TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow pins the exclusion.
+        const detail::BackendCoordinatorHold coordinator;
+        if (!coordinator)
+        {
+            return {0, ProtectionChangeStatus::ChangeFailed, ERROR_BUSY};
         }
 
         ProtectionLedgerLock lock;

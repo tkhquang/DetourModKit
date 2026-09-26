@@ -7,6 +7,7 @@
 
 #include "internal/hook_backend.hpp"
 #include "internal/hook_backend_visit.hpp"
+#include "internal/hook_coordinator.hpp"
 #include "internal/hook_emission.hpp"
 #include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
@@ -1117,6 +1118,37 @@ namespace DetourModKit
         }
     } // namespace
 
+    namespace detail
+    {
+        BackendCoordinatorHold::BackendCoordinatorHold() noexcept
+        {
+            static_assert(
+                sizeof(safetyhook::ProcessCoordinator) <= STORAGE_BYTES &&
+                    alignof(safetyhook::ProcessCoordinator) <= alignof(void *),
+                "BackendCoordinatorHold storage must fit the backend coordinator"
+            );
+            auto *const coordinator = ::new (static_cast<void *>(m_storage)) safetyhook::ProcessCoordinator();
+            m_constructed = true;
+            m_held = static_cast<bool>(*coordinator);
+        }
+
+        BackendCoordinatorHold::~BackendCoordinatorHold() noexcept
+        {
+            release();
+        }
+
+        void BackendCoordinatorHold::release() noexcept
+        {
+            if (!m_constructed)
+            {
+                return;
+            }
+            std::launder(reinterpret_cast<safetyhook::ProcessCoordinator *>(m_storage))->~ProcessCoordinator();
+            m_constructed = false;
+            m_held = false;
+        }
+    } // namespace detail
+
     namespace hook
     {
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1128,26 +1160,50 @@ namespace DetourModKit
 
         const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept
         {
-            // Never-destroyed storage (`[B-47]`). The declaration states why the hold is never released.
+            // Never-destroyed storage (`[B-47]`). The declaration states why the hold is never released. The backend
+            // allocates its allocator, so a first-use failure publishes the latched empty hold (`[B-91]`).
+            // Lifecycle.BackendAllocatorFirstUseOomFailsClosed pins the latch.
             alignas(
                 std::shared_ptr<safetyhook::Allocator>
             ) static unsigned char storage[sizeof(std::shared_ptr<safetyhook::Allocator>)];
-            static const std::shared_ptr<safetyhook::Allocator> *const allocator = ::new (static_cast<void *>(storage))
-                std::shared_ptr<safetyhook::Allocator>(safetyhook::Allocator::global());
+            static const std::shared_ptr<safetyhook::Allocator> *const allocator =
+                []() noexcept -> const std::shared_ptr<safetyhook::Allocator> *
+            {
+                try
+                {
+                    return ::new (static_cast<void *>(storage))
+                        std::shared_ptr<safetyhook::Allocator>(safetyhook::Allocator::global());
+                }
+                catch (...)
+                {
+                    return ::new (static_cast<void *>(storage)) std::shared_ptr<safetyhook::Allocator>();
+                }
+            }();
             return *allocator;
+        }
+
+        Hook::GateSlot &Hook::gate_slot() noexcept
+        {
+            return *std::launder(reinterpret_cast<GateSlot *>(m_gate_storage));
+        }
+
+        const Hook::GateSlot &Hook::gate_slot() const noexcept
+        {
+            return *std::launder(reinterpret_cast<const GateSlot *>(m_gate_storage));
         }
 
         // Hook is the RAII handle for one inline or mid hook.
         Hook::Hook(std::unique_ptr<Impl> impl, std::shared_ptr<CallGate> gate) noexcept : m_impl(std::move(impl))
         {
-            m_gate.store(std::move(gate), std::memory_order_release);
+            ::new (static_cast<void *>(m_gate_storage)) GateSlot(std::move(gate));
         }
 
         Hook::Hook(Hook &&other) noexcept : m_impl(std::move(other.m_impl))
         {
             // std::atomic is not movable. exchange leaves the source's gate empty, so a moved-from handle is fully
             // disengaged and fails closed.
-            m_gate.store(other.m_gate.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
+            ::new (static_cast<void *>(m_gate_storage))
+                GateSlot(other.gate_slot().exchange(nullptr, std::memory_order_acq_rel));
         }
 
         Hook &Hook::operator=(Hook &&other) noexcept
@@ -1158,7 +1214,10 @@ namespace DetourModKit
                 // concurrent call() that pinned this handle's gate keeps the old trampoline alive until it returns.
                 Hook discard(std::move(*this));
                 m_impl = std::move(other.m_impl);
-                m_gate.store(other.m_gate.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
+                gate_slot().store(
+                    other.gate_slot().exchange(nullptr, std::memory_order_acq_rel),
+                    std::memory_order_release
+                );
             }
             return *this;
         }
@@ -1166,8 +1225,9 @@ namespace DetourModKit
         Hook::~Hook() noexcept
         {
             // Take the gate reference out for the complete teardown. A pinned caller keeps the gate alive through its
-            // own reference. A null callable below makes a late caller fail closed.
-            std::shared_ptr<CallGate> gate = m_gate.exchange(nullptr, std::memory_order_acq_rel);
+            // own reference. A null callable below makes a late caller fail closed. The slot itself is never
+            // destroyed, so a call() that races this destructor reads a valid null word.
+            std::shared_ptr<CallGate> gate = gate_slot().exchange(nullptr, std::memory_order_acq_rel);
             if (!m_impl)
             {
                 return;
@@ -1471,7 +1531,7 @@ namespace DetourModKit
 
         bool Hook::is_enabled() const noexcept
         {
-            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
+            const std::shared_ptr<CallGate> gate = gate_slot().load(std::memory_order_acquire);
             if (!gate)
             {
                 return false;
@@ -1502,7 +1562,7 @@ namespace DetourModKit
         {
             // Copy the gate reference atomically into a strong local. call() can then keep the trampoline and mutex
             // alive across a concurrent teardown that drops the handle's own reference.
-            return m_gate.load(std::memory_order_acquire);
+            return gate_slot().load(std::memory_order_acquire);
         }
 
         std::unique_lock<std::recursive_mutex> Hook::acquire_call_lock(CallGate *gate) const noexcept
@@ -1537,7 +1597,7 @@ namespace DetourModKit
             // moved-from contract. The ledger records it like every defensive pin in ~Hook.
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)m_impl.release();
-            m_gate.store(nullptr, std::memory_order_release);
+            gate_slot().store(nullptr, std::memory_order_release);
         }
 
         namespace detail
@@ -2225,24 +2285,37 @@ namespace DetourModKit
                     // creates a silent mod chain.
                     return std::unexpected(Error{ErrorCode::MethodAlreadyHooked, "hook::vmt_hook_method", index});
                 }
+                auto node = m_impl->method_hooks.end();
                 try
                 {
+                    // Allocate the map node before the backend stores the slot. No allocation can then fail over a
+                    // live slot, and original() resolves from the instant a detour can run. The original comes from
+                    // the clone, whose slot index matches the method index.
+                    node = m_impl->method_hooks.try_emplace(index).first;
+                    node->second.original = reinterpret_cast<void *const *>(m_impl->cloned_vptr_base)[index];
                     // A void* detour installs the same 8 bytes as a typed pointer. hook_method<Fn> vetted the ABI.
                     auto created = m_impl->backend.hook_method(index, detour);
                     if (!created)
                     {
+                        m_impl->method_hooks.erase(node);
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_hook_method", index});
                     }
-                    // emplace is the last fallible step and the commit point. A bad_alloc unwinds the new VmHook. Its
-                    // destructor rolls the slot back, so nothing is half-registered.
-                    m_impl->method_hooks.emplace(index, std::move(created.value()));
+                    node->second.backend = std::move(created.value());
                 }
                 catch (const std::bad_alloc &)
                 {
+                    if (node != m_impl->method_hooks.end())
+                    {
+                        m_impl->method_hooks.erase(node);
+                    }
                     return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::vmt_hook_method", index});
                 }
                 catch (...)
                 {
+                    if (node != m_impl->method_hooks.end())
+                    {
+                        m_impl->method_hooks.erase(node);
+                    }
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_hook_method", index});
                 }
             }
@@ -2276,7 +2349,7 @@ namespace DetourModKit
             {
                 return nullptr;
             }
-            return it->second.original<void *>();
+            return it->second.original;
         }
 
         Result<void> VmtHook::remove_method(std::size_t index)
@@ -2406,6 +2479,22 @@ namespace DetourModKit
                     sizeof(std::uintptr_t) * 2
                 );
             }
+            // The slot walk and the clone classify method pages through VirtualQuery. The backend coordinator excludes
+            // a trap window that holds such a page at PAGE_READWRITE, which ends the walk early and publishes a
+            // truncated clone (`[B-66]`). HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow pins the exclusion.
+            DetourModKit::detail::BackendCoordinatorHold coordinator;
+            if (!coordinator)
+            {
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook::vmt_for: refused VMT hook '{}' on object 0x{:0{}X}: process coordinator unavailable or "
+                    "timed out.",
+                    std::string_view{name},
+                    reinterpret_cast<std::uintptr_t>(object),
+                    sizeof(std::uintptr_t) * 2
+                );
+                return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_for", current_vptr});
+            }
             const std::optional<std::size_t> slot_budget = count_vmt_method_slots(current_vptr);
             if (!slot_budget)
             {
@@ -2427,6 +2516,9 @@ namespace DetourModKit
             try
             {
                 Result<DetachedVmtBackend> cloned = clone_vmt_snapshot(current_vptr, *slot_budget);
+                // The clone is complete, so release the coordinator before the ledger, the publication, and the
+                // subscriber code below.
+                coordinator.release();
                 if (!cloned)
                 {
                     return std::unexpected(cloned.error());

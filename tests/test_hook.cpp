@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -5307,6 +5308,72 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     EXPECT_FALSE(h.is_enabled());
 }
 
+// call() can race ~Hook on retained storage (hook.hpp), so the destructor must run no member destructor over the gate
+// word. The MSVC ~atomic<shared_ptr> reads that word unmasked and decrements through a set lock bit, and libstdc++
+// releases through it. The worker hammers call() through the retained std::optional while the main thread installs
+// and destroys the hook in place. A fault ends the process, which is the verdict.
+TEST(HookConcurrency, CallRacesDestructorOnRetainedStorage)
+{
+    constexpr int ITERATIONS = 400;
+    std::optional<Hook> slot;
+    std::atomic<Hook *> published{nullptr};
+    std::atomic<int> in_flight{0};
+    std::atomic<long long> calls{0};
+
+    std::jthread worker(
+        [&](const std::stop_token &token)
+        {
+            while (!token.stop_requested())
+            {
+                Hook *const hook = published.load(std::memory_order_acquire);
+                if (hook == nullptr)
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                in_flight.fetch_add(1, std::memory_order_acq_rel);
+                // Re-check after registration: the main thread unpublishes, then waits for in_flight to reach zero
+                // before it constructs the next hook in the same storage.
+                if (published.load(std::memory_order_acquire) == hook)
+                {
+                    (void)hook->call<int>(7);
+                    calls.fetch_add(1, std::memory_order_relaxed);
+                }
+                in_flight.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+    );
+
+    for (int i = 0; i < ITERATIONS; ++i)
+    {
+        Result<Hook> installed = inline_at(
+            InlineRequest{
+                .name = "RetainedStorageRace",
+                .target = addr_of(&echo),
+            },
+            &echo_detour
+        );
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        slot.emplace(std::move(*installed));
+        published.store(&*slot, std::memory_order_release);
+        for (int spin = 0; spin < 50; ++spin)
+        {
+            std::this_thread::yield();
+        }
+        // Destroy while published: the racing call() reads the never-destroyed null slot and fails closed.
+        slot.reset();
+        published.store(nullptr, std::memory_order_release);
+        while (in_flight.load(std::memory_order_acquire) != 0)
+        {
+            std::this_thread::yield();
+        }
+    }
+    worker.request_stop();
+    worker.join();
+    EXPECT_GT(calls.load(std::memory_order_relaxed), 0);
+    EXPECT_FALSE(is_target_hooked(addr_of(&echo)));
+}
+
 // The load-bearing property behind every decide-then-write step on a target (a teardown's restore and a toggle's
 // patch alike): while one holder owns a target's serialization slot (acquire_target_slot), a concurrent install on
 // the same target cannot reach the Reserved state, so it cannot read the target's still-patched prologue as its
@@ -6121,6 +6188,80 @@ TEST(VmtHookFaultProof, ExecuteProtectionRaceCannotShrinkBackendAllocation)
     EXPECT_EQ(raced_hook.original<VmtComputeFn>(1), reinterpret_cast<VmtComputeFn>(second_method.addr()));
 }
 #endif
+
+// The method-map node allocates before the backend stores the slot. An allocation failure therefore never sits over a
+// live detour, and original() resolves from the instant the slot changes. The reader watches the clone slot and
+// original() together. A slot that holds the detour while original() is null is a live detour with no resolvable
+// original. Repeated refusals make that window observable when it exists.
+TEST(VmtHookFaultProof, MethodMapNodeAllocatesBeforeSlotStore)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    struct NodeVTable
+    {
+        void *rtti[2];
+        void *methods[3];
+    };
+    NodeVTable table{};
+    table.methods[0] = slot_bodies().at(SlotBodyPage::RET);
+    table.methods[1] = slot_bodies().at(SlotBodyPage::RET);
+    table.methods[2] = nullptr;
+    void *vptr = &table.methods[0];
+
+    Result<VmtHook> created = vmt_for("MethodMapNode", &vptr);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    VmtHook hook = std::move(*created);
+    void *const genuine = slot_bodies().at(SlotBodyPage::RET);
+    void *const detour = reinterpret_cast<void *>(&vmt_detour_compute);
+    void **const clone_slots = static_cast<void **>(vptr);
+    ASSERT_EQ(clone_slots[0], genuine);
+
+    std::atomic<bool> saw_unresolvable_detour{false};
+    std::atomic<bool> saw_detour_original{false};
+    std::jthread reader(
+        [&](const std::stop_token &token)
+        {
+            while (!token.stop_requested())
+            {
+                void *const slot = clone_slots[0];
+                void *const original = reinterpret_cast<void *>(hook.original<VmtComputeFn>(0));
+                if (slot == detour && original == nullptr)
+                {
+                    saw_unresolvable_detour.store(true, std::memory_order_release);
+                }
+                if (original == detour)
+                {
+                    saw_detour_original.store(true, std::memory_order_release);
+                }
+            }
+        }
+    );
+
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        Result<void> refused;
+        {
+            // The assertions allocate their failure text, so they run after the allocation scope ends.
+            const dmk_test::AllocFailScope fail_allocations{0};
+            refused = hook.hook_method(0, &vmt_detour_compute);
+        }
+        ASSERT_FALSE(refused.has_value());
+        EXPECT_EQ(refused.error().code, ErrorCode::OutOfMemory);
+    }
+    EXPECT_EQ(clone_slots[0], genuine);
+    EXPECT_EQ(hook.original<VmtComputeFn>(0), nullptr);
+
+    ASSERT_TRUE(hook.hook_method(0, &vmt_detour_compute).has_value());
+    EXPECT_EQ(clone_slots[0], detour);
+    EXPECT_EQ(reinterpret_cast<void *>(hook.original<VmtComputeFn>(0)), genuine);
+    reader.request_stop();
+    reader.join();
+    EXPECT_FALSE(saw_unresolvable_detour.load(std::memory_order_acquire));
+    EXPECT_FALSE(saw_detour_original.load(std::memory_order_acquire));
+
+    ASSERT_TRUE(hook.remove_method(0).has_value());
+    EXPECT_EQ(clone_slots[0], genuine);
+    EXPECT_EQ(hook.original<VmtComputeFn>(0), nullptr);
+}
 
 // The state no pre-flight can catch: the object word is valid when captured and changes before publication. The seam
 // fires in that window, so each arm reaches the publication attempt rather than an earlier gate. A fault or a losing

@@ -140,6 +140,10 @@ The probe's captures are the case's barrier atomics. Declare those BEFORE the po
 
 A test thread never carries a fatal GoogleTest assertion, and a cross-thread barrier always has a deadline. `ASSERT_*` and `FAIL()` off the main thread return from the enclosing lambda instead of a failed case. The work after them is skipped, and the main thread's wait target never arrives. Report the worker's outcome through an atomic and assert it on the main thread. Give every wait on a worker-set flag a `steady_clock` deadline. On expiry it opens any barrier where the worker can park, joins, and fails with the premise it failed to establish. An unbounded spin here wedges the whole shared unit binary with no diagnostic. `BindingGateTest.UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan` is the local pattern.
 
+### Join every owned thread on every exit path
+
+A case that owns a thread joins it on every exit path. A fatal `ASSERT_` is an exit path. Use `std::jthread` with a `std::stop_token`, or place every fatal assertion after the join. A `std::thread` destructor over a joinable thread terminates the test process and hides the assertion text. `HookConcurrency.CallRacesDestructorOnRetainedStorage` and `VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore` use the `std::jthread` form.
+
 ### White-box internal suites
 
 White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_input_intercept` over `src/internal/input_intercept.hpp`) add `src/` to their include path and call `DetourModKit::detail::` directly. `test_gate_race_probe` is a concurrency-stress white-box suite over the two header-only synchronization primitives ( `src/internal/hook_ledger.hpp` and `src/internal/input_binding_gate.hpp`). It drives real cross-thread contention on the install/teardown ledger and the input hold/press gates. It runs in the main suite (per the in-process rule above) but stays independent of the library's compiled surface. The same source therefore remains usable by standalone race-instrumented builds that cannot link the Windows-only library.

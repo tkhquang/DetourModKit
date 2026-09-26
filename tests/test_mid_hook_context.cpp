@@ -408,6 +408,35 @@ TEST(MidContextXmmViewTest, LaneFailsClosedOutOfRange)
     EXPECT_EQ(view.lane<std::uint64_t>(2), 0u); // lane 2 starts at byte 16 (out of range) -> zero
 }
 
+namespace
+{
+    // The negatives live in a template, so a rejected lane type evaluates to false instead of a hard error.
+    template <typename T> constexpr bool xmm_lane_admits = requires(const XmmView &view) { view.template lane<T>(0); };
+
+    struct NonTrivialLane
+    {
+        NonTrivialLane(const NonTrivialLane &) {}
+    };
+
+    static_assert(xmm_lane_admits<float>);
+    static_assert(xmm_lane_admits<double>);
+    static_assert(xmm_lane_admits<std::int32_t>);
+    static_assert(xmm_lane_admits<std::uint64_t>);
+    static_assert(xmm_lane_admits<std::byte>);
+    static_assert(!xmm_lane_admits<bool>, "a captured byte is not a valid bool object representation");
+    static_assert(!xmm_lane_admits<NonTrivialLane>);
+} // namespace
+
+// XmmView::lane admits trivially-copyable scalars and rejects bool. The static_asserts above are the proof. The case
+// keeps the set visible in the test inventory.
+TEST(MidContextXmmViewTest, LaneRejectsBoolAndAdmitsScalars)
+{
+    EXPECT_TRUE(xmm_lane_admits<float>);
+    EXPECT_TRUE(xmm_lane_admits<std::uint64_t>);
+    EXPECT_FALSE(xmm_lane_admits<bool>);
+    EXPECT_FALSE(xmm_lane_admits<NonTrivialLane>);
+}
+
 // T-XMM: every one of the 16 accessors selects its register by explicit member selection, pinned to the assembly
 // frame's fixed 16-byte slots by the compile-time offset/size assertions beside xmm() in src/hook.cpp. This runtime
 // half drives a synthetic context image carrying a distinct pattern per slot through all 16 indices in the optimized
