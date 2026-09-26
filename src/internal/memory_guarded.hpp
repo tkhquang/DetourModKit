@@ -227,6 +227,8 @@ namespace DetourModKit
          *          surviving holder; removing the last restores the original. The span is walked by VirtualQuery
          *          region so protection seams restore exactly. Query, protection, capacity, and allocation failures
          *          fail closed. A rollback failure is reported separately because a temporary protection may remain.
+         *          The walk holds the backend process coordinator, so a backend trap window cannot lend its transient
+         *          protection to the capture (`[B-18]`). A refused coordinator fails closed with `ERROR_BUSY`.
          */
         [[nodiscard]] ProtectionChangeOutcome protect_across_regions(
             std::uintptr_t address,
@@ -245,6 +247,7 @@ namespace DetourModKit
          *        or FlushInstructionCache can overwrite GetLastError).
          * @return true if every segment restored; false if any VirtualProtect failed (best-effort: it still attempts
          *         the remaining segments so a single failure does not strand the rest in the changed protection).
+         * @details Runs under the backend process coordinator. A refused coordinator still restores.
          */
         [[nodiscard]] bool
         restore_across_regions(const ProtectionSegment *segments, std::size_t count, std::uint32_t &os_error) noexcept;

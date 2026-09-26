@@ -106,15 +106,15 @@ namespace DetourModKit
 
             /**
              * @brief Reinterprets the captured bytes as the index-th T-sized lane; an out-of-range lane returns zero.
-             * @tparam T A trivially-copyable scalar lane type (float, double, an integer).
+             * @tparam T A trivially-copyable scalar lane type (float, double, an integer). `bool` is excluded because
+             *         a captured byte is not a valid `bool` object representation.
+             *         MidContextXmmViewTest.LaneRejectsBoolAndAdmitsScalars pins the set.
              * @note Callback-safe: a pure read over the captured context, no allocation, locking, or I/O.
              */
-            template <typename T> [[nodiscard]] T lane(std::size_t index) const noexcept
+            template <typename T>
+                requires(std::is_trivially_copyable_v<T> && !std::is_same_v<T, bool>)
+            [[nodiscard]] T lane(std::size_t index) const noexcept
             {
-                static_assert(
-                    std::is_trivially_copyable_v<T>,
-                    "XmmView::lane<T> requires a trivially-copyable lane type"
-                );
                 T value{};
                 // Fail closed on an out-of-range lane: a bad index must not read past the 16-byte register.
                 if (index >= bytes.size() / sizeof(T))
@@ -546,11 +546,20 @@ namespace DetourModKit
             };
 
             std::unique_ptr<Impl> m_impl;
+
+            /// The atomic holder of the shared call gate. @ref call pins it, so a teardown or move cannot race it.
+            using GateSlot = std::atomic<std::shared_ptr<CallGate>>;
+
             /**
-             * @brief The shared call gate, held atomically so @ref call can pin it without racing a concurrent
-             *        teardown/move that publishes over it.
+             * @brief Never-destroyed storage for the gate slot (`[B-47]`).
+             * @details Every constructor placement-constructs the slot and no destructor runs over it. A @ref call
+             *          that races ~Hook therefore reads a valid null slot instead of a destroyed atomic word.
+             *          HookConcurrency.CallRacesDestructorOnRetainedStorage pins the race.
              */
-            std::atomic<std::shared_ptr<CallGate>> m_gate;
+            alignas(GateSlot) unsigned char m_gate_storage[sizeof(GateSlot)]{};
+
+            [[nodiscard]] GateSlot &gate_slot() noexcept;
+            [[nodiscard]] const GateSlot &gate_slot() const noexcept;
 
             friend Result<Hook> mid_at(MidRequest request, MidHookFn detour);
             friend Result<Hook> detail::inline_at_raw(InlineRequest request, void *detour);

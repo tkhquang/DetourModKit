@@ -96,6 +96,8 @@ Preserve truthful failure precedence: restoration failure outranks a partial wri
 
 A page entry retires as soon as it holds no transaction, even when the OS refused its final restore. A retained entry gives its obsolete baseline to the next guard over that page. `MemoryTest.MemoryProtectGuardProof_FailedRestoreDoesNotPoisonDifferentLaterBaseline` pins this rule.
 
+A backend trap window holds a code page at `PAGE_READWRITE` under the process coordinator. A capture inside that window records the transient value as the original. The restore then leaves the page non-executable after the backend restores the real protection. `protect_across_regions` and `restore_across_regions` hold the coordinator through `detail::BackendCoordinatorHold`. A refused coordinator fails a change closed with `ERROR_BUSY` and lets a restore proceed, because a page left writable is the worse outcome. `TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow` and `TrapProtect.PatchCodeSlowPathWaitsForTheBackendTrapWindow` pin the exclusion.
+
 ### [B-19]
 
 `VirtualQuery` describes only the region that contains its argument. An `is_readable` / `is_writable` over a span that crosses a re-protected interior page otherwise fails closed at the first region's end. It does so even when every byte is committed and permitted. That page shape is one reservation split into several `MEMORY_BASIC_INFORMATION` regions. That false NotReadable makes a caller skip a valid read.

@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -43,6 +44,8 @@ namespace DetourModKit
              * @brief Returns this linked instance's ledger, constructing it once on first use.
              * @details Never-destroyed storage (`[B-47]`): a namespace-scope Hook owner can register its destructor
              *          before the ledger exists. tests/lifecycle/test_hook_static_order.cpp proves the late teardown.
+             *          A first-use allocation failure publishes the inert ledger, whose every operation fails closed
+             *          for the process (`[B-91]`). Lifecycle.HookLedgerFirstUseOomFailsClosed pins the latch.
              */
             [[nodiscard]] static HookLedger &instance() noexcept;
 
@@ -177,7 +180,18 @@ namespace DetourModKit
             [[nodiscard]] bool is_vmt_clone_base(std::uintptr_t vptr) const noexcept;
 
         private:
-            HookLedger() noexcept = default;
+            /// Allocates the target map. A std::bad_alloc reaches @ref instance, which publishes the inert ledger.
+            HookLedger();
+
+            struct InertTag
+            {
+            };
+
+            /// Builds the inert ledger: no target map, so every operation fails closed.
+            explicit HookLedger(InertTag) noexcept;
+
+            /// True when first-use construction failed.
+            [[nodiscard]] bool inert() const noexcept { return m_by_target == nullptr; }
 
             /**
              * @brief Acquires the state lock, containing a synchronization failure instead of crossing a noexcept edge.
@@ -201,8 +215,8 @@ namespace DetourModKit
 
             mutable std::mutex m_mutex;
             std::condition_variable m_install_cv;
-            // target address -> live/reserved hook ids in creation order (back = newest).
-            std::unordered_map<std::uintptr_t, TargetEntry> m_by_target;
+            // target address -> live/reserved hook ids in creation order (back = newest). Null in the inert ledger.
+            std::unique_ptr<std::unordered_map<std::uintptr_t, TargetEntry>> m_by_target;
             // Live VMT clones (small; a linear scan is cheaper than a map at this size).
             std::vector<VmtEntry> m_vmt;
             std::atomic<std::uint64_t> m_next_id{1};

@@ -251,7 +251,7 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
             // A live handle always has a gate. The null check fails closed on the broken invariant.
-            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
+            const std::shared_ptr<CallGate> gate = gate_slot().load(std::memory_order_acquire);
             if (!gate)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
@@ -410,7 +410,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
-            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
+            const std::shared_ptr<CallGate> gate = gate_slot().load(std::memory_order_acquire);
             if (!gate)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
