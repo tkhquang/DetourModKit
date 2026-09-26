@@ -78,6 +78,14 @@ Lifecycle standalone fixtures do NOT go in the `tests/test_*.cpp` glob either. A
 
 A fixture that proves language, allocation, or OS behavior runs on both toolchains: static-destruction order, first-use OOM, and the `LoadLibrary` / `FreeLibrary` reference-count and `DLL_PROCESS_DETACH` proofs. Loader reference counting is an OS property, and the archive links into a SHARED target under both toolchains. `tests/lifecycle/CMakeLists.txt` therefore has no toolchain gate at all, and neither does `tests/fault/CMakeLists.txt`. A fixture whose subject is genuinely toolchain-specific (MinGW emulated-TLS behavior, for example) needs its own per-compiler arm or a separate counterpart. It never gets a gate that removes the case from the other toolchain.
 
+### The legacy code page lane
+
+`tests/lifecycle/legacy_acp_paths.cpp` proves that config and the logger resolve paths without the ANSI code page. The host copies itself into a directory whose name holds a component outside that code page. It then runs the copy from another working directory, which holds a decoy INI.
+
+The MSVC image embeds `tests/lifecycle/legacy_acp.manifest`, whose `activeCodePage` value `Legacy` gives a CP-1252 process on a UTF-8 system. A U+7528 U+6237 case fails when the image lacks that element. It skips with code 77 under a UTF-8 process code page, when the code page represents the component, or on MinGW. The unpaired-surrogate cases never skip, because no code page represents that component.
+
+A unit test that uses a non-ANSI path proves the fix only in a process whose `GetACP()` is not 65001. Such a test records `GetACP()` as a test property.
+
 ### A case that mutates a process-wide singleton restores it or owns a host
 
 A proof case gets a private process under ctest, and no gate states that. `cmake/DMKTesting.cmake` registers the unit binary through `gtest_discover_tests`, so each of its ctest entries runs alone. A green `ctest` therefore proves nothing about the binary run whole. Run `DetourModKit_tests.exe` directly as well, on both toolchains, and report the count.

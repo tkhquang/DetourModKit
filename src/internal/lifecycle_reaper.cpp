@@ -22,12 +22,12 @@ namespace DetourModKit::detail
     namespace
     {
         // Exactly one parcel form is populated: a worker thread plus module reference, an erased owner, or a
-        // shared-owner reference to drop.
+        // shared-owner reference to drop. Both owner forms carry their rundown callback.
         struct Parcel
         {
             std::unique_ptr<std::jthread> thread;
             std::shared_ptr<void> shared_owner;
-            SharedOwnerRetire retire_shared{nullptr};
+            OwnerRetire retire{nullptr};
             void *module_ref{nullptr};
             // The deferred release must decrement the reason that the module_ref acquire booked.
             DetourModKit::diagnostics::ModulePinReason ref_reason{DetourModKit::diagnostics::ModulePinReason::Worker};
@@ -38,7 +38,7 @@ namespace DetourModKit::detail
             {
                 thread.reset();
                 shared_owner.reset();
-                retire_shared = nullptr;
+                retire = nullptr;
                 module_ref = nullptr;
                 ref_reason = DetourModKit::diagnostics::ModulePinReason::Worker;
                 owner = nullptr;
@@ -139,7 +139,7 @@ namespace DetourModKit::detail
                         m_cv.wait(lock, [this] { return !m_queue.empty(); });
                         parcel = m_queue.begin();
                     }
-                    // Owner destruction may block on its worker join, so it must not hold the queue mutex.
+                    // An owner rundown can block on its worker join, so it must not hold the queue mutex.
                     const bool retired = process(*parcel);
                     {
                         std::lock_guard<std::mutex> lock(m_mutex);
@@ -165,23 +165,23 @@ namespace DetourModKit::detail
 
             [[nodiscard]] static bool process(Parcel &parcel) noexcept
             {
-                if (parcel.destroy != nullptr)
+                if (parcel.destroy != nullptr || parcel.shared_owner)
                 {
-                    parcel.destroy(parcel.owner);
-                    return true;
-                }
-                if (parcel.shared_owner)
-                {
-                    // Complete the worker rundown while the owner is still alive. Beginning its destructor before the
-                    // join would let the worker body access an object whose lifetime had already ended. A parcel with
-                    // no callback cannot be run down at all, so retain it rather than release an owner whose body may
-                    // still be running; reap_shared_owner refuses that case, so this is the second line of defence.
-                    if (parcel.retire_shared == nullptr || !parcel.retire_shared(parcel.shared_owner.get()))
+                    // Complete the worker rundown while the owner is alive. A destructor that starts before the join
+                    // lets the worker body access an object whose lifetime ended. reap_owner and reap_shared_owner both
+                    // refuse a null callback, and this check retains any parcel without one.
+                    void *const owner = parcel.destroy != nullptr ? parcel.owner : parcel.shared_owner.get();
+                    if (parcel.retire == nullptr || !parcel.retire(owner))
                     {
                         return false;
                     }
-                    // Drop here, not in the recycling step: the last release may run the owner's destructor, and the
-                    // queue mutex is held during recycling.
+                    if (parcel.destroy != nullptr)
+                    {
+                        parcel.destroy(parcel.owner);
+                        return true;
+                    }
+                    // Drop here, not in the recycle step. The last release can run the owner's destructor, and the
+                    // recycle step holds the queue mutex.
                     parcel.shared_owner.reset();
                     return true;
                 }
@@ -282,7 +282,7 @@ namespace DetourModKit::detail
         DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
     }
 
-    bool reap_shared_owner(std::shared_ptr<void> &owner, SharedOwnerRetire retire) noexcept
+    bool reap_shared_owner(std::shared_ptr<void> &owner, OwnerRetire retire) noexcept
     {
         if (!owner)
         {
@@ -299,7 +299,7 @@ namespace DetourModKit::detail
 
         Parcel parcel;
         parcel.shared_owner = owner;
-        parcel.retire_shared = retire;
+        parcel.retire = retire;
 
         Reaper *const reaper = reaper_instance();
         if (reaper != nullptr && reaper->enqueue(std::move(parcel)))
@@ -315,18 +315,28 @@ namespace DetourModKit::detail
         return false;
     }
 
-    void reaper_detail::reap_owner_erased(void *owner, void (*destroy)(void *) noexcept) noexcept
+    void reaper_detail::reap_owner_erased(void *owner, OwnerRetire retire, void (*destroy)(void *) noexcept) noexcept
     {
-        Parcel parcel;
-        parcel.owner = owner;
-        parcel.destroy = destroy;
-
-        if (Reaper *reaper = reaper_instance(); reaper != nullptr && reaper->enqueue(std::move(parcel)))
+        if (owner == nullptr)
         {
             return;
         }
 
-        // Destruction on the calling worker would self-join, so failed queuing deliberately retains the owner.
+        if (retire != nullptr)
+        {
+            Parcel parcel;
+            parcel.owner = owner;
+            parcel.retire = retire;
+            parcel.destroy = destroy;
+
+            if (Reaper *reaper = reaper_instance(); reaper != nullptr && reaper->enqueue(std::move(parcel)))
+            {
+                return;
+            }
+        }
+
+        // Destruction on the caller's worker thread self-joins, and the reaper cannot run down an owner without a
+        // rundown callback. Either refusal deliberately retains the owner.
         DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
     }
 } // namespace DetourModKit::detail

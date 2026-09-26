@@ -327,11 +327,13 @@ namespace DetourModKit
          * @brief Registers a hotkey combo that triggers reload() on press.
          * @details A press_combo whose callback requests a reload off a dedicated background servicer thread (the press
          *          callback only flips a flag and notifies, so per-press latency stays low). The INI-configured combo
-         *          overrides @p default_combo on each load() / reload().
+         *          overrides @p default_combo on each load() / reload(). A repeat call for the same @p ini_key updates
+         *          that binding in place, so the last @p default_combo wins.
          * @param ini_key INI key that stores the combo string.
          * @param default_combo Combo applied when the key is absent (e.g. "Ctrl+F5").
-         * @return true if the binding was registered; false if @p default_combo is empty or the NONE sentinel (a reload
-         *         hotkey with no keys is never useful, so it is rejected at the call site).
+         * @return true if the binding was registered, or updated for a repeated @p ini_key. false if @p default_combo
+         *         is empty, NONE, or has no parsable combo. false also when an unload latch is set or the input
+         *         registration or update fails. A false return keeps any earlier binding for @p ini_key.
          * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] bool reload_hotkey(std::string_view ini_key, std::string_view default_combo);
@@ -345,7 +347,8 @@ namespace DetourModKit
          *          (its debounce and on_reload callback are preserved), so a hot-swap of the config file keeps
          *          auto-reload working. Re-pointing is skipped with a logged error if load() is called from the watcher
          *          thread itself (a self-join hazard); re-point from another thread in that case.
-         * @param ini_filename The INI filename, resolved relative to the runtime directory.
+         * @param ini_filename The UTF-8 INI filename, resolved relative to the runtime directory. Ill-formed UTF-8 or
+         *                     an embedded NUL loads the defaults with an Error record.
          * @note Setup/control-plane only: the load reads the file and runs every bound setter.
          */
         void load(std::string_view ini_filename);

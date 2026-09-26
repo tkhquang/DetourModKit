@@ -59,15 +59,15 @@ namespace DetourModKit
 
             /**
              * @brief Constructs a watcher for @p ini_path.
-             * @param ini_path Absolute or relative path to the INI file to monitor. The parent directory is opened for
-             *                 change notifications; the file itself does not need to exist at construction time.
+             * @param ini_path Absolute or relative UTF-16 path to the INI file to monitor. The watcher opens the parent
+             *                 directory for change notifications. The file does not need to exist at construction.
              * @param debounce Quiet-window length. A callback fires only after @p debounce has elapsed since the last
              *                 matching change event.
              * @param on_reload Callback invoked on the watcher thread when a debounced change is observed. May be empty
              *                  to construct an inert watcher.
              */
             explicit ConfigWatcher(
-                std::string_view ini_path,
+                std::wstring_view ini_path,
                 std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
                 std::function<void()> on_reload = {}
             );
@@ -139,7 +139,7 @@ namespace DetourModKit
             /**
              * @brief Returns the INI file path this watcher is monitoring.
              */
-            [[nodiscard]] const std::string &ini_path() const noexcept;
+            [[nodiscard]] const std::wstring &ini_path() const noexcept;
 
             /**
              * @brief Returns the configured debounce duration.

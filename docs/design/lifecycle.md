@@ -82,7 +82,7 @@ Some classes detach a thread that keeps the pimpl's members in use on the loader
 
 Instead, `~Class` must observe whether its own teardown detached. Use a latched flag (`m_writer_detached`), NOT a re-query of `is_loader_lock_held()`, which TOCTOUs against the detach decision. If the flag is set, abandon the already-heap-allocated `Impl` in place with `m_impl.release()` so `~Impl` never runs. No tiered leak cell is needed when the leaked object is itself already heap-allocated: `unique_ptr::release` leaks with zero allocation, so it cannot fail. Reserve the `new(nothrow)` -> `VirtualAlloc` -> static-slot ladder for a leaked `shared_ptr` that needs a fresh home. The owner-side leak, which keeps the handle alive so the destructor never runs, and the self-safe destructor are complementary belt-and-suspenders, never a double free.
 
-Relatedly, a subsystem must refuse to RESURRECT itself after shutdown. `Logger::enable_async_mode` gates on `m_shutdown_called` UNDER `m_async_mutex`, not before it the way `reconfigure` does. A call can land in `shutdown_internal`'s dropped-mutex window, with async already disabled and the stream not yet closed. Even there, it cannot spin up a fresh writer thread that outlives teardown.
+A subsystem must refuse resurrection after shutdown. `Logger::enable_async_mode` checks `m_shutdown_called` under `m_async_mutex`. A `configure` call in the dropped-mutex window of `shutdown_internal` clears that latch, so a later `enable_async_mode` there can publish a writer. `shutdown_internal` re-checks async mode under `m_async_mutex` before the close and retires that writer by the rules above. `LoggerTest.ConfigureThenEnableAsyncInsideShutdownGapIsTornDown` and `LoggerTest.ConfigureThenEnableAsyncInsideShutdownGapRetainsADetachedWriter` prove the join and the detach.
 
 ### [B-49]
 
@@ -103,7 +103,7 @@ A close is legal only once no live thread can still be inside the use. That is e
 - Leak it when a live user can remain inside it.
 - Keep its counted module reference so its code pages remain mapped.
 - Never free it with a nonzero in-flight count.
-- Never join under a control-plane mutex.
+- Never join while you hold a mutex that the worker needs.
 - Never restore a prologue when a newer layer still chains through it.
 - Check `HookLedger::newer_live_count` before `Hook::~Hook` touches backend memory.
 - If a newer layer remains live, retain the older backend and keep the target tracked as hooked.
@@ -159,7 +159,7 @@ Instead, take these steps:
 
 Such a call is asynchronous by contract. Say so in the public documentation, because a caller must not assume that the rundown finished when the call returns. `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread` verifies the control-thread arm.
 
-The queue must not depend on the heap. The reaper reserves its queue nodes up front, since the retirements that most need it happen under memory pressure. A queue that still refuses leaves the precommitted owner retention intact. A retirement with no rundown callback is refused rather than queued, because an owner whose worker cannot be run down must never be released.
+The queue must not depend on the heap. The reaper reserves its queue nodes up front, since the retirements that most need it happen under memory pressure. A queue that still refuses leaves the precommitted owner retention intact. A retirement with no rundown callback is refused rather than queued, because an owner whose worker cannot be run down must never be released. A rundown that the callback refuses keeps its owner in reaper storage (`LifecycleCounters.RefusedOwnerRundownRetainsTheOwner`, `ConfigTest.ReloadServicerVetoArmRetainsChannel`).
 
 The precommit creates one corollary. The keepalive is a deliberate self-reference, so shutdown must also clear it on the path with nothing to run down at all. Otherwise an owner that never started its worker is retained forever. That clear stays conditional on the abandonment flag. A detached thread leaves the worker non-joinable while its body still reads the owner. A later idempotent shutdown must not read that as permission to release.
 

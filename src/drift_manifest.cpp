@@ -5,7 +5,10 @@
 
 #include "DetourModKit/detail/drift_manifest.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include <charconv>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -285,9 +288,16 @@ namespace DetourModKit
 
         Result<void> write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries)
         {
+            // A narrow stream open decodes through the ANSI code page on both toolchains, so the UTF-8 path opens in
+            // its wide form. Ill-formed input fails before the open truncates any file.
+            const std::wstring wide_path = DetourModKit::detail::widen_utf8(path);
+            if (wide_path.empty())
+            {
+                return manifest_error(ErrorCode::FileOpenFailed);
+            }
             // Binary mode so the '\n' line endings written here are not translated to
             // CRLF; the parser tolerates either, but a stable on-disk form is clearer.
-            std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            std::ofstream file(std::filesystem::path(wide_path), std::ios::binary | std::ios::trunc);
             if (!file)
             {
                 return manifest_error(ErrorCode::FileOpenFailed);
@@ -312,7 +322,12 @@ namespace DetourModKit
 
         Result<std::vector<DriftRecord>> read_drift_report_from_file(const std::string &path)
         {
-            std::ifstream file(path, std::ios::binary);
+            const std::wstring wide_path = DetourModKit::detail::widen_utf8(path);
+            if (wide_path.empty())
+            {
+                return manifest_error(ErrorCode::FileOpenFailed);
+            }
+            std::ifstream file(std::filesystem::path(wide_path), std::ios::binary);
             if (!file)
             {
                 // An open failure (missing file, lock, permission, or a directory) is distinct from a

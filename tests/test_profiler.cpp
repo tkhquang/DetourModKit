@@ -2,6 +2,8 @@
 
 #include "DetourModKit/profiler.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include "fixtures/loader_lock_scope.hpp"
 #include "test_alloc_probe.hpp"
 
@@ -10,6 +12,9 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -34,6 +39,41 @@ namespace
         return std::fopen(path.c_str(), "rb");
 #endif
     }
+
+    std::atomic_uint s_temp_directory_counter{0};
+
+    /**
+     * @brief Owns a unique temporary directory and removes it on every scope exit.
+     * @details The name carries the process ID and a counter, followed by the caller's suffix.
+     */
+    class ScopedTempDirectory
+    {
+    public:
+        explicit ScopedTempDirectory(std::wstring_view suffix)
+        {
+            const unsigned int counter = s_temp_directory_counter.fetch_add(1, std::memory_order_relaxed);
+            std::wstring name = L"dmk_profiler_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(counter);
+            name += suffix;
+            m_path = std::filesystem::temp_directory_path() / name;
+            std::error_code error;
+            std::filesystem::create_directories(m_path, error);
+        }
+
+        ~ScopedTempDirectory()
+        {
+            std::error_code error;
+            std::filesystem::remove_all(m_path, error);
+        }
+
+        ScopedTempDirectory(const ScopedTempDirectory &) = delete;
+        ScopedTempDirectory &operator=(const ScopedTempDirectory &) = delete;
+
+        /// Returns the owned directory.
+        [[nodiscard]] const std::filesystem::path &path() const noexcept { return m_path; }
+
+    private:
+        std::filesystem::path m_path;
+    };
 } // namespace
 
 // Profiler singleton
@@ -417,6 +457,40 @@ TEST_F(ProfilerRecordTest, ExportToFile_InvalidPath_ReturnsFalse)
     const auto &profiler = Profiler::get_instance();
     const bool ok = profiler.export_to_file("Z:\\nonexistent\\dir\\file.json");
     EXPECT_FALSE(ok);
+}
+
+// The narrow path is UTF-8. A narrow CRT open decodes it through the ANSI code page, so this case discriminates only
+// where GetACP() is not 65001.
+TEST_F(ProfilerRecordTest, ExportToFileOutsideAnsiCodePage)
+{
+    RecordProperty("GetACP", static_cast<int>(GetACP()));
+    const ScopedTempDirectory directory{L"_\x7528\x6237"};
+    ASSERT_TRUE(std::filesystem::is_directory(directory.path()));
+    const std::filesystem::path trace = directory.path() / L"trace.json";
+
+    auto &profiler = Profiler::get_instance();
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+    profiler.record("cjk_export", tick.QuadPart, tick.QuadPart + 5000, 1);
+
+    ASSERT_TRUE(profiler.export_to_file(detail::utf8_from_wide(trace.native())));
+    std::ifstream in(trace, std::ios::binary);
+    const std::string content{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    EXPECT_NE(content.find("cjk_export"), std::string::npos);
+}
+
+// Ill-formed UTF-8 fails before any open, so no file appears under an ANSI-decoded or U+FFFD-replaced name.
+TEST_F(ProfilerRecordTest, ExportToFileRejectsIllFormedUtf8)
+{
+    const ScopedTempDirectory directory{L"_ill_formed"};
+    ASSERT_TRUE(std::filesystem::is_directory(directory.path()));
+    const std::string trace_text = detail::utf8_from_wide(directory.path().native()) + "\\trace_\x80\x81.json";
+
+    const bool exported = Profiler::get_instance().export_to_file(trace_text);
+    std::error_code error;
+    EXPECT_TRUE(std::filesystem::is_empty(directory.path(), error));
+    EXPECT_FALSE(error);
+    EXPECT_FALSE(exported);
 }
 
 // Concurrent recording

@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <windows.h>
+
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
@@ -24,7 +26,13 @@
 #include "internal/input_test_seams.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/config_diagnostics.hpp"
+#include "internal/config_pass.hpp"
+#include "internal/config_reload_gate.hpp"
+#include "internal/config_reload_lifecycle.hpp"
+#include "internal/config_watch_control.hpp"
 #include "internal/config_watcher.hpp"
+#include "internal/input_poller.hpp"
+#include "internal/utf8_conversion.hpp"
 #include "fixtures/intercept_lease.hpp"
 #include "fixtures/log_capture.hpp"
 
@@ -143,7 +151,32 @@ namespace
     std::string s_diagnostic_probe_first_locked_record;
     std::string s_deferred_source_record;
 
-    // A separate contender tests both mutexes, so the emitter never calls try_lock on a mutex it owns.
+    /**
+     * @brief Reports whether a contender thread finds the registry and watcher mutexes free.
+     * @details The contender tests both mutexes, so the caller never calls try_lock on a mutex that its own thread
+     *          owns. A contender that cannot start reports false.
+     */
+    [[nodiscard]] bool config_locks_free_from_another_thread() noexcept
+    {
+        bool locks_free = false;
+        try
+        {
+            const std::jthread contender(
+                [&locks_free]
+                {
+                    locks_free = DetourModKit::detail::config_registry_mutex_free_for_test() &&
+                                 DetourModKit::detail::config_watcher_mutex_free_for_test();
+                }
+            );
+        }
+        catch (...)
+        {
+            locks_free = false;
+        }
+        return locks_free;
+    }
+
+    /// Tallies config records and keeps the first one that a thread emitted under a config mutex.
     void observe_logger_record(DetourModKit::LogLevel, std::string_view message) noexcept
     {
         const bool watcher_start = message.find("StoppableWorker 'ConfigWatcher' started.") != std::string_view::npos;
@@ -190,22 +223,7 @@ namespace
             s_diagnostic_probe_worker_start_failures.fetch_add(1, std::memory_order_acq_rel);
         }
 
-        bool locks_free = false;
-        try
-        {
-            const std::jthread lock_probe(
-                [&locks_free]
-                {
-                    locks_free = DetourModKit::detail::config_registry_mutex_free_for_test() &&
-                                 DetourModKit::detail::config_watcher_mutex_free_for_test();
-                }
-            );
-        }
-        catch (...)
-        {
-            locks_free = false;
-        }
-        if (locks_free)
+        if (config_locks_free_from_another_thread())
         {
             return;
         }
@@ -236,6 +254,137 @@ namespace
         catch (...)
         {
         }
+    }
+
+    /**
+     * @brief Counts consumer-callable operations for the config lock proofs.
+     * @details Each locked counter records an operation that ran while a config mutex was held (`[B-101]`).
+     */
+    struct CallableLockCounts
+    {
+        std::atomic<unsigned> locked_copies{0};
+        std::atomic<unsigned> locked_moves{0};
+        std::atomic<unsigned> locked_destructions{0};
+        std::atomic<unsigned> locked_invocations{0};
+        /// Counts destructions on a thread that held the reload pass lock.
+        std::atomic<unsigned> pass_locked_destructions{0};
+        std::atomic<unsigned> invocations{0};
+        std::atomic<unsigned> destructions{0};
+        /// Counts live probe objects, which a reset leaves unchanged.
+        std::atomic<int> live{0};
+        std::atomic<int> last_int{0};
+    };
+
+    CallableLockCounts s_callable_lock_counts;
+
+    /// Zeroes every counter except the live object count.
+    void reset_callable_lock_counts() noexcept
+    {
+        s_callable_lock_counts.locked_copies.store(0, std::memory_order_release);
+        s_callable_lock_counts.locked_moves.store(0, std::memory_order_release);
+        s_callable_lock_counts.locked_destructions.store(0, std::memory_order_release);
+        s_callable_lock_counts.locked_invocations.store(0, std::memory_order_release);
+        s_callable_lock_counts.pass_locked_destructions.store(0, std::memory_order_release);
+        s_callable_lock_counts.invocations.store(0, std::memory_order_release);
+        s_callable_lock_counts.destructions.store(0, std::memory_order_release);
+        s_callable_lock_counts.last_int.store(0, std::memory_order_release);
+    }
+
+    /// Increments @p counter when a config mutex is held or the contender thread cannot start.
+    void count_if_config_locked(std::atomic<unsigned> &counter) noexcept
+    {
+        if (!config_locks_free_from_another_thread())
+        {
+            counter.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+
+    /// Returns the copies, moves, destructions, and invocations that ran under a config mutex.
+    [[nodiscard]] unsigned callable_operations_under_config_locks() noexcept
+    {
+        return s_callable_lock_counts.locked_copies.load(std::memory_order_acquire) +
+               s_callable_lock_counts.locked_moves.load(std::memory_order_acquire) +
+               s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire) +
+               s_callable_lock_counts.locked_invocations.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief A consumer callable whose copy, move, destruction, and call each record a held config mutex.
+     * @details It serves as a config setter and as the auto-reload callback. The type is empty and nothrow-movable, so
+     *          MSVC stores it inside std::function, and a std::function move runs its move constructor.
+     */
+    class CallableLockProbe
+    {
+    public:
+        CallableLockProbe() noexcept { s_callable_lock_counts.live.fetch_add(1, std::memory_order_acq_rel); }
+
+        CallableLockProbe(const CallableLockProbe &) noexcept
+        {
+            count_if_config_locked(s_callable_lock_counts.locked_copies);
+            s_callable_lock_counts.live.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        CallableLockProbe(CallableLockProbe &&) noexcept
+        {
+            count_if_config_locked(s_callable_lock_counts.locked_moves);
+            s_callable_lock_counts.live.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        CallableLockProbe &operator=(const CallableLockProbe &) = delete;
+        CallableLockProbe &operator=(CallableLockProbe &&) = delete;
+
+        ~CallableLockProbe()
+        {
+            count_if_config_locked(s_callable_lock_counts.locked_destructions);
+            if (config::detail::reload_apply_lock_held_by_current_thread())
+            {
+                s_callable_lock_counts.pass_locked_destructions.fetch_add(1, std::memory_order_acq_rel);
+            }
+            s_callable_lock_counts.destructions.fetch_add(1, std::memory_order_acq_rel);
+            s_callable_lock_counts.live.fetch_sub(1, std::memory_order_acq_rel);
+        }
+
+        /// Records the call and keeps the last int value.
+        template <typename Value> void operator()(const Value &value) const noexcept
+        {
+            count_if_config_locked(s_callable_lock_counts.locked_invocations);
+            s_callable_lock_counts.invocations.fetch_add(1, std::memory_order_acq_rel);
+            if constexpr (std::is_same_v<Value, int>)
+            {
+                s_callable_lock_counts.last_int.store(value, std::memory_order_release);
+            }
+        }
+    };
+
+    /// Replaces the INI file with one [Probe] section that holds @p value.
+    void write_probe_ini(const std::filesystem::path &path, int value)
+    {
+        std::ofstream ini(path, std::ios::binary | std::ios::trunc);
+        ini << "[Probe]\nValue=" << value << "\n";
+    }
+
+    std::atomic<bool> s_ill_formed_filename_error_seen{false};
+
+    /// Records an Error record that reports an ill-formed INI filename.
+    void observe_ill_formed_filename_record(DetourModKit::LogLevel level, std::string_view message) noexcept
+    {
+        if (level == DetourModKit::LogLevel::Error && message.find("not well-formed UTF-8") != std::string_view::npos)
+        {
+            s_ill_formed_filename_error_seen.store(true, std::memory_order_release);
+        }
+    }
+
+    /// Decodes @p text through the ANSI code page, as an MSVC narrow path conversion does.
+    [[nodiscard]] std::wstring widen_through_ansi_code_page(std::string_view text)
+    {
+        const int length = ::MultiByteToWideChar(CP_ACP, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+        if (length <= 0)
+        {
+            return {};
+        }
+        std::wstring wide(static_cast<std::size_t>(length), L'\0');
+        (void)::MultiByteToWideChar(CP_ACP, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
+        return wide;
     }
 } // namespace
 
@@ -816,7 +965,7 @@ TEST_F(ConfigTest, ReloadServicerPostThreadFailureStopsWorker)
 TEST_F(ConfigTest, ConfigWatcherPostThreadFailureStopsWorker)
 {
     DetourModKit::detail::g_worker_post_thread_start_seam = [] { throw std::runtime_error("post-thread-start"); };
-    DetourModKit::detail::ConfigWatcher watcher(m_test_ini_file.string(), std::chrono::milliseconds{50}, []() {});
+    DetourModKit::detail::ConfigWatcher watcher(m_test_ini_file.native(), std::chrono::milliseconds{50}, []() {});
 
     const auto start_time = std::chrono::steady_clock::now();
     EXPECT_FALSE(watcher.start());
@@ -2552,6 +2701,9 @@ TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMu
 {
     input::Input::instance().shutdown();
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    // A live registration updates in place and disposes nothing. Input::shutdown() drops its entries, so the second
+    // call registers afresh and replaces the stored guard.
+    input::Input::instance().shutdown();
 
     bool replacement_registered = false;
     const auto disposal =
@@ -2567,40 +2719,198 @@ TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMu
     input::Input::instance().shutdown();
 }
 
+namespace
+{
+    constexpr int PRESS_F5_KEY = VK_F5;
+    constexpr int PRESS_F6_KEY = VK_F6;
+
+    // The poll thread reads the key and the servicer thread runs the bound setter, so both outlive every case.
+    std::atomic<int> s_reload_hotkey_down_key{0};
+    std::atomic<int> s_reload_hotkey_value{0};
+
+    /**
+     * @brief Publishes the reload-hotkey key-state seam while the input engine is stopped.
+     * @details Destruction stops the engine before it clears the seam, on every exit path of the case.
+     */
+    class ReloadHotkeyKeySeam
+    {
+    public:
+        ReloadHotkeyKeySeam()
+        {
+            input::Input::instance().shutdown();
+            s_reload_hotkey_down_key.store(0, std::memory_order_release);
+            DetourModKit::detail::g_input_key_state_probe = [](int key) noexcept
+            { return key != 0 && key == s_reload_hotkey_down_key.load(std::memory_order_acquire); };
+        }
+
+        ~ReloadHotkeyKeySeam()
+        {
+            input::Input::instance().shutdown();
+            DetourModKit::detail::g_input_key_state_probe = nullptr;
+            s_reload_hotkey_down_key.store(0, std::memory_order_release);
+        }
+
+        ReloadHotkeyKeySeam(const ReloadHotkeyKeySeam &) = delete;
+        ReloadHotkeyKeySeam &operator=(const ReloadHotkeyKeySeam &) = delete;
+    };
+
+    /**
+     * @brief Closes process-wide input callback admission for its scope.
+     * @details A registration inside the scope fails with ShutdownInProgress. Destruction reopens admission.
+     */
+    class ClosedInputAdmission
+    {
+    public:
+        ClosedInputAdmission() noexcept { DetourModKit::detail::close_input_callback_admission(); }
+
+        ~ClosedInputAdmission() noexcept { (void)DetourModKit::detail::open_input_callback_admission(); }
+
+        ClosedInputAdmission(const ClosedInputAdmission &) = delete;
+        ClosedInputAdmission &operator=(const ClosedInputAdmission &) = delete;
+    };
+
+    /// Binds the reload-hotkey proof value, whose setter runs on the reload servicer thread.
+    void bind_reload_hotkey_value()
+    {
+        config::bind_int(
+            "S",
+            "K",
+            "k",
+            [](int value) { s_reload_hotkey_value.store(value, std::memory_order_release); },
+            0
+        );
+    }
+
+    /// Writes @p value as the INI source of the reload-hotkey proof value.
+    void write_reload_hotkey_value(const std::filesystem::path &ini_file, int value)
+    {
+        std::ofstream ini(ini_file);
+        ini << "[S]\nK=" << value << "\n";
+    }
+
+    /// Starts the input engine with a short poll interval and no focus requirement.
+    [[nodiscard]] bool start_reload_hotkey_engine() noexcept
+    {
+        return input::Input::instance()
+            .start(
+                input::Input::Settings{
+                    .poll_interval = std::chrono::milliseconds{2},
+                    .require_focus = false,
+                }
+            )
+            .has_value();
+    }
+
+    /**
+     * @brief Holds @p key down through the seam until the proof value reads @p expected or @p timeout expires.
+     * @return true when the proof value reads @p expected.
+     */
+    bool press_until(int key, int expected, std::chrono::milliseconds timeout)
+    {
+        s_reload_hotkey_down_key.store(key, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (s_reload_hotkey_value.load(std::memory_order_acquire) != expected &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        s_reload_hotkey_down_key.store(0, std::memory_order_release);
+        return s_reload_hotkey_value.load(std::memory_order_acquire) == expected;
+    }
+} // namespace
+
 TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
 {
-    // Regression guard: config::reload_hotkey() must retain the input::BindingGuard so the binding's enabled flag stays
-    // true. If the guard were discarded, ~BindingGuard would release the flag and the bound callback could never fire.
-    //
-    // The input facade has no press-injection hook from user code, so we prove the callback path indirectly: after
-    // registration the binding's enabled flag must still be true. We cannot peek the flag directly, so we call
-    // config::reload() (what the press callback does) and observe the setter fire.
-    input::Input::instance().shutdown();
-
-    int value = 0;
-    config::bind_int("S", "K", "k", [&value](int v) { value = v; }, 1);
-
-    {
-        std::ofstream f(m_test_ini_file);
-        f << "[S]\nK=2\n";
-    }
+    // The retained guard keeps the hotkey live, and the key-state seam drives the press through the poll loop. A second
+    // registration before start() updates the registered binding in place, so its combo reloads.
+    const ReloadHotkeyKeySeam key_seam;
+    bind_reload_hotkey_value();
+    write_reload_hotkey_value(m_test_ini_file, 2);
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
-    EXPECT_EQ(value, 2);
+    EXPECT_EQ(s_reload_hotkey_value.load(std::memory_order_acquire), 2);
 
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
-
-    {
-        std::ofstream f(m_test_ini_file);
-        f << "[S]\nK=77\n";
-    }
+    write_reload_hotkey_value(m_test_ini_file, 77);
     ASSERT_TRUE(config::reload());
-    EXPECT_EQ(value, 77);
+    EXPECT_EQ(s_reload_hotkey_value.load(std::memory_order_acquire), 77);
 
-    // Re-register with a different combo: the second call must replace the first guard in place rather than stacking
-    // per reload cycle.
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F6"));
+    ASSERT_TRUE(start_reload_hotkey_engine());
+    write_reload_hotkey_value(m_test_ini_file, 88);
+    EXPECT_TRUE(press_until(PRESS_F6_KEY, 88, std::chrono::seconds{2}))
+        << "the combo of a repeated registration before start() did not reload";
+}
 
+TEST_F(ConfigTest, ReloadHotkeyReRegistrationFiresOnPress)
+{
+    const ReloadHotkeyKeySeam key_seam;
+    bind_reload_hotkey_value();
+    write_reload_hotkey_value(m_test_ini_file, 1);
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    ASSERT_TRUE(start_reload_hotkey_engine());
+
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F6"));
+    write_reload_hotkey_value(m_test_ini_file, 77);
+    EXPECT_TRUE(press_until(PRESS_F6_KEY, 77, std::chrono::seconds{2}))
+        << "the new combo of a live re-registration did not reload";
+    write_reload_hotkey_value(m_test_ini_file, 88);
+    EXPECT_FALSE(press_until(PRESS_F5_KEY, 88, std::chrono::milliseconds{200}))
+        << "the replaced combo of a live re-registration still reloads";
+}
+
+TEST_F(ConfigTest, ReloadHotkeyRegistrationAfterClearFiresOnPress)
+{
+    const ReloadHotkeyKeySeam key_seam;
+    bind_reload_hotkey_value();
+    write_reload_hotkey_value(m_test_ini_file, 1);
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    config::clear();
+    EXPECT_EQ(input::Input::instance().binding_count(), 0u)
+        << "config::clear() left the released reload-hotkey binding registered";
+
+    // config::clear() dropped the bound value and the remembered path.
+    bind_reload_hotkey_value();
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F6"));
+    ASSERT_TRUE(start_reload_hotkey_engine());
+    write_reload_hotkey_value(m_test_ini_file, 77);
+    EXPECT_TRUE(press_until(PRESS_F6_KEY, 77, std::chrono::seconds{2}))
+        << "a registration after config::clear() did not reload";
+}
+
+TEST_F(ConfigTest, ReloadHotkeyReturnsFalseWhenRegistrationFails)
+{
     input::Input::instance().shutdown();
+    const std::size_t before = input::Input::instance().binding_count();
+    {
+        const ClosedInputAdmission closed_admission;
+        EXPECT_FALSE(config::reload_hotkey("ReloadConfig", "F5"))
+            << "reload_hotkey() reported success for a refused input registration";
+    }
+    EXPECT_EQ(input::Input::instance().binding_count(), before);
+    EXPECT_TRUE(config::reload_hotkey("ReloadConfig", "F6")) << "the refused registration blocked a later one";
+    input::Input::instance().shutdown();
+}
+
+TEST_F(ConfigTest, ReloadHotkeyReRegistrationKeepsTheLiveBindingWhileAdmissionIsClosed)
+{
+    const ReloadHotkeyKeySeam key_seam;
+    bind_reload_hotkey_value();
+    write_reload_hotkey_value(m_test_ini_file, 1);
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    ASSERT_TRUE(start_reload_hotkey_engine());
+    {
+        // A live key updates its registration in place, so closed admission cannot refuse it.
+        const ClosedInputAdmission closed_admission;
+        EXPECT_TRUE(config::reload_hotkey("ReloadConfig", "F6"));
+    }
+    write_reload_hotkey_value(m_test_ini_file, 77);
+    EXPECT_TRUE(press_until(PRESS_F6_KEY, 77, std::chrono::seconds{2}))
+        << "a re-registration under closed admission disabled the live hotkey";
 }
 
 TEST_F(ConfigTest, RegisterReloadHotkey_InvalidCombo_Rejected)
@@ -2899,7 +3209,7 @@ TEST_F(ConfigTest, AutoReload_EmptySetterPassNeverReportsSettersRan)
 {
     config::disable_auto_reload();
 
-    // A key bound with an empty setter registers a value-tracking item that produces no deferred callback (bind_scalar
+    // A key bound with an empty setter registers a value-tracking item that produces no deferred callback (bind_setter
     // guards on the setter, and take_deferred_apply returns nothing when it is null), so any reload runs zero setters.
     config::bind_int("S", "K", "k", std::function<void(int)>{}, 0);
 
@@ -3234,6 +3544,405 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
     config::disable_auto_reload();
 
     std::filesystem::remove_all(temp_dir, ec);
+}
+
+TEST_F(ConfigTest, BindKeepsSetterCopiesOutsideTheRegistryMutex)
+{
+    config::disable_auto_reload();
+    reset_callable_lock_counts();
+
+    config::bind_int("Probe", "Value", "probe value", CallableLockProbe{}, 7);
+    config::bind_combos("Probe", "Combo", "probe combo", CallableLockProbe{}, "F5");
+
+    EXPECT_EQ(s_callable_lock_counts.invocations.load(std::memory_order_acquire), 2u);
+    EXPECT_EQ(s_callable_lock_counts.last_int.load(std::memory_order_acquire), 7);
+    EXPECT_EQ(callable_operations_under_config_locks(), 0u)
+        << "copies " << s_callable_lock_counts.locked_copies.load() << ", moves "
+        << s_callable_lock_counts.locked_moves.load() << ", destructions "
+        << s_callable_lock_counts.locked_destructions.load();
+}
+
+TEST_F(ConfigTest, RebindDestroysTheDisplacedSetterOutsideTheRegistryMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    config::bind_int("Probe", "Value", "probe value", CallableLockProbe{}, 7);
+    reset_callable_lock_counts();
+
+    // A plain replacement leaves the displaced probe as the only measured callable.
+    config::bind_int("Probe", "Value", "probe value", [](int) {}, 8);
+
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start)
+        << "the displaced setter must be destroyed before bind returns";
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u);
+}
+
+TEST_F(ConfigTest, ClearDestroysSettersOutsideTheRegistryMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    config::bind_int("Probe", "Value", "probe value", CallableLockProbe{}, 7);
+    config::bind_string("Probe", "Text", "probe text", CallableLockProbe{}, "text");
+    config::bind_combos("Probe", "Combo", "probe combo", CallableLockProbe{}, "F5");
+    reset_callable_lock_counts();
+
+    config::clear();
+
+    EXPECT_EQ(s_callable_lock_counts.destructions.load(std::memory_order_acquire), 3u);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u);
+}
+
+TEST_F(ConfigTest, LoadKeepsSetterCopiesOutsideTheRegistryMutex)
+{
+    config::disable_auto_reload();
+    write_probe_ini(m_test_ini_file, 11);
+    config::bind_int("Probe", "Value", "probe value", CallableLockProbe{}, 7);
+    reset_callable_lock_counts();
+
+    config::load(m_test_ini_file.string());
+
+    EXPECT_EQ(s_callable_lock_counts.last_int.load(std::memory_order_acquire), 11);
+    EXPECT_EQ(callable_operations_under_config_locks(), 0u)
+        << "copies " << s_callable_lock_counts.locked_copies.load() << ", destructions "
+        << s_callable_lock_counts.locked_destructions.load();
+}
+
+TEST_F(ConfigTest, ReloadKeepsSetterCopiesOutsideTheRegistryMutex)
+{
+    config::disable_auto_reload();
+    write_probe_ini(m_test_ini_file, 11);
+    config::bind_int("Probe", "Value", "probe value", CallableLockProbe{}, 7);
+    config::load(m_test_ini_file.string());
+    // Changed bytes defeat the unchanged-content skip, so the pass takes the setter.
+    write_probe_ini(m_test_ini_file, 12);
+    reset_callable_lock_counts();
+
+    ASSERT_TRUE(config::reload());
+
+    EXPECT_EQ(s_callable_lock_counts.last_int.load(std::memory_order_acquire), 12);
+    EXPECT_EQ(callable_operations_under_config_locks(), 0u)
+        << "copies " << s_callable_lock_counts.locked_copies.load() << ", destructions "
+        << s_callable_lock_counts.locked_destructions.load();
+}
+
+TEST_F(ConfigTest, SetterRebindDropsTheLastReferenceAfterThePassLock)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    write_probe_ini(m_test_ini_file, 31);
+    config::bind_int(
+        "Probe",
+        "Value",
+        "probe value",
+        [probe = CallableLockProbe{}](int value)
+        {
+            probe(value);
+            // The rebind leaves the pass as the last owner of this setter.
+            if (value == 32)
+            {
+                config::bind_int("Probe", "Value", "probe value", [](int) {}, 0);
+            }
+        },
+        7
+    );
+    config::load(m_test_ini_file.string());
+    write_probe_ini(m_test_ini_file, 32);
+    reset_callable_lock_counts();
+
+    ASSERT_TRUE(config::reload());
+
+    EXPECT_EQ(s_callable_lock_counts.last_int.load(std::memory_order_acquire), 32);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(s_callable_lock_counts.pass_locked_destructions.load(std::memory_order_acquire), 0u);
+}
+
+TEST_F(ConfigTest, EnableAutoReloadKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    write_probe_ini(m_test_ini_file, 1);
+    config::load(m_test_ini_file.string());
+    reset_callable_lock_counts();
+
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    const unsigned copies = s_callable_lock_counts.locked_copies.load(std::memory_order_acquire);
+    const unsigned moves = s_callable_lock_counts.locked_moves.load(std::memory_order_acquire);
+    const unsigned destructions = s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire);
+    config::disable_auto_reload();
+
+    EXPECT_EQ(copies, 0u);
+    EXPECT_EQ(moves, 0u);
+    EXPECT_EQ(destructions, 0u);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+}
+
+TEST_F(ConfigTest, DisableAutoReloadKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    write_probe_ini(m_test_ini_file, 1);
+    config::load(m_test_ini_file.string());
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    reset_callable_lock_counts();
+
+    config::disable_auto_reload();
+
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u);
+    EXPECT_GE(s_callable_lock_counts.destructions.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+
+    // A clear() inside the re-point window skips the restart, so the persisted callback outlives every watcher and
+    // disable_auto_reload() drops its last reference.
+    const std::filesystem::path file_b = m_test_ini_file.parent_path() / (m_test_ini_file.stem().string() + "_b.ini");
+    write_probe_ini(file_b, 2);
+    config::load(m_test_ini_file.string());
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    DetourModKit::detail::g_config_repoint_window_test_hook = [] { config::clear(); };
+    config::load(file_b.string());
+    DetourModKit::detail::g_config_repoint_window_test_hook = nullptr;
+    reset_callable_lock_counts();
+
+    config::disable_auto_reload();
+
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u)
+        << "the callback that outlived its watcher must drop after unlock";
+    EXPECT_EQ(s_callable_lock_counts.destructions.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+}
+
+TEST_F(ConfigTest, AutoReloadStartFailureKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    write_probe_ini(m_test_ini_file, 1);
+    config::load(m_test_ini_file.string());
+    reset_callable_lock_counts();
+
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = []() noexcept { return true; };
+    const config::AutoReloadStatus status =
+        config::enable_auto_reload(std::chrono::milliseconds{50}, CallableLockProbe{});
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = nullptr;
+    config::disable_auto_reload();
+
+    EXPECT_EQ(status, config::AutoReloadStatus::StartFailed);
+    EXPECT_EQ(s_callable_lock_counts.locked_copies.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire), 0u);
+    EXPECT_GE(s_callable_lock_counts.destructions.load(std::memory_order_acquire), 1u);
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+}
+
+TEST_F(ConfigTest, AutoReloadRepointKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    const std::filesystem::path file_a = m_test_ini_file;
+    const std::filesystem::path file_b = file_a.parent_path() / (file_a.stem().string() + "_probe_b.ini");
+    write_probe_ini(file_a, 1);
+    write_probe_ini(file_b, 2);
+    config::load(file_a.string());
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    reset_callable_lock_counts();
+
+    config::load(file_b.string());
+    const unsigned operations = callable_operations_under_config_locks();
+    const unsigned copies = s_callable_lock_counts.locked_copies.load(std::memory_order_acquire);
+    const unsigned destructions = s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire);
+    config::disable_auto_reload();
+
+    EXPECT_EQ(operations, 0u) << "copies " << copies << ", destructions " << destructions;
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start);
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+}
+
+TEST_F(ConfigTest, AutoReloadRepointStartFailureKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    const std::filesystem::path file_a = m_test_ini_file;
+    const std::filesystem::path file_b = file_a.parent_path() / (file_a.stem().string() + "_probe_fail_b.ini");
+    write_probe_ini(file_a, 1);
+    write_probe_ini(file_b, 2);
+    config::load(file_a.string());
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    reset_callable_lock_counts();
+
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = []() noexcept { return true; };
+    config::load(file_b.string());
+    DetourModKit::detail::g_config_watcher_create_event_failure_seam = nullptr;
+
+    EXPECT_EQ(callable_operations_under_config_locks(), 0u)
+        << "copies " << s_callable_lock_counts.locked_copies.load() << ", destructions "
+        << s_callable_lock_counts.locked_destructions.load();
+    EXPECT_EQ(s_callable_lock_counts.live.load(std::memory_order_acquire), live_at_start)
+        << "the failed re-point must drop the persisted callback";
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started)
+        << "the failed re-point must leave auto-reload off";
+    config::disable_auto_reload();
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+}
+
+// A std::function move under the watcher mutex runs consumer code only on MSVC, so this case discriminates on the MSVC
+// lanes alone.
+TEST_F(ConfigTest, ReloadDrainKeepsTheCallbackOutsideTheWatcherMutex)
+{
+    config::disable_auto_reload();
+    const int live_at_start = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    write_probe_ini(m_test_ini_file, 1);
+    config::load(m_test_ini_file.string());
+    EXPECT_EQ(
+        config::enable_auto_reload(std::chrono::milliseconds{100}, CallableLockProbe{}),
+        config::AutoReloadStatus::Started
+    );
+    reset_callable_lock_counts();
+
+    const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
+    const config::detail::ReloadDrainStatus finish_status =
+        begin_status == config::detail::ReloadDrainStatus::Ready
+            ? config::detail::finish_reload_drain(std::chrono::steady_clock::now() + std::chrono::seconds{5})
+            : begin_status;
+    const unsigned moves = s_callable_lock_counts.locked_moves.load(std::memory_order_acquire);
+    const unsigned destructions = s_callable_lock_counts.locked_destructions.load(std::memory_order_acquire);
+    const int live_after_drain = s_callable_lock_counts.live.load(std::memory_order_acquire);
+    config::detail::rearm_reloads();
+    config::disable_auto_reload();
+
+    EXPECT_EQ(begin_status, config::detail::ReloadDrainStatus::Ready);
+    EXPECT_EQ(finish_status, config::detail::ReloadDrainStatus::Ready);
+    EXPECT_EQ(moves, 0u);
+    EXPECT_EQ(destructions, 0u);
+    EXPECT_EQ(live_after_drain, live_at_start);
+}
+
+TEST_F(ConfigTest, LoadRejectsIllFormedUtf8FilenameWithoutThrow)
+{
+    config::disable_auto_reload();
+    const std::string bad_name = m_test_ini_file.stem().string() + "_bad_\x80\x81.ini";
+    // The decoy sits where an ANSI code page decode of the ill-formed name lands.
+    const std::filesystem::path decoy = m_test_ini_file.parent_path() / widen_through_ansi_code_page(bad_name);
+    {
+        std::ofstream decoy_file(decoy, std::ios::binary | std::ios::trunc);
+        decoy_file << "[S]\nK=7\n";
+    }
+    std::atomic<int> value{0};
+    config::bind_int("S", "K", "k", [&value](int v) { value.store(v, std::memory_order_release); }, 1);
+    const std::string ill_formed_path =
+        DetourModKit::detail::utf8_from_wide(m_test_ini_file.parent_path().native()) + "\\" + bad_name;
+
+    s_ill_formed_filename_error_seen.store(false, std::memory_order_release);
+    DetourModKit::detail::g_logger_record_probe = &observe_ill_formed_filename_record;
+    EXPECT_NO_THROW(config::load(ill_formed_path));
+    DetourModKit::detail::g_logger_record_probe = nullptr;
+
+    EXPECT_EQ(value.load(std::memory_order_acquire), 1) << "an ill-formed filename must load the defaults";
+    EXPECT_TRUE(s_ill_formed_filename_error_seen.load(std::memory_order_acquire));
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::StartFailed);
+    config::disable_auto_reload();
+    std::error_code ec;
+    std::filesystem::remove(decoy, ec);
+}
+
+// This case discriminates only where GetACP() is not 65001 and the toolchain decoded narrow paths through that code
+// page. MinGW and a UTF-8 code page pass either way.
+TEST_F(ConfigTest, LoadResolvesUtf8PathOutsideAnsiCodePage)
+{
+    config::disable_auto_reload();
+    RecordProperty("GetACP", static_cast<int>(::GetACP()));
+    const std::filesystem::path directory =
+        m_test_ini_file.parent_path() / (m_test_ini_file.stem().wstring() + L"_\x7528\x6237");
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path ini = directory / L"cjk.ini";
+    {
+        std::ofstream ini_file(ini, std::ios::binary | std::ios::trunc);
+        ini_file << "[S]\nK=7\n";
+    }
+    std::atomic<int> value{0};
+    config::bind_int("S", "K", "k", [&value](int v) { value.store(v, std::memory_order_release); }, 1);
+
+    EXPECT_NO_THROW(config::load(DetourModKit::detail::utf8_from_wide(ini.native())));
+    EXPECT_EQ(value.load(std::memory_order_acquire), 7);
+    const config::AutoReloadStatus status = config::enable_auto_reload(std::chrono::milliseconds{50});
+    bool reloaded = false;
+    if (status == config::AutoReloadStatus::Started)
+    {
+        {
+            std::ofstream ini_file(ini, std::ios::binary | std::ios::trunc);
+            ini_file << "[S]\nK=9\n";
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (!reloaded && std::chrono::steady_clock::now() < deadline)
+        {
+            reloaded = value.load(std::memory_order_acquire) == 9;
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+    }
+    config::disable_auto_reload();
+
+    EXPECT_EQ(status, config::AutoReloadStatus::Started);
+    EXPECT_TRUE(reloaded) << "the watcher must follow the INI inside the non-ASCII directory";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+}
+
+// The re-point compares resolved paths ordinally without case, so U+00E4 in place of U+00C4 names the watched file.
+TEST_F(ConfigTest, RepointKeepsTheWatcherForANonAsciiCaseVariant)
+{
+    config::disable_auto_reload();
+    const std::filesystem::path directory =
+        m_test_ini_file.parent_path() / (m_test_ini_file.stem().wstring() + L"_\x00C4");
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path ini = directory / L"case.ini";
+    {
+        std::ofstream ini_file(ini, std::ios::binary | std::ios::trunc);
+        ini_file << "[S]\nK=1\n";
+    }
+    const std::string ini_utf8 = DetourModKit::detail::utf8_from_wide(ini.native());
+    EXPECT_NO_THROW(config::load(ini_utf8));
+    const config::AutoReloadStatus status = config::enable_auto_reload(std::chrono::milliseconds{50});
+
+    config::detail::DeferredDiagnostics diags = config::detail::open_deferred_diagnostics();
+    std::wstring variant = config::detail::get_ini_file_path(ini_utf8, diags).native();
+    const std::size_t upper = variant.rfind(L'\x00C4');
+    bool repointed = false;
+    if (status == config::AutoReloadStatus::Started && upper != std::wstring::npos)
+    {
+        variant[upper] = L'\x00E4';
+        config::detail::WatchRepoint repoint = config::detail::detach_watcher_if_repointed(variant);
+        repointed = repoint.repoint;
+        if (repoint.stale)
+        {
+            // A detached watcher restarts on the loaded path, as load() restarts it after a re-point.
+            repoint.stale.reset();
+            config::detail::restart_watcher_after_repoint(repoint.debounce, repoint.generation_at_move);
+        }
+    }
+    config::disable_auto_reload();
+
+    EXPECT_EQ(status, config::AutoReloadStatus::Started);
+    EXPECT_NE(upper, std::wstring::npos) << "the resolved INI path lost its U+00C4 component";
+    EXPECT_FALSE(repointed) << "a path that differs only by the case of U+00C4 re-pointed the watcher";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
 }
 
 TEST_F(ConfigTest, Reload_ContentUnchanged_SkipsSetters)
@@ -4378,17 +5087,11 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
 // ~ReloadServicer must survive a bare-FreeLibrary teardown, which runs under the loader lock at static destruction. The
 // real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only override, mirroring
 // g_config_watcher_loader_lock_override.
-//
-// ~ReloadServicer's other detach-and-leak trigger is destruction on the servicer's OWN worker thread (a reload setter
-// that runs config::clear() while executing on the servicer thread). That trigger is not driven here: the branch is
-// `loader_lock_held() || on_worker`, so this override short-circuits the `||` before on_worker is evaluated. That
-// self-join path is a known, accepted coverage gap: reaching it needs simulated key input to fire a reload on the
-// servicer thread, which the suite has no seam for. The underlying std::thread self-join detach is teeth-proven by
-// StoppableWorker.SelfJoinFromBodyDetachesInsteadOfTerminating.
 namespace DetourModKit::detail
 {
     extern bool (*g_config_reload_loader_lock_override)() noexcept;
     extern std::atomic<std::atomic<bool> *> g_config_reload_worker_exit_gate_probe;
+    extern std::atomic<bool> g_servicer_reaped_on_worker;
 } // namespace DetourModKit::detail
 
 namespace
@@ -4417,20 +5120,16 @@ TEST_F(ConfigTest, ReloadServicerDetachAndLeakUnderLoaderLockDoesNotHang)
     input::Input::instance().shutdown();
     diag::reset_intentional_leaks();
 
-    // Create the servicer and its reload-hotkey input binding. The binding's press callback captures a second strong
-    // reference to the servicer, so config::clear() alone cannot drop the last reference.
+    // Create the servicer and its reload-hotkey input binding.
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
 
     // Force ~ReloadServicer down the loader-lock detach-and-leak branch.
     DetourModKit::detail::g_config_reload_loader_lock_override = &cfg_reload_always_true_loader_lock;
 
     const auto t_start = std::chrono::steady_clock::now();
-    // Drop the config slot reference, then the binding reference via input teardown. The last drop runs ~ReloadServicer
-    // down its loader-lock branch (selected by the override), which leaks the Channel and records the intentional leak
-    // rather than joining. The override drives ONLY ~ReloadServicer's own branch selection: the inner StoppableWorker
-    // consults the real (here unheld) loader lock and so JOINS, meaning this asserts the branch is taken and returns
-    // promptly, not the live-detached-reader case. That leak-in-place-vs-destroy property is teeth-proven by the
-    // AsyncLogger sibling (its use_count discriminator) and the committed ~ConfigWatcher parity.
+    // The slot reset in config::clear() is the final drop. The override selects the loader-lock branch, which leaks the
+    // Channel and records the intentional leak instead of a join. The inner StoppableWorker reads the real, unheld
+    // loader lock and joins. The case therefore verifies the branch selection and a prompt return, not a live reader.
     config::clear();
     input::Input::instance().shutdown();
     const auto elapsed = std::chrono::steady_clock::now() - t_start;
@@ -4464,9 +5163,6 @@ TEST_F(ConfigTest, ReloadServicerRetainsChannelWhenItsWorkerDetachesBehindAnAuth
     DetourModKit::detail::g_config_reload_worker_exit_gate_probe.store(&exit_gate, std::memory_order_release);
 
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
-
-    // Drop the binding's servicer reference first so config::clear() below owns the last one and ~ReloadServicer runs
-    // inside the bracketed call rather than during input teardown.
     input::Input::instance().shutdown();
 
     const LoaderContext saved = lifecycle().loader_context();
@@ -4485,6 +5181,343 @@ TEST_F(ConfigTest, ReloadServicerRetainsChannelWhenItsWorkerDetachesBehindAnAuth
 
     EXPECT_GE(after, before + 2)
         << "a destructor whose worker detached must retain the Channel rather than free it under a live service_loop";
+}
+
+namespace
+{
+    // The setter runs on the servicer thread, so its barriers outlive the case.
+    std::atomic<bool> s_veto_arm_armed{false};
+    std::atomic<bool> s_veto_arm_driver_released{false};
+    std::atomic<bool> s_veto_arm_setter_finished{false};
+    std::atomic<std::size_t> s_veto_arm_leaks_before{0};
+
+    /// Returns true once @p done reports true, or false when @p timeout expires first.
+    template <typename Predicate> bool wait_for_condition(Predicate done, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!done())
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return true;
+    }
+
+    /**
+     * @brief Publishes LoaderContext::Attach after the destructor's authorization read and reports no loader lock.
+     * @details ~ReloadServicer then takes the authorized arm on its own worker, and the reaper reads the Attach context
+     *          in its rundown.
+     */
+    bool cfg_reload_authorize_then_publish_attach() noexcept
+    {
+        DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::Attach);
+        return false;
+    }
+
+    /// Clears config from the servicer thread, then parks the body until the reaper books its Channel retention.
+    void clear_from_servicer_and_park(int)
+    {
+        if (!s_veto_arm_armed.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        // The driver holds a servicer reference until request_servicer_reload_for_test() returns.
+        (void)wait_for_condition(
+            [] { return s_veto_arm_driver_released.load(std::memory_order_acquire); },
+            std::chrono::seconds{5}
+        );
+        config::clear();
+        const std::size_t retained = s_veto_arm_leaks_before.load(std::memory_order_acquire) + 2;
+        (void)wait_for_condition(
+            [retained]
+            {
+                return DetourModKit::diagnostics::intentional_leak_count(
+                           DetourModKit::diagnostics::LeakSubsystem::Worker
+                       ) >= retained;
+            },
+            std::chrono::seconds{5}
+        );
+        s_veto_arm_setter_finished.store(true, std::memory_order_release);
+    }
+} // namespace
+
+// A last servicer drop on its own worker hands the Channel to the reaper. A veto published after the destructor's
+// authorization read turns the reaper's rundown into a detach, and the body is still inside the setter.
+TEST_F(ConfigTest, ReloadServicerVetoArmRetainsChannel)
+{
+    namespace diag = DetourModKit::diagnostics;
+    using DetourModKit::detail::lifecycle;
+    using DetourModKit::detail::LoaderContext;
+
+    input::Input::instance().shutdown();
+    config::disable_auto_reload();
+    DetourModKit::detail::g_servicer_reaped_on_worker.store(false, std::memory_order_release);
+    s_veto_arm_armed.store(false, std::memory_order_release);
+    s_veto_arm_driver_released.store(false, std::memory_order_release);
+    s_veto_arm_setter_finished.store(false, std::memory_order_release);
+
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nK=1\n";
+    }
+    config::bind_int("S", "K", "k", &clear_from_servicer_and_park, 0);
+    // load() precedes the servicer, so its birth epoch follows any epoch advance that load() makes.
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    input::Input::instance().shutdown();
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nK=2\n";
+    }
+
+    const LoaderContext saved = lifecycle().loader_context();
+    const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::Worker);
+    const std::size_t abandoned_before = diag::lifecycle_counters().abandoned_owners;
+    s_veto_arm_leaks_before.store(leaks_before, std::memory_order_release);
+
+    // No fatal assertion runs between the override publication and its restore.
+    DetourModKit::detail::g_config_reload_loader_lock_override = &cfg_reload_authorize_then_publish_attach;
+    s_veto_arm_armed.store(true, std::memory_order_release);
+    const bool requested = DetourModKit::detail::request_servicer_reload_for_test();
+    s_veto_arm_driver_released.store(true, std::memory_order_release);
+    const bool setter_finished =
+        requested && wait_for_condition(
+                         [] { return s_veto_arm_setter_finished.load(std::memory_order_acquire); },
+                         std::chrono::seconds{10}
+                     );
+    DetourModKit::detail::g_config_reload_loader_lock_override = nullptr;
+    lifecycle().set_loader_context(saved);
+    s_veto_arm_armed.store(false, std::memory_order_release);
+
+    EXPECT_TRUE(requested) << "reload_hotkey() created no servicer to drive";
+    EXPECT_TRUE(setter_finished) << "the setter on the servicer thread did not finish";
+    EXPECT_TRUE(config::detail::await_reloads_quiesced_for_test(std::chrono::seconds{5}));
+    EXPECT_TRUE(DetourModKit::detail::g_servicer_reaped_on_worker.load(std::memory_order_acquire))
+        << "~ReloadServicer did not run on its own worker";
+    EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::Worker), leaks_before + 2)
+        << "the reaper must retain the Channel of a body its vetoed rundown detached";
+    EXPECT_TRUE(wait_for_condition(
+        [abandoned_before] { return diag::lifecycle_counters().abandoned_owners >= abandoned_before + 1; },
+        std::chrono::seconds{5}
+    )) << "the reaper did not abandon the Channel parcel its rundown refused";
+}
+
+namespace
+{
+    // The poll thread and the servicer thread read these barriers, so they outlive the case.
+    std::atomic<bool> s_poll_drop_keys_down{false};
+    std::atomic<bool> s_poll_drop_reload_key_read{false};
+    std::atomic<std::uint64_t> s_poll_drop_key_reads{0};
+    std::atomic<std::size_t> s_poll_drop_most_staged{0};
+    std::atomic<bool> s_poll_drop_setter_parked{false};
+    std::atomic<bool> s_poll_drop_setter_released{false};
+    std::atomic<bool> s_poll_drop_consumer_parked{false};
+    std::atomic<bool> s_poll_drop_consumer_released{false};
+    std::atomic<bool> s_poll_drop_consumer_returned{false};
+
+    constexpr int POLL_DROP_PARK_VALUE = 99;
+
+    /// Parks the reload setter on the servicer thread while the INI holds the park value.
+    void park_poll_drop_setter(int value)
+    {
+        if (value != POLL_DROP_PARK_VALUE)
+        {
+            return;
+        }
+        s_poll_drop_setter_parked.store(true, std::memory_order_release);
+        (void)wait_for_condition(
+            [] { return s_poll_drop_setter_released.load(std::memory_order_acquire); },
+            std::chrono::seconds{30}
+        );
+    }
+
+    /**
+     * @brief Installs the key-state and staging seams of the poll-thread drop proof on a stopped input engine.
+     * @details F7 reads down only after F5 read down, and each cycle reads F5 first, so both presses stage in one
+     *          cycle. Destruction releases both parked callbacks, stops the engine, and clears both seams.
+     */
+    class PollThreadDropSeams
+    {
+    public:
+        PollThreadDropSeams()
+        {
+            input::Input::instance().shutdown();
+            s_poll_drop_keys_down.store(false, std::memory_order_release);
+            s_poll_drop_reload_key_read.store(false, std::memory_order_release);
+            s_poll_drop_key_reads.store(0, std::memory_order_release);
+            s_poll_drop_most_staged.store(0, std::memory_order_release);
+            s_poll_drop_setter_parked.store(false, std::memory_order_release);
+            s_poll_drop_setter_released.store(false, std::memory_order_release);
+            s_poll_drop_consumer_parked.store(false, std::memory_order_release);
+            s_poll_drop_consumer_released.store(false, std::memory_order_release);
+            s_poll_drop_consumer_returned.store(false, std::memory_order_release);
+            DetourModKit::detail::g_input_key_state_probe = [](int key) noexcept
+            {
+                s_poll_drop_key_reads.fetch_add(1, std::memory_order_acq_rel);
+                if (!s_poll_drop_keys_down.load(std::memory_order_acquire))
+                {
+                    return false;
+                }
+                if (key == VK_F5)
+                {
+                    s_poll_drop_reload_key_read.store(true, std::memory_order_release);
+                    return true;
+                }
+                return key == VK_F7 && s_poll_drop_reload_key_read.load(std::memory_order_acquire);
+            };
+            DetourModKit::detail::g_input_post_stage_probe = [](std::size_t staged) noexcept
+            {
+                std::size_t most = s_poll_drop_most_staged.load(std::memory_order_acquire);
+                while (staged > most && !s_poll_drop_most_staged.compare_exchange_weak(most, staged))
+                {
+                }
+            };
+        }
+
+        ~PollThreadDropSeams()
+        {
+            s_poll_drop_keys_down.store(false, std::memory_order_release);
+            s_poll_drop_setter_released.store(true, std::memory_order_release);
+            s_poll_drop_consumer_released.store(true, std::memory_order_release);
+            input::Input::instance().shutdown();
+            DetourModKit::detail::g_input_key_state_probe = nullptr;
+            DetourModKit::detail::g_input_post_stage_probe = nullptr;
+        }
+
+        PollThreadDropSeams(const PollThreadDropSeams &) = delete;
+        PollThreadDropSeams &operator=(const PollThreadDropSeams &) = delete;
+    };
+} // namespace
+
+// The reload press and a parked consumer press stage in one poll cycle. That cycle holds a reload callback copy while
+// config::clear() resets the servicer slot. The clear() caller owns the servicer join.
+TEST_F(ConfigTest, ReloadHotkeyClearKeepsThePollThreadPolling)
+{
+    const PollThreadDropSeams seams;
+    config::bind_int("S", "K", "k", &park_poll_drop_setter, 0);
+    write_reload_hotkey_value(m_test_ini_file, 1);
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    input::ComboBinding consumer;
+    consumer.name = "poll_drop_consumer";
+    consumer.trigger = input::Trigger::Press;
+    consumer.combos = {input::KeyCombo{{keyboard_key(VK_F7)}, {}}};
+    consumer.on_press = []
+    {
+        s_poll_drop_consumer_parked.store(true, std::memory_order_release);
+        (void)wait_for_condition(
+            [] { return s_poll_drop_consumer_released.load(std::memory_order_acquire); },
+            std::chrono::seconds{30}
+        );
+        s_poll_drop_consumer_returned.store(true, std::memory_order_release);
+    };
+    const Result<input::BindingGuard> consumer_guard = input::register_combo(std::move(consumer));
+    ASSERT_TRUE(consumer_guard.has_value());
+    ASSERT_TRUE(start_reload_hotkey_engine());
+    const std::size_t bindings_before_clear = input::Input::instance().binding_count();
+
+    // No fatal assertion runs while a callback is parked.
+    write_reload_hotkey_value(m_test_ini_file, POLL_DROP_PARK_VALUE);
+    s_poll_drop_keys_down.store(true, std::memory_order_release);
+    const bool both_parked = wait_for_condition(
+        []
+        {
+            return s_poll_drop_setter_parked.load(std::memory_order_acquire) &&
+                   s_poll_drop_consumer_parked.load(std::memory_order_acquire);
+        },
+        std::chrono::seconds{5}
+    );
+    s_poll_drop_keys_down.store(false, std::memory_order_release);
+
+    std::atomic<bool> clear_returned{false};
+    bool reload_binding_removed = false;
+    bool polled_while_parked = false;
+    {
+        std::jthread clearer;
+        if (both_parked)
+        {
+            clearer = std::jthread(
+                [&clear_returned]
+                {
+                    config::clear();
+                    clear_returned.store(true, std::memory_order_release);
+                }
+            );
+            reload_binding_removed = wait_for_condition(
+                [bindings_before_clear] { return input::Input::instance().binding_count() < bindings_before_clear; },
+                std::chrono::seconds{5}
+            );
+            // clear() can join the parked servicer and stay blocked. The bounded wait orders the consumer release
+            // after the slot reset.
+            (void)wait_for_condition(
+                [&clear_returned] { return clear_returned.load(std::memory_order_acquire); },
+                std::chrono::milliseconds{250}
+            );
+        }
+        s_poll_drop_consumer_released.store(true, std::memory_order_release);
+        const bool consumer_returned = wait_for_condition(
+            [] { return s_poll_drop_consumer_returned.load(std::memory_order_acquire); },
+            std::chrono::seconds{5}
+        );
+        const std::uint64_t reads_after_consumer = s_poll_drop_key_reads.load(std::memory_order_acquire);
+        polled_while_parked =
+            consumer_returned &&
+            wait_for_condition(
+                [reads_after_consumer]
+                { return s_poll_drop_key_reads.load(std::memory_order_acquire) >= reads_after_consumer + 10; },
+                std::chrono::seconds{2}
+            );
+        s_poll_drop_setter_released.store(true, std::memory_order_release);
+    }
+
+    EXPECT_TRUE(both_parked) << "the reload setter and the consumer callback did not both park";
+    EXPECT_GE(s_poll_drop_most_staged.load(std::memory_order_acquire), 2u)
+        << "the reload press and the consumer press did not stage in one poll cycle";
+    EXPECT_TRUE(reload_binding_removed) << "config::clear() left the reload binding registered";
+    EXPECT_TRUE(polled_while_parked) << "the poll thread stopped polling while the reload setter was parked";
+    EXPECT_TRUE(clear_returned.load(std::memory_order_acquire)) << "config::clear() did not return";
+}
+
+namespace
+{
+    /// Publishes a loader context for its scope and restores the previous context on every exit path.
+    class PublishedLoaderContext
+    {
+    public:
+        explicit PublishedLoaderContext(DetourModKit::detail::LoaderContext context) noexcept
+            : m_saved(DetourModKit::detail::lifecycle().loader_context())
+        {
+            DetourModKit::detail::lifecycle().set_loader_context(context);
+        }
+
+        ~PublishedLoaderContext() noexcept { DetourModKit::detail::lifecycle().set_loader_context(m_saved); }
+
+        PublishedLoaderContext(const PublishedLoaderContext &) = delete;
+        PublishedLoaderContext &operator=(const PublishedLoaderContext &) = delete;
+
+    private:
+        DetourModKit::detail::LoaderContext m_saved;
+    };
+} // namespace
+
+// Input::remove_bindings_by_name() refuses only an inert engine. Under a published teardown veto, the config::clear()
+// gate alone keeps the reload binding of a stopped engine (`[B-100]`).
+TEST_F(ConfigTest, ClearKeepsTheReloadBindingUnderATeardownVeto)
+{
+    input::Input::instance().shutdown();
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    const std::size_t registered = input::Input::instance().binding_count();
+    ASSERT_GT(registered, 0u);
+    {
+        const PublishedLoaderContext loader_detach{DetourModKit::detail::LoaderContext::LoaderDetach};
+        config::clear();
+    }
+    EXPECT_EQ(input::Input::instance().binding_count(), registered)
+        << "config::clear() removed the reload binding under a published teardown veto";
+    input::Input::instance().shutdown();
 }
 
 // Non-finite floats fall back to their defaults rather than poisoning downstream arithmetic.

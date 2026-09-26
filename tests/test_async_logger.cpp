@@ -1907,7 +1907,7 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
         ASSERT_TRUE(logger->enqueue(LogLevel::Info, "wake_probe"));
         ASSERT_TRUE(logger->flush_with_timeout(flush_budget))
             << "writer did not drain within " << flush_budget.count() << " ms on iteration " << i
-            << " -- a wakeup was lost to the flush-interval timeout";
+            << " - a wakeup was lost to the flush-interval timeout";
         worst = std::max(worst, std::chrono::steady_clock::now() - start_time);
     }
 
@@ -1937,6 +1937,7 @@ namespace DetourModKit::detail
     extern std::atomic<std::atomic<bool> *> g_async_logger_block_entry_gate;
     extern std::atomic<std::atomic<std::int64_t> *> g_async_logger_block_start_ns;
     extern void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept;
+    extern std::atomic<std::atomic<std::int64_t> *> g_async_logger_record_time_override;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1982,6 +1983,7 @@ namespace
             DetourModKit::detail::g_async_logger_block_entry_gate.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_block_start_ns.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_before_flush_probe = nullptr;
+            DetourModKit::detail::g_async_logger_record_time_override.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
         }
 
@@ -2761,4 +2763,120 @@ TEST_F(AsyncLoggerTest, BlockPolicy_DeadlineHoldsDuringStop)
     writer_gate.store(false, std::memory_order_release);
     stopper.join();
     EXPECT_EQ(logger->queue_size(), 0u);
+}
+
+namespace
+{
+    /** @brief Returns the first line of @p content that holds @p marker, or an empty string. */
+    [[nodiscard]] std::string line_holding(const std::string &content, std::string_view marker)
+    {
+        std::istringstream stream(content);
+        for (std::string line; std::getline(stream, line);)
+        {
+            if (line.find(marker) != std::string::npos)
+            {
+                return line;
+            }
+        }
+        return {};
+    }
+} // namespace
+
+// Each record's level field leaves std::left on the shared sink, so the second record proves the millisecond field
+// sets its own adjustment.
+TEST_F(AsyncLoggerTest, MillisecondFieldIsZeroPaddedLeft)
+{
+    constexpr std::int64_t base_epoch_ms = 1'700'000'000'000;
+    std::atomic<std::int64_t> record_time{base_epoch_ms + 7};
+    AsyncLoggerSeamReset seam_reset{nullptr, nullptr};
+    DetourModKit::detail::g_async_logger_record_time_override.store(&record_time, std::memory_order_release);
+
+    AsyncLoggerConfig config;
+    config.batch_size = 64;
+    config.flush_interval = std::chrono::milliseconds{10};
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "first_record"));
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "second_record"));
+    record_time.store(base_epoch_ms + 42, std::memory_order_release);
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "third_record"));
+    logger->shutdown();
+    file_stream->close();
+
+    std::ifstream in(m_test_log_file);
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string first_line = line_holding(content, "first_record");
+    const std::string second_line = line_holding(content, "second_record");
+    const std::string third_line = line_holding(content, "third_record");
+    EXPECT_NE(first_line.find(".007] [INFO   ] :: first_record"), std::string::npos) << first_line;
+    EXPECT_NE(second_line.find(".007] [INFO   ] :: second_record"), std::string::npos) << second_line;
+    EXPECT_NE(third_line.find(".042] [INFO   ] :: third_record"), std::string::npos) << third_line;
+}
+
+// One producer on the queued route keeps its order. SyncFallback and concurrent producers can reorder records inside
+// one second, so the capacity keeps every record on the queue.
+TEST_F(AsyncLoggerTest, SameSecondRecordsNeverDecrease)
+{
+    constexpr std::int64_t base_epoch_ms = 1'700'000'000'000;
+    constexpr int record_count = 1000;
+    std::atomic<std::int64_t> record_time{base_epoch_ms};
+    AsyncLoggerSeamReset seam_reset{nullptr, nullptr};
+    DetourModKit::detail::g_async_logger_record_time_override.store(&record_time, std::memory_order_release);
+
+    AsyncLoggerConfig config;
+    config.batch_size = 64;
+    config.queue_capacity = 2048;
+    config.flush_interval = std::chrono::milliseconds{10};
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < record_count; ++i)
+    {
+        record_time.store(base_epoch_ms + i, std::memory_order_release);
+        ASSERT_TRUE(logger->enqueue(LogLevel::Info, "same_second_" + std::to_string(i)));
+    }
+    ASSERT_EQ(logger->dropped_count(), 0u);
+    logger->shutdown();
+    file_stream->close();
+
+    std::ifstream in(m_test_log_file);
+    std::vector<int> values;
+    values.reserve(record_count);
+    for (std::string line; std::getline(in, line);)
+    {
+        if (line.find("same_second_") == std::string::npos)
+        {
+            continue;
+        }
+        const auto field_end = line.find("] [");
+        ASSERT_NE(field_end, std::string::npos) << line;
+        ASSERT_GE(field_end, 4u) << line;
+        ASSERT_EQ(line[field_end - 4], '.') << line;
+        const std::string digits = line.substr(field_end - 3, 3);
+        ASSERT_TRUE(std::all_of(digits.begin(), digits.end(), [](char digit) { return digit >= '0' && digit <= '9'; }))
+            << line;
+        values.push_back((digits[0] - '0') * 100 + (digits[1] - '0') * 10 + (digits[2] - '0'));
+    }
+
+    ASSERT_EQ(values.size(), static_cast<std::size_t>(record_count));
+    int first_mismatch_index = -1;
+    int first_mismatch_value = -1;
+    int decrease_count = 0;
+    for (int i = 0; i < record_count; ++i)
+    {
+        if (first_mismatch_index < 0 && values[i] != i)
+        {
+            first_mismatch_index = i;
+            first_mismatch_value = values[i];
+        }
+        if (i > 0 && values[i] < values[i - 1])
+        {
+            ++decrease_count;
+        }
+    }
+    EXPECT_EQ(first_mismatch_index, -1) << "record " << first_mismatch_index << " rendered " << first_mismatch_value;
+    EXPECT_EQ(decrease_count, 0) << "the millisecond field decreased inside one second";
 }

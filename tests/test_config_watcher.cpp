@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <process.h>
 #include <stdexcept>
@@ -30,6 +31,24 @@ static_assert(
     std::is_nothrow_move_constructible_v<std::unique_ptr<int>>,
     "std::unique_ptr must remain nothrow-move-constructible for the "
     "ConfigWatcher loader-lock leak path to keep ~ConfigWatcher noexcept honest."
+);
+
+// The constructor takes a wide path, so narrow text cannot reach the watcher through the ANSI code page.
+static_assert(
+    !std::is_constructible_v<
+        DetourModKit::detail::ConfigWatcher,
+        std::string,
+        std::chrono::milliseconds,
+        std::function<void()>>,
+    "ConfigWatcher must reject a narrow std::string path."
+);
+static_assert(
+    !std::is_constructible_v<
+        DetourModKit::detail::ConfigWatcher,
+        const char *,
+        std::chrono::milliseconds,
+        std::function<void()>>,
+    "ConfigWatcher must reject a narrow C string path."
 );
 
 namespace
@@ -86,7 +105,7 @@ namespace
     {
         std::atomic<int> hits{0};
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, [&hits]() { hits.fetch_add(1); });
             EXPECT_FALSE(watcher.is_running());
         }
         EXPECT_EQ(hits.load(), 0);
@@ -94,7 +113,7 @@ namespace
 
     TEST_F(ConfigWatcherTest, StartThenStopIdempotent)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
 
         EXPECT_TRUE(watcher.start());
         EXPECT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
@@ -109,14 +128,14 @@ namespace
 
     TEST_F(ConfigWatcherTest, Accessors)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 173ms, []() {});
-        EXPECT_EQ(watcher.ini_path(), m_ini_path.string());
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 173ms, []() {});
+        EXPECT_EQ(watcher.ini_path(), m_ini_path.native());
         EXPECT_EQ(watcher.debounce(), 173ms);
     }
 
     TEST_F(ConfigWatcherTest, StartFailsOnEmptyIniPath)
     {
-        DetourModKit::detail::ConfigWatcher watcher("", 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(L"", 50ms, []() {});
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
         EXPECT_NO_THROW(watcher.stop());
@@ -129,7 +148,7 @@ namespace
     TEST_F(ConfigWatcherTest, BenignStartFailureDoesNotLeakAndStaysReusable)
     {
         const std::filesystem::path missing = m_temp_dir / "no_such_subdir" / "watched.ini";
-        DetourModKit::detail::ConfigWatcher watcher(missing.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(missing.native(), 50ms, []() {});
 
         const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::ConfigWatcher);
         EXPECT_FALSE(watcher.start());
@@ -144,7 +163,7 @@ namespace
 
     TEST_F(ConfigWatcherTest, IsWorkerThreadFalseFromMainBeforeStart)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
         EXPECT_FALSE(watcher.is_worker_thread(std::this_thread::get_id()));
     }
 
@@ -153,7 +172,7 @@ namespace
         std::atomic<bool> observed{false};
         std::atomic<std::thread::id> cb_tid{};
         DetourModKit::detail::ConfigWatcher watcher(
-            m_ini_path.string(),
+            m_ini_path.native(),
             50ms,
             [&]()
             {
@@ -181,7 +200,7 @@ namespace
         std::atomic<bool> observed{false};
         std::atomic<std::thread::id> cb_tid{};
         DetourModKit::detail::ConfigWatcher watcher(
-            m_ini_path.string(),
+            m_ini_path.native(),
             50ms,
             [&]()
             {
@@ -219,7 +238,7 @@ namespace
         // reports false the slot is back to the no-thread id. Complements IsWorkerThreadFalseAfterStop, which covers
         // the normal-exit reset with a captured worker id.
         DetourModKit::detail::ConfigWatcher watcher(
-            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
+            (m_temp_dir / "nonexistent_subdir" / "file.ini").native(),
             50ms,
             []() {}
         );
@@ -232,7 +251,7 @@ namespace
 
     TEST_F(ConfigWatcherTest, StopWithoutStartIsSafe)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
         EXPECT_NO_THROW(watcher.stop());
         EXPECT_NO_THROW(watcher.stop());
         EXPECT_FALSE(watcher.is_running());
@@ -242,7 +261,7 @@ namespace
     {
         std::atomic<int> hits{0};
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             std::this_thread::sleep_for(80ms);
@@ -255,7 +274,7 @@ namespace
     TEST_F(ConfigWatcherTest, BasicFire_CallbackInvokedOnWrite)
     {
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -275,7 +294,7 @@ namespace
     TEST_F(ConfigWatcherTest, Debounce_BurstyWritesCollapseToOneFire)
     {
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 200ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 200ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -315,7 +334,7 @@ namespace
     TEST_F(ConfigWatcherTest, Debounce_FiresUnderSustainedForeignChurn)
     {
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -357,7 +376,7 @@ namespace
     TEST_F(ConfigWatcherTest, FilenameMatchIsCaseInsensitive)
     {
         std::atomic<int> hits{0};
-        const std::string upper_path = (m_temp_dir / "WATCHED.INI").string();
+        const std::wstring upper_path = (m_temp_dir / "WATCHED.INI").native();
         DetourModKit::detail::ConfigWatcher watcher(upper_path, 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
@@ -371,12 +390,39 @@ namespace
         watcher.stop();
     }
 
+    // An unpaired surrogate has no spelling in any code page, so only a wide path reaches this directory.
+    TEST_F(ConfigWatcherTest, WatchesDirectoryOutsideEveryCodePage)
+    {
+        const std::filesystem::path directory = m_temp_dir / (std::wstring(L"lone_\xD800") + L"_dir");
+        std::filesystem::create_directories(directory);
+        const std::filesystem::path ini = directory / L"watched.ini";
+        {
+            std::ofstream out(ini, std::ios::binary | std::ios::trunc);
+            out << "[S]\nK=1\n";
+        }
+
+        std::atomic<int> hits{0};
+        DetourModKit::detail::ConfigWatcher watcher(ini.native(), 50ms, [&hits]() { hits.fetch_add(1); });
+        EXPECT_EQ(watcher.ini_path(), ini.native());
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        {
+            std::ofstream out(ini, std::ios::binary | std::ios::trunc);
+            out << "[S]\nK=2\n";
+        }
+
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s));
+        watcher.stop();
+    }
+
     // Rename-swap-save (Notepad++, VSCode)
 
     TEST_F(ConfigWatcherTest, RenameSwapSave_TriggersReload)
     {
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -403,7 +449,7 @@ namespace
 
     TEST_F(ConfigWatcherTest, Stop_ReturnsWithinBound)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 100ms, []() {});
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -421,7 +467,7 @@ namespace
 
     TEST_F(ConfigWatcherTest, EmptyCallback_DoesNotCrashOnEvent)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, {});
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -438,7 +484,7 @@ namespace
         // ReadDirectoryChangesW is posted, so I/O is in flight before every stop().
         for (int i = 0; i < 100; ++i)
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             watcher.stop();
             EXPECT_FALSE(watcher.is_running());
@@ -450,7 +496,7 @@ namespace
         // 600 siblings with >70-char names push each FILE_NOTIFY_INFORMATION entry past 100 bytes, overflowing the 16
         // KB kernel buffer and driving the ERROR_NOTIFY_ENUM_DIR / zero-byte-completion paths.
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -487,7 +533,7 @@ namespace
         }
 
         {
-            DetourModKit::detail::ConfigWatcher watcher(ini.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(ini.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             std::this_thread::sleep_for(100ms);
@@ -510,7 +556,7 @@ namespace
         std::atomic<int> hits{0};
         // 2 s debounce, stop after 200 ms: the pending callback must be flushed during stop() rather than waiting for
         // the timer.
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 2000ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 2000ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -526,7 +572,7 @@ namespace
     TEST_F(ConfigWatcherTest, Construct_InvalidPath_StartReturnsFalse)
     {
         DetourModKit::detail::ConfigWatcher watcher(
-            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
+            (m_temp_dir / "nonexistent_subdir" / "file.ini").native(),
             100ms,
             []() {}
         );
@@ -543,7 +589,7 @@ namespace
     {
         std::atomic<int> fires{0};
         DetourModKit::detail::ConfigWatcher watcher(
-            m_ini_path.string(),
+            m_ini_path.native(),
             50ms,
             [&fires]()
             {
@@ -575,7 +621,7 @@ namespace
     {
         std::atomic<int> fires{0};
         DetourModKit::detail::ConfigWatcher watcher(
-            m_ini_path.string(),
+            m_ini_path.native(),
             2000ms,
             [&fires]()
             {
@@ -604,7 +650,7 @@ namespace
     // the atomic worker-thread id, so this must neither crash nor hang.
     TEST_F(ConfigWatcherTest, IsRunningConcurrentWithStartStopIsRaceFree)
     {
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
 
         std::atomic<bool> stop_reader{false};
         std::thread reader(
@@ -633,7 +679,7 @@ namespace
     TEST_F(ConfigWatcherTest, RestartsAfterPostStartWorkerExit)
     {
         std::atomic<int> hits{0};
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
@@ -677,7 +723,7 @@ namespace
         std::atomic<bool> release{false};
         // Long debounce so an edit stays pending (un-fired) until stop() flushes it.
         DetourModKit::detail::ConfigWatcher watcher(
-            m_ini_path.string(),
+            m_ini_path.native(),
             3000ms,
             [&]()
             {
@@ -767,7 +813,7 @@ namespace
         std::atomic<int> hits{0};
         const auto t_start = std::chrono::steady_clock::now();
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         }
@@ -784,7 +830,7 @@ namespace
         std::atomic<int> hits{0};
         const auto t_start = std::chrono::steady_clock::now();
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -811,7 +857,7 @@ namespace
         const LoaderContext saved = lifecycle().loader_context();
         bool exited = false;
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -847,7 +893,7 @@ namespace
         const LoaderContext saved = lifecycle().loader_context();
         bool exited = false;
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -883,7 +929,7 @@ namespace
         const LoaderContext saved = lifecycle().loader_context();
         bool exited = false;
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
@@ -925,7 +971,7 @@ namespace
         const LoaderContext saved = lifecycle().loader_context();
         const std::size_t before = DetourModKit::diagnostics::intentional_leak_count(LeakSubsystem::ConfigWatcher);
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             ASSERT_FALSE(watcher.has_exited());
@@ -945,7 +991,7 @@ namespace
         // cell via new (std::nothrow), so prior leaked Impls are never overwritten.
         for (int i = 0; i < 3; ++i)
         {
-            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
             ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             g_config_watcher_loader_lock_override = &always_true_loader_lock;
@@ -993,7 +1039,7 @@ namespace
         const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::ConfigWatcher);
 
         DetourModKit::detail::g_config_watcher_prehandshake_seam = [] { throw std::runtime_error("pre-handshake"); };
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
 
         const auto t0 = std::chrono::steady_clock::now();
         const bool started = watcher.start();
@@ -1018,7 +1064,7 @@ namespace
         s_release_prehandshake.store(false, std::memory_order_release);
         DetourModKit::detail::g_config_watcher_prehandshake_seam = &park_prehandshake;
 
-        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.native(), 50ms, []() {});
         bool started = false;
         std::thread starter([&] { started = watcher.start(); });
         const bool parked = wait_until([] { return s_prehandshake_parked.load(std::memory_order_acquire); }, 1s);

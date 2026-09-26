@@ -328,6 +328,32 @@ set_tests_properties(Lifecycle.LoggerGenerationProofRejectsAnUnknownScenario PRO
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_generation_log>
   LABELS "lifecycle-proof")
 
+# legacy_acp_paths hosts the legacy code page proofs. The MSVC link step merges the listed manifest into the image
+# through its mt.exe pass. MinGW ignores a .manifest source and skips the CJK cases (77), because libstdc++ narrows
+# std::filesystem paths through UTF-8. The unpaired-surrogate cases never skip: no code page and no strict UTF-8
+# conversion represents that directory name.
+add_executable(legacy_acp_paths legacy_acp_paths.cpp legacy_acp.manifest)
+target_link_libraries(legacy_acp_paths PRIVATE DetourModKit dmk_coverage)
+target_include_directories(legacy_acp_paths PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(legacy_acp_paths PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(legacy_acp_paths)
+add_dependencies(dmk_lifecycle_proof_hosts legacy_acp_paths)
+
+set(legacy_acp_paths_proofs
+  Lifecycle.LegacyCodePageResolvesIniBesideCjkModuleDirectory       config-cjk
+  Lifecycle.ResolvesIniBesideModuleDirectoryOutsideEveryCodePage    config-surrogate
+  Lifecycle.LegacyCodePageSinkOpenFailureLeavesClosedDefault        logger-cjk
+  Lifecycle.SinkOpenFailureOutsideEveryCodePageLeavesClosedDefault  logger-surrogate)
+while(legacy_acp_paths_proofs)
+  list(POP_FRONT legacy_acp_paths_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:legacy_acp_paths> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:legacy_acp_paths>
+    TEST_TIMEOUT 60
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endwhile()
+
 # Two DLLs from one source, each linking the DetourModKit archive, give one process two independent kits. That is the
 # only configuration in which the per-linked-instance ledger scope is observable, so it runs on both toolchains: the
 # scope follows from static linkage, not from loader behavior.

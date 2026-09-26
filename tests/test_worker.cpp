@@ -397,10 +397,9 @@ namespace
         }
     };
 
-    // Mirrors ReloadServicer::Channel: the state the still-running body reads lives in a member declared BEFORE the
-    // worker, so ~ReapableOwner destroys the worker (joining the body) first and only then ends that member's
-    // lifetime. The body may therefore read `canary` for as long as it runs, and live_count returning to baseline is
-    // a signal that the off-thread join already completed rather than merely that destruction started.
+    // Mirrors ReloadServicer::Channel. The body reads `canary` while it runs, and the reaper's retire callback joins
+    // the body before it destroys the owner. A live_count back at baseline therefore signals a completed off-thread
+    // join, not only a started destruction.
     struct ReapableOwner
     {
         static constexpr int CANARY = 0x0FF1CE;
@@ -481,7 +480,14 @@ TEST_F(StoppableWorkerProof, PostStartFailureAndSelfRetirementPreserveOwnership)
                 owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
                 std::memory_order_release
             );
-            DetourModKit::detail::reap_owner(std::move(*owner_holder));
+            DetourModKit::detail::reap_owner(
+                std::move(*owner_holder),
+                [](void *raw_owner) noexcept
+                {
+                    static_cast<ReapableOwner *>(raw_owner)->worker->shutdown();
+                    return true;
+                }
+            );
             // The reaper is now blocked joining this thread, so the canary member is still within its lifetime.
             alive_after_retire->store(
                 owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,

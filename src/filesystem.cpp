@@ -5,6 +5,8 @@
 
 #include "DetourModKit/filesystem.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include <windows.h>
 #include <filesystem>
 #include <iostream>
@@ -120,7 +122,7 @@ namespace DetourModKit
                 {
                     result_directory_path = std::filesystem::path(current_dir_buffer).wstring();
                     std::cerr << "[DMK Filesystem WARNING] Using current working directory as fallback: "
-                              << std::filesystem::path(result_directory_path).string() << '\n';
+                              << detail::utf8_from_wide(result_directory_path) << '\n';
                 }
                 else
                 {
@@ -148,28 +150,12 @@ namespace DetourModKit
     {
         std::string to_utf8(const std::wstring &wide)
         {
-            if (wide.empty())
-            {
-                return {};
-            }
-            if (wide.size() > static_cast<size_t>(INT_MAX))
+            std::string text = detail::utf8_from_wide(wide);
+            if (text.empty() && !wide.empty())
             {
                 return ".";
             }
-            const int wide_len = static_cast<int>(wide.size());
-            const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len, nullptr, 0, nullptr, nullptr);
-            if (needed <= 0)
-            {
-                return ".";
-            }
-            std::string out(static_cast<size_t>(needed), '\0');
-            const int written =
-                WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len, out.data(), needed, nullptr, nullptr);
-            if (written <= 0)
-            {
-                return ".";
-            }
-            return out;
+            return text;
         }
     } // anonymous namespace
 
