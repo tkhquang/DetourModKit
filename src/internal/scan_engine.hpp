@@ -108,11 +108,12 @@ namespace DetourModKit
         /**
          * @brief Parses a space-separated AOB string into a compiled EnginePattern.
          * @param aob_str The AOB pattern string.
-         * @return The compiled pattern, or std::nullopt on any parse failure or allocation failure.
+         * @return The compiled pattern, `BadPattern` on a parse failure, or `OutOfMemory` when the heap sink cannot
+         *         grow.
          * @details The heap sink runs the shared grammar with no MAX_PATTERN_BYTES cap. The jump count keeps the
          *          MAX_PATTERN_JUMPS cap.
          */
-        [[nodiscard]] std::optional<EnginePattern> parse_aob(std::string_view aob_str);
+        [[nodiscard]] Result<EnginePattern> parse_aob(std::string_view aob_str);
 
         /**
          * @struct RawMatch

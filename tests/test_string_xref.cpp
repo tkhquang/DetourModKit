@@ -1,19 +1,26 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <initializer_list>
 #include <memory>
+#include <new>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include "DetourModKit/scan.hpp"
+
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 
@@ -560,6 +567,105 @@ TEST(StringXrefTest, ResolvesUniqueLeaReference)
     const auto result = scan::find_string_xref(utf8_query("AnchorStringAlpha"), img.range());
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->raw(), img.addr(0x10));
+}
+
+// An allocation failure is never a miss. At every allocation budget, find_string_xref and resolve() either throw
+// std::bad_alloc or return the site, and resolve_batch() either reports OutOfMemory or returns the site.
+TEST(StringXrefTest, AllocationFailureIsNeverReportedAsAMiss)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "AllocationFailureAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    const scan::StringRefQuery query = utf8_query("AllocationFailureAnchor");
+    const std::array<scan::Candidate, 1> ladder = {scan::Candidate::string_xref("xref", "AllocationFailureAnchor")};
+    const std::array<scan::ScanRequest, 1> requests = {
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = img.range(),
+        },
+    };
+
+    // The first calls warm every first-use static, so the counted calls measure only their own allocations.
+    ASSERT_TRUE(scan::find_string_xref(query, img.range()).has_value());
+    ASSERT_TRUE(scan::resolve(requests[0]).has_value());
+    const long long before = dmk_test::thread_new_calls();
+    ASSERT_TRUE(scan::find_string_xref(query, img.range()).has_value());
+    const long long direct_calls = dmk_test::thread_new_calls() - before;
+    ASSERT_TRUE(scan::resolve(requests[0]).has_value());
+    const long long resolve_calls = dmk_test::thread_new_calls() - before - direct_calls;
+    ASSERT_TRUE(scan::resolve_batch(requests, 1).has_value());
+    const long long batch_calls = dmk_test::thread_new_calls() - before - direct_calls - resolve_calls;
+    ASSERT_GT(direct_calls, 0);
+
+    for (long long allow = 0; allow <= direct_calls; ++allow)
+    {
+        std::optional<Result<Address>> site;
+        bool threw = false;
+        {
+            dmk_test::AllocFailScope fail(allow);
+            try
+            {
+                site = scan::find_string_xref(query, img.range());
+            }
+            catch (const std::bad_alloc &)
+            {
+                threw = true;
+            }
+        }
+        if (!threw)
+        {
+            ASSERT_TRUE(site->has_value()) << "allow " << allow << ": " << DetourModKit::to_string(site->error().code);
+            EXPECT_EQ((*site)->raw(), img.addr(0x10)) << "allow " << allow;
+        }
+    }
+
+    for (long long allow = 0; allow <= std::max(resolve_calls, batch_calls); ++allow)
+    {
+        std::optional<Result<scan::Hit>> hit;
+        bool threw = false;
+        {
+            dmk_test::AllocFailScope fail(allow);
+            try
+            {
+                hit = scan::resolve(requests[0]);
+            }
+            catch (const std::bad_alloc &)
+            {
+                threw = true;
+            }
+        }
+        if (!threw)
+        {
+            ASSERT_TRUE(hit->has_value()) << "allow " << allow << ": " << DetourModKit::to_string(hit->error().code);
+            EXPECT_EQ((*hit)->address.raw(), img.addr(0x10)) << "allow " << allow;
+        }
+
+        std::optional<Result<std::vector<Result<scan::Hit>>>> batch;
+        {
+            dmk_test::AllocFailScope fail(allow);
+            batch = scan::resolve_batch(requests, 1);
+        }
+        if (!batch->has_value())
+        {
+            EXPECT_EQ(batch->error().code, ErrorCode::OutOfMemory) << "allow " << allow;
+            continue;
+        }
+        ASSERT_EQ((*batch)->size(), 1u);
+        const Result<scan::Hit> &slot = (**batch)[0];
+        if (!slot.has_value())
+        {
+            EXPECT_EQ(slot.error().code, ErrorCode::OutOfMemory) << "allow " << allow;
+            continue;
+        }
+        EXPECT_EQ(slot->address.raw(), img.addr(0x10)) << "allow " << allow;
+    }
 }
 
 TEST(StringXrefTest, InvalidEnumsReturnInvalidArg)

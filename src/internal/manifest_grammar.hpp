@@ -31,12 +31,12 @@ namespace DetourModKit::manifest::detail
      * @param limits The structural and byte caps to enforce.
      * @param context Static/literal label naming the raising operation for Error::where (e.g. "manifest::parse").
      * @return Empty on success, or an Error: ManifestIdentityCollision (a section or key that folds to one already
-     *         seen, whether by case, surrounding whitespace, or exact repetition), MalformedLine (a section whose
-     *         `manifest` / `sig.` structural prefix is not canonical lowercase, a non-lowercase key, an empty section
-     *         name, a bracket line the file never closes with `]`, a rung section with no parent label, a leading
-     *         UTF-8 BOM, or an embedded NUL byte), ManifestFramingUnsafe (a `<<<` heredoc that the file never closes,
-     *         or one whose terminator tag is empty), or SizeTooLarge (encoded text, a section, key, record, rung,
-     *         field, or aggregate that exceeds @p limits).
+     *         seen, whether by case, surrounding whitespace, or exact repetition), MalformedLine (a section other than
+     *         the lowercase `manifest` header or a `sig.`-prefixed section, a key line before the first section header,
+     *         a non-lowercase key, a bracket line the file never closes with `]`, a rung section with no parent label,
+     *         a leading UTF-8 BOM, or an embedded NUL byte), ManifestFramingUnsafe (a `<<<` heredoc that the file
+     *         never closes, or one whose terminator tag is empty), or SizeTooLarge (encoded text, a section, key,
+     *         record, rung, field, or aggregate that exceeds @p limits).
      * @details The case-sensitive backend still merges exact/whitespace-equivalent identities, while the manifest
      *          contract also reserves ASCII-case-folded identities. This pass tokenizes the raw bytes before the store,
      *          rejects every ambiguous identity, and applies structural and byte limits before backend allocation. A

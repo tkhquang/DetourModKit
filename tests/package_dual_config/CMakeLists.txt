@@ -21,26 +21,33 @@ endforeach()
 
 # Prove selection from target metadata as well as from a successful link. MinGW can link a Release archive into a
 # Debug consumer without an MSVC-style mismatch diagnostic, so runtime success alone cannot distinguish the files.
-get_target_property(_dmk_debug_location DetourModKit::DetourModKit IMPORTED_LOCATION_DEBUG)
-get_target_property(_dmk_release_location DetourModKit::DetourModKit IMPORTED_LOCATION_RELEASE)
-get_target_property(_dmk_relwithdebinfo_map DetourModKit::DetourModKit MAP_IMPORTED_CONFIG_RELWITHDEBINFO)
-get_target_property(_dmk_minsizerel_map DetourModKit::DetourModKit MAP_IMPORTED_CONFIG_MINSIZEREL)
-get_filename_component(_dmk_debug_name "${_dmk_debug_location}" NAME)
-get_filename_component(_dmk_release_name "${_dmk_release_location}" NAME)
-if(NOT _dmk_debug_name STREQUAL "libDetourModKitd${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  message(FATAL_ERROR "Debug imports '${_dmk_debug_location}', expected libDetourModKitd${CMAKE_STATIC_LIBRARY_SUFFIX}")
-endif()
-if(NOT _dmk_release_name STREQUAL "libDetourModKit${CMAKE_STATIC_LIBRARY_SUFFIX}")
-  message(FATAL_ERROR
-    "Release imports '${_dmk_release_location}', expected libDetourModKit${CMAKE_STATIC_LIBRARY_SUFFIX}")
-endif()
-if(NOT _dmk_relwithdebinfo_map STREQUAL "Release;RelWithDebInfo")
-  message(FATAL_ERROR "RelWithDebInfo import map is '${_dmk_relwithdebinfo_map}', expected Release;RelWithDebInfo")
-endif()
-if(NOT _dmk_minsizerel_map STREQUAL "Release;MinSizeRel")
-  message(FATAL_ERROR "MinSizeRel import map is '${_dmk_minsizerel_map}', expected Release;MinSizeRel")
-endif()
+# Every compiled target in the prefix selects its Debug and Release archives, and maps both release-family configs.
+function(dmk_expect_config_selection target archive)
+  get_target_property(debug_location ${target} IMPORTED_LOCATION_DEBUG)
+  get_target_property(release_location ${target} IMPORTED_LOCATION_RELEASE)
+  get_filename_component(debug_name "${debug_location}" NAME)
+  get_filename_component(release_name "${release_location}" NAME)
+  if(NOT debug_name STREQUAL "lib${archive}d${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    message(FATAL_ERROR
+      "${target} Debug imports '${debug_location}', expected lib${archive}d${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+  if(NOT release_name STREQUAL "lib${archive}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    message(FATAL_ERROR
+      "${target} Release imports '${release_location}', expected lib${archive}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+  foreach(config IN ITEMS RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${config}" config_upper)
+    get_target_property(config_map ${target} MAP_IMPORTED_CONFIG_${config_upper})
+    if(NOT config_map STREQUAL "Release;${config}")
+      message(FATAL_ERROR "${target} ${config} import map is '${config_map}', expected Release;${config}")
+    endif()
+  endforeach()
+endfunction()
 
+dmk_expect_config_selection(DetourModKit::DetourModKit DetourModKit)
+dmk_expect_config_selection(DetourModKit::WheelHost DetourModKitWheelHost)
+
+get_target_property(_dmk_release_location DetourModKit::DetourModKit IMPORTED_LOCATION_RELEASE)
 get_filename_component(_dmk_libdir "${_dmk_release_location}" DIRECTORY)
 get_target_property(_dmk_dep_links DetourModKit::deps INTERFACE_LINK_LIBRARIES)
 foreach(_dmk_dependency IN ITEMS safetyhook Zydis Zycore)
@@ -57,7 +64,7 @@ foreach(_dmk_dependency IN ITEMS safetyhook Zydis Zycore)
 endforeach()
 
 add_executable(dmk_dual_config_consumer main.cpp)
-target_link_libraries(dmk_dual_config_consumer PRIVATE DetourModKit::DetourModKit)
+target_link_libraries(dmk_dual_config_consumer PRIVATE DetourModKit::DetourModKit DetourModKit::WheelHost)
 
 # CI-runner workaround as in tests/package_smoke: embed the MinGW runtime so the proof binary is PATH-independent.
 if(MINGW)

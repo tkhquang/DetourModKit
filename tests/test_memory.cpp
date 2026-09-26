@@ -25,13 +25,16 @@
 #include <windows.h>
 #include <process.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -3838,24 +3841,50 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
     // The loop ended with the cache initialized (64, 10000); the fixture TearDown shuts it down.
 }
 
-// The typed write<T> / write_in_place<T> overloads are constrained against any non-owning view (std::span of any
-// element type, std::basic_string_view) so a view cannot exact-match the typed template and bit-copy the view object
-// (data pointer + length) into the target instead of the bytes it references.
+// The typed write<T> / write_in_place<T> overloads reject every std::ranges::view and every std::initializer_list. A
+// view therefore cannot exact-match the typed template and bit-copy the view object (data pointer + length) into the
+// target instead of the bytes it references.
 namespace
 {
     template <class Arg>
     concept WriteCallable = requires(Address a, Arg v) { memory::write(a, v); };
     template <class Arg>
     concept WriteInPlaceCallable = requires(Address a, Arg v) { memory::write_in_place(a, v); };
+    // An explicit template argument leaves only the typed template as a candidate, so this tests its constraint alone.
+    template <class Arg>
+    concept TypedWriteInPlaceCallable = requires(Address a, const Arg &v) { memory::write_in_place<Arg>(a, v); };
+
+    using ByteSubrange = std::ranges::subrange<std::byte *>;
+    using ByteArrayRef = std::ranges::ref_view<std::byte[4]>;
 
     // write has no view sink at all, so every non-owning view is intentionally not callable through it.
     static_assert(!WriteCallable<std::span<std::byte>>, "write(addr, span<byte>) must be ill-formed; use write_bytes");
     static_assert(!WriteCallable<std::span<const std::byte>>, "write(addr, span<const byte>) must be ill-formed");
     static_assert(!WriteCallable<std::span<int>>, "write(addr, span<int>) must be ill-formed, not a scalar bit-copy");
     static_assert(!WriteCallable<std::string_view>, "write(addr, string_view) must be ill-formed");
+    static_assert(!WriteCallable<std::wstring_view>, "write(addr, wstring_view) must be ill-formed");
+    static_assert(!WriteCallable<std::initializer_list<std::byte>>, "write(addr, initializer_list) must be ill-formed");
+    static_assert(!WriteCallable<ByteSubrange>, "write(addr, subrange) must be ill-formed");
+    static_assert(!WriteCallable<ByteArrayRef>, "write(addr, ref_view) must be ill-formed");
     // A genuine trivially-copyable value still binds the typed template.
     static_assert(WriteCallable<int>, "write(addr, value) must remain valid");
     static_assert(WriteCallable<std::array<std::byte, 4>>, "write(addr, array-of-bytes) is a value, not a span");
+
+    // The typed write_in_place template rejects the same set. A byte range view still reaches the byte-span sink
+    // through its implicit span conversion (WriteInPlace_ByteRangeViewsWriteViewedBytes).
+    static_assert(!TypedWriteInPlaceCallable<std::initializer_list<std::byte>>);
+    static_assert(!TypedWriteInPlaceCallable<ByteSubrange>);
+    static_assert(!TypedWriteInPlaceCallable<ByteArrayRef>);
+    static_assert(!TypedWriteInPlaceCallable<std::wstring_view>);
+    static_assert(TypedWriteInPlaceCallable<int>);
+    static_assert(TypedWriteInPlaceCallable<std::array<std::byte, 4>>);
+
+    // The trait covers owning_view too, and no owning container or array.
+    static_assert(detail::is_non_owning_view_v<std::span<const std::byte, 4>>);
+    static_assert(detail::is_non_owning_view_v<std::ranges::owning_view<std::vector<std::byte>>>);
+    static_assert(!detail::is_non_owning_view_v<std::vector<std::byte>>);
+    static_assert(!detail::is_non_owning_view_v<std::string>);
+    static_assert(!detail::is_non_owning_view_v<std::byte[4]>);
 
     // write_in_place keeps its byte-span sink, so a byte span routes there rather than the hijacked typed template; a
     // non-byte span or a string_view has no sink and so is a deliberate compile error (not a scalar bit-copy of the
@@ -3914,6 +3943,30 @@ TEST_F(MemoryTest, WriteInPlace_MutableByteSpanWritesViewedBytes)
     EXPECT_EQ(target[2], std::byte{0x33});
     EXPECT_EQ(target[3], std::byte{0x44});
     EXPECT_EQ(target[4], std::byte{0x00});
+}
+
+// A subrange or ref_view over bytes converts to the byte-span sink, so the target receives the viewed bytes. A typed
+// match stores the view object instead: two pointers for the subrange, one for the ref_view.
+TEST_F(MemoryTest, WriteInPlace_ByteRangeViewsWriteViewedBytes)
+{
+    std::byte source[4] = {std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+    const std::array<std::byte, 4> expected{std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+
+    std::array<std::byte, 32> subrange_target{};
+    ASSERT_TRUE(
+        memory::write_in_place(Address{subrange_target.data()}, ByteSubrange{std::begin(source), std::end(source)})
+            .has_value()
+    );
+    std::array<std::byte, 32> ref_target{};
+    ASSERT_TRUE(memory::write_in_place(Address{ref_target.data()}, ByteArrayRef{source}).has_value());
+
+    for (const std::array<std::byte, 32> *target : {&subrange_target, &ref_target})
+    {
+        EXPECT_TRUE(std::equal(expected.begin(), expected.end(), target->begin()));
+        EXPECT_TRUE(
+            std::all_of(target->begin() + 4, target->end(), [](std::byte value) { return value == std::byte{}; })
+        );
+    }
 }
 
 // A ProtectGuard laid over a span that crosses a protection seam restores each region to its own prior protection on

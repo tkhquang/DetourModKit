@@ -7,9 +7,9 @@
  *
  * Houses the verified COL -> TypeDescriptor walk (@ref resolve_col_site) and the page-bounded name copy (@ref
  * read_name_seh) that both the forward walker (type_name_of / vtable_is_type) and the reverse dissector
- * (identify_pointee_type / heal_landmark) consume. The structures and helpers live in DetourModKit::rtti::detail and
- * are NOT part of the installed public surface; ColHead in particular encodes a raw ABI layout that must never leak
- * into a consumer-visible header.
+ * (identify_pointee_type / heal_landmark) consume. The scan resolver's RTTI rung consumes @ref primary_vtable_checked.
+ * The structures and helpers live in DetourModKit::rtti::detail and are NOT part of the installed public surface.
+ * ColHead in particular encodes a raw ABI layout that must never leak into a consumer-visible header.
  */
 
 #include "DetourModKit/rtti.hpp"
@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string_view>
 #include <type_traits>
 
 namespace DetourModKit
@@ -190,6 +192,25 @@ namespace DetourModKit
              */
             [[nodiscard]] std::size_t
             read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len, std::uintptr_t module_end) noexcept;
+
+            /**
+             * @struct PrimaryVtable
+             * @brief Result of @ref primary_vtable_checked: the primary vtable plus the sweep completeness.
+             */
+            struct PrimaryVtable
+            {
+                /// The unique primary vtable, or std::nullopt on absence, ambiguity, or a sweep other than Complete.
+                std::optional<Address> vtable;
+                /// Completeness of the one sweep that produced @ref vtable.
+                Traversal completeness = Traversal::Complete;
+            };
+
+            /**
+             * @brief @ref rtti::vtable_for_type plus the completeness of its sweep.
+             * @details One sweep answers both, so a caller that tells an incomplete sweep from a miss reads one view
+             *          of the image.
+             */
+            [[nodiscard]] PrimaryVtable primary_vtable_checked(std::string_view mangled, Region range) noexcept;
         } // namespace detail
     } // namespace rtti
 } // namespace DetourModKit

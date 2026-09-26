@@ -396,7 +396,8 @@ namespace DetourModKit::scan
      *       @ref ErrorCode::AmbiguousReference. That sweep does not promote a broad-only reference into a hit. Set
      *       @ref StringRefQuery::broad_match to accept the rarer shapes. @ref anchor::Anchor::xref_broad_match and
      *       @ref anchor::ScanProfile::default_broad_string_xref expose the same knob.
-     * @note Not noexcept: the broad-match phase may allocate during its decode. Setup/control-plane only.
+     * @note Not noexcept: an allocation failure in either phase throws `std::bad_alloc` and is never reported as a
+     *       miss. Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
 

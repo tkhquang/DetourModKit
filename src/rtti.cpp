@@ -1053,16 +1053,16 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    std::optional<Address> rtti::vtable_for_type(std::string_view mangled, Region range) noexcept
+    rtti::detail::PrimaryVtable rtti::detail::primary_vtable_checked(std::string_view mangled, Region range) noexcept
     {
         VtMatch matches[MAX_REVERSE_MATCHES];
-        rtti::Traversal completeness = rtti::Traversal::Complete;
+        PrimaryVtable result;
         const std::size_t match_count = scan_vtables_for_name(
             DetourModKit::detail::module_span(range),
             mangled,
             matches,
             MAX_REVERSE_MATCHES,
-            completeness
+            result.completeness
         );
 
         // A unique or absent verdict is the inverse of vtable_is_type and is trustworthy only across a COMPLETE sweep.
@@ -1070,8 +1070,8 @@ namespace DetourModKit
         // match buffer filled) can hide a second distinct primary, which makes a "unique" answer wrong, or the only
         // primary, which makes an "absent" answer wrong. Fail closed rather than authorize a verdict from a partial
         // sweep. Match-buffer exhaustion is reported as Traversal::Saturated by the same completeness gate.
-        if (completeness != rtti::Traversal::Complete)
-            return std::nullopt;
+        if (result.completeness != rtti::Traversal::Complete)
+            return result;
 
         // The primary vtable is the COL.offset == 0 sub-object: the value an object pointer's first qword holds for a
         // most-derived instance. More than one distinct primary for the same name (a type linked into the image twice)
@@ -1082,13 +1082,18 @@ namespace DetourModKit
             if (matches[i].col_offset != 0)
                 continue;
             if (primary && *primary != matches[i].vtable)
-                return std::nullopt;
+                return result;
             primary = matches[i].vtable;
         }
 
-        if (!primary)
-            return std::nullopt;
-        return Address{*primary};
+        if (primary)
+            result.vtable = Address{*primary};
+        return result;
+    }
+
+    std::optional<Address> rtti::vtable_for_type(std::string_view mangled, Region range) noexcept
+    {
+        return rtti::detail::primary_vtable_checked(mangled, range).vtable;
     }
 
     rtti::VtablesResult

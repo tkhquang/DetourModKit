@@ -372,15 +372,14 @@ namespace DetourModKit
         };
     } // namespace
 
-    std::optional<detail::EnginePattern> detail::parse_aob(std::string_view aob_str)
+    Result<detail::EnginePattern> detail::parse_aob(std::string_view aob_str)
     {
-        // An unbounded AOB can exhaust the heap sink, so bad_alloc fails closed to nullopt.
         try
         {
             EnginePatternSink sink;
             if (detail::parse_pattern_into(aob_str, sink) != detail::PatternStatus::Ok)
             {
-                return std::nullopt;
+                return std::unexpected(Error{ErrorCode::BadPattern, "detail::parse_aob"});
             }
             // The anchor is storage-specific, so it is computed here rather than in the shared grammar: select it over
             // segment 0 with the engine's size() "no fully-known byte" sentinel.
@@ -389,7 +388,7 @@ namespace DetourModKit
         }
         catch (const std::bad_alloc &)
         {
-            return std::nullopt;
+            return std::unexpected(Error{ErrorCode::OutOfMemory, "detail::parse_aob"});
         }
     }
 

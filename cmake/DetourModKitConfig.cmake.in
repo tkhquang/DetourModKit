@@ -200,8 +200,8 @@ if(NOT TARGET DetourModKit::DetourModKit)
     # fallback can pick the Debug archive for the compiled DetourModKit while DetourModKit::deps (which treats every
     # non-Debug configuration as release) stays on Release, mixing configurations across the link. Release is listed
     # first so a dual-config prefix resolves to it, with the config's own name as a fallback so a prefix that shipped
-    # only that single configuration (exporting IMPORTED_LOCATION_RELWITHDEBINFO but no _RELEASE) still resolves --
-    # a bare "Release" map would redirect to a nonexistent location with no fallback. A Debug-only prefix still fails
+    # only that single configuration (exporting IMPORTED_LOCATION_RELWITHDEBINFO but no _RELEASE) still resolves. A
+    # bare "Release" map redirects to a nonexistent location with no fallback. A Debug-only prefix still fails
     # closed for these configs (neither location present).
     set_target_properties(DetourModKit::DetourModKit PROPERTIES
         MAP_IMPORTED_CONFIG_RELWITHDEBINFO "Release;RelWithDebInfo"
@@ -211,14 +211,17 @@ endif()
 # Resident wheel host (DetourModKit::WheelHost). A standalone target with its own export set, never a transitive
 # dependency of DetourModKit::DetourModKit, so a consumer that does not need it never links it. The export file ships
 # in every prefix; the existence guard keeps find_package(DetourModKit) working against an older prefix that predates
-# the host.
+# the host. Its archive takes the release-family map of DetourModKit::DetourModKit above for the same reason.
 if(NOT TARGET DetourModKit::WheelHost
         AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/DetourModKitWheelHostTargets.cmake")
     include("${CMAKE_CURRENT_LIST_DIR}/DetourModKitWheelHostTargets.cmake")
+    set_target_properties(DetourModKit::WheelHost PROPERTIES
+        MAP_IMPORTED_CONFIG_RELWITHDEBINFO "Release;RelWithDebInfo"
+        MAP_IMPORTED_CONFIG_MINSIZEREL "Release;MinSizeRel")
 endif()
 
 check_required_components(DetourModKit)
 
 message(STATUS "Found DetourModKit: ${DetourModKit_VERSION}")
-message(STATUS "DetourModKit ABI: C++23 static library, no extern \"C\" boundary -- "
-  "link only from the same target system and compiler/STL/CRT toolchain that built this prefix.")
+message(STATUS "DetourModKit ABI: C++23 static library, no extern \"C\" boundary. "
+  "Link only from the same target system and compiler/STL/CRT toolchain that built this prefix.")

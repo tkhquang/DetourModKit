@@ -283,9 +283,12 @@ namespace DetourModKit::manifest
         SignatureRecord record;
         record.label = std::string(source.label);
         record.kind = source.kind;
-        // ExportName stores its module in export_module. Every other kind leaves this field empty. record.module
-        // represents this shared field without a kind branch. An empty export_module remains empty.
-        record.module = std::string(source.export_module);
+        // record.module scopes every kind, but the anchor reads export_module for ExportName only. Copy it for that
+        // kind alone, so a stray value on another kind cannot move the resolve scope or the fingerprint.
+        if (source.kind == anchor::AnchorKind::ExportName)
+        {
+            record.module = std::string(source.export_module);
+        }
         record.export_name = std::string(source.export_name);
         record.mangled = std::string(source.mangled);
         record.operand_kind = source.operand_kind;

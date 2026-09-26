@@ -432,7 +432,7 @@ namespace DetourModKit::detail
      *          so the marker still points at the right run.
      * @note Not noexcept. The compile-time fixed-array sink never allocates, so the literal path cannot throw. A
      *       heap-backed runtime sink can throw bad_alloc on an unbounded pattern, and a noexcept mark turns that OOM
-     *       into a std::terminate. `parse_aob` catches the throw and fails closed to nullopt instead.
+     *       into a std::terminate. `parse_aob` catches the throw and returns `OutOfMemory` instead.
      */
     template <class Sink> [[nodiscard]] constexpr PatternStatus parse_pattern_into(std::string_view dsl, Sink &sink)
     {

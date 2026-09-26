@@ -141,6 +141,7 @@ Keep IPO OFF for any install-destined build. `DMK_ENABLE_LTO` defaults OFF when 
 - Install release prefixes from tests-OFF producer trees.
 - Compare shipped and tested consumer contracts with `scripts/check_export_equality.py`.
 - Prove Debug and Release consumer links from one prefix with `tests/package_dual_config`.
+- Map RelWithDebInfo and MinSizeRel to the Release archive on `DetourModKit::DetourModKit` and `DetourModKit::WheelHost`.
 - Record the compiler fact in `DetourModKitAbi.cmake`.
 - Record the STL fact in `DetourModKitAbi.cmake`.
 - Record the CRT fact in `DetourModKitAbi.cmake`.
