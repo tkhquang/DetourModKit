@@ -203,10 +203,12 @@ namespace DetourModKit
          * @details A reshape that alters the binding SET advances the generation. These reshapes are register,
          *          name-based rebind, name-based removal, clear, or a real consume-flag transition. A stale token then
          *          fails closed and reads inactive. A consume set that re-applies the current flag value is a no-op and
-         *          keeps every live token current. A plain guard release does NOT advance it. A consume binding's
-         *          release advances it through the consume-flag transition. The counter is process-wide and monotonic,
-         *          so a token cannot alias a different engine after a shutdown / start cycle. Default, unknown-name,
-         *          and allocation-failed tokens are all invalid and always read inactive.
+         *          keeps every live token current. A guard release advances it only when the release clears a set
+         *          consume flag.
+         *
+         *          The counter is process-wide and monotonic, so a token cannot alias a different engine after a
+         *          shutdown / start cycle. Default, unknown-name, and allocation-failed tokens are all invalid and
+         *          always read inactive.
          */
         class BindingToken
         {
@@ -250,13 +252,13 @@ namespace DetourModKit
          *          returns.
          *
          *          A Hold guard synthesizes one balancing on_state_change(false) when a true edge was the last one
-         *          forwarded, and never re-enters a callback that is on the stack. A consume binding's release also
-         *          clears its engine-side consume flag, as set_consume(name, false) does.
+         *          forwarded, and never re-enters a callback that is on the stack. A release also clears the
+         *          engine-side consume flag of its registration, whether the registration or a later set_consume set it.
          *
          *          A guard release may race prepare_logic_dll_unload. Release and retirement exclude each other, so
-         *          the rundown promise holds in both directions. Retirement disposes of the callable; an ordinary
+         *          the rundown promise holds in both directions. Retirement disposes of the callable. An ordinary
          *          release leaves it gate-owned. A guard outliving the drain stays valid but no longer reaches the
-         *          callback. Such a release still clears a consume binding's engine-side flag.
+         *          callback. Such a release still clears the engine-side consume flag.
          * @note Setup/control-plane only: destroy a guard from init / shutdown / a worker thread, never from a hook
          *       or input callback.
          * @warning release may invoke a Hold binding's balancing callback and may block on the poll thread, or on a
@@ -402,7 +404,8 @@ namespace DetourModKit
             /**
              * @struct Settings
              * @brief Poll-thread and gamepad tuning applied when start() builds the engine.
-             * @details The gamepad knobs take effect only at start(); change require_focus live with set_require_focus.
+             * @details The gamepad knobs take effect only at start(). A set_require_focus call overrides require_focus
+             *          before or after start().
              */
             struct Settings
             {
@@ -472,11 +475,16 @@ namespace DetourModKit
              *          and is_running() stays false. The engine is constructed by the first start() that has at least
              *          one staged binding.
              * @param settings Poll cadence, focus gate, gamepad tuning, and wheel backend.
-             * @return Result<void>. ErrorCode::InvalidArg reports an invalid backend or host table.
-             *         ErrorCode::OutOfMemory reports allocation failure. ErrorCode::SystemCallFailed reports thread
-             *         or required-host lease failure. ErrorCode::ShutdownInProgress reports teardown conflict.
-             * @note Allocation, system-call, and callback-drain failures are retryable. The staged bindings remain, so
-             *       a later start() attempts the same set again. A process-lifetime veto is terminal.
+             * @return Result<void>. ErrorCode::InvalidArg reports an invalid backend, host table, or wheel target
+             *         thread. ErrorCode::OutOfMemory reports allocation failure. ErrorCode::SystemCallFailed reports a
+             *         module-reference, thread, or required-host lease failure. ErrorCode::ShutdownInProgress reports
+             *         teardown conflict.
+             * @note Error::detail of SystemCallFailed depends on the arm. A module-reference failure carries
+             *       GetLastError(), and a thread failure carries the std::system_error code value. A lease failure
+             *       carries the magnitude of the negative DMK_WHEELHOST_* status.
+             * @note Allocation, system-call, and callback-drain failures are retryable. The staged bindings and a
+             *       pending set_require_focus value remain, so a later start() attempts the same set again. A
+             *       process-lifetime veto is terminal.
              * @note Setup/control-plane only: the start allocates the engine and creates the poll thread.
              */
             [[nodiscard]] Result<void> start(Settings settings) noexcept;
@@ -492,11 +500,12 @@ namespace DetourModKit
              *       destroys no staged callable. It stops a running poll loop by detach, never a join, except at
              *       process exit. It retains the facade owner, module references, and detours. A failed join retains
              *       the same owner set.
-             * @note Callable from a binding callback. Such a call is asynchronous: is_running() reads false, callbacks
-             *       already staged for the current cycle still complete, and the join, detour removal, and final
-             *       on_state_change(false) run on a background retirement thread. If that thread cannot take the
-             *       retirement, the whole owner is retained for the process lifetime and no final
-             *       on_state_change(false) is delivered.
+             * @note Callable from a binding callback on any thread. That includes a balancing edge that rebind,
+             *       removal, clear, or a guard release delivers on the caller's thread. Such a call is asynchronous.
+             *       is_running() reads false, and callbacks already staged for the current cycle still complete. The
+             *       join, detour removal, and final on_state_change(false) run on a background retirement thread. If
+             *       that thread cannot take the retirement, the whole owner is retained for the process lifetime and
+             *       no final on_state_change(false) is delivered.
              * @note Setup/control-plane only: the normal path joins the poll thread. The binding-callback call above is
              *       the documented asynchronous exception.
              */
@@ -594,8 +603,11 @@ namespace DetourModKit
 
             /**
              * @brief Sets whether the engine requires foreground focus before processing key events.
+             * @details While an engine runs, the value takes effect immediately for that engine. With no engine, the
+             *          value overrides Settings::require_focus for the start() that builds the next engine. shutdown()
+             *          discards a pending value.
              * @param require_focus true to gate on foreground (default), false to process regardless of focus.
-             * @note Thread-safe; takes effect immediately, before or after start().
+             * @note Thread-safe.
              * @note Setup/control-plane only: a configuration toggle, not a per-frame call.
              */
             void set_require_focus(bool require_focus) noexcept;
@@ -668,9 +680,9 @@ namespace DetourModKit
             Input(Input &&) = delete;
             Input &operator=(Input &&) = delete;
 
-            // This identity-keyed consume clear supports a consume binding's guard teardown. A guard owns the exact
-            // registration and must clear it even when its name is empty. The function routes to the live or pending
-            // binding set, like set_consume.
+            // Every guard teardown runs this identity-keyed consume clear. A guard owns the exact registration and must
+            // clear it even when its name is empty. The function routes to the live or pending binding set, like
+            // set_consume.
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             // Retires the delivery gates of the selected bindings before the unload drain removes them.

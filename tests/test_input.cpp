@@ -612,16 +612,9 @@ TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
 class InputTest : public ::testing::Test
 {
 protected:
-    // shutdown() tears down the poller but does not reset require_focus (a persistent setting), so restore the
-    // default here. A test that flips require_focus and then aborts on an ASSERT cannot leak that state into the
-    // next test: ctest already isolates each case in its own process, and this keeps the single-process exe
-    // deterministic too, without a per-test restore that an early ASSERT would skip.
-    void SetUp() override
-    {
-        auto &mgr = input::Input::instance();
-        mgr.shutdown();
-        mgr.set_require_focus(true);
-    }
+    // shutdown() also clears a pending set_require_focus value. A case that sets it and then fails an ASSERT cannot
+    // leak it into the next case of the single-process exe.
+    void SetUp() override { input::Input::instance().shutdown(); }
 
     void TearDown() override { input::Input::instance().shutdown(); }
 };
@@ -2963,7 +2956,6 @@ TEST(InputUpdateCombos, UpdatesRunningPollerBinding)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
@@ -2989,7 +2981,6 @@ TEST(InputUpdateCombos, UpdatesRunningPollerBinding)
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     EXPECT_TRUE(im.is_running());
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 // Live rebind preserves caller and resource failure classes. The failure leaves the same request ready for retry.
@@ -2998,7 +2989,6 @@ TEST(InputUpdateCombos, LiveRebindTypesAllocationFailureAsOutOfMemory)
     DMK_REQUIRE_PROXY_FREE_STL();
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}});
@@ -3043,14 +3033,12 @@ TEST(InputUpdateCombos, LiveRebindTypesAllocationFailureAsOutOfMemory)
     ASSERT_TRUE(im.rebind("update-live-oom", retry).has_value());
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 TEST(InputUpdateCombos, ConcurrentUpdateWhilePollerRunning)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
@@ -3090,7 +3078,6 @@ TEST(InputUpdateCombos, ConcurrentUpdateWhilePollerRunning)
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
     SUCCEED();
 }
 
@@ -3098,7 +3085,6 @@ TEST(InputUpdateCombos, ConcurrentQueriesAndCardinalityUpdatesWhilePollerRunning
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
@@ -3180,14 +3166,12 @@ TEST(InputUpdateCombos, ConcurrentQueriesAndCardinalityUpdatesWhilePollerRunning
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 TEST(InputHotReload, RegisterPressWhilePollerRunning)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3219,14 +3203,12 @@ TEST(InputHotReload, RegisterPressWhilePollerRunning)
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 TEST(InputHotReload, ClearBindingsKeepsPollerRunning)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3269,14 +3251,12 @@ TEST(InputHotReload, ClearBindingsKeepsPollerRunning)
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 TEST(InputHotReload, RemoveBindingByNameLive)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3306,7 +3286,6 @@ TEST(InputHotReload, RemoveBindingByNameLive)
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 TEST(InputHotReload, EmptyComboListRegistersSentinelName)
@@ -3423,7 +3402,6 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3464,7 +3442,6 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 // KeyStateCache: per-cycle keyboard memoization
@@ -3550,7 +3527,6 @@ TEST(InputPollerPollLoopSafety, BindingGrowthPastStartupReserveKeepsPollThreadAl
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3585,7 +3561,6 @@ TEST(InputPollerPollLoopSafety, BindingGrowthPastStartupReserveKeepsPollThreadAl
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(extra + 1));
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 // remove_bindings_by_name must carry surviving entries' atomic states forward; is_active(name) must stay consistent
@@ -3594,7 +3569,6 @@ TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
 
     (void)input::register_combo(
         input::ComboBinding{
@@ -3634,7 +3608,6 @@ TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
     EXPECT_FALSE(im.is_active("keep-b"));
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 // BindingToken: generation-checked binding handles
@@ -3809,7 +3782,6 @@ TEST_F(InputTest, BindingTokenInvalidBeforeStart)
 TEST_F(InputTest, BindingTokenResolvesAfterStart)
 {
     auto &mgr = input::Input::instance();
-    mgr.set_require_focus(false);
     (void)input::register_combo(
         input::ComboBinding{
             .name = "hotkey",
@@ -3835,7 +3807,6 @@ TEST_F(InputTest, BindingTokenResolvesAfterStart)
 TEST_F(InputTest, BindingTokenStaleAfterLiveRegister)
 {
     auto &mgr = input::Input::instance();
-    mgr.set_require_focus(false);
     (void)input::register_combo(
         input::ComboBinding{
             .name = "a",
@@ -3871,7 +3842,6 @@ TEST_F(InputTest, BindingTokenStaleAfterLiveRegister)
 TEST_F(InputTest, BindingTokenStaleAfterConsumeToggle)
 {
     auto &mgr = input::Input::instance();
-    mgr.set_require_focus(false);
     (void)input::register_combo(
         input::ComboBinding{
             .name = "consume_test",
@@ -3910,7 +3880,6 @@ TEST_F(InputTest, BindingTokenStaysCurrentAfterRedundantConsumeSet)
     // A consume set that re-applies the current flag value is a no-op: no cache rebuild, no generation advance, no
     // token invalidation. Only a real transition reshapes, exactly as set_consume_by_owner already behaved.
     auto &mgr = input::Input::instance();
-    mgr.set_require_focus(false);
     (void)input::register_combo(
         input::ComboBinding{
             .name = "redundant_consume",
@@ -3949,7 +3918,6 @@ TEST_F(InputTest, BindingTokenStaysCurrentAfterRedundantConsumeSet)
 TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
 {
     auto &mgr = input::Input::instance();
-    mgr.set_require_focus(false);
     (void)input::register_combo(
         input::ComboBinding{
             .name = "persist",
@@ -4339,6 +4307,299 @@ TEST(InputLifecycleProof, TypedDrainRetiresAStagedBindingGateBeforeItEverStarts)
 
     *guard = input::BindingGuard{};
     EXPECT_TRUE(observer.expired()) << "a later guard release must have nothing left to destroy";
+}
+
+// A failed cache rebuild on the live engine empties its name index. A named drain must still retire the binding by a
+// scan of the binding set, so Drained never covers a live callable ([B-74]).
+TEST(InputLifecycleProof, NamedDrainAfterDegradedIndexRetiresTheBinding)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    InputSeamReset seam_reset;
+    constexpr std::string_view VICTIM_NAME = "degraded_index_victim_with_a_name_past_the_small_string_buffer";
+    auto &mgr = input::Input::instance();
+    mgr.shutdown();
+    (void)detail::open_input_callback_admission();
+    (void)DetourModKit::log();
+
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    auto victim = input::register_combo(
+        input::ComboBinding{
+            .name = std::string{VICTIM_NAME},
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+            .on_press = [keep = std::move(token)] {},
+        }
+    );
+    ASSERT_TRUE(victim.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    // Sweep budgets until one registration lands its reshape but fails the cache rebuild that follows it.
+    std::vector<input::BindingGuard> fillers;
+    fillers.reserve(65);
+    bool degraded = false;
+    for (long long budget = 0; budget <= 64 && !degraded; ++budget)
+    {
+        input::ComboBinding filler{
+            .name = "degraded_index_filler_" + std::to_string(budget) + "_past_the_small_string_buffer",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+            .on_press = [] {},
+        };
+        Result<input::BindingGuard> added = std::unexpected(Error{ErrorCode::OutOfMemory, "sweep"});
+        {
+            dmk_test::AllocFailScope fail(budget);
+            added = input::register_combo(std::move(filler));
+        }
+        if (added.has_value())
+        {
+            degraded = detail::InputTestSeams::live_name_index_degraded_for_test();
+            fillers.push_back(std::move(*added));
+        }
+    }
+    ASSERT_TRUE(degraded) << "no allocation budget reached the post-reshape cache rebuild failure";
+    ASSERT_FALSE(observer.expired());
+    const std::size_t before = mgr.binding_count();
+
+    const std::string_view names[] = {VICTIM_NAME};
+    EXPECT_EQ(
+        mgr.prepare_logic_dll_unload(std::span<const std::string_view>{names}, std::chrono::seconds{2}),
+        input::CallbackDrainStatus::Drained
+    );
+    EXPECT_TRUE(observer.expired()) << "the drain reported Drained while the named callable stayed alive";
+    EXPECT_FALSE(victim->is_active());
+    EXPECT_EQ(mgr.binding_count(), before - 1) << "the drain left the named binding registered";
+    EXPECT_FALSE(mgr.acquire_token(VICTIM_NAME).valid());
+
+    fillers.clear();
+    *victim = input::BindingGuard{};
+    mgr.shutdown();
+}
+
+// A set_require_focus value made before start() overrides Settings::require_focus for the engine that start() builds.
+// shutdown() discards a pending value, so a later start() follows its Settings again.
+TEST_F(InputTest, SetRequireFocusBeforeStartIsHonored)
+{
+    constexpr int PRESS_VK = 0x75;
+    auto &mgr = input::Input::instance();
+    std::atomic<int> presses{0};
+    InputFacadeKeySeamCleanup cleanup;
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == PRESS_VK; };
+
+    const input::Input::Settings settings{.poll_interval = std::chrono::milliseconds{2}};
+    const auto stage_focus_binding = [&presses]
+    {
+        return input::register_combo(
+            input::ComboBinding{
+                .name = "focus_override_press",
+                .trigger = input::Trigger::Press,
+                .combos = {input::KeyCombo{{keyboard_key(PRESS_VK)}, {}}},
+                .on_press = [&presses] { presses.fetch_add(1, std::memory_order_acq_rel); },
+            }
+        );
+    };
+    const auto delivered_within = [&presses](std::chrono::milliseconds window)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + window;
+        while (presses.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return presses.load(std::memory_order_acquire) != 0;
+    };
+    const auto run_arm = [&](bool override_first, bool shutdown_first, std::chrono::milliseconds window)
+    {
+        presses.store(0, std::memory_order_release);
+        if (override_first)
+        {
+            mgr.set_require_focus(false);
+        }
+        if (shutdown_first)
+        {
+            mgr.shutdown();
+        }
+        auto guard = stage_focus_binding();
+        const bool started = guard.has_value() && mgr.start(settings).has_value() && mgr.is_running();
+        const bool delivered = started && delivered_within(window);
+        mgr.shutdown();
+        return std::pair{started, delivered};
+    };
+
+    // Control: the default Settings gate on focus, and a headless test process does not own the foreground.
+    const auto control = run_arm(false, false, std::chrono::milliseconds{200});
+    ASSERT_TRUE(control.first);
+    if (control.second)
+    {
+        GTEST_SKIP() << "this process owns the foreground window, so the focus gate cannot be observed";
+    }
+
+    const auto honored = run_arm(true, false, std::chrono::seconds{5});
+    ASSERT_TRUE(honored.first);
+    EXPECT_TRUE(honored.second) << "start(Settings) discarded the pre-start set_require_focus(false)";
+
+    const auto discarded = run_arm(true, true, std::chrono::milliseconds{200});
+    ASSERT_TRUE(discarded.first);
+    EXPECT_FALSE(discarded.second) << "shutdown() kept a pending set_require_focus value";
+}
+
+// A guard release clears the consume flag that set_consume(name, true) enabled after registration ([B-27]). The first
+// binding registers with consume on and is the control.
+TEST_F(InputTest, ReleaseClearsConsumeEnabledAfterRegistration)
+{
+    auto &mgr = input::Input::instance();
+    dmk_test::reset_published_consume_rules();
+
+    auto at_registration = input::register_combo(
+        input::ComboBinding{
+            .name = "consume_at_registration",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::B)}, {}}},
+            .consume = true,
+            .on_press = [] {},
+        }
+    );
+    auto enabled_later = input::register_combo(
+        input::ComboBinding{
+            .name = "consume_enabled_later",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .on_press = [] {},
+        }
+    );
+    ASSERT_TRUE(at_registration.has_value());
+    ASSERT_TRUE(enabled_later.has_value());
+    ASSERT_TRUE(mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}}).has_value());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
+    ASSERT_EQ(mgr.consume_capacity().active, 1u);
+
+    mgr.set_consume("consume_enabled_later", true);
+    const auto button_a = static_cast<std::uint16_t>(GamepadCode::A);
+    const auto both = static_cast<std::uint16_t>(button_a | static_cast<std::uint16_t>(GamepadCode::B));
+    ASSERT_EQ(mgr.consume_capacity().active, 2u);
+    ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(both), both);
+
+    at_registration->release();
+    EXPECT_EQ(mgr.consume_capacity().active, 1u);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(both), button_a);
+
+    enabled_later->release();
+    EXPECT_EQ(mgr.consume_capacity().active, 0u) << "the release kept the consume shape set after registration";
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(both), 0u);
+
+    mgr.shutdown();
+    dmk_test::reset_published_consume_rules();
+}
+
+// An empty name addresses no binding (ComboBinding::name). The pending verbs before start() follow the live engine,
+// so anonymous staged bindings keep their combos, consume flag, and callables.
+TEST_F(InputTest, PendingVerbsRefuseEmptyNames)
+{
+    InputSeamReset seam_reset;
+    auto &mgr = input::Input::instance();
+    (void)detail::open_input_callback_admission();
+    dmk_test::reset_published_consume_rules();
+
+    auto first_token = std::make_shared<int>(0);
+    auto second_token = std::make_shared<int>(0);
+    const std::weak_ptr<int> first_observer = first_token;
+    const std::weak_ptr<int> second_observer = second_token;
+    auto first = input::register_combo(
+        input::ComboBinding{
+            .name = "",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .on_press = [keep = std::move(first_token)] {},
+        }
+    );
+    auto second = input::register_combo(
+        input::ComboBinding{
+            .name = "",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::B)}, {}}},
+            .on_press = [keep = std::move(second_token)] {},
+        }
+    );
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_EQ(mgr.binding_count(), 2u);
+
+    const auto rebound = mgr.rebind("", {});
+    ASSERT_FALSE(rebound.has_value());
+    EXPECT_EQ(rebound.error().code, ErrorCode::InvalidArg);
+    EXPECT_EQ(mgr.binding_count(), 2u) << "rebind(\"\") collapsed the anonymous staged bindings";
+    EXPECT_EQ(mgr.remove_bindings_by_name(""), 0u);
+    EXPECT_EQ(mgr.binding_count(), 2u);
+    mgr.set_consume("", true);
+
+    const std::string_view names[] = {""};
+    EXPECT_EQ(
+        mgr.prepare_logic_dll_unload(std::span<const std::string_view>{names}, std::chrono::seconds{2}),
+        input::CallbackDrainStatus::Drained
+    );
+    EXPECT_FALSE(first_observer.expired()) << "the drain retired an anonymous staged binding";
+    EXPECT_FALSE(second_observer.expired()) << "the drain retired an anonymous staged binding";
+    EXPECT_TRUE(first->is_active());
+    EXPECT_EQ(mgr.binding_count(), 2u);
+
+    (void)detail::open_input_callback_admission();
+    ASSERT_TRUE(mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}}).has_value());
+    ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
+    EXPECT_EQ(mgr.consume_capacity().active, 0u) << "set_consume(\"\") reached an anonymous staged binding";
+
+    mgr.shutdown();
+    dmk_test::reset_published_consume_rules();
+}
+
+// A no-op second start() must report success even when its diagnostic cannot format. Input::start logs through
+// try_log, so a logging failure never becomes an OutOfMemory result.
+TEST_F(InputTest, DoubleStartUnderPoisonedAllocatorStaysSuccess)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    auto &mgr = input::Input::instance();
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "double_start_oom",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+    ASSERT_TRUE(mgr.is_running());
+
+    Logger &logger = DetourModKit::log();
+    struct LevelRestore
+    {
+        Logger &logger;
+        LogLevel level;
+        ~LevelRestore() { logger.set_log_level(level); }
+    } restore{logger, logger.get_log_level()};
+    logger.set_log_level(LogLevel::Debug);
+
+    // Premise: an unguarded Debug record allocates in this process, so the poisoned allocator makes it throw.
+    bool control_threw = false;
+    {
+        dmk_test::AllocFailScope fail(0);
+        try
+        {
+            logger.debug("input double-start control record {}", 1);
+        }
+        catch (const std::bad_alloc &)
+        {
+            control_threw = true;
+        }
+    }
+    ASSERT_TRUE(control_threw) << "a Debug record did not allocate, so the poisoned start could not fail";
+
+    Result<void> second;
+    {
+        dmk_test::AllocFailScope fail(0);
+        second = mgr.start();
+    }
+    EXPECT_TRUE(second.has_value()) << "a no-op start() reported error code "
+                                    << static_cast<int>(second.has_value() ? ErrorCode{} : second.error().code);
+    EXPECT_TRUE(mgr.is_running());
 }
 
 TEST_F(InputTest, PendingRemoveOutOfMemoryLeavesBindingsUnchanged)
@@ -6591,7 +6852,9 @@ TEST_F(InputPollerTest, ConsumeToggleCacheRebuildFailureRetainsThePriorSnapshot)
         poller.set_consume(bare.name, true);
     }
 
-    // Name lookup survives, so the control plane is still reachable and can repair itself.
+    // The Retain policy keeps the name index authoritative, so the control plane is still reachable and can repair
+    // itself. A token alone cannot show that, because the degraded-index scan also resolves names.
+    EXPECT_TRUE(poller.name_index_authoritative_for_test());
     EXPECT_TRUE(poller.acquire_binding_token(bare.name).valid());
     EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
 
@@ -6644,6 +6907,7 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
     EXPECT_EQ(detail::evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u);
     EXPECT_EQ(poller.consume_capacity().active, 0u);
     // The lookup caches are still retained, which is the point of the Retain policy.
+    EXPECT_TRUE(poller.name_index_authoritative_for_test());
     EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
 
     detail::uninstall(poller.intercept_owner_for_test());
@@ -6767,7 +7031,8 @@ TEST_F(InputPollerTest, CallbackSafeQueryCompletesWhileConsumeDiagnosticSinkIsBl
 }
 
 // A caller that already reshaped m_bindings cannot retain stale caches because their indices may address past the new
-// array. A failed rebuild must leave lookup empty and index-based queries safe until a later reshape rebuilds it.
+// array. A failed rebuild must leave the index empty and index-based queries safe. Name lookups scan the binding set
+// until a later reshape rebuilds the index, so a live binding never reads as absent.
 TEST_F(InputPollerTest, ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
@@ -6804,30 +7069,134 @@ TEST_F(InputPollerTest, ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe)
         }
 
         ASSERT_EQ(poller.binding_count(), 2u) << "budget=" << budget;
-        const bool seed_indexed = poller.acquire_binding_token(SEED_NAME).valid();
-        const bool extra_indexed = poller.acquire_binding_token(EXTRA_NAME).valid();
-        if (seed_indexed || extra_indexed)
+        if (poller.name_index_authoritative_for_test())
         {
-            EXPECT_TRUE(seed_indexed) << "budget=" << budget;
-            EXPECT_TRUE(extra_indexed) << "budget=" << budget;
+            EXPECT_TRUE(poller.acquire_binding_token(SEED_NAME).valid()) << "budget=" << budget;
+            EXPECT_TRUE(poller.acquire_binding_token(EXTRA_NAME).valid()) << "budget=" << budget;
             continue;
         }
 
         reached_rebuild_failure = true;
         EXPECT_FALSE(poller.is_binding_active(0));
         EXPECT_FALSE(poller.is_binding_active(1));
-        EXPECT_EQ(poller.remove_bindings_by_name(SEED_NAME), 0u);
+        EXPECT_TRUE(poller.has_bindings_by_name(SEED_NAME));
+        EXPECT_TRUE(poller.acquire_binding_token(EXTRA_NAME).valid());
+        EXPECT_EQ(poller.remove_bindings_by_name(SEED_NAME), 1u);
+        EXPECT_TRUE(poller.name_index_authoritative_for_test()) << "the removal's rebuild did not restore the index";
+        EXPECT_FALSE(poller.has_bindings_by_name(SEED_NAME));
 
         detail::InputBinding repair;
         repair.name = REPAIR_NAME;
         repair.keys = {keyboard_key(0x72)};
         ASSERT_TRUE(poller.add_binding(std::move(repair)));
-        EXPECT_TRUE(poller.acquire_binding_token(SEED_NAME).valid());
+        EXPECT_FALSE(poller.acquire_binding_token(SEED_NAME).valid());
         EXPECT_TRUE(poller.acquire_binding_token(EXTRA_NAME).valid());
         EXPECT_TRUE(poller.acquire_binding_token(REPAIR_NAME).valid());
     }
 
     EXPECT_TRUE(reached_rebuild_failure) << "allocation sweep never reached the post-reshape cache rebuild";
+}
+
+namespace
+{
+    /**
+     * @brief Grows @p poller until one add_binding lands its reshape but fails the cache rebuild after it.
+     * @details The first budget that lands the reshape always fails the rebuild, because the rebuild allocates more.
+     * @return true when the name index is left non-authoritative.
+     */
+    [[nodiscard]] bool degrade_name_index(detail::InputPoller &poller)
+    {
+        for (long long budget = 0; budget <= 64; ++budget)
+        {
+            detail::InputBinding extra;
+            extra.name = "degrading_binding_" + std::to_string(budget) + "_past_the_small_string_buffer";
+            extra.keys = {keyboard_key(0x71)};
+            bool added = false;
+            {
+                dmk_test::AllocFailScope fail(budget);
+                added = poller.add_binding(std::move(extra));
+            }
+            if (added && !poller.name_index_authoritative_for_test())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+} // namespace
+
+// Every name verb resolves through the binding scan while a failed rebuild leaves the index non-authoritative, and an
+// empty name still addresses no binding. A resolved set_consume or update_combos rebuilds the index, so each verb gets
+// its own degraded poller.
+TEST_F(InputPollerTest, DegradedIndexNameVerbsResolveByScan)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    (void)DetourModKit::log();
+    constexpr std::string_view HELD_NAME = "held_binding_with_a_name_past_the_small_string_buffer";
+    constexpr std::string_view SPARE_NAME = "spare_binding_with_a_name_past_the_small_string_buffer";
+    constexpr int HELD_VK = 0x70;
+    const auto make_bindings = [&]
+    {
+        std::vector<detail::InputBinding> bindings;
+        detail::InputBinding held;
+        held.name = HELD_NAME;
+        held.keys = {keyboard_key(HELD_VK)};
+        bindings.push_back(std::move(held));
+        detail::InputBinding spare;
+        spare.name = SPARE_NAME;
+        spare.keys = {keyboard_key(0x72)};
+        bindings.push_back(std::move(spare));
+        detail::InputBinding anonymous;
+        anonymous.keys = {keyboard_key(0x73)};
+        bindings.push_back(std::move(anonymous));
+        return bindings;
+    };
+
+    {
+        detail::InputPoller poller(make_bindings());
+        ASSERT_TRUE(degrade_name_index(poller));
+        // Only a resolved name can flip the flag, and the flip rebuilds the index.
+        poller.set_consume(SPARE_NAME, true);
+        EXPECT_TRUE(poller.name_index_authoritative_for_test()) << "set_consume missed a live name";
+    }
+    {
+        detail::InputPoller poller(make_bindings());
+        ASSERT_TRUE(degrade_name_index(poller));
+        const input::KeyComboList combos{
+            input::KeyCombo{{keyboard_key(0x74)}, {}},
+            input::KeyCombo{{keyboard_key(0x75)}, {}},
+        };
+        EXPECT_EQ(poller.update_combos(SPARE_NAME, combos), detail::InputPoller::ComboUpdate::Updated);
+    }
+    {
+        detail::InputPoller poller(make_bindings());
+        ASSERT_TRUE(degrade_name_index(poller));
+        const std::size_t count = poller.binding_count();
+        EXPECT_FALSE(poller.has_bindings_by_name(""));
+        EXPECT_EQ(poller.remove_bindings_by_name(""), 0u);
+        poller.set_consume("", true);
+        EXPECT_FALSE(poller.name_index_authoritative_for_test()) << "set_consume(\"\") reached the anonymous binding";
+        EXPECT_EQ(poller.binding_count(), count);
+    }
+    {
+        // Declared before the poller, so the poll thread joins before the probe clears.
+        struct ProbeReset
+        {
+            ~ProbeReset() { detail::g_input_key_state_probe = nullptr; }
+        } probe_reset;
+        detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+        detail::InputPoller poller(make_bindings(), std::chrono::milliseconds{2}, false);
+        poller.start();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!poller.is_binding_active(HELD_NAME) && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        ASSERT_TRUE(poller.is_binding_active(HELD_NAME)) << "the held key never activated its binding";
+        ASSERT_TRUE(degrade_name_index(poller));
+        EXPECT_TRUE(poller.is_binding_active(HELD_NAME)) << "a held binding read inactive through the degraded index";
+        poller.shutdown();
+    }
 }
 
 namespace
@@ -7608,6 +7977,253 @@ TEST(InputPollerExternalWheelTest, ReshapeBetweenDrainAndEvaluationCarriesDraine
     EXPECT_TRUE(carry_wait([] { return g_carry_wheel_presses.load() >= 1; }))
         << "the reshaped-away cycle dropped the drained notch instead of carrying it";
     EXPECT_EQ(g_carry_wheel_presses.load(), 1) << "the carried notch must deliver exactly once";
+
+    poller->shutdown();
+    poller.reset();
+}
+
+namespace
+{
+    // Clears every poll-loop seam the carry cases install. Declare it before the poller, so the poll thread joins
+    // before the seams and their captures die.
+    struct CarrySeamReset
+    {
+        CarrySeamReset() noexcept
+        {
+            g_carry_wheel_presses.store(0);
+            g_carry_drain_budget.store(0);
+            g_carry_drain_calls.store(0);
+            g_carry_probe_entered.store(false);
+            g_carry_probe_release.store(false);
+        }
+        ~CarrySeamReset()
+        {
+            detail::g_input_external_wheel_post_drain_probe = nullptr;
+            detail::g_input_post_stage_probe = nullptr;
+            detail::g_input_key_state_probe = nullptr;
+        }
+        CarrySeamReset(const CarrySeamReset &) = delete;
+        CarrySeamReset &operator=(const CarrySeamReset &) = delete;
+    };
+
+    [[nodiscard]] detail::InputBinding carry_wheel_binding(std::function<void()> on_press)
+    {
+        detail::InputBinding binding;
+        binding.name = "carry_wheel";
+        binding.keys = {mouse_wheel(WheelCode::Up)};
+        binding.trigger = input::Trigger::Press;
+        binding.on_press = std::move(on_press);
+        return binding;
+    }
+
+    [[nodiscard]] std::shared_ptr<detail::InputPoller> make_carry_poller(std::vector<detail::InputBinding> bindings)
+    {
+        return std::make_shared<detail::InputPoller>(
+            std::move(bindings),
+            std::chrono::milliseconds{1},
+            false,
+            0,
+            GamepadCode::TriggerThreshold,
+            GamepadCode::StickThreshold,
+            input::Input::WheelBackend::ExternalHost,
+            &g_carry_host_table
+        );
+    }
+
+    /// Parks the poll thread in the post-drain probe once, on the first drain that carries a notch.
+    void park_on_first_carry_notch(const std::array<int, 4> &counts)
+    {
+        if (counts[DMK_WHEEL_UP] > 0 && !g_carry_probe_entered.exchange(true))
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            while (!g_carry_probe_release.load() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        }
+    }
+
+    /// Waits for @p cycles more host drains, so a late duplicate delivery has time to show.
+    [[nodiscard]] bool carry_settle(int cycles)
+    {
+        const int target = g_carry_drain_calls.load() + cycles;
+        return carry_wait([target] { return g_carry_drain_calls.load() >= target; });
+    }
+} // namespace
+
+// A staging failure that lands before the wheel evaluation must park the drained external counts ([B-92]). The
+// reshape grows the binding set past the staged-callback capacity, so the pass fails at its first allocation.
+TEST(InputPollerExternalWheelTest, StagingFailureBeforeWheelEvaluationCarriesDrainedNotches)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    static std::atomic<bool> s_alloc_armed{false};
+    static std::atomic<long long> s_calls_before{0};
+    static std::atomic<long long> s_alloc_attempts{-1};
+    s_alloc_armed.store(false);
+    s_alloc_attempts.store(-1);
+    // The failed pass logs, so the logger's first use must not land inside the armed window.
+    (void)DetourModKit::log();
+    CarrySeamReset seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(carry_wheel_binding([]() noexcept { g_carry_wheel_presses.fetch_add(1); }));
+    auto poller = make_carry_poller(std::move(bindings));
+    ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
+
+    detail::g_input_external_wheel_post_drain_probe = [](const std::array<int, 4> &counts)
+    {
+        const bool first = counts[DMK_WHEEL_UP] > 0 && !g_carry_probe_entered.load();
+        park_on_first_carry_notch(counts);
+        if (first)
+        {
+            // This thread's next allocation is the staging reserve that the reshape made grow.
+            s_calls_before.store(dmk_test::thread_new_calls());
+            dmk_test::arm_alloc_failure(0);
+            s_alloc_armed.store(true);
+        }
+    };
+    detail::g_input_post_stage_probe = [](std::size_t)
+    {
+        if (s_alloc_armed.exchange(false))
+        {
+            s_alloc_attempts.store(dmk_test::thread_new_calls() - s_calls_before.load());
+            dmk_test::disarm_alloc_failure();
+        }
+    };
+    poller->start();
+
+    ASSERT_TRUE(carry_wait([] { return g_carry_drain_calls.load() >= 3; })) << "the poll loop never reached its drain";
+    g_carry_drain_budget.store(1);
+    ASSERT_TRUE(carry_wait([] { return g_carry_probe_entered.load(); }))
+        << "the poll thread never drained the staged notch";
+    detail::InputBinding dummy;
+    dummy.name = "carry_dummy";
+    dummy.keys = {keyboard_key(0x42)};
+    ASSERT_TRUE(poller->add_binding(std::move(dummy)));
+    g_carry_probe_release.store(true);
+
+    ASSERT_TRUE(carry_wait([] { return s_alloc_attempts.load() >= 0; })) << "the armed cycle never reached staging";
+    ASSERT_GE(s_alloc_attempts.load(), 1) << "the staging pass never allocated, so no failure preceded the wheel";
+    EXPECT_TRUE(carry_wait([] { return g_carry_wheel_presses.load() >= 1; }))
+        << "the failed pass lost the drained external notch";
+    ASSERT_TRUE(carry_settle(8));
+    EXPECT_EQ(g_carry_wheel_presses.load(), 1) << "the parked notch must deliver exactly once";
+
+    poller->shutdown();
+    poller.reset();
+}
+
+// The generation-mismatch branch already parked the drained counts when a later staging copy throws. The failed pass
+// must still deliver them exactly once, so an additive re-park of the same counts fails this case.
+TEST(InputPollerExternalWheelTest, StagingFailureAfterParkingCarriesDrainedNotchesOnce)
+{
+    constexpr int THROWING_VK = 0x43;
+    static std::atomic<bool> s_key_down{false};
+    static std::atomic<bool> s_notch_cycle{false};
+    static std::atomic<int> s_parked_cycle_failed{-1};
+    s_key_down.store(false);
+    s_notch_cycle.store(false);
+    s_parked_cycle_failed.store(-1);
+    auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
+    auto failed_copies = std::make_shared<std::atomic<int>>(0);
+    auto invocations = std::make_shared<std::atomic<int>>(0);
+    CarrySeamReset seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(carry_wheel_binding([]() noexcept { g_carry_wheel_presses.fetch_add(1); }));
+    detail::InputBinding throwing;
+    throwing.name = "carry_throwing_key";
+    throwing.keys = {keyboard_key(THROWING_VK)};
+    throwing.trigger = input::Trigger::Press;
+    throwing.on_press = dmk_test::ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
+    bindings.push_back(std::move(throwing));
+    auto poller = make_carry_poller(std::move(bindings));
+    ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
+
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == THROWING_VK && s_key_down.load(); };
+    detail::g_input_external_wheel_post_drain_probe = [](const std::array<int, 4> &counts)
+    {
+        const bool first = counts[DMK_WHEEL_UP] > 0 && !g_carry_probe_entered.load();
+        park_on_first_carry_notch(counts);
+        if (first)
+        {
+            s_notch_cycle.store(true);
+        }
+    };
+    detail::g_input_post_stage_probe = [throw_on_copy, failed_copies](std::size_t)
+    {
+        if (s_notch_cycle.exchange(false))
+        {
+            s_parked_cycle_failed.store(failed_copies->load() > 0 ? 1 : 0);
+            throw_on_copy->store(false);
+        }
+    };
+    poller->start();
+
+    ASSERT_TRUE(carry_wait([] { return g_carry_drain_calls.load() >= 3; })) << "the poll loop never reached its drain";
+    g_carry_drain_budget.store(1);
+    ASSERT_TRUE(carry_wait([] { return g_carry_probe_entered.load(); }))
+        << "the poll thread never drained the staged notch";
+    throw_on_copy->store(true);
+    s_key_down.store(true);
+    detail::InputBinding dummy;
+    dummy.name = "carry_dummy";
+    dummy.keys = {keyboard_key(0x42)};
+    ASSERT_TRUE(poller->add_binding(std::move(dummy)));
+    g_carry_probe_release.store(true);
+
+    ASSERT_TRUE(carry_wait([] { return s_parked_cycle_failed.load() >= 0; }))
+        << "the parked cycle never reached staging";
+    EXPECT_EQ(s_parked_cycle_failed.load(), 1) << "the key edge copy did not fail in the parked cycle";
+    EXPECT_TRUE(carry_wait([] { return g_carry_wheel_presses.load() >= 1; }))
+        << "the failed pass lost the parked external notch";
+    ASSERT_TRUE(carry_settle(8));
+    EXPECT_EQ(g_carry_wheel_presses.load(), 1) << "a failed pass parked the drained counts twice";
+    EXPECT_EQ(invocations->load(), 1) << "the key edge must fire once on the cycle after the failure";
+
+    poller->shutdown();
+    poller.reset();
+}
+
+// The ExternalHost twin of InterceptMessageHookPollerTest.StagingFailureDoesNotDestroyTheWheelNotch. A copy failure
+// after the drained counts reached the pulse leaves them to the pulse rollback, never to the carry as well.
+TEST(InputPollerExternalWheelTest, StagingFailureDoesNotDestroyTheExternalWheelNotch)
+{
+    auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
+    auto failed_copies = std::make_shared<std::atomic<int>>(0);
+    auto invocations = std::make_shared<std::atomic<int>>(0);
+    CarrySeamReset seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(carry_wheel_binding(dmk_test::ThrowingCopyCallback{throw_on_copy, failed_copies, invocations}));
+    auto poller = make_carry_poller(std::move(bindings));
+    ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
+
+    detail::g_input_external_wheel_post_drain_probe = [throw_on_copy](const std::array<int, 4> &counts)
+    {
+        if (counts[DMK_WHEEL_UP] > 0 && !g_carry_probe_entered.exchange(true))
+        {
+            throw_on_copy->store(true);
+        }
+    };
+    detail::g_input_post_stage_probe = [throw_on_copy, failed_copies](std::size_t)
+    {
+        if (failed_copies->load() > 0)
+        {
+            throw_on_copy->store(false);
+        }
+    };
+    poller->start();
+
+    ASSERT_TRUE(carry_wait([] { return g_carry_drain_calls.load() >= 3; })) << "the poll loop never reached its drain";
+    g_carry_drain_budget.store(1);
+    ASSERT_TRUE(carry_wait([failed_copies] { return failed_copies->load() > 0; }))
+        << "the notch cycle never failed its staging copy";
+    EXPECT_TRUE(carry_wait([invocations] { return invocations->load() >= 1; }))
+        << "the failed pass destroyed the drained external notch";
+    ASSERT_TRUE(carry_settle(8));
+    EXPECT_EQ(invocations->load(), 1) << "the rolled-back notch must deliver exactly once";
+    EXPECT_EQ(failed_copies->load(), 1);
 
     poller->shutdown();
     poller.reset();

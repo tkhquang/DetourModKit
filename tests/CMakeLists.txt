@@ -396,6 +396,9 @@ if(DMK_BUILD_TESTS)
     Lifecycle.InputRegistrationRacesCallbackShutdown
     Lifecycle.InputExternalShutdownRunsDownSynchronously
     InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing
+    Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread
+    Lifecycle.ControlThreadReleaseWithoutShutdownRunsDown
+    Lifecycle.ControlThreadShutdownAbandonedPremiseRunsDownBeforeClearing
     Lifecycle.InputFirstUseOomFailsClosed
     Lifecycle.InputConcurrentFirstUseOomFailsClosed
     Lifecycle.InputFirstUseSuccessStartsEngine
@@ -571,7 +574,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 241)
+    --minimum 247)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()
