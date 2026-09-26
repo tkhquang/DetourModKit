@@ -1,17 +1,23 @@
 #include <gtest/gtest.h>
+#include <windows.h>
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
 #include "DetourModKit/filesystem.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include "fixtures/loader_lock_scope.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
+using DetourModKit::detail::utf8_from_wide;
+using DetourModKit::detail::widen_utf8;
 
 // [B-100] Filesystem boundary. Each call returns a separate string that can allocate. The forced loader verdict does
 // not change the cached value.
@@ -161,4 +167,31 @@ TEST(FilesystemContractTest, OwningResultCopyCostIsDocumented)
         std::is_same_v<decltype(filesystem::get_runtime_directory_utf8()), std::string>,
         "get_runtime_directory_utf8 returns an owning std::string, not a reference or view"
     );
+}
+
+// An unpaired surrogate is a valid NTFS name that path::string() and path::u8string() reject with an exception.
+TEST(Utf8ConversionTest, LoneSurrogateRendersReplacementCharacter)
+{
+    std::string rendered;
+    EXPECT_NO_THROW(rendered = utf8_from_wide(L"a\xD800z"));
+    EXPECT_EQ(rendered, "a\xEF\xBF\xBDz");
+}
+
+TEST(Utf8ConversionTest, CjkTextRoundTrips)
+{
+    RecordProperty("GetACP", static_cast<int>(GetACP()));
+    const std::string utf8_text = "\xE7\x94\xA8\xE6\x88\xB7";
+    const std::wstring wide_text = L"\x7528\x6237";
+    EXPECT_EQ(widen_utf8(utf8_text), wide_text);
+    EXPECT_EQ(utf8_from_wide(wide_text), utf8_text);
+}
+
+// CreateFileW stops at the first NUL, so a widened embedded NUL names a different file.
+TEST(Utf8ConversionTest, IllFormedOrEmbeddedNulInputWidensToEmpty)
+{
+    EXPECT_TRUE(widen_utf8("\xED\xA0\x80").empty()) << "an encoded surrogate is ill-formed UTF-8";
+    EXPECT_TRUE(widen_utf8("\x80\x81").empty()) << "a bare continuation byte is ill-formed UTF-8";
+    EXPECT_TRUE(widen_utf8("\xE7\x94").empty()) << "a truncated sequence is ill-formed UTF-8";
+    EXPECT_TRUE(widen_utf8(std::string_view{"a\0b", 3}).empty());
+    EXPECT_TRUE(widen_utf8(std::string_view{}).empty());
 }

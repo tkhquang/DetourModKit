@@ -6,7 +6,7 @@
  * @brief Shared bounded UTF-8 -> UTF-16 widening for module-name lookups.
  */
 
-#include <windows.h>
+#include "internal/utf8_conversion.hpp"
 
 #include <climits>
 #include <cstddef>
@@ -43,36 +43,9 @@ namespace DetourModKit
             {
                 return std::wstring{};
             }
-
-            const std::string_view name{data, length};
-            if (name.find('\0') != std::string_view::npos)
-            {
-                return std::wstring{};
-            }
-
-            const int input_length = static_cast<int>(length);
-            const int wide_length =
-                ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, input_length, nullptr, 0);
-            if (wide_length <= 0)
-            {
-                return std::wstring{};
-            }
             try
             {
-                std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-                const int converted = ::MultiByteToWideChar(
-                    CP_UTF8,
-                    MB_ERR_INVALID_CHARS,
-                    data,
-                    input_length,
-                    wide_name.data(),
-                    wide_length
-                );
-                if (converted != wide_length)
-                {
-                    return std::wstring{};
-                }
-                return wide_name;
+                return widen_utf8(std::string_view{data, length});
             }
             catch (const std::bad_alloc &)
             {

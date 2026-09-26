@@ -3,9 +3,11 @@
 #include "DetourModKit/filesystem.hpp"
 
 #include "internal/async_logger.hpp"
+#include "internal/utf8_conversion.hpp"
 #include "internal/win_file_stream.hpp"
 #include "platform.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -14,16 +16,15 @@
 #include <iostream>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    // Test-only probe fired from Logger::shutdown_internal() inside its dropped-mutex window: async logging already
-    // disabled but the sink stream not yet closed. When non-null, a fixture uses it to prove that enable_async_mode()'s
-    // m_shutdown_called gate refuses to resurrect async logging in exactly that gap (the one interleaving a bare
-    // after-shutdown enable cannot reach, because by then the stream is also closed). Set / cleared on a single thread
-    // inside a test fixture; the definition and fire site compile out of shipping builds.
+    // shutdown_internal() fires this test-only probe inside its dropped-mutex window, after the first writer retirement
+    // and before the final re-check. A fixture drives configure() and enable_async_mode() calls into that window. Tests
+    // install it on one thread. Builds without DMK_ENABLE_TEST_SEAMS omit it.
     void (*g_logger_shutdown_gap_probe)() noexcept = nullptr;
 
     // Test-only probe fired inside enable_async_mode()'s arm-then-publish window. When non-null it may throw, which
@@ -381,6 +382,11 @@ namespace DetourModKit
         // Opens a candidate sink and never touches this Logger, so reconfigure_locked() can prove the replacement
         // file before it retires the live one. Truncate starts a fresh file. Append preserves prior records.
         const std::wstring log_file_full_path = generate_log_file_path(file_name);
+        if (log_file_full_path.empty() && !file_name.empty())
+        {
+            // generate_log_file_path() already reported the name that did not widen. An empty path names no file.
+            return nullptr;
+        }
         const auto mode = truncate ? (std::ios::out | std::ios::trunc) : (std::ios::out | std::ios::app);
         auto sink = std::make_shared<detail::WinFileStream>();
         sink->open(log_file_full_path, mode);
@@ -388,7 +394,7 @@ namespace DetourModKit
         if (!sink->is_open())
         {
             std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
+                      << "Failed to open log file: " << detail::utf8_from_wide(log_file_full_path)
                       << ". Subsequent logs to file will fail." << '\n';
             return nullptr;
         }
@@ -442,41 +448,42 @@ namespace DetourModKit
             return;
         }
 
+        // Retires the published writer. The caller holds m_async_mutex but not *m_log_mutex_ptr, which the writer
+        // takes to drain before its join returns. Returns true when the writer detached and keeps final sink access.
+        const auto retire_published_writer = [this](std::shared_ptr<AsyncLogger> &owner) noexcept -> bool
+        {
+            if (!m_async_mode_enabled.load(std::memory_order_acquire))
+            {
+                return false;
+            }
+            owner = m_async_logger.exchange(nullptr, std::memory_order_acq_rel);
+            m_async_mode_enabled.store(false, std::memory_order_release);
+            if (!owner)
+            {
+                return false;
+            }
+            owner->shutdown();
+            m_dropped_messages.fetch_add(owner->dropped_count(), std::memory_order_relaxed);
+            if (owner->writer_was_detached())
+            {
+                // The latch precedes the release of m_async_mutex, so configure cannot reopen behind the writer.
+                m_async_writer_abandoned.store(true, std::memory_order_release);
+                return true;
+            }
+            // The joined writer reads no state. The owner reference keeps it alive, so the root release cannot destroy
+            // the writer inside its own call.
+            owner->release_retention_root();
+            return false;
+        };
+
         std::shared_ptr<AsyncLogger> local_logger;
         bool writer_detached = false;
-
         {
             std::lock_guard<std::mutex> lock(m_async_mutex);
-            if (m_async_mode_enabled.load(std::memory_order_acquire))
-            {
-                local_logger = m_async_logger.exchange(nullptr, std::memory_order_acq_rel);
-                m_async_mode_enabled.store(false, std::memory_order_release);
-                if (local_logger)
-                {
-                    local_logger->shutdown();
-                    writer_detached = local_logger->writer_was_detached();
-                    m_dropped_messages.fetch_add(local_logger->dropped_count(), std::memory_order_relaxed);
-                    if (writer_detached)
-                    {
-                        // The retained writer still owns the sink. Latch the facade inert before releasing the
-                        // lifecycle mutex so configure cannot reopen behind it.
-                        m_async_writer_abandoned.store(true, std::memory_order_release);
-                    }
-                    else
-                    {
-                        // The writer was joined, so nothing reads its state any more. local_logger is the external
-                        // strong owner that makes breaking the root safe: without it the reset below would drop the
-                        // last reference and destroy the object from inside its own member function.
-                        local_logger->release_retention_root();
-                    }
-                }
-            }
+            writer_detached = retire_published_writer(local_logger);
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-        // Test-only probe: fires in the dropped-mutex window opened above (m_async_mode_enabled is now false but the
-        // sink stream is still open), so a fixture can prove enable_async_mode()'s m_shutdown_called gate refuses to
-        // resurrect async logging in exactly this gap. Null and branch-only in production.
         if (auto *gap_probe = detail::g_logger_shutdown_gap_probe)
         {
             gap_probe();
@@ -495,17 +502,29 @@ namespace DetourModKit
             return;
         }
 
+        // A configure() and enable_async_mode() pair in the gap can publish a writer. m_async_mutex stays held from
+        // this re-check through the close, so no pair publishes between them. A writer that any path detached keeps
+        // final sink access (`[B-48]`), so the close runs only while the abandoned latch is clear. Every write of that
+        // latch runs under m_async_mutex. gap_logger drops after both mutexes release.
+        std::shared_ptr<AsyncLogger> gap_logger;
+        bool gap_writer_detached = false;
         {
-            // Normal path: the writer was joined (or async was never enabled), so this thread is the single owner of
-            // final sink access. Acquire both mutexes to prevent configure()/reconfigure() from opening a new stream in
-            // the gap after the async-logger teardown block above releases m_async_mutex.
-            std::scoped_lock lock(m_async_mutex, *m_log_mutex_ptr);
+            std::lock_guard<std::mutex> async_lock(m_async_mutex);
             m_shutdown_called.store(true, std::memory_order_release);
-            if (m_log_file_stream_ptr && m_log_file_stream_ptr->is_open())
+            gap_writer_detached = retire_published_writer(gap_logger);
+            if (!m_async_writer_abandoned.load(std::memory_order_acquire))
             {
-                m_log_file_stream_ptr->flush();
-                m_log_file_stream_ptr->close();
+                std::lock_guard<std::mutex> sink_lock(*m_log_mutex_ptr);
+                if (m_log_file_stream_ptr && m_log_file_stream_ptr->is_open())
+                {
+                    m_log_file_stream_ptr->flush();
+                    m_log_file_stream_ptr->close();
+                }
             }
+        }
+        if (gap_writer_detached)
+        {
+            abandon_detached_async_logger(gap_logger);
         }
     }
 
@@ -642,8 +661,11 @@ namespace DetourModKit
 
         if (level >= LogLevel::Error)
         {
+            // std::cerr is shared with the host, so the level field pads by hand and leaves its format flags unchanged.
+            constexpr std::string_view level_padding{"       "};
             std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp(m_timestamp_format) << "] ["
-                      << std::setw(7) << std::left << level_str << "] :: " << message << '\n';
+                      << level_str << level_padding.substr(std::min(level_str.size(), level_padding.size()))
+                      << "] :: " << message << '\n';
         }
 
         // The file sink was closed or unhealthy; the message was not delivered to it (an error-level message reached
@@ -718,7 +740,15 @@ namespace DetourModKit
 
     std::wstring Logger::generate_log_file_path(const std::string &file_name) const
     {
-        std::filesystem::path log_file_path_obj(file_name);
+        const std::wstring wide_name = detail::widen_utf8(file_name);
+        if (!file_name.empty() && wide_name.empty())
+        {
+            std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] Log file name is not well-formed UTF-8, holds a "
+                      << "NUL, or exceeds INT_MAX bytes." << '\n';
+            return {};
+        }
+
+        const std::filesystem::path log_file_path_obj(wide_name);
         if (log_file_path_obj.is_absolute())
         {
             return log_file_path_obj.wstring();
@@ -734,7 +764,7 @@ namespace DetourModKit
                 return log_file_path_obj.wstring();
             }
 
-            const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / file_name;
+            const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / log_file_path_obj;
             return final_log_path.lexically_normal().wstring();
         }
         catch (const std::exception &e)
@@ -771,11 +801,9 @@ namespace DetourModKit
         {
             std::lock_guard<std::mutex> lock(m_async_mutex);
 
-            // Refuse to resurrect async logging after shutdown. shutdown()/~Logger set m_shutdown_called before
-            // shutdown_internal() clears m_async_mode_enabled, and shutdown_internal() drops m_async_mutex between that
-            // clear and the final stream close. Checking the gate under this mutex closes that window: a concurrent
-            // enable could otherwise see async mode off and a still-open stream, then start a writer that outlives
-            // teardown. configure() re-clears the gate after a clean shutdown, so legitimate re-enable still works.
+            // Refuse to resurrect async logging after shutdown. The check runs under m_async_mutex because
+            // shutdown_internal() drops that mutex before it closes the sink. A configure() inside that window clears
+            // the latch, and shutdown_internal() then retires any writer published there (`[B-48]`).
             if (m_shutdown_called.load(std::memory_order_acquire))
             {
                 return;

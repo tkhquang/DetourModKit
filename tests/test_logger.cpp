@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <process.h>
 #include <stdexcept>
@@ -23,6 +24,7 @@
 
 #include "internal/async_logger.hpp"
 #include "internal/logger_test_seams.hpp"
+#include "internal/utf8_conversion.hpp"
 
 #include "test_alloc_probe.hpp"
 
@@ -999,6 +1001,118 @@ TEST_F(LoggerTest, ErrorOnInvalidLogPath)
     Logger &logger = log();
     EXPECT_NO_THROW(logger.reconfigure("TEST", "/nonexistent_dir_12345/foo.log", "%Y-%m-%d %H:%M:%S"));
     EXPECT_NO_THROW(logger.info("Message after bad path"));
+}
+
+namespace
+{
+    std::atomic<int> s_path_case_counter{0};
+
+    /** @brief Returns @p stem with this process ID and a per-process counter appended. */
+    [[nodiscard]] std::string unique_path_stem(std::string_view stem)
+    {
+        return std::string(stem) + "_" + std::to_string(_getpid()) + "_" +
+               std::to_string(s_path_case_counter.fetch_add(1, std::memory_order_relaxed));
+    }
+
+    /** @brief Removes a test directory tree on every exit path. */
+    class DirectoryCleanup
+    {
+    public:
+        explicit DirectoryCleanup(std::filesystem::path directory) noexcept : m_directory(std::move(directory)) {}
+
+        ~DirectoryCleanup() noexcept
+        {
+            std::error_code error_code;
+            std::filesystem::remove_all(m_directory, error_code);
+        }
+
+        DirectoryCleanup(const DirectoryCleanup &) = delete;
+        DirectoryCleanup &operator=(const DirectoryCleanup &) = delete;
+        DirectoryCleanup(DirectoryCleanup &&) = delete;
+        DirectoryCleanup &operator=(DirectoryCleanup &&) = delete;
+
+    private:
+        std::filesystem::path m_directory;
+    };
+} // namespace
+
+// An ANSI code page decode of the ill-formed bytes names a different file. Its absence proves the strict UTF-8 route.
+TEST_F(LoggerTest, IllFormedUtf8FileNameOpensNoFile)
+{
+    const std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
+    const std::string ill_formed_name = unique_path_stem("dmk_log_bad") + "_\x80\x81.log";
+    const std::string file_name =
+        detail::utf8_from_wide((temp_dir / std::filesystem::path{}).native()) + ill_formed_name;
+
+    const int name_length = static_cast<int>(ill_formed_name.size());
+    const int acp_length = MultiByteToWideChar(CP_ACP, 0, ill_formed_name.data(), name_length, nullptr, 0);
+    ASSERT_GT(acp_length, 0);
+    std::wstring acp_name(static_cast<std::size_t>(acp_length), L'\0');
+    ASSERT_EQ(
+        MultiByteToWideChar(CP_ACP, 0, ill_formed_name.data(), name_length, acp_name.data(), acp_length),
+        acp_length
+    );
+    const std::filesystem::path acp_path = temp_dir / acp_name;
+    std::error_code error_code;
+    std::filesystem::remove(acp_path, error_code);
+
+    testing::internal::CaptureStderr();
+    EXPECT_NO_THROW({ const Logger dedicated("P", file_name); });
+    const std::string captured = testing::internal::GetCapturedStderr();
+    const bool acp_file_exists = std::filesystem::exists(acp_path, error_code);
+    std::filesystem::remove(acp_path, error_code);
+
+    EXPECT_FALSE(acp_file_exists) << "the logger opened the ANSI code page spelling of an ill-formed UTF-8 name";
+    EXPECT_NE(captured.find("not well-formed UTF-8"), std::string::npos) << captured;
+}
+
+// The diagnostic renders the wide path as UTF-8, and the same UTF-8 spelling opens a file outside the ANSI code page.
+TEST_F(LoggerTest, OpenSinkFailureDiagnosticPrintsWidePath)
+{
+    RecordProperty("GetACP", static_cast<int>(GetACP()));
+    std::filesystem::path cjk_dir = std::filesystem::temp_directory_path() / unique_path_stem("dmk_log_cjk");
+    cjk_dir += L"_\x7528\x6237";
+    std::error_code error_code;
+    std::filesystem::create_directories(cjk_dir, error_code);
+    ASSERT_FALSE(error_code) << error_code.message();
+    const DirectoryCleanup cleanup{cjk_dir};
+
+    const std::string missing_file =
+        detail::utf8_from_wide((cjk_dir / L"missing" / L"x.log").lexically_normal().native());
+    testing::internal::CaptureStderr();
+    EXPECT_NO_THROW({ const Logger failed_open("P", missing_file); });
+    const std::string captured = testing::internal::GetCapturedStderr();
+    EXPECT_NE(captured.find("Failed to open log file: " + missing_file + ". "), std::string::npos) << captured;
+
+    const std::filesystem::path opened_file = cjk_dir / L"x.log";
+    EXPECT_NO_THROW({ const Logger opened("P", detail::utf8_from_wide(opened_file.native())); });
+    EXPECT_TRUE(std::filesystem::exists(opened_file, error_code)) << "GetACP() " << GetACP();
+}
+
+// An ill-formed UTF-8 name opens no file, so configure() and reconfigure() on a live sink keep the previous sink.
+TEST_F(LoggerTest, IllFormedUtf8ReconfigurationKeepsTheLiveSink)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+    const std::string ill_formed_file =
+        detail::utf8_from_wide((std::filesystem::temp_directory_path() / std::filesystem::path{}).native()) +
+        unique_path_stem("dmk_log_bad_live") + "_\x80\x81.log";
+
+    testing::internal::CaptureStderr();
+    EXPECT_NO_THROW(Logger::configure("BAD", ill_formed_file, "%H:%M:%S"));
+    EXPECT_NO_THROW(logger.reconfigure("BAD", ill_formed_file, "%H:%M:%S"));
+    const std::string captured = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_ILL_FORMED_RECONFIG_4q8v"));
+    logger.flush();
+
+    std::ifstream input_stream(m_test_log_file);
+    ASSERT_TRUE(input_stream.is_open());
+    const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("AFTER_ILL_FORMED_RECONFIG_4q8v"), std::string::npos)
+        << "an ill-formed UTF-8 name retired the live sink";
+    EXPECT_NE(captured.find("not well-formed UTF-8"), std::string::npos) << captured;
+    EXPECT_EQ(captured.find("Failed to open log file"), std::string::npos)
+        << "an empty path reached a second diagnostic";
 }
 
 TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
@@ -2097,6 +2211,50 @@ TEST_F(LoggerTest, Log_ErrorLevel_WhenFileClosed_WritesToStderr)
         stderr_output.find("LOG_FILE_WRITE_ERROR") != std::string::npos ||
         stderr_output.find("CRITICAL ERROR") != std::string::npos
     );
+}
+
+namespace
+{
+    /** @brief Restores the process-wide std::cerr format flags on every exit path. */
+    class StderrFlagsRestore
+    {
+    public:
+        StderrFlagsRestore() noexcept : m_flags(std::cerr.flags()) {}
+
+        ~StderrFlagsRestore() noexcept { std::cerr.flags(m_flags); }
+
+        StderrFlagsRestore(const StderrFlagsRestore &) = delete;
+        StderrFlagsRestore &operator=(const StderrFlagsRestore &) = delete;
+        StderrFlagsRestore(StderrFlagsRestore &&) = delete;
+        StderrFlagsRestore &operator=(StderrFlagsRestore &&) = delete;
+
+    private:
+        std::ios_base::fmtflags m_flags;
+    };
+} // namespace
+
+// The host shares std::cerr, so the stderr fallback must leave its adjustment unchanged. The internal preset differs
+// from a sticky left and from a restore to right.
+TEST_F(LoggerTest, StderrFallbackLeavesStderrAdjustmentUnchanged)
+{
+    const StderrFlagsRestore flags_restore;
+    std::cerr.setf(std::ios_base::internal, std::ios_base::adjustfield);
+
+    static std::atomic<int> s_stderr_dir_counter{0};
+    const auto missing_dir = std::filesystem::temp_directory_path() /
+                             ("dmk_missing_stderr_dir_" + std::to_string(_getpid()) + "_" +
+                              std::to_string(s_stderr_dir_counter.fetch_add(1, std::memory_order_relaxed)));
+    Logger &logger = log();
+    logger.shutdown();
+    Logger::configure("STDERR_ADJUST", (missing_dir / "impossible.log").string(), "%H:%M:%S");
+
+    testing::internal::CaptureStderr();
+    logger.error("adjustment probe");
+    const std::string captured = testing::internal::GetCapturedStderr();
+    const auto adjustment = std::cerr.flags() & std::ios_base::adjustfield;
+
+    ASSERT_NE(captured.find("LOG_FILE_WRITE_ERROR"), std::string::npos) << captured;
+    EXPECT_EQ(adjustment, std::ios_base::internal) << "the stderr fallback changed the std::cerr adjustment";
 }
 
 TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
@@ -3384,6 +3542,234 @@ TEST_F(LoggerTest, ConfigureInsideShutdownGapCannotOutliveShutdown)
     Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
     EXPECT_TRUE(logger.log(LogLevel::Info, "RECOVERED_BY_AUTHORITATIVE_CONFIGURE"));
     std::filesystem::remove(forbidden_file, error_code);
+}
+
+namespace
+{
+    constexpr std::string_view GAP_PAIR_MARKER{"GAP_PAIR_RECORD_5k2w"};
+    std::atomic<bool> s_gap_pair_published{false};
+
+    /**
+     * @brief Publishes a writer inside the shutdown gap through configure() and then enable_async_mode().
+     * @details The configure() call clears the shutdown latch, so the enable passes every gate. The Error marker
+     *          cannot be filtered out and reaches the published writer.
+     */
+    void configure_then_enable_in_gap() noexcept
+    {
+        try
+        {
+            Logger::configure("TEST", g_gap_configure_file, "%Y-%m-%d %H:%M:%S");
+        }
+        catch (...)
+        {
+        }
+        log().enable_async_mode();
+        s_gap_pair_published.store(log().is_async_mode_enabled(), std::memory_order_release);
+        (void)log().log_noexcept(LogLevel::Error, GAP_PAIR_MARKER);
+        g_gap_probe_ran.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Publishes the gap pair and then retires its writer through a disable_async_mode() that detaches it.
+     * @details The detach sets the abandoned latch before the final block of shutdown_internal(), so that block finds
+     *          no published writer to retire.
+     */
+    void configure_enable_then_detach_in_gap() noexcept
+    {
+        configure_then_enable_in_gap();
+        DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+        log().disable_async_mode();
+    }
+
+    /**
+     * @brief Polls @p file for @p marker for up to five seconds.
+     * @return true when the file content holds @p marker before the deadline.
+     */
+    [[nodiscard]] bool wait_for_file_marker(const std::filesystem::path &file, std::string_view marker)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        for (;;)
+        {
+            std::ifstream input_stream(file);
+            const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+            if (content.find(marker) != std::string::npos)
+            {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+    }
+
+    /**
+     * @brief Runs the gap pair under a forced detach and exits with the first broken expectation.
+     * @details The abandoned latch is permanent for the process default, so only a death-test child runs this.
+     *          Exit 0 means the detached gap writer stays retained, the latch holds, and the sink stays open for the
+     *          writer.
+     */
+    [[noreturn]] void run_gap_pair_detach_probe()
+    {
+        static std::atomic<bool> writer_gate{true};
+        writer_gate.store(true, std::memory_order_release);
+
+        const auto log_file = unique_activation_log_path("test_logger_gap_detach");
+        const auto rival_file = unique_activation_log_path("test_logger_gap_rival");
+        std::error_code error_code;
+        std::filesystem::remove(log_file, error_code);
+        std::filesystem::remove(rival_file, error_code);
+
+        g_gap_configure_file = log_file.string();
+        Logger::configure("TEST", g_gap_configure_file, "%Y-%m-%d %H:%M:%S");
+        Logger &logger = DetourModKit::log();
+        logger.disable_async_mode();
+        g_gap_probe_ran.store(false, std::memory_order_release);
+        s_gap_pair_published.store(false, std::memory_order_release);
+
+        diagnostics::reset_intentional_leaks();
+        const std::size_t logger_leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+        const std::size_t writer_leaks_before =
+            diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::AsyncLogger);
+        const std::size_t live_before =
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+        DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+        DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+        DetourModKit::detail::g_logger_shutdown_gap_probe = &configure_then_enable_in_gap;
+        logger.shutdown();
+        DetourModKit::detail::g_logger_shutdown_gap_probe = nullptr;
+
+        if (!s_gap_pair_published.load(std::memory_order_acquire))
+        {
+            std::_Exit(41);
+        }
+        if (logger.is_async_mode_enabled())
+        {
+            std::_Exit(42);
+        }
+        if (diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger) != logger_leaks_before + 1 ||
+            diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::AsyncLogger) != writer_leaks_before + 1 ||
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed) != live_before + 1)
+        {
+            std::_Exit(43);
+        }
+
+        Logger::configure("RIVAL", rival_file.string(), "%H:%M:%S");
+        if (DetourModKit::log().log(LogLevel::Error, "GAP_DETACH_REVIVED") || std::filesystem::exists(rival_file))
+        {
+            std::_Exit(44);
+        }
+
+        writer_gate.store(false, std::memory_order_release);
+        const bool marker_present = wait_for_file_marker(log_file, GAP_PAIR_MARKER);
+        std::filesystem::remove(log_file, error_code);
+        std::_Exit(marker_present ? 0 : 45);
+    }
+
+    /**
+     * @brief Detaches the gap writer before the final block and exits with the first broken expectation.
+     * @details The abandoned latch is permanent for the process default, so only a death-test child runs this.
+     *          Exit 0 means the gated marker reached the file after the writer gate opened.
+     */
+    [[noreturn]] void run_gap_disable_detach_probe()
+    {
+        static std::atomic<bool> writer_gate{true};
+        writer_gate.store(true, std::memory_order_release);
+
+        const auto log_file = unique_activation_log_path("test_logger_gap_disable_detach");
+        std::error_code error_code;
+        std::filesystem::remove(log_file, error_code);
+
+        g_gap_configure_file = log_file.string();
+        Logger::configure("TEST", g_gap_configure_file, "%Y-%m-%d %H:%M:%S");
+        Logger &logger = DetourModKit::log();
+        logger.disable_async_mode();
+        s_gap_pair_published.store(false, std::memory_order_release);
+
+        diagnostics::reset_intentional_leaks();
+        const std::size_t logger_leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+
+        DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+        DetourModKit::detail::g_logger_shutdown_gap_probe = &configure_enable_then_detach_in_gap;
+        logger.shutdown();
+        DetourModKit::detail::g_logger_shutdown_gap_probe = nullptr;
+
+        if (!s_gap_pair_published.load(std::memory_order_acquire))
+        {
+            std::_Exit(41);
+        }
+        if (logger.is_async_mode_enabled())
+        {
+            std::_Exit(42);
+        }
+        if (diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger) != logger_leaks_before + 1)
+        {
+            std::_Exit(43);
+        }
+
+        writer_gate.store(false, std::memory_order_release);
+        const bool marker_present = wait_for_file_marker(log_file, GAP_PAIR_MARKER);
+        std::filesystem::remove(log_file, error_code);
+        std::_Exit(marker_present ? 0 : 45);
+    }
+} // namespace
+
+// A configure() and enable_async_mode() pair inside the shutdown gap publishes a writer. Shutdown must retire it,
+// drain its records, and release its module reference before the sink closes.
+TEST_F(LoggerTest, ConfigureThenEnableAsyncInsideShutdownGapIsTornDown)
+{
+    Logger &logger = log();
+    logger.disable_async_mode();
+    g_gap_probe_ran.store(false, std::memory_order_release);
+    s_gap_pair_published.store(false, std::memory_order_release);
+    g_gap_configure_file = m_test_log_file.string();
+
+    diagnostics::reset_intentional_leaks();
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+    const std::size_t pins_before = diagnostics::module_pin_count(diagnostics::ModulePinReason::AsyncLogger);
+
+    DetourModKit::detail::g_logger_shutdown_gap_probe = &configure_then_enable_in_gap;
+    logger.shutdown();
+    DetourModKit::detail::g_logger_shutdown_gap_probe = nullptr;
+
+    const bool async_survived = logger.is_async_mode_enabled();
+    const std::size_t live_after =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+    const std::size_t pins_after = diagnostics::module_pin_count(diagnostics::ModulePinReason::AsyncLogger);
+    // This call retires a writer that shutdown left published, so a failure cannot reach later cases.
+    logger.disable_async_mode();
+
+    ASSERT_TRUE(g_gap_probe_ran.load(std::memory_order_acquire)) << "the shutdown-gap probe never fired";
+    ASSERT_TRUE(s_gap_pair_published.load(std::memory_order_acquire)) << "the gap pair published no writer";
+    EXPECT_FALSE(async_survived) << "shutdown returned with the gap writer still published";
+    EXPECT_EQ(live_after, live_before) << "shutdown left the gap writer alive on its retention root";
+    EXPECT_EQ(pins_after, pins_before) << "shutdown left the gap writer's module reference booked";
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before);
+    EXPECT_FALSE(logger.log(LogLevel::Error, "MUST_REMAIN_SHUT_DOWN"));
+
+    std::ifstream input_stream(m_test_log_file);
+    const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find(GAP_PAIR_MARKER), std::string::npos) << "shutdown closed the sink before the writer drained";
+}
+
+// The unit suite owns this case: the loader-lock override seam forces the detach, and the death-test child confines
+// the permanent abandoned latch.
+TEST_F(LoggerTest, ConfigureThenEnableAsyncInsideShutdownGapRetainsADetachedWriter)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_gap_pair_detach_probe(), ::testing::ExitedWithCode(0), "");
+}
+
+// A disable_async_mode() that detaches the gap writer leaves it final sink access, so shutdown must not close the sink
+// under it. The death-test child confines the permanent abandoned latch.
+TEST_F(LoggerTest, ShutdownKeepsTheSinkForAWriterDetachedInsideTheGap)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_gap_disable_detach_probe(), ::testing::ExitedWithCode(0), "");
 }
 
 // A synchronous write to a sink that never opened is a lost message; dropped_count() must report it so consumers can

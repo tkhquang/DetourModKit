@@ -65,7 +65,9 @@ Stops the watcher synchronously. The notification drain, a final debounced `on_r
 
 ### `config::reload_hotkey(ini_key, default_combo)`
 
-Wires a key combo to `reload()` via `config::press_combo`. Can be called before or after `input::Input::instance().start()`. A hotkey registered while the poll engine runs goes live on the next poll cycle. One caveat: a `start()` with no staged bindings builds no engine, so a hotkey registered after such an empty `start()` stays staged until the next `start()`. The combo is sourced from `ini_key` in the `[Input]` section of the INI at load time and re-applied on every subsequent `reload()`. Returns `false` if `default_combo` is empty, is the literal `NONE` sentinel, or fails to parse into any valid combo (a typo default emits a WARNING first). All three cases otherwise register an inert binding.
+Wires a key combo to `reload()` via `config::press_combo`. Can be called before or after `input::Input::instance().start()`. A hotkey registered while the poll engine runs goes live on the next poll cycle. One caveat: a `start()` with no staged bindings builds no engine, so a hotkey registered after such an empty `start()` stays staged until the next `start()`. The combo is sourced from `ini_key` in the `[Input]` section of the INI at load time and re-applied on every subsequent `reload()`.
+
+Returns `false` if `default_combo` is empty, is the literal `NONE` sentinel, or fails to parse into any valid combo (a typo default emits a WARNING first). [`config.hpp`](../../../include/DetourModKit/config.hpp) states the complete return contract, including a failed registration and the in-place update for a repeated `ini_key`.
 
 ```cpp
 config::load("mymod.ini");

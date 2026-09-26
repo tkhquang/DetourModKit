@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -340,8 +341,8 @@ TEST_F(SessionStartAsyncActivation, PostPublicationThrowLeavesWriterSessionOwned
     std::filesystem::remove(log_path, error_code);
 }
 
-// The child executable supplies the long basename that the process gate reads. The parent starts the exact child case
-// and checks its proof marker.
+// A renamed child executable supplies the basename that the process gate reads. Each parent starts one exact child
+// case and checks its proof marker.
 namespace
 {
     constexpr DWORD CHILD_PROCESS_TIMEOUT_MS = 60000;
@@ -349,14 +350,18 @@ namespace
     constexpr DWORD CHILD_ARTIFACT_CLEANUP_RETRY_MS = 20;
     constexpr std::string_view CHILD_EXECUTION_MARKER =
         "SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename:complete";
+    constexpr std::string_view FOLD_CHILD_EXECUTION_MARKER =
+        "SessionStart.DISABLED_ChildProcessGateFoldIsLocaleIndependent:complete";
     std::atomic<std::uint32_t> s_child_image_counter{0};
 
-    // The 100 U+65E5 code points use 300 UTF-8 bytes and 100 UTF-16 code units. The PID and counter make the child
-    // image name unique, while the complete component stays below the 255-code-unit limit.
-    [[nodiscard]] std::wstring unique_long_multibyte_stem()
+    /**
+     * @brief Returns a child image stem that starts with @p lead and ends with the PID and a counter.
+     * @param lead Leading text of the stem.
+     */
+    [[nodiscard]] std::wstring unique_child_stem(std::wstring_view lead)
     {
         const std::uint32_t counter = s_child_image_counter.fetch_add(1, std::memory_order_relaxed);
-        return std::wstring(100, L'\u65e5') + L"_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(counter);
+        return std::wstring(lead) + L"_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(counter);
     }
 
     [[nodiscard]] std::wstring current_exe_path_wide()
@@ -488,6 +493,143 @@ namespace
         std::filesystem::path m_marker;
         std::filesystem::path m_log;
     };
+
+    /**
+     * @brief Runs one disabled child case in a renamed copy of this executable and checks its proof marker.
+     * @param stem Unique stem of the child image name.
+     * @param child_case Full GoogleTest name of the disabled child case.
+     * @param marker_text Text that the child case writes to its proof marker after every assertion passes.
+     */
+    void run_renamed_child_case(std::wstring_view stem, std::wstring_view child_case, std::string_view marker_text)
+    {
+        const std::wstring own = current_exe_path_wide();
+        ASSERT_FALSE(own.empty());
+
+        // Place the child image beside the original so it resolves the same fixture DLLs. A copy gives the child
+        // separate file identity. The parent process keeps its own executable mapped until this test exits.
+        const std::filesystem::path directory = std::filesystem::path(own).parent_path();
+        const std::filesystem::path renamed = directory / (std::wstring(stem) + L".exe");
+        const std::filesystem::path marker = child_execution_marker_path(renamed);
+        const std::filesystem::path child_log = child_log_path(renamed);
+        ChildArtifactCleanup artifacts{renamed, marker, child_log};
+
+        std::error_code cleanup_error;
+        ASSERT_TRUE(artifacts.cleanup(cleanup_error))
+            << "failed to clear prior child artifacts: " << cleanup_error.message();
+
+        std::error_code create_error;
+        std::filesystem::copy_file(own, renamed, create_error);
+        ASSERT_FALSE(create_error) << "failed to create the child image: " << create_error.message();
+        std::error_code identity_error;
+        const bool shares_parent_file = std::filesystem::equivalent(own, renamed, identity_error);
+        ASSERT_FALSE(identity_error) << "failed to compare child image identity: " << identity_error.message();
+        ASSERT_FALSE(shares_parent_file) << "the child image must not share the mapped parent file identity";
+
+        std::wstring command = L"\"" + renamed.wstring() + L"\" --gtest_also_run_disabled_tests --gtest_filter=";
+        command += child_case;
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const BOOL created = CreateProcessW(
+            renamed.c_str(),
+            command.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            directory.c_str(),
+            &startup,
+            &process
+        );
+        if (!created)
+        {
+            const DWORD launch_error = GetLastError();
+            FAIL() << "CreateProcessW failed with " << launch_error;
+        }
+
+        const DWORD wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
+        const DWORD wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+        BOOL terminate_result = TRUE;
+        DWORD terminate_error = ERROR_SUCCESS;
+        DWORD terminate_wait_result = WAIT_OBJECT_0;
+        if (wait_result != WAIT_OBJECT_0)
+        {
+            terminate_result = TerminateProcess(process.hProcess, 1);
+            if (!terminate_result)
+            {
+                terminate_error = GetLastError();
+            }
+            terminate_wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
+        }
+
+        DWORD exit_code = STILL_ACTIVE;
+        BOOL exit_code_read = FALSE;
+        DWORD exit_code_error = ERROR_SUCCESS;
+        if (wait_result == WAIT_OBJECT_0)
+        {
+            exit_code_read = GetExitCodeProcess(process.hProcess, &exit_code);
+            if (!exit_code_read)
+            {
+                exit_code_error = GetLastError();
+            }
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+
+        if (wait_result != WAIT_OBJECT_0)
+        {
+            std::error_code failure_cleanup_error;
+            EXPECT_TRUE(artifacts.cleanup(failure_cleanup_error))
+                << "failed to remove child artifacts: " << failure_cleanup_error.message();
+        }
+        ASSERT_EQ(wait_result, static_cast<DWORD>(WAIT_OBJECT_0))
+            << "child wait result " << wait_result << ", Win32 error " << wait_error << ", terminate result "
+            << terminate_result << ", terminate error " << terminate_error << ", final wait result "
+            << terminate_wait_result;
+        ASSERT_NE(exit_code_read, FALSE) << "GetExitCodeProcess failed with " << exit_code_error;
+        ASSERT_EQ(exit_code, 0u) << "the child process reported a failed Session proof";
+
+        std::string observed_marker;
+        {
+            std::ifstream marker_stream(marker, std::ios::binary);
+            ASSERT_TRUE(marker_stream.is_open()) << "the child produced no proof marker";
+            observed_marker.assign(std::istreambuf_iterator<char>{marker_stream}, std::istreambuf_iterator<char>{});
+        }
+        ASSERT_EQ(observed_marker, marker_text);
+
+        cleanup_error.clear();
+        ASSERT_TRUE(artifacts.cleanup(cleanup_error))
+            << "failed to remove child artifacts: " << cleanup_error.message();
+    }
+
+    /**
+     * @class LocaleRestore
+     * @brief Restores a captured C runtime locale for every category on scope exit.
+     */
+    class LocaleRestore final
+    {
+    public:
+        /**
+         * @brief Copies the locale name that the destructor restores.
+         * @param name Locale name that setlocale returned for LC_ALL.
+         */
+        explicit LocaleRestore(const char *name) : m_name(name) {}
+
+        /** @brief Restores the captured locale. */
+        ~LocaleRestore() noexcept { std::setlocale(LC_ALL, m_name.c_str()); }
+
+        /** @brief Returns the captured locale name. */
+        [[nodiscard]] const std::string &name() const noexcept { return m_name; }
+
+        LocaleRestore(const LocaleRestore &) = delete;
+        LocaleRestore &operator=(const LocaleRestore &) = delete;
+        LocaleRestore(LocaleRestore &&) = delete;
+        LocaleRestore &operator=(LocaleRestore &&) = delete;
+
+    private:
+        std::string m_name;
+    };
 } // namespace
 
 TEST_F(SessionStart, ChildArtifactCleanupRetriesTransientLocks)
@@ -569,105 +711,89 @@ TEST_F(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
 
 TEST_F(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
 {
+    // The 100 U+65E5 code points use 300 UTF-8 bytes and 100 UTF-16 code units. The complete image name component
+    // stays below the 255-code-unit limit.
+    ASSERT_NO_FATAL_FAILURE(run_renamed_child_case(
+        unique_child_stem(std::wstring(100, L'\u65e5')),
+        L"SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename",
+        CHILD_EXECUTION_MARKER
+    ));
+}
+
+TEST_F(SessionStart, DISABLED_ChildProcessGateFoldIsLocaleIndependent)
+{
     const std::wstring own = current_exe_path_wide();
     ASSERT_FALSE(own.empty());
+    const std::filesystem::path own_path{own};
+    const std::wstring basename_wide = own_path.filename().wstring();
+    ASSERT_FALSE(basename_wide.empty());
+    ASSERT_EQ(basename_wide.front(), L'\u00c4');
 
-    // Place the child image beside the original so it resolves the same fixture DLLs. A copy gives the child separate
-    // file identity. The parent process keeps its own executable mapped until this test exits.
-    const std::filesystem::path directory = std::filesystem::path(own).parent_path();
-    const std::filesystem::path renamed = directory / (unique_long_multibyte_stem() + L".exe");
-    const std::filesystem::path marker = child_execution_marker_path(renamed);
-    const std::filesystem::path child_log = child_log_path(renamed);
-    ChildArtifactCleanup artifacts{renamed, marker, child_log};
+    // U+00E4 is the lowercase form of U+00C4. U+00D6 is a different letter and controls against an always-true gate.
+    std::wstring variant_wide = basename_wide;
+    variant_wide.front() = L'\u00e4';
+    std::wstring other_wide = basename_wide;
+    other_wide.front() = L'\u00d6';
+    const std::string variant = to_utf8(variant_wide);
+    const std::string other = to_utf8(other_wide);
+    const std::string log_file = to_utf8(child_log_path(own_path).filename().wstring());
+    ASSERT_FALSE(variant.empty());
+    ASSERT_FALSE(other.empty());
+    ASSERT_FALSE(log_file.empty());
 
-    std::error_code cleanup_error;
-    ASSERT_TRUE(artifacts.cleanup(cleanup_error))
-        << "failed to clear prior child artifacts: " << cleanup_error.message();
-
-    std::error_code create_error;
-    std::filesystem::copy_file(own, renamed, create_error);
-    ASSERT_FALSE(create_error) << "failed to create the child image: " << create_error.message();
-    std::error_code identity_error;
-    const bool shares_parent_file = std::filesystem::equivalent(own, renamed, identity_error);
-    ASSERT_FALSE(identity_error) << "failed to compare child image identity: " << identity_error.message();
-    ASSERT_FALSE(shares_parent_file) << "the child image must not share the mapped parent file identity";
-
-    std::wstring command = L"\"" + renamed.wstring() +
-                           L"\" --gtest_also_run_disabled_tests"
-                           L" --gtest_filter=SessionStart.DISABLED_ChildProcessGateMatchesOwnBasename";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    const BOOL created = CreateProcessW(
-        renamed.c_str(),
-        command.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NO_WINDOW,
-        nullptr,
-        directory.c_str(),
-        &startup,
-        &process
-    );
-    if (!created)
+    const auto check_gate = [&](std::string_view locale_name) -> void
     {
-        const DWORD launch_error = GetLastError();
-        FAIL() << "CreateProcessW failed with " << launch_error;
-    }
-
-    const DWORD wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
-    const DWORD wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
-    BOOL terminate_result = TRUE;
-    DWORD terminate_error = ERROR_SUCCESS;
-    DWORD terminate_wait_result = WAIT_OBJECT_0;
-    if (wait_result != WAIT_OBJECT_0)
-    {
-        terminate_result = TerminateProcess(process.hProcess, 1);
-        if (!terminate_result)
         {
-            terminate_error = GetLastError();
+            Result<Session> accepted = Session::start(
+                ModInfo{
+                    .name = "SESS_TEST",
+                    .log_file = log_file,
+                    .game_process_name = variant,
+                }
+            );
+            ASSERT_TRUE(accepted.has_value()) << "locale " << locale_name << ": " << accepted.error().message();
         }
-        terminate_wait_result = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
-    }
+        Result<Session> rejected = Session::start(
+            ModInfo{
+                .name = "SESS_TEST",
+                .log_file = log_file,
+                .game_process_name = other,
+            }
+        );
+        ASSERT_FALSE(rejected.has_value()) << "locale " << locale_name;
+        EXPECT_EQ(rejected.error().code, ErrorCode::ProcessMismatch) << "locale " << locale_name;
+    };
 
-    DWORD exit_code = STILL_ACTIVE;
-    BOOL exit_code_read = FALSE;
-    DWORD exit_code_error = ERROR_SUCCESS;
-    if (wait_result == WAIT_OBJECT_0)
+    const char *const initial_locale = std::setlocale(LC_ALL, nullptr);
+    ASSERT_NE(initial_locale, nullptr);
+    const LocaleRestore restore{initial_locale};
+    ASSERT_EQ(restore.name(), "C") << "the first gate check requires the C locale";
+    ASSERT_NO_FATAL_FAILURE(check_gate(restore.name()));
+
+    // msvcrt.dll rejects the "de-DE" name, so "German_Germany.1252" is the fallback.
+    const char *applied = std::setlocale(LC_ALL, "de-DE");
+    if (applied == nullptr)
     {
-        exit_code_read = GetExitCodeProcess(process.hProcess, &exit_code);
-        if (!exit_code_read)
-        {
-            exit_code_error = GetLastError();
-        }
+        applied = std::setlocale(LC_ALL, "German_Germany.1252");
     }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    ASSERT_NE(applied, nullptr) << "no German locale is available";
+    const std::string applied_name{applied};
+    ASSERT_NO_FATAL_FAILURE(check_gate(applied_name));
 
-    if (wait_result != WAIT_OBJECT_0)
-    {
-        std::error_code failure_cleanup_error;
-        EXPECT_TRUE(artifacts.cleanup(failure_cleanup_error))
-            << "failed to remove child artifacts: " << failure_cleanup_error.message();
-    }
-    ASSERT_EQ(wait_result, static_cast<DWORD>(WAIT_OBJECT_0))
-        << "child wait result " << wait_result << ", Win32 error " << wait_error << ", terminate result "
-        << terminate_result << ", terminate error " << terminate_error << ", final wait result "
-        << terminate_wait_result;
-    ASSERT_NE(exit_code_read, FALSE) << "GetExitCodeProcess failed with " << exit_code_error;
-    ASSERT_EQ(exit_code, 0u) << "the child process reported a failed Session proof";
+    std::ofstream marker_stream(child_execution_marker_path(own_path), std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(marker_stream.is_open()) << "the child failed to create its proof marker";
+    marker_stream << FOLD_CHILD_EXECUTION_MARKER;
+    marker_stream.close();
+    ASSERT_TRUE(marker_stream) << "the child failed to commit its proof marker";
+}
 
-    std::string observed_marker;
-    {
-        std::ifstream marker_stream(marker, std::ios::binary);
-        ASSERT_TRUE(marker_stream.is_open()) << "the child produced no proof marker";
-        observed_marker.assign(std::istreambuf_iterator<char>{marker_stream}, std::istreambuf_iterator<char>{});
-    }
-    ASSERT_EQ(observed_marker, CHILD_EXECUTION_MARKER);
-
-    cleanup_error.clear();
-    ASSERT_TRUE(artifacts.cleanup(cleanup_error)) << "failed to remove child artifacts: " << cleanup_error.message();
+TEST_F(SessionStart, ProcessGateFoldIsLocaleIndependent)
+{
+    ASSERT_NO_FATAL_FAILURE(run_renamed_child_case(
+        unique_child_stem(L"\u00c4rger"),
+        L"SessionStart.DISABLED_ChildProcessGateFoldIsLocaleIndependent",
+        FOLD_CHILD_EXECUTION_MARKER
+    ));
 }
 
 TEST_F(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)

@@ -42,7 +42,7 @@ namespace DetourModKit::config::detail
      * @details Path comparison is the watcher's ordinal case-insensitive match. On the watcher's own worker thread the
      *          re-point is refused with an error log, because inline watcher destruction self-joins the worker.
      */
-    [[nodiscard]] WatchRepoint detach_watcher_if_repointed(std::string_view loaded_resolved_path);
+    [[nodiscard]] WatchRepoint detach_watcher_if_repointed(std::wstring_view loaded_resolved_path);
 
     /**
      * @brief Restarts the auto-reload watcher after load()'s stale-watcher join.
@@ -67,7 +67,11 @@ namespace DetourModKit::config::detail
     /// Moves the hotkey guards and servicer out under the control mutex. The caller disposes after unlock.
     [[nodiscard]] WatchHotkeyControl detach_hotkey_control() noexcept;
 
-    /// Disposes reload-hotkey guards and runs the disposal probe once when any guard exists.
+    /**
+     * @brief Releases the reload-hotkey guards and removes their input bindings.
+     * @details The removal runs only when blocking_teardown_permitted() holds. The disposal probe runs once, before the
+     *          first release, when any guard exists.
+     */
     void dispose_reload_hotkey_guards(std::vector<input::BindingGuard> &guards) noexcept;
 
     /// Outcome of the drain's non-blocking stop request against the watcher control plane.
@@ -92,7 +96,7 @@ namespace DetourModKit::config::detail
     {
         std::unique_ptr<DetourModKit::detail::ConfigWatcher> watcher;
         std::shared_ptr<void> servicer;
-        std::function<void(bool)> callback;
+        std::shared_ptr<const std::function<void(bool)>> callback;
         std::vector<input::BindingGuard> guards;
     };
 

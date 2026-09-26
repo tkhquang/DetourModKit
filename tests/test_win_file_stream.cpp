@@ -2,11 +2,14 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <windows.h>
 
+#include "internal/utf8_conversion.hpp"
 #include "internal/win_file_stream.hpp"
 
 #include "test_alloc_probe.hpp"
@@ -464,28 +467,25 @@ TEST_F(WinFileStreamTest, FlushBuffer_EmptyBuffer_Succeeds)
     EXPECT_TRUE(stream.good());
 }
 
-TEST_F(WinFileStreamBufTest, Open_AcpFallback_InvalidUtf8)
+// Ill-formed UTF-8 fails before the current file closes, so that file keeps its handle and no file appears under an
+// ANSI-decoded or U+FFFD-replaced name.
+TEST_F(WinFileStreamBufTest, OpenRejectsIllFormedUtf8)
 {
     WinFileStreamBuf buf;
-    // Build a path string with invalid UTF-8 bytes directly, bypassing std::filesystem::path which throws on invalid
-    // sequences.
-    std::string dir = m_test_dir.string();
-    std::string invalid_utf8 = dir + "\\test_\x80\x81.txt";
+    ASSERT_TRUE(buf.open(m_test_path.wstring(), std::ios_base::out));
 
-    // Pre-compute the ACP wide name with the same flags the fallback uses (CP_ACP, no MB_ERR_INVALID_CHARS), so the
-    // assertions below can observe the created file under the identical conversion.
-    std::wstring wide_invalid;
-    wide_invalid.resize(MAX_PATH);
-    const int len = MultiByteToWideChar(CP_ACP, 0, invalid_utf8.c_str(), -1, wide_invalid.data(), MAX_PATH);
-    ASSERT_GT(len, 0);
-
-    // MultiByteToWideChar with CP_UTF8 + MB_ERR_INVALID_CHARS fails on the byte sequence, so a successful open in an
-    // existing directory proves the CP_ACP fallback ran; the file must then exist under the ACP-converted name.
-    ASSERT_TRUE(buf.open(invalid_utf8, std::ios_base::out));
+    const std::string ill_formed = DetourModKit::detail::utf8_from_wide(m_test_path.native()) + "_\x80\x81.txt";
+    EXPECT_FALSE(buf.open(ill_formed, std::ios_base::out));
     EXPECT_TRUE(buf.is_open());
+    EXPECT_EQ(buf.sputn("kept", 4), 4);
     EXPECT_TRUE(buf.close());
-    EXPECT_NE(GetFileAttributesW(wide_invalid.c_str()), INVALID_FILE_ATTRIBUTES);
-    DeleteFileW(wide_invalid.c_str());
+    EXPECT_EQ(read_file(m_test_path), "kept");
+
+    std::error_code error;
+    const auto entry_count =
+        std::distance(std::filesystem::directory_iterator(m_test_dir, error), std::filesystem::directory_iterator{});
+    EXPECT_FALSE(error);
+    EXPECT_EQ(entry_count, 1);
 }
 
 TEST_F(WinFileStreamTest, ConstructWithPath_WritesData)

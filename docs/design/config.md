@@ -8,7 +8,7 @@ Rules owned here: `[B-36]`, `[B-37]`, `[B-38]`, `[B-79]`, `[B-80]`.
 
 ### config
 
-Registration takes a `mutex`. Setter callbacks run after that lock releases and can re-enter data-plane config calls. A separate pass lock serializes load and reload and refuses unsafe control-plane re-entry.
+Registration takes a `mutex`. Each setter lives in one shared node, so the registry lock copies and drops only references. Setter invocation and the final release run after that lock releases (`[B-101]`), so a setter can re-enter data-plane config calls. A separate pass lock serializes load and reload and refuses unsafe control-plane re-entry. A pass drops its setter references after the pass lock releases.
 
 Config diagnostics use the private record list in `src/internal/config_diagnostics.hpp`. The owner emits each source-stamped record after unlock.
 
@@ -31,13 +31,15 @@ Parse semantics:
 Worker topology:
 
 - `enable_auto_reload()` owns the internal `detail::ConfigWatcher` (`src/internal/config_watcher.hpp`) behind a separate `std::mutex`, so start/stop transitions do not contend with registration traffic.
-- Setters that the watcher invokes run on the watcher thread. Setters that the reload hotkey invokes run on a dedicated `ReloadServicer` thread, lazily started on the first `reload_hotkey` and torn down in `clear()`. The `input::Input` poll thread therefore never blocks on INI parsing.
+- The persisted `on_reload` callback lives in one shared node that each watcher generation shares. The watcher mutex guards only the pointer, and the last reference drops after that mutex releases (`[B-101]`).
+- Setters that the watcher invokes run on the watcher thread. Setters that the reload hotkey invokes run on a dedicated `ReloadServicer` thread, lazily started on the first `reload_hotkey` and torn down in `clear()`. The `input::Input` poll thread therefore never blocks on INI parsing. The press callback holds only a weak servicer reference, so the servicer slot reset is the final drop and never runs on the poll thread (`ConfigTest.ReloadHotkeyClearKeepsThePollThreadPolling`).
+- A repeat `reload_hotkey` for one INI key rebinds the live registration in place (`ConfigTest.ReloadHotkeyReRegistrationFiresOnPress`). A second registration under the same name shares its entries, and a rebind rebuilds them from the older registration's gate. `clear()` and the unload drain release each hotkey guard and remove its binding outside the watcher mutex (`[B-45]`). A vetoed teardown skips the removal (`ConfigTest.ClearKeepsTheReloadBindingUnderATeardownVeto`).
 
 `ReloadServicer` teardown:
 
 - Every field that the servicer thread touches (its mutex, its condition variable, its pending/shutdown flags, and its owned `StoppableWorker`) lives in a heap-owned `Channel`. `~ReloadServicer` under the loader lock can therefore leak the whole `Channel`. The alternative destroys the mutex and condition variable out from under the detached `service_loop`, which keeps a raw `Channel*`.
 - The authorized arm retires the worker first. It retains the `Channel` on the same terms whenever the body did not yet publish its exit. `StoppableWorker::shutdown()` re-queries the process-global veto for itself, so an arm entered as a join can still finish as a detach.
-- Off the loader lock, a servicer torn down from its own worker thread hands the `Channel` to the off-thread reaper ( `src/internal/lifecycle_reaper.hpp`). The self-teardown case is a setter that calls `clear()`. The reaper joins the worker after its body returns and then destroys the `Channel`. That self-retirement neither self-joins nor leaks permanently, and it mirrors `~ConfigWatcher`.
+- Off the loader lock, a servicer torn down from its own worker thread hands the `Channel` to the off-thread reaper (`src/internal/lifecycle_reaper.hpp`). The self-teardown case is a setter that calls `clear()`. The reaper runs the same retirement as the authorized arm and destroys the `Channel` only after the body publishes its exit. A veto that detaches the worker on the reaper thread leaves the `Channel` retained with a Worker leak (`ConfigTest.ReloadServicerVetoArmRetainsChannel`).
 - The press-request path takes the `Channel` mutex around the predicate store before `cv.notify_one` to close the lost-wakeup window.
 
 Watcher mechanism, one `StoppableWorker`:
@@ -84,7 +86,7 @@ These sites all parse this way:
 - the input-name `icompare` (an inline ASCII fold, never `std::tolower`),
 - the `NONE` sentinel fold.
 
-The config-watcher filename match likewise uses `CompareStringOrdinal` rather than a locale `towupper`. Add a non-C-locale test whenever a new value crosses the parse path.
+The config-watcher filename match and the re-point path comparison likewise use `CompareStringOrdinal` rather than a locale `towupper` (`ConfigTest.RepointKeepsTheWatcherForANonAsciiCaseVariant`). Add a non-C-locale test whenever a new value crosses the parse path.
 
 ### [B-38]
 

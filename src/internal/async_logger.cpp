@@ -11,8 +11,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <iomanip>
 #include <new>
+#include <ostream>
 #include <span>
 #include <system_error>
 #include <thread>
@@ -84,6 +86,9 @@ namespace DetourModKit
         // Runs after a batch has been formatted but before its final flush so a test can invalidate the sink at the
         // exact durability boundary.
         void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept = nullptr;
+        // Replaces the record clock with a fixed epoch time in milliseconds, so a test can place records at chosen
+        // milliseconds.
+        std::atomic<std::atomic<std::int64_t> *> g_async_logger_record_time_override{nullptr};
 #endif
 
         StringPool::StringPool() noexcept
@@ -235,6 +240,14 @@ namespace DetourModKit
         LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
             : level(lvl), timestamp(std::chrono::system_clock::now())
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const auto *forced_time = g_async_logger_record_time_override.load(std::memory_order_acquire))
+            {
+                timestamp = std::chrono::system_clock::time_point{
+                    std::chrono::milliseconds{forced_time->load(std::memory_order_acquire)}
+                };
+            }
+#endif
             const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
 
             if (msg_size <= MAX_INLINE_SIZE)
@@ -1093,6 +1106,28 @@ namespace DetourModKit
         m_state.store(State::Stopped, std::memory_order_release);
     }
 
+    namespace
+    {
+        /**
+         * @brief Writes one record line in the synchronous sink layout (`[B-32]`).
+         * @details Each level field leaves std::left on the shared sink, so the millisecond field sets its own
+         *          adjustment. A stream exception reaches the caller.
+         */
+        void write_record_line(
+            std::ostream &out,
+            const std::tm &calendar_time,
+            const LogMessage &message,
+            const std::string &timestamp_format
+        )
+        {
+            const auto milliseconds =
+                std::chrono::duration_cast<std::chrono::milliseconds>(message.timestamp.time_since_epoch()) % 1000;
+            out << "[" << std::put_time(&calendar_time, timestamp_format.c_str()) << "." << std::right
+                << std::setfill('0') << std::setw(3) << milliseconds.count() << std::setfill(' ') << "] ["
+                << std::setw(7) << std::left << to_string(message.level) << "] :: " << message.message() << '\n';
+        }
+    } // namespace
+
     size_t AsyncLogger::Impl::write_batch(std::span<const LogMessage> messages) noexcept
     {
         std::lock_guard<std::mutex> lock(*m_log_mutex);
@@ -1123,13 +1158,7 @@ namespace DetourModKit
 #endif
                 }
 
-                const auto ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
-
-                *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
-                               << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                               << "[" << std::setw(7) << std::left << to_string(msg.level) << "] :: " << msg.message()
-                               << '\n';
+                write_record_line(*m_file_stream, cached_tm, msg, m_config.timestamp_format);
             }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1258,12 +1287,7 @@ namespace DetourModKit
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(message.timestamp.time_since_epoch()) % 1000;
-            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
-                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << to_string(message.level)
-                           << "] :: " << message.message() << '\n';
+            write_record_line(*m_file_stream, tm_buf, message, m_config.timestamp_format);
             m_file_stream->flush();
 
             if (m_file_stream->fail())

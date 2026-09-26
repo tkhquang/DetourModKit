@@ -1,17 +1,63 @@
 #include <gtest/gtest.h>
 
+#include <windows.h>
+#include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 #include "DetourModKit/detail/drift_manifest.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include <process.h> // _getpid for collision-free temp paths under parallel CTest
 
 using DetourModKit::ErrorCode;
+using DetourModKit::detail::utf8_from_wide;
 using DetourModKit::rtti::DriftEntry;
 namespace rtti = DetourModKit::rtti;
+
+namespace
+{
+    std::atomic_uint s_temp_directory_counter{0};
+
+    /**
+     * @brief Owns a unique temporary directory and removes it on every scope exit.
+     * @details The name carries the process ID and a counter, followed by the caller's suffix.
+     */
+    class ScopedTempDirectory
+    {
+    public:
+        explicit ScopedTempDirectory(std::wstring_view suffix)
+        {
+            const unsigned int counter = s_temp_directory_counter.fetch_add(1, std::memory_order_relaxed);
+            std::wstring name = L"dmk_drift_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(counter);
+            name += suffix;
+            m_path = std::filesystem::temp_directory_path() / name;
+            std::error_code error;
+            std::filesystem::create_directories(m_path, error);
+        }
+
+        ~ScopedTempDirectory()
+        {
+            std::error_code error;
+            std::filesystem::remove_all(m_path, error);
+        }
+
+        ScopedTempDirectory(const ScopedTempDirectory &) = delete;
+        ScopedTempDirectory &operator=(const ScopedTempDirectory &) = delete;
+
+        /// Returns the owned directory.
+        [[nodiscard]] const std::filesystem::path &path() const noexcept { return m_path; }
+
+    private:
+        std::filesystem::path m_path;
+    };
+} // namespace
 
 TEST(DriftManifestTest, RoundTripPreservesEntries)
 {
@@ -186,6 +232,54 @@ TEST(DriftManifestTest, WriteToUnopenablePathFailsClosed)
     const auto written = rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1));
     ASSERT_FALSE(written.has_value());
     EXPECT_EQ(written.error().code, ErrorCode::FileOpenFailed);
+}
+
+// The narrow path is UTF-8. A narrow CRT open decodes it through the ANSI code page, so this case discriminates only
+// where GetACP() is not 65001.
+TEST(DriftManifestTest, FileRoundTripOutsideAnsiCodePage)
+{
+    RecordProperty("GetACP", static_cast<int>(GetACP()));
+    const ScopedTempDirectory directory{L"_\x7528\x6237"};
+    ASSERT_TRUE(std::filesystem::is_directory(directory.path()));
+    const std::filesystem::path report = directory.path() / L"report.tmp";
+    const std::string report_text = utf8_from_wide(report.native());
+
+    DriftEntry entry;
+    entry.name = ".?AVCjkFoo@@";
+    entry.nominal_offset = 0x20;
+    entry.healed_offset = 0x28;
+    entry.delta = 8;
+    entry.ok = true;
+    const auto written = rtti::write_drift_report_to_file(report_text, std::span<const DriftEntry>(&entry, 1));
+    ASSERT_TRUE(written.has_value()) << DetourModKit::to_string(written.error().code);
+    EXPECT_TRUE(std::filesystem::exists(report));
+
+    const auto parsed = rtti::read_drift_report_from_file(report_text);
+    ASSERT_TRUE(parsed.has_value()) << DetourModKit::to_string(parsed.error().code);
+    ASSERT_EQ(parsed->size(), 1u);
+    EXPECT_EQ((*parsed)[0].name, ".?AVCjkFoo@@");
+}
+
+// Ill-formed UTF-8 fails before any open, so no file appears under an ANSI-decoded or U+FFFD-replaced name.
+TEST(DriftManifestTest, IllFormedUtf8PathFailsClosed)
+{
+    const ScopedTempDirectory directory{L"_ill_formed"};
+    ASSERT_TRUE(std::filesystem::is_directory(directory.path()));
+    const std::string report_text = utf8_from_wide(directory.path().native()) + "\\report_\x80\x81.tmp";
+
+    DriftEntry entry;
+    entry.name = ".?AVFoo@@";
+    entry.ok = true;
+    const auto written = rtti::write_drift_report_to_file(report_text, std::span<const DriftEntry>(&entry, 1));
+    const auto parsed = rtti::read_drift_report_from_file(report_text);
+    std::error_code error;
+    EXPECT_TRUE(std::filesystem::is_empty(directory.path(), error));
+    EXPECT_FALSE(error);
+
+    ASSERT_FALSE(written.has_value());
+    EXPECT_EQ(written.error().code, ErrorCode::FileOpenFailed);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, ErrorCode::FileOpenFailed);
 }
 
 TEST(DriftManifestTest, ReadMissingFileFailsClosed)

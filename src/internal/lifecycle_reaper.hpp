@@ -20,8 +20,8 @@ namespace DetourModKit::diagnostics
 
 namespace DetourModKit::detail
 {
-    /// Callback that completes an owner's worker rundown while the owner is still alive.
-    using SharedOwnerRetire = bool (*)(void *) noexcept;
+    /// Runs an owner's worker down while the owner is alive and returns true only when destruction is safe.
+    using OwnerRetire = bool (*)(void *) noexcept;
 
     /**
      * @brief Moves @p owner's reference to the reaper thread, so its worker can be retired before destruction.
@@ -37,7 +37,7 @@ namespace DetourModKit::detail
      *         caller's responsibility (through a precommitted keepalive or its own never-destroyed storage), never
      *         a release on the retiring thread.
      */
-    [[nodiscard]] bool reap_shared_owner(std::shared_ptr<void> &owner, SharedOwnerRetire retire) noexcept;
+    [[nodiscard]] bool reap_shared_owner(std::shared_ptr<void> &owner, OwnerRetire retire) noexcept;
 
     /**
      * @brief Joins @p thread on the reaper thread, then releases @p module_ref.
@@ -61,20 +61,23 @@ namespace DetourModKit::detail
 
     namespace reaper_detail
     {
-        void reap_owner_erased(void *owner, void (*destroy)(void *) noexcept) noexcept;
+        void reap_owner_erased(void *owner, OwnerRetire retire, void (*destroy)(void *) noexcept) noexcept;
     } // namespace reaper_detail
 
     /**
-     * @brief Destroys @p owner on the reaper thread after its worker body returns.
-     * @tparam Owner Complete owner type whose destructor joins its worker.
-     * @param owner Unique owner to retire off-thread.
-     * @note If queuing fails, ownership is deliberately retained and recorded as an intentional Worker leak.
+     * @brief Destroys @p owner on the reaper thread once @p retire reports that its worker body returned.
+     * @details The reaper invokes @p retire while the owner is alive. A refused retirement stays in never-destroyed
+     *          reaper storage and counts in diagnostics::LifecycleCounters::abandoned_owners.
+     * @param owner Unique owner to retire off-thread. The call ignores a null pointer.
+     * @param retire Required rundown callback. It books its own leak subsystem when it refuses.
+     * @note A failed enqueue or a null @p retire retains the owner and records an intentional Worker leak.
      */
-    template <typename Owner> void reap_owner(std::unique_ptr<Owner> owner) noexcept
+    template <typename Owner> void reap_owner(std::unique_ptr<Owner> owner, OwnerRetire retire) noexcept
     {
         Owner *const raw_owner = owner.release();
         reaper_detail::reap_owner_erased(
             raw_owner,
+            retire,
             [](void *raw) noexcept { std::default_delete<Owner>{}(static_cast<Owner *>(raw)); }
         );
     }

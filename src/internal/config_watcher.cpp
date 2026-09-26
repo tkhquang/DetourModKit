@@ -9,6 +9,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/detail/worker.hpp"
 #include "lifecycle_context.hpp"
+#include "utf8_conversion.hpp"
 #include "worker_start_log.hpp"
 
 #include <windows.h>
@@ -252,7 +253,9 @@ namespace DetourModKit
 
         struct ConfigWatcher::Impl
         {
-            std::string ini_path_utf8;
+            std::wstring ini_path;
+            /// Holds the UTF-8 rendering of ini_path for diagnostics only.
+            std::string ini_path_text;
             std::wstring directory_wide;
             std::wstring filename_wide;
             std::chrono::milliseconds debounce;
@@ -265,14 +268,15 @@ namespace DetourModKit
             std::atomic<bool> worker_exited{true};
             std::atomic<bool> stop_requested{false};
 
-            Impl(std::string_view path, std::chrono::milliseconds deb, std::function<void()> cb)
-                : ini_path_utf8(path), debounce(deb), on_reload(std::move(cb))
+            Impl(std::wstring_view path, std::chrono::milliseconds deb, std::function<void()> cb)
+                : ini_path(path), ini_path_text(DetourModKit::detail::utf8_from_wide(path)), debounce(deb),
+                  on_reload(std::move(cb))
             {
                 // Resolve into directory + filename components up-front.
                 // weakly_canonical is avoided because the file may not exist yet;
                 // absolute() is enough for ReadDirectoryChangesW.
                 std::error_code ec;
-                std::filesystem::path input_path(ini_path_utf8);
+                std::filesystem::path input_path(ini_path);
                 std::filesystem::path absolute_path = std::filesystem::absolute(input_path, ec);
                 if (ec)
                 {
@@ -311,7 +315,7 @@ namespace DetourModKit
         }
 
         ConfigWatcher::ConfigWatcher(
-            std::string_view ini_path,
+            std::wstring_view ini_path,
             std::chrono::milliseconds debounce_window,
             std::function<void()> on_reload
         )
@@ -377,14 +381,14 @@ namespace DetourModKit
             return m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{};
         }
 
-        const std::string &ConfigWatcher::ini_path() const noexcept
+        const std::wstring &ConfigWatcher::ini_path() const noexcept
         {
             if (!m_impl)
             {
-                static const std::string s_empty;
+                static const std::wstring s_empty;
                 return s_empty;
             }
-            return m_impl->ini_path_utf8;
+            return m_impl->ini_path;
         }
 
         std::chrono::milliseconds ConfigWatcher::debounce() const noexcept
@@ -495,7 +499,7 @@ namespace DetourModKit
                     diags,
                     LogLevel::Error,
                     "ConfigWatcher: invalid INI path '{}'; cannot start.",
-                    m_impl->ini_path_utf8
+                    m_impl->ini_path_text
                 );
                 return false;
             }
@@ -507,7 +511,7 @@ namespace DetourModKit
             auto filename = m_impl->filename_wide;
             auto debounce_ms = m_impl->debounce;
             auto callback = m_impl->on_reload;
-            auto label = m_impl->ini_path_utf8;
+            auto label = m_impl->ini_path_text;
             const LogLevel startup_threshold = diags.threshold;
 
             // The StoppableWorker body is stored in std::function, so the lambda must stay copyable; we cannot move a
@@ -1164,7 +1168,7 @@ namespace DetourModKit
                     diags,
                     LogLevel::Error,
                     "ConfigWatcher '{}': failed to start worker: {}",
-                    m_impl->ini_path_utf8,
+                    m_impl->ini_path_text,
                     e.what()
                 );
                 return false;
@@ -1176,7 +1180,7 @@ namespace DetourModKit
                     diags,
                     LogLevel::Error,
                     "ConfigWatcher '{}': failed to start worker: unknown exception.",
-                    m_impl->ini_path_utf8
+                    m_impl->ini_path_text
                 );
                 return false;
             }
@@ -1207,7 +1211,7 @@ namespace DetourModKit
                         diags,
                         LogLevel::Warning,
                         "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
-                        m_impl->ini_path_utf8
+                        m_impl->ini_path_text
                     );
                     started = false;
                 }
