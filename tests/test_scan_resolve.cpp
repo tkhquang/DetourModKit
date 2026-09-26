@@ -1920,6 +1920,30 @@ TEST(ScanResolve, SoleMissingRttiVtableReturnsNoMatch)
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
 }
 
+// A reverse-RTTI sweep that skipped an unreadable page cannot prove absence, so the RttiVtable rung reports
+// IncompleteScan in place of the generic miss. The same scope with every page readable is a proven miss.
+TEST(ScanResolve, RttiVtableOverAFaultedPageReportsIncompleteScan)
+{
+    constexpr std::size_t PAGE_SIZE = 0x1000;
+    ExecutableBuffer buffer(PAGE_SIZE * 2);
+    ASSERT_TRUE(buffer.valid());
+
+    const std::array<Candidate, 1> ladder = {Candidate::rtti_vtable("absent", ".?AVDefinitelyNotARealType@@")};
+    const scan::ScanRequest request{
+        .ladder = ladder,
+        .scope = buffer.region(),
+    };
+
+    const auto complete = scan::resolve(request);
+    ASSERT_FALSE(complete.has_value());
+    EXPECT_EQ(complete.error().code, ErrorCode::NoMatch);
+
+    ASSERT_TRUE(buffer.protect(PAGE_SIZE, PAGE_SIZE, PAGE_NOACCESS));
+    const auto partial = scan::resolve(request);
+    ASSERT_FALSE(partial.has_value());
+    EXPECT_EQ(partial.error().code, ErrorCode::IncompleteScan);
+}
+
 class ScanResolveRttiVtable : public ::testing::Test
 {
 protected:

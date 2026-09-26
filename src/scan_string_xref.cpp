@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -116,13 +117,6 @@ namespace DetourModKit
                 }
             }
 
-            // Why a query cannot be compiled, so the caller can report a precise error instead of "not found".
-            enum class QueryTextStatus : std::uint8_t
-            {
-                Ok,
-                Malformed
-            };
-
             // Builds a literal-byte EnginePattern from a string query plus an optional trailing NUL, emitted as a hex
             // AOB and run through parse_aob so the string scan reuses the exact same compiled-pattern path as every
             // other AOB.
@@ -134,14 +128,14 @@ namespace DetourModKit
             //
             // An embedded NUL is rejected on both routes: it contradicts require_terminator, cannot appear in the C
             // string literals these anchors name, and would otherwise make the compiled pattern's terminator ambiguous.
-            std::optional<detail::EnginePattern>
-            compile_string_pattern(const StringRefQuery &query, QueryTextStatus &status)
+            // Every allocation failure throws std::bad_alloc, the allocation contract of both public entry points.
+            [[nodiscard]] Result<detail::EnginePattern> compile_string_pattern(const StringRefQuery &query)
             {
-                status = QueryTextStatus::Ok;
+                const auto malformed = []() -> Result<detail::EnginePattern>
+                { return std::unexpected(Error{ErrorCode::MalformedQueryText, "scan::find_string_xref"}); };
                 if (query.text.find('\0') != std::string_view::npos)
                 {
-                    status = QueryTextStatus::Malformed;
-                    return std::nullopt;
+                    return malformed();
                 }
 
                 const bool wide = (query.encoding == StringEncoding::Utf16le);
@@ -175,8 +169,7 @@ namespace DetourModKit
                         char32_t code_point = 0;
                         if (!detail::decode_utf8(query.text, pos, code_point))
                         {
-                            status = QueryTextStatus::Malformed;
-                            return std::nullopt;
+                            return malformed();
                         }
                         if (code_point < 0x10000)
                         {
@@ -199,7 +192,16 @@ namespace DetourModKit
                         emit(0x00);
                     }
                 }
-                return detail::parse_aob(aob);
+                Result<detail::EnginePattern> pattern = detail::parse_aob(aob);
+                if (pattern)
+                {
+                    return pattern;
+                }
+                if (pattern.error().code == ErrorCode::OutOfMemory)
+                {
+                    throw std::bad_alloc{};
+                }
+                return malformed();
             }
 
             // Best-effort diagnosis for executable windows skipped because they faulted mid-scan. A module image is
@@ -1250,17 +1252,11 @@ namespace DetourModKit
 
                 // Phase 1: locate the single occurrence of the string in the image's readable pages. The linker pools
                 // identical literals, so a second occurrence makes the anchor ambiguous and must fail closed.
-                QueryTextStatus text_status = QueryTextStatus::Ok;
-                const auto pattern = compile_string_pattern(query, text_status);
+                const Result<detail::EnginePattern> pattern = compile_string_pattern(query);
                 if (!pattern)
                 {
-                    if (text_status == QueryTextStatus::Malformed)
-                    {
-                        // The text is not encodable as asked, so no literal to search for was ever defined. Distinct
-                        // from "searched and absent" so the caller fixes the query rather than the signature.
-                        return std::unexpected(Error{ErrorCode::MalformedQueryText, "scan::find_string_xref"});
-                    }
-                    return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
+                    // MalformedQueryText: the query defines no literal, so the caller fixes the query, not the image.
+                    return std::unexpected(pattern.error());
                 }
                 // One traversal counts zero, one, or two-or-more occurrences, so the located address and the uniqueness
                 // verdict describe the same view of memory; two independent passes could straddle a concurrent write

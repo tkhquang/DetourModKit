@@ -1222,9 +1222,14 @@ namespace DetourModKit::manifest
             for (const ManifestIni::Entry &entry : sections)
             {
                 const std::string_view name = entry.pItem;
-                if (!name.starts_with("sig."))
+                if (name == "manifest")
                 {
                     continue;
+                }
+                // The grammar pass admits no other top-level section. Fail closed rather than skip one silently.
+                if (!name.starts_with("sig."))
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
 
                 const std::optional<RungSectionName> rung = parse_rung_section_name(name);
@@ -1246,6 +1251,7 @@ namespace DetourModKit::manifest
             for (const ManifestIni::Entry &entry : sections)
             {
                 const std::string_view name = entry.pItem;
+                // This skips the header and each record's rungs. The loop above rejected every other name.
                 if (!name.starts_with("sig.") || parse_rung_section_name(name).has_value())
                 {
                     continue;

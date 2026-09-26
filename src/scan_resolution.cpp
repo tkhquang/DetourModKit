@@ -13,6 +13,7 @@
 #include "DetourModKit/scan.hpp"
 
 #include "internal/memory_guarded.hpp"
+#include "internal/rtti_shared.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_exclusions.hpp"
 #include "internal/scan_pages.hpp"
@@ -273,9 +274,10 @@ namespace DetourModKit
                     if (const RttiVtable *rtti = candidate.as_rtti_vtable())
                     {
                         // Fully qualify the namespace: the local `rtti` pointer would otherwise shadow the `rtti`
-                        // module namespace and make `rtti::vtable_for_type` name the variable instead.
-                        const std::optional<Address> vtable =
-                            DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
+                        // module namespace and make `rtti::detail` name the variable instead.
+                        const DetourModKit::rtti::detail::PrimaryVtable primary =
+                            DetourModKit::rtti::detail::primary_vtable_checked(rtti->mangled, request.scope);
+                        const std::optional<Address> &vtable = primary.vtable;
                         if (vtable && range.contains(vtable->raw()) && accepts_resolved_address(request, *vtable))
                         {
                             Hit hit{*vtable, candidate.name(), Mode::RttiVtable};
@@ -285,6 +287,10 @@ namespace DetourModKit
                             }
                             log_resolved(request, hit, false);
                             return hit;
+                        }
+                        if (primary.completeness != DetourModKit::rtti::Traversal::Complete)
+                        {
+                            remember_text_error(ErrorCode::IncompleteScan);
                         }
                         continue;
                     }

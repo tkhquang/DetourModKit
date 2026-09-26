@@ -202,21 +202,15 @@ namespace DetourModKit::manifest::detail
                 const std::string_view name = rtrim(text.substr(name_start, pos - name_start));
                 pos = line_end_from(pos);
 
+                // parse reads only the canonical lowercase `manifest` header and `sig.` sections. Any other name,
+                // including a miscased one, holds state that parse never reads. An empty name (`[]`, `[   ]`) also
+                // reopens the backend's implicit default section, where a key collision escapes the per-section
+                // namespace. Fail closed instead.
+                if (name != "manifest" && !name.starts_with("sig."))
+                {
+                    return fail(ErrorCode::MalformedLine, context);
+                }
                 std::string folded = to_lower(name);
-                // An empty section name (`[]`, `[   ]`) is the backend's implicit default section, which also holds any
-                // keys before the first header; re-opening it would let a key collision split across the `[]` escape
-                // the per-section namespace. A canonical manifest never names it, so reject it outright.
-                if (folded.empty())
-                {
-                    return fail(ErrorCode::MalformedLine, context);
-                }
-                // The `manifest` header and every `sig.` prefix must be canonical lowercase, else the case-sensitive
-                // store would silently drop the section (a lost record). Fail closed instead.
-                if ((folded == "manifest" && name != "manifest") ||
-                    (folded.starts_with("sig.") && !name.starts_with("sig.")))
-                {
-                    return fail(ErrorCode::MalformedLine, context);
-                }
                 // The folded, trimmed name is the merge key: two sections reaching it by case, whitespace, or exact
                 // repetition would collapse into one before the trust gate.
                 if (section_count >= limits.max_sections)
@@ -267,7 +261,12 @@ namespace DetourModKit::manifest::detail
                 continue;
             }
 
-            // Key line. The key runs to the first `=` or newline.
+            // Key line. The key runs to the first `=` or newline. A key before the first header lands in the backend's
+            // implicit default section, which parse never reads, so it fails closed.
+            if (section_count == 0)
+            {
+                return fail(ErrorCode::MalformedLine, context);
+            }
             const std::size_t key_start = pos;
             while (pos < size && text[pos] != '=' && !is_newline(text[pos]))
             {

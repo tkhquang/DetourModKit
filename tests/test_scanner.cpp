@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -92,6 +93,7 @@ TEST(ScannerTest, parse_aob_empty)
     auto result = detail::parse_aob("");
 
     ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::BadPattern);
 }
 
 TEST(ScannerTest, find_pattern_found)
@@ -144,8 +146,8 @@ TEST(ScannerJumpsTest, ParseAobAcceptsBoundedJump)
     EXPECT_EQ(p->anchor, 1U);
 }
 
-// Every illegal jump placement / form fails the shared parser, so parse_aob returns nullopt rather than a broken engine
-// pattern.
+// Every illegal jump placement / form fails the shared parser, so parse_aob returns BadPattern rather than a broken
+// engine pattern.
 TEST(ScannerJumpsTest, ParseAobRejectsBadJumps)
 {
     EXPECT_FALSE(detail::parse_aob("[2-5] 48").has_value());      // leading jump
@@ -463,15 +465,19 @@ TEST(ScannerJumpsTest, SharedRegionBudgetPersistsAcrossNthSuffixScan)
     EXPECT_TRUE(budget.region_exhausted);
 }
 
-// The runtime AOB parser grows a heap-backed pattern, so an allocation failure mid-parse must fail closed to nullopt
-// rather than terminate. parse_pattern_into is intentionally not noexcept, and parse_aob catches bad_alloc; without
-// that, the bad_alloc would cross a noexcept boundary and std::terminate would abort this process.
+// The runtime AOB parser grows a heap-backed pattern, so an allocation failure mid-parse must return OutOfMemory rather
+// than terminate. parse_pattern_into is intentionally not noexcept, and parse_aob catches bad_alloc. The typed code
+// lets a caller tell an allocation failure from a malformed pattern.
 TEST(ScannerTest, parse_aob_allocation_failure_fails_soft)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
-    dmk_test::AllocFailScope fail(0); // fail every allocation the parse attempts, starting with the first push_back
-    const auto result = detail::parse_aob("48 8B 05 ?? ?? ?? ?? E8 ?? ?? ?? ??");
-    EXPECT_FALSE(result.has_value());
+    std::optional<Result<detail::EnginePattern>> result;
+    {
+        dmk_test::AllocFailScope fail(0); // fail every allocation the parse attempts, starting with the first push_back
+        result = detail::parse_aob("48 8B 05 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+    }
+    ASSERT_FALSE(result->has_value());
+    EXPECT_EQ(result->error().code, ErrorCode::OutOfMemory);
 }
 
 // The runtime engine parser and the compile-time value parser are one and the same, so both produce an identical

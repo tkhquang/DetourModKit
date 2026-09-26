@@ -460,8 +460,12 @@ namespace DetourModKit
         {
             /// Largest accepted encoded text size in bytes.
             std::size_t max_file_bytes{1u << 20};
-            /// Largest accepted number of INI sections (header, records, and rung sub-sections combined).
-            std::size_t max_sections{1u << 15};
+            /**
+             * @brief Largest accepted number of INI sections (header, records, and rung sub-sections combined).
+             * @details The default is the count the default @ref max_records and @ref max_rungs_per_record admit:
+             *          1 + 512 * (1 + 32).
+             */
+            std::size_t max_sections{16897};
             /// Largest accepted number of keys within any one section.
             std::size_t max_keys_per_section{64};
             /// Largest accepted number of `[sig.<label>]` records.
@@ -514,14 +518,14 @@ namespace DetourModKit
          * @return The parsed @ref Manifest (header plus records in file order), or an Error: MissingHeader (no
          *         `[manifest]` section or an unsupported schema), MalformedLine (a line, field, or enum token that
          *         does not parse, a noncomment key line without `=`, an empty key, a non-canonical section or key
-         *         spelling, a key that is inert for its record's declared binding kind or its rung's mode, or Utf16le
-         *         string evidence that breaks the @ref SignatureRecord::xref_encoding rule), ManifestIdentityCollision
-         *         (a case-, whitespace-, or
-         *         exactly-duplicated section, or a whitespace-variant or exactly-duplicated key, but a miscased key is
-         *         MalformedLine before collision detection), ManifestFramingUnsafe (an unterminated `<<<` heredoc
-         *         value, an opener with an empty tag, or a heredoc whose first body line is its terminator),
-         *         SizeTooLarge (encoded text, a section, key, field, record, rung, or aggregate exceeding @p limits),
-         *         or OutOfMemory (an allocation failed).
+         *         spelling, a section other than `[manifest]` or a `sig.`-prefixed section, a key line before the
+         *         first section header, a key that is inert for its record's declared binding kind or its rung's mode,
+         *         or Utf16le string evidence that breaks the @ref SignatureRecord::xref_encoding rule),
+         *         ManifestIdentityCollision (a case-, whitespace-, or exactly-duplicated section, or a
+         *         whitespace-variant or exactly-duplicated key, but a miscased key is MalformedLine before collision
+         *         detection), ManifestFramingUnsafe (an unterminated `<<<` heredoc value, an opener with an empty tag,
+         *         or a heredoc whose first body line is its terminator), SizeTooLarge (encoded text, a section, key,
+         *         field, record, rung, or aggregate exceeding @p limits), or OutOfMemory (an allocation failed).
          * @details Fails closed: a manifest that cannot be trusted to describe the signatures faithfully is rejected
          *          whole, never partially applied. A raw prepass rejects every identity collision before the
          *          case-sensitive backend reads the text, so no merged or swallowed record can masquerade as another.

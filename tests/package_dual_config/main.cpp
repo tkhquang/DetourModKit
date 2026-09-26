@@ -1,6 +1,9 @@
-// Exercise enough compiled surface to require the DetourModKit archive and its private static dependency chain.
+// Exercise enough compiled surface to require the DetourModKit archive, its private static dependency chain, and the
+// WheelHost archive.
 #include <DetourModKit.hpp>
+#include <DetourModKit/abi/wheel_host.h>
 
+#include <cstdint>
 #include <cstdio>
 
 int main()
@@ -26,6 +29,13 @@ int main()
     if (DetourModKit::hook::is_target_hooked(DetourModKit::Address{}))
     {
         return 3;
+    }
+    // A rejected ABI version reaches the WheelHost archive and starts no host.
+    WheelHostTable table{};
+    if (wheel_host_start(0, DMK_WHEELHOST_ABI_VERSION + 1U, static_cast<std::uint32_t>(sizeof(table)), &table) !=
+        DMK_WHEELHOST_ERR_ABI)
+    {
+        return 4;
     }
     return 0;
 }
