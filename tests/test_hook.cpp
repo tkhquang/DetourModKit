@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -5317,13 +5318,12 @@ TEST(HookConcurrency, CallRacesDestructorOnRetainedStorage)
     std::optional<Hook> slot;
     std::atomic<Hook *> published{nullptr};
     std::atomic<int> in_flight{0};
-    std::atomic<bool> stop{false};
     std::atomic<long long> calls{0};
 
-    std::thread worker(
-        [&]
+    std::jthread worker(
+        [&](const std::stop_token &token)
         {
-            while (!stop.load(std::memory_order_acquire))
+            while (!token.stop_requested())
             {
                 Hook *const hook = published.load(std::memory_order_acquire);
                 if (hook == nullptr)
@@ -5368,7 +5368,7 @@ TEST(HookConcurrency, CallRacesDestructorOnRetainedStorage)
             std::this_thread::yield();
         }
     }
-    stop.store(true, std::memory_order_release);
+    worker.request_stop();
     worker.join();
     EXPECT_GT(calls.load(std::memory_order_relaxed), 0);
     EXPECT_FALSE(is_target_hooked(addr_of(&echo)));
@@ -6215,13 +6215,12 @@ TEST(VmtHookFaultProof, MethodMapNodeAllocatesBeforeSlotStore)
     void **const clone_slots = static_cast<void **>(vptr);
     ASSERT_EQ(clone_slots[0], genuine);
 
-    std::atomic<bool> stop{false};
     std::atomic<bool> saw_unresolvable_detour{false};
     std::atomic<bool> saw_detour_original{false};
-    std::thread reader(
-        [&]
+    std::jthread reader(
+        [&](const std::stop_token &token)
         {
-            while (!stop.load(std::memory_order_acquire))
+            while (!token.stop_requested())
             {
                 void *const slot = clone_slots[0];
                 void *const original = reinterpret_cast<void *>(hook.original<VmtComputeFn>(0));
@@ -6239,8 +6238,12 @@ TEST(VmtHookFaultProof, MethodMapNodeAllocatesBeforeSlotStore)
 
     for (int attempt = 0; attempt < 200; ++attempt)
     {
-        const dmk_test::AllocFailScope fail_allocations{0};
-        const Result<void> refused = hook.hook_method(0, &vmt_detour_compute);
+        Result<void> refused;
+        {
+            // The assertions allocate their failure text, so they run after the allocation scope ends.
+            const dmk_test::AllocFailScope fail_allocations{0};
+            refused = hook.hook_method(0, &vmt_detour_compute);
+        }
         ASSERT_FALSE(refused.has_value());
         EXPECT_EQ(refused.error().code, ErrorCode::OutOfMemory);
     }
@@ -6250,7 +6253,7 @@ TEST(VmtHookFaultProof, MethodMapNodeAllocatesBeforeSlotStore)
     ASSERT_TRUE(hook.hook_method(0, &vmt_detour_compute).has_value());
     EXPECT_EQ(clone_slots[0], detour);
     EXPECT_EQ(reinterpret_cast<void *>(hook.original<VmtComputeFn>(0)), genuine);
-    stop.store(true, std::memory_order_release);
+    reader.request_stop();
     reader.join();
     EXPECT_FALSE(saw_unresolvable_detour.load(std::memory_order_acquire));
     EXPECT_FALSE(saw_detour_original.load(std::memory_order_acquire));
