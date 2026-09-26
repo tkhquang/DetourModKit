@@ -20,14 +20,17 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -48,6 +51,18 @@ namespace DetourModKit::detail
     void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
     [[nodiscard]] std::size_t backend_toggle_exception_catches_for_test() noexcept;
     [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+    enum class TrapTransactionOutcome : std::uint8_t
+    {
+        Restored,
+        ReportedFailure,
+        Threw,
+    };
+    [[nodiscard]] TrapTransactionOutcome drive_backend_trap_transaction_for_test(
+        void *from,
+        void *to,
+        std::size_t len,
+        const std::function<void()> &run_fn
+    ) noexcept;
     struct BackendInstructionFlushObservation
     {
         void *address;
@@ -2774,3 +2789,88 @@ TEST(HookToggleWarning, ReconciledDisableNamesTheRetry)
     EXPECT_NE(text.find(expected), std::string::npos) << text;
     EXPECT_EQ(call_target(page), LEAF_RESULT);
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    using VmtWindowFn = int (*)(void *, int, int);
+
+    int vmt_window_detour(void *, int, int)
+    {
+        return 0;
+    }
+} // namespace
+
+// A backend trap window holds a method page at PAGE_READWRITE under the process coordinator. The vmt_for slot walk
+// classifies each slot's page through VirtualQuery, so a walk inside that window ends early and publishes a truncated
+// clone. vmt_for holds the coordinator across the walk and the clone, so it cannot return before the window closes,
+// and the clone then carries every slot.
+TEST(HookBackendTrapWindow, VmtForWaitsForTheBackendTrapWindow)
+{
+    using namespace std::chrono_literals;
+    dmk_test::ScratchPage method_page;
+    ASSERT_TRUE(method_page.ok());
+    plant_leaf(method_page);
+    method_page.put(0x100, {0xC3, 0x90, 0x90, 0x90});
+    method_page.put(0x140, {0xC3, 0x90, 0x90, 0x90});
+    dmk_test::ScratchPage trampoline;
+    ASSERT_TRUE(trampoline.ok());
+
+    struct WindowVTable
+    {
+        void *rtti[2];
+        void *methods[3];
+    };
+    WindowVTable table{};
+    table.methods[0] = reinterpret_cast<void *>(method_page.addr(0x100));
+    table.methods[1] = reinterpret_cast<void *>(method_page.addr(0x140));
+    table.methods[2] = nullptr;
+    void *vptr = &table.methods[0];
+
+    std::atomic<bool> window_open{false};
+    std::atomic<bool> create_attempted{false};
+    std::atomic<bool> create_returned{false};
+    std::atomic<bool> returned_inside_window{false};
+    std::thread transaction(
+        [&]
+        {
+            const DetourModKit::detail::TrapTransactionOutcome outcome =
+                DetourModKit::detail::drive_backend_trap_transaction_for_test(
+                    method_page.base(),
+                    trampoline.base(),
+                    6,
+                    [&]
+                    {
+                        window_open.store(true, std::memory_order_release);
+                        for (int i = 0; i < 2000 && !create_attempted.load(std::memory_order_acquire); ++i)
+                        {
+                            std::this_thread::sleep_for(1ms);
+                        }
+                        // The creating thread is inside vmt_for. A serialized walk cannot return before this window
+                        // closes.
+                        std::this_thread::sleep_for(100ms);
+                        returned_inside_window.store(
+                            create_returned.load(std::memory_order_acquire),
+                            std::memory_order_release
+                        );
+                    }
+                );
+            EXPECT_EQ(outcome, DetourModKit::detail::TrapTransactionOutcome::Restored);
+        }
+    );
+    while (!window_open.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    create_attempted.store(true, std::memory_order_release);
+    Result<DetourModKit::hook::VmtHook> created = DetourModKit::hook::vmt_for("TrapWindowVmt", &vptr);
+    create_returned.store(true, std::memory_order_release);
+    transaction.join();
+
+    EXPECT_FALSE(returned_inside_window.load(std::memory_order_acquire));
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    DetourModKit::hook::VmtHook hook = std::move(*created);
+    ASSERT_TRUE(hook.hook_method(1, &vmt_window_detour).has_value());
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(hook.original<VmtWindowFn>(1)), method_page.addr(0x140));
+}
+#endif

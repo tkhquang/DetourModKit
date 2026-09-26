@@ -15,6 +15,7 @@ The call gate:
 - Each `Hook` pins a refcounted per-hook call gate: a `std::recursive_mutex` plus the currently-callable trampoline, published under that mutex.
 - `call()` copies the gate into a strong reference BEFORE the lock. `enable()`, `disable()`, `~Hook`, and `operator=(Hook&&)` can therefore run concurrently with a guarded call, without reclamation of backend storage still in use.
 - A late caller that only pinned the gate before teardown reads a null callable and fails closed.
+- The gate word lives in never-destroyed storage inside the handle (`[B-47]`). `~Hook` runs no member destructor over it, so a `call()` that races teardown on retained storage reads a null word instead of a destroyed atomic. `HookConcurrency.CallRacesDestructorOnRetainedStorage` pins the race.
 - `enable()` and `disable()` drive an atomic CAS status machine and publish or clear the gate's callable under the gate mutex.
 
 The ledger:
@@ -177,6 +178,10 @@ A VMT clone includes the ABI prefix below the address point as well as callable 
 Publish and restore real object words through a range-confined, fault-contained atomic compare-exchange. A displacement, protection change, or unmap then returns normally, without abandoned C++ locks or destructors. The backend must retain no host object pointer. A guarded read followed by a guarded store is not equivalent: a foreign writer that displaces the word between the two is silently overwritten. Carry the expected value into one instruction and reject a losing comparison. Refuse an unaligned word rather than split-lock it, since alignment is what makes the exchange atomic. These checks are unconditional and independent of policy options.
 
 A swap of foreign access for an owned snapshot moves the trap rather than removes it. Any fact derived BEFORE the capture (a slot count, a size, an offset) describes different memory than the backend acts on. Even a re-walk of captured pointer words is insufficient when the backend re-queries mutable metadata, such as the target pages' execute permission. `Impl::method_count` is the worked example. It is the only bound between a caller's index and `VmHook`'s unchecked slot write. A count larger than SafetyHook's allocation therefore corrupts an adjacent RWX allocation without a fault. Demote the pre-capture walk to a capture budget, and derive the published count from captured words. Normalize the backend surrogate's counted run to a DMK-owned executable marker, so its allocation has exactly that count. Then copy the captured targets into the detached clone before publication. More generally, validate the backend's complete footprint, or replace its foreign access with an owned snapshot or guarded transaction. C++ `try/catch` does not contain a foreign SEH fault.
+
+A page classification taken outside the process coordinator carries the same trap. A backend trap window holds a method page at `PAGE_READWRITE`, so a slot walk inside that window ends early and the clone is truncated. `vmt_for` therefore holds the coordinator across the walk and the clone, and refuses the create with `BackendFailed` when the coordinator is unavailable. `HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow` pins the exclusion. `detail::BackendCoordinatorHold` (`src/internal/hook_coordinator.hpp`) gives translation units outside the hook island the same hold, which `[B-18]` uses for protection transactions.
+
+`hook_method` allocates its map node and records the original slot pointer before the backend stores the slot. No allocation failure then sits over a live detour, and `original()` resolves from the instant the slot changes. `VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore` pins the order.
 
 ### [B-81]
 

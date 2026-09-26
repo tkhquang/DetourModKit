@@ -153,6 +153,128 @@ dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
   LABELS "lifecycle-proof")
 
+# The four `[B-91]` accessor hosts below share first_use_oom_poison.hpp. Each has an oom arm that refuses every
+# allocation and a success control. Each constructor arm grants the object its storage and refuses the constructor's
+# own allocation. A constructor arm skips where the STL constructor allocates nothing. Exit status is the oracle.
+add_executable(protection_ledger_first_use_oom protection_ledger_first_use_oom.cpp)
+target_link_libraries(protection_ledger_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(protection_ledger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(protection_ledger_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts protection_ledger_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerFirstUseSuccessRecordsProtection
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+add_executable(hook_ledger_first_use_oom hook_ledger_first_use_oom.cpp)
+target_link_libraries(hook_ledger_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(hook_ledger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(hook_ledger_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts hook_ledger_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerFirstUseSuccessRecordsInstall
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# The reaper host reaches the internal retirement entry and the module reference helper directly.
+add_executable(reaper_first_use_oom reaper_first_use_oom.cpp)
+target_link_libraries(reaper_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(reaper_first_use_oom PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(reaper_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts reaper_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperFirstUseSuccessJoinsOffThread
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# The allocator host names the backend island header, so it links the backend for its include path.
+add_executable(backend_allocator_first_use_oom backend_allocator_first_use_oom.cpp)
+target_link_libraries(backend_allocator_first_use_oom PRIVATE DetourModKit safetyhook dmk_coverage)
+target_include_directories(backend_allocator_first_use_oom PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(backend_allocator_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts backend_allocator_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorFirstUseSuccessInstalls
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# Two `[B-47]` storage forms. A process exit inside the cache shutdown window meets a joinable cleanup handle, and a
+# static destructor reconfigures the logger through the module directory cache. Both need a fresh process.
+add_executable(never_destroyed_storage never_destroyed_storage.cpp)
+target_link_libraries(never_destroyed_storage PRIVATE DetourModKit dmk_coverage)
+target_include_directories(never_destroyed_storage PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(never_destroyed_storage PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(never_destroyed_storage)
+add_dependencies(dmk_lifecycle_proof_hosts never_destroyed_storage)
+
+dmk_add_raw_proof(NAME Lifecycle.CacheShutdownRacesProcessExitFromSecondThread
+  COMMAND $<TARGET_FILE:never_destroyed_storage> exit-during-shutdown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:never_destroyed_storage>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerConfigureAfterPathCacheDestruction
+  COMMAND $<TARGET_FILE:never_destroyed_storage> configure-after-static-destruction
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:never_destroyed_storage>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # In the persistent-failure case the writer's batch reservation is refused for the whole run, so the regression is a
 # hang rather than a wrong value. TEST_TIMEOUT is the oracle: without the one-record progress floor the writer spins
 # and shutdown's join never returns. The host reaches into internal/ headers to drive one AsyncLogger directly.

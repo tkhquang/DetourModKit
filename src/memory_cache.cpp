@@ -33,6 +33,7 @@
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
@@ -402,10 +403,21 @@ namespace DetourModKit
                 bool m_admitted{false};
             };
 
-            // Use std::thread, not jthread. The jthread auto-join destructor runs after s_cleanup_cv and
-            // s_cleanup_mutex are destroyed in reverse declaration order. Manual join in shutdown_cache avoids this.
             std::atomic<bool> s_cleanup_thread_running{false};
-            std::thread s_cleanup_thread;
+
+            /**
+             * @brief The cleanup thread handle in never-destroyed storage (`[B-47]`).
+             * @details A process exit during Starting or Stopping leaves the handle joinable, and a static destructor
+             *          over a joinable std::thread terminates the exiting process. shutdown_cache joins by hand.
+             *          Lifecycle.CacheShutdownRacesProcessExitFromSecondThread pins the exit.
+             */
+            [[nodiscard]] std::thread &cleanup_thread() noexcept
+            {
+                alignas(std::thread) static unsigned char storage[sizeof(std::thread)];
+                static std::thread *const thread = ::new (static_cast<void *>(storage)) std::thread();
+                return *thread;
+            }
+
             // s_cleanup_self_ref holds a counted module reference acquired before thread creation. A clean join
             // releases it. The loader-lock detach path leaks it so the detached thread's code stays mapped.
             HMODULE s_cleanup_self_ref{nullptr};
@@ -907,7 +919,7 @@ namespace DetourModKit
              */
             bool detach_cleanup_thread_retained() noexcept
             {
-                if (!s_cleanup_thread.joinable())
+                if (!cleanup_thread().joinable())
                 {
                     return true;
                 }
@@ -915,7 +927,7 @@ namespace DetourModKit
                 try
                 {
                     // The retained module reference keeps the detached worker's code mapped.
-                    s_cleanup_thread.detach();
+                    cleanup_thread().detach();
                     DetourModKit::diagnostics::record_intentional_leak(
                         DetourModKit::diagnostics::LeakSubsystem::MemoryCache
                     );
@@ -955,14 +967,14 @@ namespace DetourModKit
             bool join_cleanup_thread() noexcept
             {
                 std::lock_guard join_lock(s_cleanup_join_mutex);
-                if (!s_cleanup_thread.joinable())
+                if (!cleanup_thread().joinable())
                 {
                     return false;
                 }
 
                 try
                 {
-                    s_cleanup_thread.join();
+                    cleanup_thread().join();
                 }
                 catch (...)
                 {
@@ -1461,7 +1473,7 @@ namespace DetourModKit
             }
             {
                 std::lock_guard join_lock(s_cleanup_join_mutex);
-                if (s_cleanup_thread.joinable())
+                if (cleanup_thread().joinable())
                 {
                     s_lifecycle_violations.fetch_add(1, std::memory_order_relaxed);
                     return false;
@@ -1530,8 +1542,8 @@ namespace DetourModKit
                     // concurrent detach tries the mutex, fails, and returns without access to the handle. This lock can
                     // remain held across thread creation without a deadlock.
                     std::lock_guard join_lock(s_cleanup_join_mutex);
-                    assert(!s_cleanup_thread.joinable());
-                    s_cleanup_thread = std::thread(cleanup_thread_func, generation);
+                    assert(!cleanup_thread().joinable());
+                    cleanup_thread() = std::thread(cleanup_thread_func, generation);
                 }
                 catch (...)
                 {
