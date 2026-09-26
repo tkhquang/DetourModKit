@@ -7,6 +7,8 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 
+#include "fixtures/proof_section.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -20,13 +22,7 @@ namespace DetourModKit::detail
 
 namespace
 {
-#if defined(_MSC_VER)
-#define DMK_PROOF_NOINLINE __declspec(noinline)
-#else
-#define DMK_PROOF_NOINLINE __attribute__((noinline))
-#endif
-
-    DMK_PROOF_NOINLINE int static_order_target(int x)
+    DMK_PROOF_TARGET int static_order_target(int x)
     {
         volatile int result = x;
         return result;

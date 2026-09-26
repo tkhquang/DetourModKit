@@ -20,19 +20,26 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <format>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 
+#include "fixtures/log_capture.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "internal/diagnostics_population.hpp"
 #include "test_alloc_probe.hpp"
@@ -44,6 +51,18 @@ namespace DetourModKit::detail
     void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
     [[nodiscard]] std::size_t backend_toggle_exception_catches_for_test() noexcept;
     [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+    enum class TrapTransactionOutcome : std::uint8_t
+    {
+        Restored,
+        ReportedFailure,
+        Threw,
+    };
+    [[nodiscard]] TrapTransactionOutcome drive_backend_trap_transaction_for_test(
+        void *from,
+        void *to,
+        std::size_t len,
+        const std::function<void()> &run_fn
+    ) noexcept;
     struct BackendInstructionFlushObservation
     {
         void *address;
@@ -974,14 +993,22 @@ TEST(HookBackendCacheFlush, GeneratedE9FfRouteAndMidRangesFlushBeforePublication
     DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
     Result<Hook> mid_installed = install_mid_leaf(mid_page, "CacheFlushMid");
     ASSERT_TRUE(mid_installed.has_value()) << mid_installed.error().message();
-    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 3U);
-    for (std::size_t i = 0; i < 3; ++i)
+    ASSERT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 5U);
+    for (std::size_t i = 0; i < 5; ++i)
     {
         const auto flush = DetourModKit::detail::backend_instruction_flush_trace_for_test(i);
         EXPECT_NE(flush.address, nullptr);
         EXPECT_GT(flush.size, 0U);
         EXPECT_TRUE(flush.succeeded);
     }
+    EXPECT_EQ(
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(0).address,
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(2).address
+    );
+    EXPECT_EQ(
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(1).address,
+        DetourModKit::detail::backend_instruction_flush_trace_for_test(3).address
+    );
 }
 
 TEST(HookBackendCacheFlush, TargetCommitFlushesBeforeProtectionRestoreInBothDirections)
@@ -1037,7 +1064,9 @@ TEST(HookBackendCacheFlush, GenerationFailureRefusesEveryExecutableRangeBeforePu
     verify_refusal("CacheFlushE9Failure", false, false, 1);
     verify_refusal("CacheFlushFFFailure", false, true, 1);
     verify_refusal("CacheFlushRouteFailure", true, false, 2);
-    verify_refusal("CacheFlushMidFailure", true, false, 3);
+    verify_refusal("CacheFlushContinuationFailure", true, false, 3);
+    verify_refusal("CacheFlushContinuationExitFailure", true, false, 4);
+    verify_refusal("CacheFlushMidFailure", true, false, 5);
 }
 
 TEST(HookBackendCacheFlush, RestoreFailureOutranksACommittedFlushFailure)
@@ -2407,3 +2436,441 @@ TEST(HookBackendVmtClassification, UnreadableHeaderBetweenPrecountAndCaptureAvoi
 }
 
 #endif // DMK_ENABLE_TEST_SEAMS
+
+// Exhaustion and unsupported relocation require distinct first-cause diagnostics.
+namespace
+{
+    /// The range the backend's near allocation can reach from a target, clamped to the user address space.
+    struct AllocationWindow
+    {
+        std::uintptr_t low{0};
+        std::uintptr_t high{0};
+        std::uintptr_t maximum{0};
+        std::uintptr_t granule{0};
+    };
+
+    AllocationWindow allocation_window(std::uintptr_t target) noexcept
+    {
+        constexpr std::uintptr_t MAX_DISTANCE = 0x7FFF'FFFF;
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        const auto minimum = reinterpret_cast<std::uintptr_t>(system_info.lpMinimumApplicationAddress);
+        AllocationWindow window{};
+        window.maximum = reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress);
+        window.granule = system_info.dwAllocationGranularity;
+        window.low = target - minimum > MAX_DISTANCE ? target - MAX_DISTANCE : minimum;
+        window.high = window.maximum - target > MAX_DISTANCE ? target + MAX_DISTANCE : window.maximum;
+        return window;
+    }
+
+    /**
+     * @brief Counts the granule-aligned free starts in the window, which the backend's placement walk tests.
+     * @details A final partial granule counts as one candidate.
+     */
+    std::size_t free_granules_in_window(const AllocationWindow &window) noexcept
+    {
+        std::size_t granules = 0;
+        std::uintptr_t cursor = window.low;
+        while (cursor < window.high)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) == 0)
+            {
+                break;
+            }
+            const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            if (info.State == MEM_FREE)
+            {
+                const std::uintptr_t start = (cursor + window.granule - 1) & ~(window.granule - 1);
+                const std::uintptr_t stop = region_end < window.high ? region_end : window.high;
+                if (start < stop)
+                {
+                    granules += (stop - start + window.granule - 1) / window.granule;
+                }
+            }
+            if (region_end <= cursor)
+            {
+                break;
+            }
+            cursor = region_end;
+        }
+        return granules;
+    }
+
+    /**
+     * @brief Reserves every free granule the backend can place near a target, and releases them on scope exit.
+     * @details One MEM_RESERVE per free range keeps the reservation count small. A range the OS refuses as one
+     *          reservation is taken granule by granule so no usable sliver survives. The window is padded by two
+     *          granules above, because the allocator tests only the aligned start of a candidate.
+     */
+    class WindowExhaustion
+    {
+    public:
+        explicit WindowExhaustion(std::uintptr_t target)
+        {
+            AllocationWindow window = allocation_window(target);
+            window.high =
+                window.maximum - window.high > 2 * window.granule ? window.high + 2 * window.granule : window.maximum;
+            std::uintptr_t cursor = window.low;
+            while (cursor < window.high)
+            {
+                MEMORY_BASIC_INFORMATION info{};
+                if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) == 0)
+                {
+                    break;
+                }
+                const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+                if (info.State == MEM_FREE)
+                {
+                    const std::uintptr_t start = (cursor + window.granule - 1) & ~(window.granule - 1);
+                    const std::uintptr_t stop = region_end < window.high ? region_end : window.high;
+                    if (start < stop)
+                    {
+                        reserve(start, stop, window.granule);
+                    }
+                }
+                if (region_end <= cursor)
+                {
+                    break;
+                }
+                cursor = region_end;
+            }
+        }
+
+        ~WindowExhaustion() noexcept
+        {
+            for (void *base : m_reservations)
+            {
+                VirtualFree(base, 0, MEM_RELEASE);
+            }
+        }
+
+        WindowExhaustion(const WindowExhaustion &) = delete;
+        WindowExhaustion &operator=(const WindowExhaustion &) = delete;
+        WindowExhaustion(WindowExhaustion &&) = delete;
+        WindowExhaustion &operator=(WindowExhaustion &&) = delete;
+
+        [[nodiscard]] std::size_t count() const noexcept { return m_reservations.size(); }
+
+    private:
+        void reserve(std::uintptr_t start, std::uintptr_t stop, std::uintptr_t granule)
+        {
+            void *whole = VirtualAlloc(reinterpret_cast<void *>(start), stop - start, MEM_RESERVE, PAGE_NOACCESS);
+            if (whole != nullptr)
+            {
+                m_reservations.push_back(whole);
+                return;
+            }
+            for (std::uintptr_t candidate = start; candidate < stop; candidate += granule)
+            {
+                const std::uintptr_t size = stop - candidate < granule ? stop - candidate : granule;
+                void *one = VirtualAlloc(reinterpret_cast<void *>(candidate), size, MEM_RESERVE, PAGE_NOACCESS);
+                if (one != nullptr)
+                {
+                    m_reservations.push_back(one);
+                }
+            }
+        }
+
+        std::vector<void *> m_reservations;
+    };
+
+    /// Counts the committed private regions with an execute protection over the whole user address space.
+    std::size_t private_executable_regions() noexcept
+    {
+        constexpr DWORD EXECUTE_MASK =
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        const auto maximum = reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress);
+        std::size_t regions = 0;
+        std::uintptr_t cursor = 0;
+        while (cursor < maximum)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) == 0)
+            {
+                break;
+            }
+            if (info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && (info.Protect & EXECUTE_MASK) != 0)
+            {
+                ++regions;
+            }
+            const std::uintptr_t next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            if (next <= cursor)
+            {
+                break;
+            }
+            cursor = next;
+        }
+        return regions;
+    }
+
+    /// Plants `jmp short +3; mov rax, 1; ret`: the short jump lands inside the mov, so no trampoline can relocate it.
+    void plant_interior_jump(dmk_test::ScratchPage &page) noexcept
+    {
+        page.put(0, {0xEB, 0x03, 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3});
+    }
+
+    std::size_t hook_manager_leaks() noexcept
+    {
+        return DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+    }
+
+    /// The prefix every toggle warning shares: the hook name and its zero-padded target address.
+    std::string toggle_warning_prefix(const char *name, const dmk_test::ScratchPage &page)
+    {
+        return std::format("hook: '{}' at 0x{:016X} ", name, page.addr(0));
+    }
+} // namespace
+
+TEST(HookBackendCreate, ExhaustedWindowNamesTheAllocatorRefusal)
+{
+    for (const bool interior_jump : {false, true})
+    {
+        SCOPED_TRACE(interior_jump);
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        if (interior_jump)
+        {
+            plant_interior_jump(page);
+        }
+        const std::size_t leaks_before = hook_manager_leaks();
+        const std::size_t regions_before = private_executable_regions();
+
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        std::optional<Result<Hook>> installed;
+        {
+            const WindowExhaustion exhausted{page.addr(0)};
+            ASSERT_EQ(free_granules_in_window(allocation_window(page.addr(0))), 0u)
+                << exhausted.count() << " reservations left a free granule in the window";
+            installed.emplace(install_mid_leaf(page, "ExhaustedWindow"));
+        }
+        ASSERT_FALSE(installed->has_value()) << "the mid create found room in an exhausted window";
+        EXPECT_EQ(installed->error().code, ErrorCode::BackendFailed);
+        EXPECT_EQ(installed->error().detail, page.addr(0));
+
+        const std::string text = capture.read_all();
+        EXPECT_NE(text.find("hook::mid_at: backend create failed for 'ExhaustedWindow'"), std::string::npos) << text;
+        EXPECT_NE(text.find("bad allocation (no free region within +/-2 GB of the target)"), std::string::npos) << text;
+        EXPECT_EQ(text.find("allocator error"), std::string::npos) << text;
+
+        // The failed create leaves nothing behind: no ledger record, no leak, and no committed arena.
+        EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+        EXPECT_EQ(hook_manager_leaks(), leaks_before);
+        EXPECT_EQ(private_executable_regions(), regions_before);
+    }
+}
+
+TEST(HookBackendCreate, InteriorShortJumpReportsTheFirstContentCheck)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_interior_jump(page);
+    ASSERT_GT(free_granules_in_window(allocation_window(page.addr(0))), 0u) << "the window must not be exhausted";
+
+    dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+    const Result<Hook> installed = install_mid_leaf(page, "InteriorShortJump");
+    ASSERT_FALSE(installed.has_value()) << "the backend relocated a jump into an instruction interior";
+    EXPECT_EQ(installed.error().code, ErrorCode::BackendFailed);
+
+    const std::string text = capture.read_all();
+    EXPECT_NE(text.find("hook::mid_at: backend create failed for 'InteriorShortJump'"), std::string::npos) << text;
+    EXPECT_NE(text.find("unsupported instruction in trampoline"), std::string::npos) << text;
+    EXPECT_EQ(text.find("no free region"), std::string::npos) << text;
+    EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+}
+
+// The four deferred toggle warnings are the operator's only signal for a refused or reconciled toggle. These cases
+// pin their text after the hook name and address.
+TEST(HookToggleWarning, RefusedEnableNamesTheWitness)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = install_leaf(page, "WarnRefusedEnable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    plant_foreign_patch(page);
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        const Result<void> enabled = hook.enable();
+        ASSERT_FALSE(enabled.has_value());
+        EXPECT_EQ(enabled.error().code, ErrorCode::EnableFailed);
+        text = capture.read_all();
+    }
+    const std::string expected =
+        toggle_warning_prefix("WarnRefusedEnable", page) + "refused enable: another writer owns the prologue.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+
+    // A hand restore of the prologue lets the disabled hook tear down without a pin.
+    plant_leaf(page);
+}
+
+TEST(HookToggleWarning, ReconciledEnableNamesTheRetry)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = install_leaf(page, "WarnReconciledEnable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ASSERT_TRUE(hook.enable().has_value());
+    write_prologue_span(page, pristine);
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        const Result<void> again = hook.enable();
+        ASSERT_TRUE(again.has_value()) << again.error().message();
+        text = capture.read_all();
+    }
+    const std::string expected = toggle_warning_prefix("WarnReconciledEnable", page) +
+                                 "has original bytes under an active state. This enable retries the arm.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+}
+
+TEST(HookToggleWarning, RefusedDisableNamesTheWitness)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = install_leaf(page, "WarnRefusedDisable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+    plant_foreign_patch(page);
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        const Result<void> disabled = hook.disable();
+        ASSERT_FALSE(disabled.has_value());
+        EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
+        text = capture.read_all();
+    }
+    const std::string expected =
+        toggle_warning_prefix("WarnRefusedDisable", page) + "refused disable: another writer owns the prologue.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+
+    // A hand restore of this hook's exact patch lets the ordinary disable and teardown run.
+    write_prologue_span(page, armed);
+    EXPECT_TRUE(hook.disable().has_value());
+}
+
+TEST(HookToggleWarning, ReconciledDisableNamesTheRetry)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = install_leaf(page, "WarnReconciledDisable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+    ASSERT_TRUE(hook.disable().has_value());
+    write_prologue_span(page, armed);
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        const Result<void> again = hook.disable();
+        ASSERT_TRUE(again.has_value()) << again.error().message();
+        text = capture.read_all();
+    }
+    const std::string expected = toggle_warning_prefix("WarnReconciledDisable", page) +
+                                 "has owned bytes under a disabled state. This disable retries the restore.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    using VmtWindowFn = int (*)(void *, int, int);
+
+    int vmt_window_detour(void *, int, int)
+    {
+        return 0;
+    }
+} // namespace
+
+// A backend trap window holds a method page at PAGE_READWRITE under the process coordinator. The vmt_for slot walk
+// classifies each slot's page through VirtualQuery, so a walk inside that window ends early and publishes a truncated
+// clone. vmt_for holds the coordinator across the walk and the clone, so it cannot return before the window closes,
+// and the clone then carries every slot.
+TEST(HookBackendTrapWindow, VmtForWaitsForTheBackendTrapWindow)
+{
+    using namespace std::chrono_literals;
+    dmk_test::ScratchPage method_page;
+    ASSERT_TRUE(method_page.ok());
+    plant_leaf(method_page);
+    method_page.put(0x100, {0xC3, 0x90, 0x90, 0x90});
+    method_page.put(0x140, {0xC3, 0x90, 0x90, 0x90});
+    dmk_test::ScratchPage trampoline;
+    ASSERT_TRUE(trampoline.ok());
+
+    struct WindowVTable
+    {
+        void *rtti[2];
+        void *methods[3];
+    };
+    WindowVTable table{};
+    table.methods[0] = reinterpret_cast<void *>(method_page.addr(0x100));
+    table.methods[1] = reinterpret_cast<void *>(method_page.addr(0x140));
+    table.methods[2] = nullptr;
+    void *vptr = &table.methods[0];
+
+    std::atomic<bool> window_open{false};
+    std::atomic<bool> create_attempted{false};
+    std::atomic<bool> create_returned{false};
+    std::atomic<bool> returned_inside_window{false};
+    std::thread transaction(
+        [&]
+        {
+            const DetourModKit::detail::TrapTransactionOutcome outcome =
+                DetourModKit::detail::drive_backend_trap_transaction_for_test(
+                    method_page.base(),
+                    trampoline.base(),
+                    6,
+                    [&]
+                    {
+                        window_open.store(true, std::memory_order_release);
+                        for (int i = 0; i < 2000 && !create_attempted.load(std::memory_order_acquire); ++i)
+                        {
+                            std::this_thread::sleep_for(1ms);
+                        }
+                        // The creating thread is inside vmt_for. A serialized walk cannot return before this window
+                        // closes.
+                        std::this_thread::sleep_for(100ms);
+                        returned_inside_window.store(
+                            create_returned.load(std::memory_order_acquire),
+                            std::memory_order_release
+                        );
+                    }
+                );
+            EXPECT_EQ(outcome, DetourModKit::detail::TrapTransactionOutcome::Restored);
+        }
+    );
+    while (!window_open.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    create_attempted.store(true, std::memory_order_release);
+    Result<DetourModKit::hook::VmtHook> created = DetourModKit::hook::vmt_for("TrapWindowVmt", &vptr);
+    create_returned.store(true, std::memory_order_release);
+    transaction.join();
+
+    EXPECT_FALSE(returned_inside_window.load(std::memory_order_acquire));
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    DetourModKit::hook::VmtHook hook = std::move(*created);
+    ASSERT_TRUE(hook.hook_method(1, &vmt_window_detour).has_value());
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(hook.original<VmtWindowFn>(1)), method_page.addr(0x140));
+}
+#endif

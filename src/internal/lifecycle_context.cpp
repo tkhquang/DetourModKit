@@ -21,6 +21,24 @@ namespace DetourModKit
             return s_lifecycle;
         }
 
+        bool process_is_exiting() noexcept
+        {
+            if (lifecycle().loader_context() == LoaderContext::ProcessExit)
+            {
+                return true;
+            }
+            // A consumer without bootstrap_detach publishes no context, so the loader supplies the answer.
+            using ShutdownProbe = BOOLEAN(NTAPI *)();
+            const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+            // GCC treats void (*)() as compatible with every function type.
+            using AnyFunction = void (*)();
+            const auto probe = ntdll != nullptr ? reinterpret_cast<ShutdownProbe>(reinterpret_cast<AnyFunction>(
+                                                      ::GetProcAddress(ntdll, "RtlDllShutdownInProgress")
+                                                  ))
+                                                : nullptr;
+            return probe != nullptr && probe() != FALSE;
+        }
+
         bool LifecycleContext::begin_start() noexcept
         {
             LifecycleState expected = LifecycleState::Stopped;
@@ -68,7 +86,9 @@ namespace DetourModKit
 
         bool teardown_caller_authorized() noexcept
         {
-            return lifecycle().context_permits_blocking() || lifecycle().is_worker_thread();
+            const LoaderContext context = lifecycle().loader_context();
+            return context == LoaderContext::Normal || context == LoaderContext::ExplicitDrain ||
+                   lifecycle().is_worker_thread();
         }
 
         bool blocking_teardown_permitted() noexcept

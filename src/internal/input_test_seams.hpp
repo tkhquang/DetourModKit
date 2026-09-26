@@ -40,6 +40,8 @@ namespace DetourModKit::detail
         static void unlock_facade_mutex_for_test() noexcept;
         /// Clears the test retention latch and reports whether it was set.
         [[nodiscard]] static bool reclaim_vetoed_impl_for_test() noexcept;
+        /// Reports whether a live engine exists and a failed cache rebuild left its name index degraded.
+        [[nodiscard]] static bool live_name_index_degraded_for_test() noexcept;
     };
 } // namespace DetourModKit::detail
 

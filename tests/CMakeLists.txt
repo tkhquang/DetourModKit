@@ -14,6 +14,10 @@ endif()
 # inherits the flags; the explicit per-target -w suppression below keeps its diagnostics quiet, as before.
 add_compile_options(${DMK_WARNING_COMPILE_OPTIONS} ${DMK_HARDENING_COMPILE_OPTIONS})
 add_link_options(${DMK_HARDENING_LINK_OPTIONS})
+# docs/design/testing.md, "In-image hook targets live in their own section", owns the reason for a full MSVC link.
+if(MSVC)
+  add_link_options(/INCREMENTAL:NO)
+endif()
 
 # Compile the benchmark ledger itself as a standalone producer proof. Keeping the mode-driven main behind a private
 # definition in the shared header makes every probe exercise the exact code the four benchmarks include, without a
@@ -326,6 +330,20 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LoggerFirstUseOomFailsClosed
     Lifecycle.LoggerConcurrentFirstUseOomFailsClosed
     Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
+    Lifecycle.ProtectionLedgerFirstUseOomFailsClosed
+    Lifecycle.ProtectionLedgerConstructorOomFailsClosed
+    Lifecycle.ProtectionLedgerFirstUseSuccessRecordsProtection
+    Lifecycle.HookLedgerFirstUseOomFailsClosed
+    Lifecycle.HookLedgerConstructorOomFailsClosed
+    Lifecycle.HookLedgerFirstUseSuccessRecordsInstall
+    Lifecycle.ReaperFirstUseOomFailsClosed
+    Lifecycle.ReaperConstructorOomFailsClosed
+    Lifecycle.ReaperFirstUseSuccessJoinsOffThread
+    Lifecycle.BackendAllocatorFirstUseOomFailsClosed
+    Lifecycle.BackendAllocatorConstructorOomFailsClosed
+    Lifecycle.BackendAllocatorFirstUseSuccessInstalls
+    Lifecycle.CacheShutdownRacesProcessExitFromSecondThread
+    Lifecycle.LoggerConfigureAfterPathCacheDestruction
     Lifecycle.LoggerPersistentBatchOomStillDrainsAndJoins
     Lifecycle.LoggerOversizeBatchSizeStillDrainsAndJoins
     Lifecycle.LoggerAppendModePreservesPriorGenerationRecords
@@ -336,6 +354,16 @@ if(DMK_BUILD_TESTS)
     Lifecycle.HookLedgerIsBlindAcrossLinkedInstances
     Lifecycle.ArmedForeignHookIsRefusedByDecode
     Lifecycle.HookRefusalCodesDistinguishTheMechanism
+    Lifecycle.GuardedReadHandlerRetiresWithTheSession
+    Lifecycle.GuardedReadHandlerRetiresOnCacheShutdownWithoutASession
+    Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache
+    Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession
+    Lifecycle.GuardedReadHandlerReopensOnSessionRestart
+    Lifecycle.GuardedReadHandlerReopensOnCacheRestart
+    Lifecycle.GuardedReadDrainSkipsAtProcessExit
+    Lifecycle.GuardedReadLockSkipsAtProcessExit
+    Lifecycle.DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease
+    Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario
     Lifecycle.CrossBindingReleaseHasNoABBA
     Lifecycle.RetiredPressCallableDisposalHasNoSelfDeadlock
     Lifecycle.RetiredHoldCallableDisposalHasNoSelfDeadlock
@@ -361,16 +389,26 @@ if(DMK_BUILD_TESTS)
     InputLifecycleProof.TrackedDeliveryIsAdmitted
     InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelivery
     InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing
+    InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed
     InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
     Lifecycle.ReloadServicerSelfRetiresThroughReaper
     Lifecycle.InputCallbackSelfShutdownDoesNotJoinSelf
     Lifecycle.InputRegistrationRacesCallbackShutdown
     Lifecycle.InputExternalShutdownRunsDownSynchronously
     InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing
+    Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread
+    Lifecycle.ControlThreadReleaseWithoutShutdownRunsDown
+    Lifecycle.ControlThreadShutdownAbandonedPremiseRunsDownBeforeClearing
     Lifecycle.InputFirstUseOomFailsClosed
     Lifecycle.InputConcurrentFirstUseOomFailsClosed
     Lifecycle.InputFirstUseSuccessStartsEngine
     Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
+    Lifecycle.XInputCleanRouteResetReportsNoLeak
+    Lifecycle.XInputParkedRouteReportsRetention
+    Lifecycle.XInputParkedOrdinalRouteReportsRetention
+    Lifecycle.XInputAliasedRouteReportsOneRetention
+    Lifecycle.XInputRollbackReportsRouteRetention
+    Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention
     Lifecycle.XInputPreBodyRouteRetainsExecutableChain
     Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction
     Lifecycle.XInputCleanReleaseNeedsNoAllocation
@@ -403,6 +441,45 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteRestoreFailureChargesPublication
     Lifecycle.RouteAllocatorReclaimsWholeBlock
     Lifecycle.MidRouteAccountingIncludesGeneratedStub
+    Lifecycle.MidRouteSurvivesDormantFiber
+    Lifecycle.InlineSelfTeardownReportsRetention
+    Lifecycle.RoutedChainExceptionPreservesLifetime
+    Lifecycle.RoutedBypassSurvivesDormantFiber
+    Lifecycle.RoutedBypassCleanRoutesReclaim
+    Lifecycle.RoutedBypassDrainsBeforeReclaim
+    Lifecycle.RoutedBypassProofRejectsUnknownScenario
+    Lifecycle.MidRouteStaleSlotRefusesCreation
+    Lifecycle.MidRouteBypassDuringIdleScanRetains
+    Lifecycle.MidRouteSurvivesDormantTailCallee
+    Lifecycle.MidRouteSurvivesExceptionContinuation
+    Lifecycle.MidRouteUnwindSettlesRouteOwnership
+    Lifecycle.MidRouteIdleContinuationReclaims
+    Lifecycle.MidRouteReturnReclaims
+    Lifecycle.MidRouteExternalBranchReclaims
+    Lifecycle.MidRouteConditionalBranchReclaims
+    Lifecycle.MidRouteIndirectBranchReclaims
+    Lifecycle.MidRouteInternalBranchReclaims
+    Lifecycle.MidRouteSelectedExternalResumeReclaims
+    Lifecycle.MidRouteSelectedInternalResumeReclaims
+    Lifecycle.MidRouteFarPatchReclaims
+    Lifecycle.MidRouteExitPreservesRegistersAndFlags
+    Lifecycle.MidRouteExitUnwindRestoresCaller
+    Lifecycle.MidRouteSelectedEpilogueReclaims
+    Lifecycle.MidRouteClosedBypassPreservesOwnership
+    Lifecycle.MidRouteInternalReturnPreservesOwnership
+    Lifecycle.MidRouteInternalReturnPopPreservesOwnership
+    Lifecycle.MidRouteInternalTailBranchPreservesOwnership
+    Lifecycle.MidRouteInternalTailConditionalPreservesOwnership
+    Lifecycle.MidRouteInternalTailIndirectPreservesOwnership
+    Lifecycle.MidRouteProofRejectsUnknownScenario
+    Lifecycle.XInputTelemetryProofRejectsUnknownScenario
+    Lifecycle.PublishedMidRouteReclaimsUnlessParked
+    Lifecycle.TrapMappingPreservesTransactionDirection
+    Lifecycle.DestroyLockFailureRetainsRoute
+    Lifecycle.ReconciledRouteReleasesProcessRecord
+    Lifecycle.RefusedTeardownNamesCoordinator
+    Lifecycle.RefusedTeardownCompletesRetention
+    Lifecycle.ProofSectionHoldsOnlyItsTargets
     Lifecycle.XInputForwardedExOrdinalIsHooked
     Lifecycle.XInputSameModuleExOrdinalIsHooked
     Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage
@@ -436,6 +513,51 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LogicDllMidPostAdapterRouteDrainsBeforeUnload
     Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload
     Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload
+    Lifecycle.RouteCopiesRejectUnknownScenario
+    Lifecycle.RouteCopiesSerializeConcurrentScans
+    Lifecycle.RouteCopiesSerializePatchAndScan
+    Lifecycle.RouteCopiesRetainLayeredDependencies
+    Lifecycle.RouteCopiesRetainInlineDependencies
+    Lifecycle.RouteCopiesRetainOverlappingDependencies
+    Lifecycle.RouteCopiesReleaseOlderLayerAfterDrainFailure
+    Lifecycle.RouteCopiesReleaseOlderLayerAfterAdapterDrainFailure
+    Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub
+    Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait
+    Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread
+    Lifecycle.RouteCopiesRejectUncoordinatedReclamation
+    Lifecycle.RouteCopiesRejectIncompatibleCoordination
+    Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout
+    Lifecycle.RouteCopiesRetainArmedHookAfterCoordinatorTimeout
+    Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal
+    Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal
+    Lifecycle.RouteCopiesShareRegistrationCapacity
+    Lifecycle.RouteCopiesRetryRefusedConnection
+    Lifecycle.RouteCopiesRejectForeignCoordinatorView
+    Lifecycle.RouteCopiesReportLayerConflict
+    Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict
+    Lifecycle.RouteCopiesReportCoordinatorRefusal
+    Lifecycle.RouteCoordinatorSurvivesParticipantUnload
+    Lifecycle.StagedGenerationResourcesStayWithinBudget
+    Lifecycle.MidEntryTlsIndexReturnsWithTheLastSlot
+    Lifecycle.MidEntryTlsIndexStaysWithARetainedSlot
+    Lifecycle.MidEntryTlsIndexRefusalReleasesItsClaim
+    Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher
+    Lifecycle.EmitTlsIndexStaysWithALiveDispatcher
+    Lifecycle.DeliveryTlsIndexReturnsWithTheLastGate
+    Lifecycle.DeliveryTlsIndexStaysWithALiveGate
+    Lifecycle.GuardedReadTlsIndexReturnsOnRelease
+    Lifecycle.GuardedReadTlsIndexWaitsForTheInFlightAccess
+    Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession
+    Lifecycle.DiagnosticsTlsIndexReturnsOnCacheShutdownWithoutASession
+    Lifecycle.DiagnosticsTlsIndexStaysThroughACacheRestart
+    Lifecycle.DiagnosticsTlsIndexStaysWithALiveSubscription
+    Lifecycle.DiagnosticsTlsIndexWaitsForARunningHandler
+    Lifecycle.DiagnosticsTlsIndexStaysWithAParkedHandler
+    Lifecycle.DiagnosticsTlsIndexTeardownInsideAHandlerNeverWaits
+    Lifecycle.DiagnosticsTlsIndexLoaderLockReleaseNeverWaits
+    Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease
+    Lifecycle.DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits
+    Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception
@@ -443,14 +565,16 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationParkedCallbackRefusesReload
     Lifecycle.StagedGenerationReleasedCallbackAllowsReload
     Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps
+    Lifecycle.StagedGenerationExistingCandidateUsesFreshName
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
     Lifecycle.VmtUnreadableModuleHeader
     Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader)
+  # --require checks each listed proof by name. The floor is the listed count plus this inventory test.
   set(lifecycle_inventory_command
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 128)
+    --minimum 247)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

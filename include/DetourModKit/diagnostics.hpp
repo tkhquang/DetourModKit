@@ -47,6 +47,8 @@ namespace DetourModKit
             MemoryCache,
             Worker,
             Bootstrap,
+            /// A diagnostics dispatcher kept its emit-chain TLS index at teardown. See @ref hook_lifecycle.
+            Diagnostics,
             /// Sentinel: the number of tracked subsystems. Not a subsystem.
             Count
         };
@@ -92,8 +94,8 @@ namespace DetourModKit
          *          Its live count equals successful acquires minus releases.
          *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
          *          XInputTarget refers to an XInput provider module.
-         * @note After Session teardown, MessageHookKeepalive and a retained XInput pair are inert.
-         *       Other open self-module reasons can identify live code.
+         * @note After Session teardown, MessageHookKeepalive is inert. A retained XInput pair or chain may still
+         *       forward calls. Other open self-module reasons can identify live code.
          */
         enum class ModulePinReason : std::uint8_t
         {
@@ -113,7 +115,7 @@ namespace DetourModKit
             LifecycleReaper,
             /// Reserved inert value for the WndProc keepalive. It keeps this numeric slot and never counts.
             WndprocKeepalive,
-            /// Tracks the XInput self-reference until rollback or a proved clean uninstall.
+            /// Tracks the XInput self-reference until a rollback or uninstall that retains no XInput chain.
             XInputKeepalive,
             /** @brief Tracks an XInput provider reference paired with @ref XInputKeepalive. */
             XInputTarget,
@@ -256,6 +258,7 @@ namespace DetourModKit
          * @return The shared @ref ScannerFaultEvent dispatcher.
          * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
          *       the existing reference.
+         * @note The TLS index contract of @ref hook_lifecycle also applies to this dispatcher.
          */
         EventDispatcher<ScannerFaultEvent> &scanner_faults();
 
@@ -266,6 +269,18 @@ namespace DetourModKit
          * @return The shared @ref HookLifecycleEvent dispatcher.
          * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
          *       the existing reference.
+         * @note A subscription makes this dispatcher an owner of the emit-chain TLS index of this DMK copy. Session
+         *       teardown returns that ownership when no subscription is live and no emit runs. Without an active
+         *       Session, memory::shutdown_cache() returns idle ownership. A live subscription keeps ownership silently,
+         *       with no leak record. A later memory::shutdown_cache() call returns an
+         *       ownership that teardown kept, after the dispatcher becomes idle.
+         * @note An authorized teardown waits up to one second for a running emit. It does not wait under the loader
+         *       lock, inside a diagnostics handler, or while an untracked emit runs. An emit that still runs then keeps
+         *       the index and records one @ref LeakSubsystem::Diagnostics event per kept ownership.
+         *       Teardown does not log under the loader lock, and it skips the release at process exit.
+         *       `Lifecycle.DiagnosticsTlsIndex*` pins this contract.
+         * @warning Drop every subscription before Session teardown. A subscription that is live at Session teardown
+         *          keeps the index and records one @ref LeakSubsystem::Diagnostics event.
          */
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle();
 

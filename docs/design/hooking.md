@@ -8,13 +8,14 @@ Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[
 
 ### hook (free functions + RAII Hook/VmtHook)
 
-There is no central registry.
+The process coordinator owns route order across participants. The local ledger owns DMK handle identities.
 
 The call gate:
 
 - Each `Hook` pins a refcounted per-hook call gate: a `std::recursive_mutex` plus the currently-callable trampoline, published under that mutex.
 - `call()` copies the gate into a strong reference BEFORE the lock. `enable()`, `disable()`, `~Hook`, and `operator=(Hook&&)` can therefore run concurrently with a guarded call, without reclamation of backend storage still in use.
 - A late caller that only pinned the gate before teardown reads a null callable and fails closed.
+- The gate word lives in never-destroyed storage inside the handle (`[B-47]`). `~Hook` runs no member destructor over it, so a `call()` that races teardown on retained storage reads a null word instead of a destroyed atomic. `HookConcurrency.CallRacesDestructorOnRetainedStorage` pins the race.
 - `enable()` and `disable()` drive an atomic CAS status machine and publish or clear the gate's callable under the gate mutex.
 
 The ledger:
@@ -22,8 +23,8 @@ The ledger:
 - The per-linked-instance `src/internal/hook_ledger.hpp` is a small mutex over target/vptr sets, not a public registry. DMK is a static archive, so two DLLs that each link it get two independent ledgers.
 - The ledger backs exact duplicate detection (`fail_if_already_hooked`) through an atomic check-and-reserve ( `try_reserve_hook`). The reservation commits only after backend create and fallible setup succeed, and it rolls back on any create failure.
 - The two refusal mechanisms carry two codes, because the caller's correct response differs. `ErrorCode::TargetAlreadyHookedByThisKit` comes from the ledger. `ErrorCode::TargetAlreadyHookedByAnotherModule` comes from the foreign-prologue decode that runs only when the ledger has no record.
-- Same-target backend creates proceed through the ledger's pending queue in reservation order, so permissive layering cannot patch concurrently or invert the trampoline chain.
-- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot and refuse with `ErrorCode::LayerConflict` from underneath a newer layer.
+- The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants.
+- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot and refuse with `ErrorCode::LayerConflict` from underneath a newer local layer.
 - The ledger's state is never-destroyed storage, so a hook owned by a namespace-scope object can still tear down at static-destruction time.
 
 VmtHook and teardown:
@@ -31,23 +32,68 @@ VmtHook and teardown:
 - `VmtHook` serializes object-vptr create/apply/remove/teardown transitions through a setup-time object gate, with per-method state still protected by its SRWLOCK.
 - The destructor applies the loader-lock leaf discipline. Under the loader lock it leaks the backend and `record_intentional_leak`s instead of a restore. It keeps the counted module reference it took at install, which maps the trampoline/detour code.
 - It restores only on a positive byte witness. Otherwise it pins the whole backend and keeps the ledger entry.
-- Clean x64 mid teardown is a separate bounded retention case. Public `mid_at` automatically reserves route capacity before publication. Backend destruction leaves the published gateway, inline trampoline, allocator backing, and unwind metadata mapped for process lifetime, while the mid stub/adapter can be retired.
+- Clean x64 mid teardown reclaims the published route after the backend proves that it is idle. Public `mid_at` reserves route capacity before publication. An idle chain returns its gateway, trampoline, allocator block, and unwind records, and refunds its charge. A failed proof retains the chain and its charge. `Hook::~Hook` records that retention as a `LeakSubsystem::HookManager` leak with a warning.
+
+  The proof requires a restored target, zero route entries, and a closed route. Each other thread is suspended in turn, and its instruction pointer must be outside the gateway and trampoline. Each suspended thread's committed stack is checked for relocated-call return addresses. The current thread's stack receives the same check. The scan excludes dormant fiber stacks. Counted displaced execution covers their route lifetime.
+
+  After the first scan, the backend checks every route count and dependent count again. A second scan precedes release under the same coordinator acquisition. `Lifecycle.MidRouteBypassDuringIdleScanRetains` verifies admission during the first scan. `InlineHook.ClosedNonMidBypassHasAStackOnlyWitness` isolates the stack-read witness.
+
+  Every patch transaction excludes the trampoline and gateway pages of each registered route after page normalization. A target on an excluded page fails with `NON_EXECUTABLE_TRANSACTION_UNAVAILABLE`. `Lifecycle.RoutedChainExceptionPreservesLifetime` verifies saved-context safety and clean release when no fault occurs. `InlineHook.TransactionsKeepSharedRoutedChainsExecutable` verifies a chain that shares a page with another hook's trampoline.
+
+  A non-mid closed bypass uses its own counted wrapper through the complete provider call. Ordinary `original()` calls retain the destination wrapper's existing ownership. `Lifecycle.RoutedBypassSurvivesDormantFiber` verifies the route and provider after the host releases its module reference.
+
+  A mid window fails with `UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE` when an instruction after a displaced call has RSP as an explicit destination. An `ADD` of a nonnegative immediate is the exception. Without the refusal, an exit reads the stale return word of the completed call as a live internal return and keeps its route entry. `Lifecycle.MidRouteStaleSlotRefusesCreation` verifies unchanged target bytes and balanced capacity after refusal.
+
+  Mid ownership extends through displaced instructions and callees. Ordinary exits preserve registers and flags. An exit preserves ownership when its top stack slot points into the displaced window or its epilogue. Each generated exit has unwind records for its temporary frame.
+
+  A selected resume inside the displaced window or at its epilogue preserves ownership. An external resume releases it. Enable redirects acquire ownership. Disable leaves counted mid execution in the trampoline until its normal exit. Closed gateways acquire ownership before bypass execution.
+
+  A mid gateway requests 1,920 bytes for its control, exits, and unwind records. The reservation allows 4,096 logical bytes and three allocation granules per complete chain. Idle teardown refunds that reservation and charge. `Lifecycle.MidRouteAccountingIncludesGeneratedStub` verifies the requested bytes and complete capacity charge.
+
+  An exception continuation preserves its entry until normal execution exits. Exception unwind and nonlocal exits can abandon an entry. The bounded drain then retains the whole backend, adapter, and module references with an explicit warning. The saved-context quiescence contract resides in `mid_at`.
+
+  `Lifecycle.MidRouteSurvivesDormantFiber` and `Lifecycle.MidRouteSurvivesExceptionContinuation` verify saved execution after teardown. `Lifecycle.MidRouteUnwindSettlesRouteOwnership` verifies permanent retention after unwind. The other `Lifecycle.MidRoute*` cases verify normal exits, selected resumes, bypass execution, register preservation, unwind records, and idle reclamation.
+
+  The [process route coordinator](#process-route-coordinator) owns dependencies across participants. `Lifecycle.RouteCopiesRetainLayeredDependencies`, `Lifecycle.RouteCopiesRetainInlineDependencies`, and `Lifecycle.RouteCopiesRetainOverlappingDependencies` verify that contract after both loader references drop. The local idle proof remains under `Lifecycle.PublishedMidRouteReclaimsUnlessParked`.
 - A retained id still counts in newer-layer counting for the process lifetime. The pinned backend is still installed, so a layer underneath it must stay refused. Ids append newest-last, so a layer installed after a pin still tears down normally.
 - `Hook::release()` and `VmtHook::release()` are the caller-requested form of the same pin and book their leak identically.
 
 Hot-path mechanism: None. Install and teardown are setup/control-plane. The per-hook gate mutex serializes `call()`, and the handle's own storage must outlive a concurrent call.
 
+## Process route coordinator
+
+Participants are the Windows x64 copies that share version 1 of a private data protocol. A named mapping identifies one canonical view. Its name includes the process ID and process creation time. A participant accepts an existing mapping only when its canonical address is a view of the same section in this process. A mapping that another process created first therefore refuses coordination.
+
+The process owns one 49,152-byte non-executable mapping and two handles. The payload occupies 45,112 bytes and holds 512 bounded records. It contains no callable address or allocator state. The owner remains after every participant unloads. `Lifecycle.StagedGenerationResourcesStayWithinBudget` verifies one view and two handles after each generation.
+
+`safetyhook::ProcessCoordinator` in `external/safetyhook/include/safetyhook/os.hpp` owns the lock order, the acquisition limit, owner reacquisition, and the shared layer order. Create holds the coordinator through the original-byte snapshot and record publication. Patch transactions and reclamation scans acquire it before any protection change or thread suspension. DMK teardown acquires it before a route closes, because the coordinator wait export can be that route.
+
+Each record identifies a target, its patched byte count, creation order, generated ranges, enable state, and continuation state. A live newer record blocks an older toggle. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
+
+Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses older layers.
+
+When another thread holds the coordinator throughout teardown, DMK makes at most four acquisitions per disarmed mid hook and two per armed hook. The coordinator timeout budgets total eight and four seconds, respectively, apart from scheduler delay.
+
+The [refusal measurements](../analysis/coordinator_refusal_v4/README.md) record both paths. `Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal` and `Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal` verify clean reclamation after one refused DMK acquisition.
+
+Retained DMK routes also preserve their adapter and counted module reference. A DMK drain failure or a destroy lock failure records its leaked route as retained.
+
+Foreign libraries outside this protocol remain outside its guarantee. The existing target-lifetime and saved-context contracts still apply. No public coordinator API or package target exists.
+
+`Lifecycle.RouteCopies*` verifies these contracts:
+
+- serialization and layered dependencies,
+- retention after a callback or adapter drain failure,
+- targets on the wait stub page and on the wait export,
+- refusals and their reported causes,
+- registration capacity, acquisition timeout, and a retried first connection,
+- refusal of a foreign or incompatible mapping.
+
+`Lifecycle.RouteCoordinatorSurvivesParticipantUnload` verifies a stable owner after the first participant unmaps. `Lifecycle.DestroyLockFailureRetainsRoute` and `Lifecycle.ReconciledRouteReleasesProcessRecord` verify the lock-failure and reconciled record states. `Lifecycle.RefusedTeardownNamesCoordinator` verifies the retention cause after a refused restore. `Lifecycle.RefusedTeardownCompletesRetention` verifies the charge and the retained record after a refused teardown acquisition.
+
 ## Backend confinement
 
-The public hook island has these members:
-
-- `src/hook.cpp` belongs to the island.
-- `src/hook_toggle.cpp` belongs to the island.
-- `src/hook_mid_context.cpp` belongs to the island.
-- `src/internal/hook_backend.hpp` belongs to the island.
-- `src/internal/hook_backend_visit.hpp` belongs to the island.
-- `src/internal/mid_hook_adapter.hpp` belongs to the island.
-- `src/internal/mid_hook_adapter.cpp` belongs to the island.
+The public hook island is `src/hook.cpp`, `src/hook_toggle.cpp`, `src/hook_mid_context.cpp`, `src/internal/hook_backend.hpp`, `src/internal/hook_backend_visit.hpp`, `src/internal/mid_hook_adapter.hpp`, and `src/internal/mid_hook_adapter.cpp`.
 
 The active input island contains `src/internal/input_intercept.cpp`. Other library sources must not include SafetyHook or name `safetyhook::`.
 
@@ -55,7 +101,7 @@ The library links SafetyHook as a private build dependency. CMake keeps static l
 
 These sources prove the boundaries:
 
-- `scripts/check_header_hygiene.py` proves the source boundary.
+- `scripts/check_header_hygiene.py` proves the source boundary and owns the island list as `BACKEND_SOURCE_ISLANDS`.
 - `scripts/check_install_prefix.py` proves the install boundary.
 - `tests/package_build_tree` proves the consumer boundary.
 
@@ -76,27 +122,21 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - instruction-cache maintenance for generated code and target patch commits,
 - instruction-boundary relocation and trap redirection for widened branches,
 - refusal before multi-byte writes when a required transaction code page must stay executable,
-- a VMT move constructor that propagates allocation failure.
+- a VMT move constructor that propagates allocation failure,
+- reclamation of a published routed chain after an idle proof, with retention recorded for later proofs on the same target,
+- mid-route ownership through displaced execution, terminal exits, and transaction redirects,
+- preservation of the first E9 failure when the FF fallback fails without an allocation error,
+- process coordination for patch order, route records, and reclamation across participants.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 
 When you re-pin the backend, pin only to a commit that the configured upstream remote serves. ALSO regenerate the vendored patch so it still reconstructs the reviewed tree (`git -C external/safetyhook diff <base> <reviewed>`). A re-pin without the patch silently drops the fix. Never repoint `.gitmodules` at a fork to carry the delta.
 
-`scripts/check_backend_patch.py` fails closed if the model drifts. It validates the upstream URL and the frozen patch hash and fix markers. It validates the pinned base commit against both the parent gitlink and the checked-out submodule HEAD, and it validates the submodule working tree itself. That tree can be in exactly two source states: the pristine pinned base before any configure, or byte-exactly the reviewed patch output after one. Each of these is refused:
+`scripts/check_backend_patch.py` fails closed if the model drifts, and its docstring owns the refused states. The submodule working tree has exactly two source states: the pristine pinned base before any configure, or byte-exactly the reviewed patch output after one. `--expect-state pristine|patched` pins which state a phase requires. The blocking `backend-patch` quality job proves the fresh checkout, applies the patch through `cmake -P cmake/DMKBackendPatch.cmake`, and proves the result.
 
-- staged content, or index visibility flags,
-- an ordinary untracked path other than the configure-time `.dmk_patch.lock` marker,
-- ignored content outside the frozen non-source build/IDE/generated-output roots,
-- a tracked edit outside the patch's file set,
-- an incompletely applied patch,
-- a patched file whose bytes are not the reconstruction of base plus patch,
-- any failed state query.
+The configure-time verdict is byte equality, not a path set. `dmk_reconstruct_backend_targets` rebuilds every owned target from the pinned base blob plus the patch in a scratch git worktree and compares each file. The worktree sits inside the submodule's git directory, so backend-state enumeration never sees it. An edit inside a target the patch already owns therefore fails on bytes, not on the path set or the reverse-apply.
 
-`--expect-state pristine|patched` pins which state a phase requires. The blocking `backend-patch` quality job proves the fresh checkout, applies the patch through `cmake -P cmake/DMKBackendPatch.cmake`, and proves the result. `dmk_verify_backend_state` in that module decides the changed-file set, ignored-output boundary, and index visibility flags at configure time as well. A configure therefore aborts rather than compiles a backend nobody reviewed.
-
-The configure-time verdict is byte equality, not a path set, and that is frozen. An edit inside a target the patch already owns leaves the changed-path set identical. Once the patch's lines are present, the idempotence reverse-apply stays clean too. A ruling on either signal alone lets configure compile unreviewed bytes. `dmk_reconstruct_backend_targets` therefore rebuilds every owned target from the pinned base blob plus the patch in a scratch tree and compares each file. The scratch tree is anchored as its own git worktree root, because `git apply` otherwise resolves the patch against whatever repository it discovers. It sits inside the submodule's git directory, so backend-state enumeration can never see it.
-
-Python and CMake implement one model with two spellings of the same normalization: `lf()` and `git diff --ignore-cr-at-eol`. `scripts/test_check_backend_patch.py` asserts that they accept and refuse the same states. It does not trust the spellings to stay equivalent. A fixture for this defect must put the smuggled bytes outside every hunk, or the reverse-apply catches them first and the test proves nothing.
+Python and CMake spell one normalization two ways, `lf()` and `git diff --ignore-cr-at-eol`. `scripts/test_check_backend_patch.py` asserts that they accept and refuse the same states. A fixture for that defect must put the smuggled bytes outside every hunk, or the reverse-apply catches them first and the test proves nothing.
 
 A configured build tree leaves the submodule working tree dirty, because the patch is applied in place. It can also leave ignored generated build output under its reviewed roots. That is expected.
 
@@ -104,7 +144,7 @@ A configured build tree leaves the submodule working tree dirty, because the pat
 
 ### [B-16]
 
-`disable()` writes a hook's saved prologue back over the target. A hook created on an already-hooked address saved a jump to the older detour as its prologue. An oldest-first restore therefore rewrites the entry into the older hook's freed trampoline, a use-after-free. `src/internal/hook_ledger.hpp` tracks per-target layer order and closes both halves. A non-top-layer `enable()` / `disable()` is REFUSED with `ErrorCode::LayerConflict` and writes nothing. An out-of-order destructor leaks the older backend rather than restores it. The rule below is therefore about clean teardown rather than crash avoidance. It still matters: the leak is permanent, and only newest-first restores the pristine prologue.
+`disable()` restores the saved prologue. A layered prologue can reference an older route, so teardown must proceed newest-first. The local ledger refuses an older local handle, and the process coordinator refuses an older participant's toggle. `Hook::enable()` and `Hook::disable()` own the resulting error codes, and `Lifecycle.RouteCopiesReportLayerConflict` verifies the coordinator refusal. An out-of-order destructor retains the older backend. The process coordinator owns the cross-participant contract above.
 
 Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) does not provide the required newest-first teardown contract. Code that holds layered same-target handles in a container must not rely on a container drop for rollback. Tear them down back-to-front (`pop_back`) or use a commit-on-success transaction, never `~vector`. This is the `install_all` rollback trap, fixed by its internal `InstallRollback` guard.
 
@@ -139,6 +179,10 @@ Publish and restore real object words through a range-confined, fault-contained 
 
 A swap of foreign access for an owned snapshot moves the trap rather than removes it. Any fact derived BEFORE the capture (a slot count, a size, an offset) describes different memory than the backend acts on. Even a re-walk of captured pointer words is insufficient when the backend re-queries mutable metadata, such as the target pages' execute permission. `Impl::method_count` is the worked example. It is the only bound between a caller's index and `VmHook`'s unchecked slot write. A count larger than SafetyHook's allocation therefore corrupts an adjacent RWX allocation without a fault. Demote the pre-capture walk to a capture budget, and derive the published count from captured words. Normalize the backend surrogate's counted run to a DMK-owned executable marker, so its allocation has exactly that count. Then copy the captured targets into the detached clone before publication. More generally, validate the backend's complete footprint, or replace its foreign access with an owned snapshot or guarded transaction. C++ `try/catch` does not contain a foreign SEH fault.
 
+A page classification taken outside the process coordinator carries the same trap. A backend trap window holds a method page at `PAGE_READWRITE`, so a slot walk inside that window ends early and the clone is truncated. `vmt_for` therefore holds the coordinator across the walk and the clone, and refuses the create with `BackendFailed` when the coordinator is unavailable. `HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow` pins the exclusion. `detail::BackendCoordinatorHold` (`src/internal/hook_coordinator.hpp`) gives translation units outside the hook island the same hold, which `[B-18]` uses for protection transactions.
+
+`hook_method` allocates its map node and records the original slot pointer before the backend stores the slot. No allocation failure then sits over a live detour, and `original()` resolves from the instant the slot changes. `VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore` pins the order.
+
 ### [B-81]
 
 The record exists only while the target and trampoline pages are temporarily non-executable during one patch transaction. While that transaction is active, an execute fault elsewhere on either affected page must retry until protection returns. A continued exception search exposes an artificial backend-created fault to the host. After every success or failure path, remove the record before the return. Otherwise later reuse of the same virtual address turns an unrelated fault into an infinite retry loop. Query and protection failures must return a status, restore only the protections acquired, and never run the patch callback after a failed acquisition. DMK still independently witnesses target bytes before it publishes Active or Disabled state.
@@ -149,15 +193,17 @@ The record exists only while the target and trampoline pages are temporarily non
 
 ### [B-84]
 
-A throw can cross generated code that does publish valid records, and the routed gateway, wrapper, and exit thunk are exactly that case. A native exception raised in a routed destination is required to reach its caller's handler. Windows x64 unwinds a frame with no registered `RUNTIME_FUNCTION` as a leaf. An escaping throw then walks garbage and terminates the host instead of a report.
+A throw can cross generated code that does publish valid records, and the routed gateway, wrappers, and exit thunk are exactly that case. A native exception raised in a routed destination is required to reach its caller's handler. Windows x64 unwinds a frame with no registered `RUNTIME_FUNCTION` as a leaf. An escaping throw then walks garbage and terminates the host instead of a report.
 
-Code that DMK's backend generates, and that a destination call can raise through, registers its records before the route can be published. That code (the routed gateway, wrapper, and exit thunk) never modifies RSP anywhere its records do not describe. The gateway and exit save with `push rbx; pushfq`, restore with `popfq; pop rbx`, and then jump or return. Both intercepted RFLAGS and callback-written RFLAGS therefore survive, while the final pop/jump or pop/ret remains a recognized epilogue. The wrapper uses the ordinary fixed `sub rsp, 40` / `add rsp, 40` frame. Registration failure fails the create. Failed unregistration conservatively retains the referenced storage. Publication retains code and records together for the process lifetime.
+Code that DMK's backend generates, and that a destination call can raise through, registers its records before the route can be published. That code (the routed gateway, wrappers, and exit thunk) never modifies RSP anywhere its records do not describe. The gateway and exit save with `push rbx; pushfq`, restore with `popfq; pop rbx`, and then jump or return. Both intercepted RFLAGS and callback-written RFLAGS therefore survive, while the final pop/jump or pop/ret remains a recognized epilogue. Each wrapper uses the ordinary fixed `sub rsp, 40` / `add rsp, 40` frame. Registration failure fails the create. Failed unregistration conservatively retains the referenced storage. A published route keeps its code and records together until the idle proof at teardown withdraws both ("Clean x64 mid teardown"). A chain that fails the proof keeps both for the process lifetime.
 
 Generated code that adjusts RSP dynamically cannot be described this way (SafetyHook's mid stub), so a throw must still never reach it. A DMK-managed callback adapter must preserve the exact backend signature, contain every user exception, and own an enter/recheck/leave rundown. It reaches the user callback from a real DMK frame, which is the only place containment and in-flight accounting can live. A raw arbitrary-signature detour (`hook::inline_at`) cannot be wrapped that way, because the erased form does not know the target's signature. It carries a documented no-throw contract and caller-owned quiescence instead. Document that requirement rather than encode it as a `noexcept` function type. The header already accepts ordinary function pointers, so the tightened type is a compatibility break.
 
 ### [B-85]
 
-Flip the allocation-free tombstone before any teardown decision. Every later branch, even one that leaks the backend, then goes inert rather than keeps a call path into a destroyed owner. Off loader lock, drain callbacks committed before the tombstone on every branch. A second live recheck lets new entries through a pinned backend back out without a join on that callback count. The drain therefore has a deterministic end. Destroy the backend only after physical entry stops and every adapter body leaves. Never wait on the calling thread: a teardown reached from inside its own callback must detect that and pin instead. A timeout is not a drain.
+Flip the allocation-free tombstone before any teardown decision. Off loader lock, drain callbacks committed before the tombstone on every branch. Destroy the backend only after physical entry stops and every adapter body leaves. For teardown inside the hook's own callback or a displaced callee, retain the resources without a wait.
+
+Every later branch preserves the tombstone, even when it retains the backend. The second live check rejects later callback entries. A timeout is not a drain. `Lifecycle.PublishedMidRouteReclaimsUnlessParked` verifies the displaced-callee case.
 
 ### [B-89]
 
@@ -173,7 +219,7 @@ Acquisition at teardown is not equivalent. Teardown is exactly the moment the pr
 
 The backend commits its mutation inside a thread-trapping transaction that can still fail or throw during cleanup. A failure can therefore sit over a live patch or a completed restore. `Hook::enable`, `Hook::disable`, rollback, and `~Hook` contain backend exceptions and then classify the patch window as `Original`, exact `OwnedPatch`, `Foreign`, or `Indeterminate`. `OwnedPatch` requires persistent provenance that the backend completed its emitted-byte capture. A pre-sized or default-filled buffer is not evidence.
 
-Never short-circuit the witness on a backend failure. A committed restore makes the target unable to enter this hook and authorizes backend destruction, while a committed exact patch publishes `Active` with `BackendFailed`. Destruction still retains any x64 routed chain that was previously published. That process-lifetime retention is capacity-accounted and independent of the byte witness.
+Never short-circuit the witness on a backend failure. A committed restore makes the target unable to enter this hook and authorizes backend destruction, while a committed exact patch publishes `Active` with `BackendFailed`. Destruction frees a previously published x64 routed chain only after the idle proof ("Clean x64 mid teardown"). A retained chain stays capacity-accounted and is independent of the byte witness.
 
 A committed restore followed by `Foreign` or `Indeterminate` remains conservatively `Active` with `DisableFailed`. A newer layer can chain through the trampoline, and unreadable bytes prove no absence. Reassert the backend's retained state before that publication, so `is_enabled()` and a later owned-patch retry agree. Conversely, `Original` clears a stale backend flag before backend destruction, so a contained exception is never retried from SafetyHook's noexcept destructor. Both toggles write unconditionally, so `Foreign` and `Indeterminate` are refused before the call. Teardown pins them.
 

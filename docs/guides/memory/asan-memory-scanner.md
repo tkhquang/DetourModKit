@@ -2,7 +2,7 @@
 
 ## Summary
 
-DetourModKit's AOB scanner and SEH-guarded probe read deliberately read arbitrary mapped process memory. Under MSVC AddressSanitizer (the `msvc-debug-asan` preset) those reads land on memory ASan poisoned for its own bookkeeping and are reported as buffer overflows. Yet every read is in bounds of a committed, readable page and never faults in a release build. They are false positives intrinsic to a whole-process memory scanner run inside an ASan-instrumented process.
+DetourModKit's AOB scanner and fault-guarded probe deliberately read arbitrary mapped process memory. Under MSVC AddressSanitizer (the `msvc-debug-asan` preset) those reads land on memory ASan poisoned for its own bookkeeping and are reported as buffer overflows. Yet every read is in bounds of a committed, readable page and never faults in a release build. They are false positives intrinsic to a whole-process memory scanner run inside an ASan-instrumented process.
 
 The fix excludes only the deliberate foreign-memory readers from ASan. The AOB byte-search prefilter routes through a self-provided `dmk_memchr` in every build, so it is immune to libc interceptors by construction. Only the `no_sanitize_address` attribute and the `__movsb` copy path remain ASan-conditional under `#if defined(__SANITIZE_ADDRESS__)`. The guarded copy lives in the memory engine TU, and the public `memory.hpp` header is Win32-free. The full test suite still runs, and passes, under ASan with the scanner exercised.
 

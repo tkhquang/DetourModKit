@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -44,8 +45,8 @@ namespace DetourModKit
             // Shared cancellation flag the binding's callback wrapper gates on; release() clears it so subsequent
             // events become no-ops.
             std::shared_ptr<std::atomic<bool>> enabled;
-            // One-shot action run once by release(): runs down the per-binding gate and, for a consume binding, lifts
-            // passthrough suppression.
+            // One-shot action run once by release(): runs down the per-binding gate, then clears the binding's consume
+            // flag.
             std::function<void()> on_release;
             std::string name;
         };
@@ -172,9 +173,9 @@ namespace DetourModKit
             std::atomic<bool> m_running{false};
             std::atomic<bool> m_callback_drain_active{false};
             std::atomic<std::uint32_t> m_admission_commits_inflight{0};
-            // Last-applied / pending engine settings. require_focus is live-mutable via set_require_focus; the gamepad
-            // knobs and poll interval are consumed when start() builds the poller.
-            Settings m_settings{};
+            // A set_require_focus value made while no engine runs. The start() that builds an engine applies it over
+            // Settings::require_focus before the poll thread starts. shutdown() clears it with the other staged state.
+            std::optional<bool> m_pending_require_focus;
 
             /// Advances the facade state token after a pending binding or start setting changes.
             void advance_start_revision() noexcept
@@ -261,6 +262,15 @@ namespace DetourModKit
                 bool m_engaged{false};
             };
 
+            /**
+             * @brief Reports whether a name-keyed verb addresses @p binding.
+             * @details An empty name addresses no binding (ComboBinding::name), as in the live name index.
+             */
+            [[nodiscard]] bool matches_name(const detail::InputBinding &binding, std::string_view name) noexcept
+            {
+                return !name.empty() && binding.name == name;
+            }
+
             [[nodiscard]] bool await_admission_commits(
                 std::atomic<std::uint32_t> &inflight,
                 std::chrono::steady_clock::time_point deadline
@@ -328,8 +338,7 @@ namespace DetourModKit
                 // One lifecycle shared by this registration's gate and every exploded engine entry: the gate reads its
                 // tombstone as a resurrection guard, and each entry carries it so a poll-cycle callback staged before a
                 // remove / clear / cardinality-changing rebind is refused at dispatch. Allocated once here so the gate
-                // and entries share one identity. This call also reserves the delivery marker's TLS slot, which has to
-                // happen on a control thread before the wrappers below can be dispatched to.
+                // and entries share one identity.
                 auto lifecycle = detail::make_binding_lifecycle();
 
                 const bool is_hold = binding.trigger == Trigger::Hold;
@@ -374,46 +383,55 @@ namespace DetourModKit
                     gate_release = [gate]() { gate->release(); };
                     binding_gate = gate;
                 }
-
-                // Callback disable does not clear consume suppression, which reads InputBinding::consume. Clear by
-                // owner identity because empty names do not enter the name index. The weak token rejects late release.
-                std::function<void()> consume_release;
-                if (binding.consume)
+                // The gate registered its delivery marker ownership on this control thread, before any dispatch. A
+                // reservation re-arms the warning, so each episode without an index logs once.
+                static std::atomic<bool> s_tls_warned{false};
+                if (binding_gate->delivery_tls.reserved())
                 {
-                    const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
-                    Input *const facade = this;
-                    consume_release = [facade_alive, facade, consume_owner]()
-                    {
-                        if (auto keep = facade_alive.lock())
-                        {
-                            facade->set_consume_by_owner(consume_owner, false);
-                        }
-                    };
+                    s_tls_warned.store(false, std::memory_order_relaxed);
                 }
+                else if (!s_tls_warned.exchange(true, std::memory_order_relaxed))
+                {
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "Input: no TLS index is available for the delivery marker. Input callbacks are refused until "
+                        "a later registration reserves one, and a binding registered without one does not consume its "
+                        "trigger."
+                    );
+                }
+                // A gate that found no delivery index refuses its callbacks, so its binding registers without consume
+                // and fails open ([B-26], InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed).
+                const bool consume = binding.consume && binding_gate->delivery_tls.reserved();
+
+                // Callback disable does not clear consume suppression, which reads InputBinding::consume. A later
+                // set_consume(name, true) can enable it on any binding, so every release clears it. The clear goes by
+                // owner identity because empty names do not enter the name index, and it is a no-op while the flag is
+                // off. The weak token rejects a late release.
+                const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
+                Input *const facade = this;
+                const auto consume_release = [facade_alive, facade, consume_owner]()
+                {
+                    if (auto keep = facade_alive.lock())
+                    {
+                        facade->set_consume_by_owner(consume_owner, false);
+                    }
+                };
 
                 // Release the gate before the consume clear. If a Hold edge throws, run the clear before the exception
                 // resumes.
-                if (consume_release)
+                impl->on_release = [gate_release = std::move(gate_release), consume_release]()
                 {
-                    impl->on_release =
-                        [gate_release = std::move(gate_release), consume_release = std::move(consume_release)]()
+                    try
                     {
-                        try
-                        {
-                            gate_release();
-                        }
-                        catch (...)
-                        {
-                            consume_release();
-                            throw;
-                        }
+                        gate_release();
+                    }
+                    catch (...)
+                    {
                         consume_release();
-                    };
-                }
-                else
-                {
-                    impl->on_release = std::move(gate_release);
-                }
+                        throw;
+                    }
+                    consume_release();
+                };
 
                 // Explode the combos into one engine entry per alternative, all sharing the name (OR logic). An empty
                 // list still registers a single inert sentinel so the name is addressable for a later rebind.
@@ -425,7 +443,7 @@ namespace DetourModKit
                     entry.keys = keys;
                     entry.modifiers = modifiers;
                     entry.trigger = binding.trigger;
-                    entry.consume = binding.consume;
+                    entry.consume = consume;
                     entry.consume_owner = consume_owner;
                     entry.lifecycle = lifecycle;
                     entry.gate = binding_gate;
@@ -560,11 +578,10 @@ namespace DetourModKit
 
                 if (m_impl->m_poller)
                 {
-                    log().debug("input::Input: start() called while already running; no-op.");
+                    (void)log().try_log(LogLevel::Debug, "input::Input: start() called while already running; no-op.");
                     return {};
                 }
 
-                m_impl->m_settings = settings;
                 m_impl->advance_start_revision();
 
                 if (m_impl->m_pending.empty())
@@ -627,14 +644,16 @@ namespace DetourModKit
                     {
                         // Leave callback admission open, matching the other start() failure paths: the refusal is
                         // retryable once the loader supplies a valid host and the staged bindings remain.
-                        log().error(
+                        (void)log().try_log(
+                            LogLevel::Error,
                             "input::Input: required wheel host is missing or ABI-incompatible; refusing start."
                         );
                         return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
                     }
                     else
                     {
-                        log().warning(
+                        (void)log().try_log(
+                            LogLevel::Warning,
                             "input::Input: optional wheel host unavailable; using the local MessageHook "
                             "backend."
                         );
@@ -643,14 +662,16 @@ namespace DetourModKit
                 }
 
                 Logger &logger = log();
-                logger.info(
+                (void)logger.try_log(
+                    LogLevel::Info,
                     "input::Input: Starting with {} binding(s), poll interval {}ms",
                     m_impl->m_pending.size(),
                     settings.poll_interval.count()
                 );
                 for (const auto &binding : m_impl->m_pending)
                 {
-                    logger.trace(
+                    (void)logger.try_log(
+                        LogLevel::Trace,
                         "input::Input: Registered {} binding \"{}\" with {} key(s)",
                         to_string(binding.trigger),
                         binding.name,
@@ -703,7 +724,8 @@ namespace DetourModKit
                                 static_cast<std::uintptr_t>(signed_status < 0 ? -signed_status : signed_status);
                             return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
                         }
-                        log().warning(
+                        (void)log().try_log(
+                            LogLevel::Warning,
                             "input::Input: optional wheel host rejected the lease; using the local "
                             "MessageHook backend."
                         );
@@ -721,6 +743,11 @@ namespace DetourModKit
                             settings.wheel_target_thread_id
                         );
                     }
+                }
+                // Applied under the lock, so a value set during the unlocked host window also reaches this engine.
+                if (m_impl->m_pending_require_focus)
+                {
+                    poller->set_require_focus(*m_impl->m_pending_require_focus);
                 }
                 try
                 {
@@ -805,6 +832,7 @@ namespace DetourModKit
                     m_impl->advance_start_revision();
                 }
                 retired.swap(m_impl->m_pending);
+                m_impl->m_pending_require_focus.reset();
             }
             // Drop staged capture owners before poller shutdown.
             retired.clear();
@@ -815,10 +843,10 @@ namespace DetourModKit
 
                 if (local_poller->self_retiring())
                 {
-                    // shutdown() was reached from a binding callback, so this thread IS the poll thread. Its rundown
-                    // (join, detour uninstall, final on_state_change(false)) must happen after the callback returns
-                    // and off this thread. Hand the facade's reference to the process-lifetime reaper, which drops it
-                    // once shutdown() has joined the body there; ~InputPoller then sees a completed rundown.
+                    // shutdown() was reached from a binding callback, on the poll thread or inside a delivery on a
+                    // control thread. The rundown (join, detour uninstall, final on_state_change(false)) runs after
+                    // the callback returns and off this thread. The process-lifetime reaper takes the facade's
+                    // reference and drops it once its shutdown() call joined the body.
                     std::shared_ptr<void> owner = std::move(local_poller);
                     const auto retire = [](void *raw_owner) noexcept -> bool
                     {
@@ -829,7 +857,7 @@ namespace DetourModKit
                     if (!detail::reap_shared_owner(owner, retire))
                     {
                         // The precommitted self-keepalive retains the complete poller when no reaper can accept it.
-                        // Stop was already requested, so the loop exits after this callback without losing its state.
+                        // Stop was already requested, so the loop exits after its current cycle and keeps its state.
                         diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
                     }
                 }
@@ -932,7 +960,7 @@ namespace DetourModKit
                     indices.reserve(m_impl->m_pending.size());
                     for (std::size_t i = 0; i < m_impl->m_pending.size(); ++i)
                     {
-                        if (m_impl->m_pending[i].name == name)
+                        if (matches_name(m_impl->m_pending[i], name))
                         {
                             indices.push_back(i);
                         }
@@ -1058,7 +1086,7 @@ namespace DetourModKit
                     bool changed = false;
                     for (auto &binding : m_impl->m_pending)
                     {
-                        if (binding.name == name && binding.consume != consume)
+                        if (matches_name(binding, name) && binding.consume != consume)
                         {
                             binding.consume = consume;
                             changed = true;
@@ -1079,9 +1107,6 @@ namespace DetourModKit
 
         void Input::set_consume_by_owner(std::uint64_t owner, bool consume) noexcept
         {
-            // Identity-keyed counterpart to set_consume(name), used by a consume guard's teardown so an empty-name
-            // binding (absent from the name index) still has its suppression lifted. Mirrors set_consume's live-vs-
-            // pending routing: clear on the live poller if running, else on the staged bindings for the next start().
             if (is_inert())
             {
                 return;
@@ -1130,15 +1155,12 @@ namespace DetourModKit
             }
 
             std::lock_guard lock(m_impl->m_mutex);
-            if (m_impl->m_settings.require_focus != require_focus)
-            {
-                m_impl->m_settings.require_focus = require_focus;
-                m_impl->advance_start_revision();
-            }
             if (m_impl->m_poller)
             {
                 m_impl->m_poller->set_require_focus(require_focus);
+                return;
             }
+            m_impl->m_pending_require_focus = require_focus;
         }
 
         std::size_t Input::remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
@@ -1164,7 +1186,7 @@ namespace DetourModKit
                 {
                     removed_pending = static_cast<std::size_t>(std::ranges::count_if(
                         m_impl->m_pending,
-                        [name](const detail::InputBinding &b) { return b.name == name; }
+                        [name](const detail::InputBinding &b) { return matches_name(b, name); }
                     ));
                     if (removed_pending != 0)
                     {
@@ -1173,7 +1195,7 @@ namespace DetourModKit
                         staged.reserve(m_impl->m_pending.size() - removed_pending);
                         for (detail::InputBinding &entry : m_impl->m_pending)
                         {
-                            (entry.name == name ? retired : staged).push_back(std::move(entry));
+                            (matches_name(entry, name) ? retired : staged).push_back(std::move(entry));
                         }
                         m_impl->m_pending.swap(staged);
                         m_impl->advance_start_revision();
@@ -1252,11 +1274,11 @@ namespace DetourModKit
                     {
                         for (const detail::InputBinding &staged : m_impl->m_pending)
                         {
-                            const bool selected =
-                                every_binding || std::ranges::any_of(
-                                                     binding_names,
-                                                     [&staged](std::string_view name) { return staged.name == name; }
-                                                 );
+                            const bool selected = every_binding || std::ranges::any_of(
+                                                                       binding_names,
+                                                                       [&staged](std::string_view name)
+                                                                       { return matches_name(staged, name); }
+                                                                   );
                             if (selected && staged.gate)
                             {
                                 pending_gates.push_back(staged.gate);
@@ -1352,7 +1374,7 @@ namespace DetourModKit
                         std::lock_guard lock(m_impl->m_mutex);
                         pending_match = std::ranges::any_of(
                             m_impl->m_pending,
-                            [name](const detail::InputBinding &binding) { return binding.name == name; }
+                            [name](const detail::InputBinding &binding) { return matches_name(binding, name); }
                         );
                         live_poller = m_impl->m_poller;
                     }
@@ -1505,6 +1527,18 @@ namespace DetourModKit::detail
         }
         live_poller->publish_consume_rules_for_test();
         return true;
+    }
+
+    bool InputTestSeams::live_name_index_degraded_for_test() noexcept
+    {
+        input::Input &self = input::Input::instance();
+        std::shared_ptr<InputPoller> live_poller;
+        if (!self.is_inert())
+        {
+            std::lock_guard lock(self.m_impl->m_mutex);
+            live_poller = self.m_impl->m_poller;
+        }
+        return live_poller && !live_poller->name_index_authoritative_for_test();
     }
 } // namespace DetourModKit::detail
 #endif // DMK_ENABLE_TEST_SEAMS

@@ -108,6 +108,12 @@ The build is Win64 only. Every library translation unit includes `<windows.h>`, 
 
 `ctest -L <label>` exits zero on an empty selection. A toolchain gate, a renamed case, or a host that was never registered therefore removes the coverage and still reports green. Declare the label's cases to `scripts/check_test_label_inventory.py` (`--require` per name, `--minimum`, `--expect-target` for a `gtest_discover_tests` target whose `_NOT_BUILT` placeholder means it was never built). Register that check as a ctest that carries the same label, from `tests/CMakeLists.txt`, never from the subdirectory it covers. A gate that the skipped subdirectory also skips proves nothing. `FaultProof.LabelInventoryIsComplete` is the worked example. Related: `dmk_add_raw_proof` declares no build dependency. A workflow that builds targets by name must therefore list every raw host, or the ctest is registered and never built.
 
+### In-image hook targets live in their own section
+
+Mark each inline or mid hook target that test code defines in its own image with `DMK_PROOF_TARGET` from `tests/fixtures/proof_section.hpp`. Detours, generated code, and targets in another image need no mark.
+
+The macro places the function in the private `.proof` code section. A toggle transaction temporarily removes execute access from the target page. If a backend handler or its helpers share that page, the handler can fault under its own lock and deadlock. An incremental MSVC link puts its jump table in the first code section, which can be `.proof`. `tests/CMakeLists.txt` therefore links each MSVC test target with `/INCREMENTAL:NO`. `Lifecycle.ProofSectionHoldsOnlyItsTargets` verifies that no other code precedes the targets in `.proof`.
+
 ### CTest execution timeouts
 
 `CTestTimeoutControl` is the proof pointer. [The test coverage guide](../tests/README.md) owns the CTest timeout contract.
@@ -134,6 +140,26 @@ The probe's captures are the case's barrier atomics. Declare those BEFORE the po
 
 A test thread never carries a fatal GoogleTest assertion, and a cross-thread barrier always has a deadline. `ASSERT_*` and `FAIL()` off the main thread return from the enclosing lambda instead of a failed case. The work after them is skipped, and the main thread's wait target never arrives. Report the worker's outcome through an atomic and assert it on the main thread. Give every wait on a worker-set flag a `steady_clock` deadline. On expiry it opens any barrier where the worker can park, joins, and fails with the premise it failed to establish. An unbounded spin here wedges the whole shared unit binary with no diagnostic. `BindingGateTest.UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan` is the local pattern.
 
+### Join every owned thread on every exit path
+
+A case that owns a thread joins it on every exit path. A fatal `ASSERT_` is an exit path. Use `std::jthread` with a `std::stop_token`, or place every fatal assertion after the join. A `std::thread` destructor over a joinable thread terminates the test process and hides the assertion text. `HookConcurrency.CallRacesDestructorOnRetainedStorage` and `VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore` use the `std::jthread` form.
+
 ### White-box internal suites
 
 White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_input_intercept` over `src/internal/input_intercept.hpp`) add `src/` to their include path and call `DetourModKit::detail::` directly. `test_gate_race_probe` is a concurrency-stress white-box suite over the two header-only synchronization primitives ( `src/internal/hook_ledger.hpp` and `src/internal/input_binding_gate.hpp`). It drives real cross-thread contention on the install/teardown ledger and the input hold/press gates. It runs in the main suite (per the in-process rule above) but stays independent of the library's compiled surface. The same source therefore remains usable by standalone race-instrumented builds that cannot link the Windows-only library.
+
+## Generation resource proof
+
+`Lifecycle.StagedGenerationResourcesStayWithinBudget` exercises six mid hooks per fresh DLL. It also exercises one inline hook, one input binding, one subscribed namespace-scope dispatcher, and subscriptions to both diagnostics dispatchers. It omits VMT hooks. The hook lifecycle subscription must observe 14 events during Init and 21 after Shutdown. The first 101 generations must unmap and leave no route record or intentional leak.
+
+The next generation parks one caller before the entry count of its first mid route and then tears down. It must book one HookManager leak, keep one retained route record, and stay mapped. The released caller must return the target value through the route bypass. The generation after it keeps its hook lifecycle subscription live across `~Session`. Its Shutdown must refuse the reload with one `Diagnostics` leak, and the loader keeps it mapped. Two clean generations follow, and the retained record must remain.
+
+The host measures executable bytes with `VirtualQuery`. Each generation retains exactly one executable trap page. A retained route also retains one allocation-granularity block.
+
+The host counts free TLS indices in the process TLS bitmaps under the PEB lock. Every clean generation returns each TLS index that it reserved, on both toolchains. The retained generation keeps two indices, one for its claimed mid slot and one for its dispatcher. The refused diagnostics generation keeps one emit index. The host stages one discarded copy before its baseline, because the first host staging takes platform TLS indices. The MinGW host first holds one initialized `libwinpthread-1.dll` load, because each new load of that runtime takes a TLS index that its unload never returns.
+
+The coordinator mapping must preserve its address and size and hold only the expected retained record. After each unload, the process must hold one view of the coordinator section and one handle each to its lock and section. The [hook note](hooking.md#process-route-coordinator) owns its fixed budget.
+
+The exact census requires an uninstrumented process. ASan retains separate executable VEH wrapper pages, so the census returns skip code 77 under ASan. The `Lifecycle.RouteCopies*` proofs still execute under ASan.
+
+`Lifecycle.RouteCopiesRetainLayeredDependencies` verifies layered retention across participants. The caller resumes after both loader references drop. A forced unreported route retention must fail the generation resource proof, and so must a TLS owner that never returns its index. A disabled coordinator must fail the cross-copy schedule or dependency proof.

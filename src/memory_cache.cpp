@@ -11,6 +11,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
+#include "internal/diagnostics_population.hpp"
 #include "internal/drain_backoff.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/srw_shared_mutex.hpp"
@@ -32,6 +33,7 @@
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
@@ -401,10 +403,21 @@ namespace DetourModKit
                 bool m_admitted{false};
             };
 
-            // Use std::thread, not jthread. The jthread auto-join destructor runs after s_cleanup_cv and
-            // s_cleanup_mutex are destroyed in reverse declaration order. Manual join in shutdown_cache avoids this.
             std::atomic<bool> s_cleanup_thread_running{false};
-            std::thread s_cleanup_thread;
+
+            /**
+             * @brief The cleanup thread handle in never-destroyed storage (`[B-47]`).
+             * @details A process exit during Starting or Stopping leaves the handle joinable, and a static destructor
+             *          over a joinable std::thread terminates the exiting process. shutdown_cache joins by hand.
+             *          Lifecycle.CacheShutdownRacesProcessExitFromSecondThread pins the exit.
+             */
+            [[nodiscard]] std::thread &cleanup_thread() noexcept
+            {
+                alignas(std::thread) static unsigned char storage[sizeof(std::thread)];
+                static std::thread *const thread = ::new (static_cast<void *>(storage)) std::thread();
+                return *thread;
+            }
+
             // s_cleanup_self_ref holds a counted module reference acquired before thread creation. A clean join
             // releases it. The loader-lock detach path leaks it so the detached thread's code stays mapped.
             HMODULE s_cleanup_self_ref{nullptr};
@@ -906,7 +919,7 @@ namespace DetourModKit
              */
             bool detach_cleanup_thread_retained() noexcept
             {
-                if (!s_cleanup_thread.joinable())
+                if (!cleanup_thread().joinable())
                 {
                     return true;
                 }
@@ -914,7 +927,7 @@ namespace DetourModKit
                 try
                 {
                     // The retained module reference keeps the detached worker's code mapped.
-                    s_cleanup_thread.detach();
+                    cleanup_thread().detach();
                     DetourModKit::diagnostics::record_intentional_leak(
                         DetourModKit::diagnostics::LeakSubsystem::MemoryCache
                     );
@@ -954,14 +967,14 @@ namespace DetourModKit
             bool join_cleanup_thread() noexcept
             {
                 std::lock_guard join_lock(s_cleanup_join_mutex);
-                if (!s_cleanup_thread.joinable())
+                if (!cleanup_thread().joinable())
                 {
                     return false;
                 }
 
                 try
                 {
-                    s_cleanup_thread.join();
+                    cleanup_thread().join();
                 }
                 catch (...)
                 {
@@ -979,20 +992,26 @@ namespace DetourModKit
                 return true;
             }
 
+#if !defined(_MSC_VER) && defined(_WIN64)
+            /** @brief Applies the Session retirement policy to a cache teardown. */
+            void shutdown_guarded_engine() noexcept
+            {
+                if (DetourModKit::detail::lifecycle().state() == DetourModKit::detail::LifecycleState::Stopping)
+                    detail::retire_session_guarded_engine();
+                else
+                    detail::release_guarded_engine();
+            }
+#endif
+
             /**
-             * @brief Abandons the cache without a wait when teardown lacks block authority.
-             * @details A wait on s_lifecycle_mutex under the loader lock can deadlock against an initializer that
-             *          creates the cleanup thread because thread creation takes the loader lock. This path stops and
-             *          attempts to detach the cleanup thread, drops the guarded engine, and unpublishes a Starting or
-             *          Running generation. It drains no readers and frees no shards.
+             * @brief Abandons the cache when teardown lacks block authority.
+             * @details A lifecycle-mutex wait can deadlock against thread creation under the loader lock.
+             *          The shutdown_cache contract owns the guarded-handler release exception.
              */
             void abandon_cache_unauthorized() noexcept
             {
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // Remove the vectored fault handler before module unload. This operation takes the VEH mutex and drains
-                // in-flight guarded accesses, so it is not wait-free. A handler in unmapped code faults the host.
-                // Therefore, the wait is safer than omission of handler removal.
-                detail::release_guarded_engine();
+                shutdown_guarded_engine();
 #endif
                 s_cleanup_thread_running.store(false, std::memory_order_release);
                 s_cleanup_cv.notify_one();
@@ -1454,7 +1473,7 @@ namespace DetourModKit
             }
             {
                 std::lock_guard join_lock(s_cleanup_join_mutex);
-                if (s_cleanup_thread.joinable())
+                if (cleanup_thread().joinable())
                 {
                     s_lifecycle_violations.fetch_add(1, std::memory_order_relaxed);
                     return false;
@@ -1503,12 +1522,6 @@ namespace DetourModKit
             // Advance the generation this session's cleanup thread binds to, after the shards are built.
             const std::uint64_t generation = s_lifecycle_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-#if !defined(_MSC_VER) && defined(_WIN64)
-            // MinGW has no frame-based SEH. A successful vectored-handler install avoids the per-call VirtualQuery
-            // fallback. Installation remains best-effort and independent of cache success.
-            detail::ensure_guarded_engine_installed();
-#endif
-
             s_cleanup_thread_running.store(true, std::memory_order_release);
             // Hold a counted reference before cleanup thread creation. A creation failure releases it below.
             s_cleanup_self_ref = acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
@@ -1529,8 +1542,8 @@ namespace DetourModKit
                     // concurrent detach tries the mutex, fails, and returns without access to the handle. This lock can
                     // remain held across thread creation without a deadlock.
                     std::lock_guard join_lock(s_cleanup_join_mutex);
-                    assert(!s_cleanup_thread.joinable());
-                    s_cleanup_thread = std::thread(cleanup_thread_func, generation);
+                    assert(!cleanup_thread().joinable());
+                    cleanup_thread() = std::thread(cleanup_thread_func, generation);
                 }
                 catch (...)
                 {
@@ -1602,6 +1615,13 @@ namespace DetourModKit
                 return false;
             }
 
+#if !defined(_MSC_VER) && defined(_WIN64)
+            // The reopen follows the Running publication, so a rolled-back start keeps a retired epoch closed
+            // (SessionTeardown.RolledBackCacheStartKeepsTheRetiredHandlerEpoch). The cache keepalive reference pins
+            // this image through a concurrent abandonment.
+            detail::reopen_guarded_engine();
+            detail::ensure_guarded_engine_installed();
+#endif
             return true;
         }
 
@@ -1648,6 +1668,15 @@ namespace DetourModKit
             // Decide the block policy once for the whole teardown. A second query lets a concurrent publication split
             // one teardown across both policies.
             const bool may_block = DetourModKit::detail::blocking_teardown_permitted();
+            // Session teardown releases the diagnostics owners as its own leaf, so only a module without an active
+            // Session releases them here.
+            if (DetourModKit::detail::lifecycle().state() == DetourModKit::detail::LifecycleState::Stopped)
+            {
+                DetourModKit::detail::release_diagnostics_emit_owners(
+                    DetourModKit::detail::DiagnosticsTeardown::CacheShutdown,
+                    may_block
+                );
+            }
             if (!may_block)
             {
                 abandon_cache_unauthorized();
@@ -1659,7 +1688,12 @@ namespace DetourModKit
 
             const LifecycleState state = s_lifecycle_state.load(std::memory_order_seq_cst);
             if (state != LifecycleState::Running && !(state == LifecycleState::Stopped && s_cache_shards))
+            {
+#if !defined(_MSC_VER) && defined(_WIN64)
+                shutdown_guarded_engine();
+#endif
                 return;
+            }
 
             // Stopped with a live shard array is a prior loader-lock abandonment or drain timeout, safe to finish here
             // off the loader lock. Stopping also prevents a concurrent loader-lock callback from another Stopped
@@ -1723,11 +1757,7 @@ namespace DetourModKit
                 s_cleanup_requested.store(false, std::memory_order_relaxed);
 
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // Remove the vectored fault handler so it cannot dangle into freed code if the DMK module is unloaded
-                // after teardown. The engine drains guarded reads on the handler path before handler removal. An
-                // in-flight read cannot fault into a missing handler. The operation is idempotent. A later guarded
-                // read reinstalls it.
-                detail::release_guarded_engine();
+                shutdown_guarded_engine();
 #endif
 
                 // Publish Stopped last, under the lifecycle mutex, so the next init_cache admits a fresh start (which

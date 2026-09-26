@@ -26,6 +26,7 @@
 #include "internal/config_diagnostics.hpp"
 #include "internal/config_watcher.hpp"
 #include "fixtures/intercept_lease.hpp"
+#include "fixtures/log_capture.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -3691,103 +3692,7 @@ TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_FloatMissingUsesMemberInitia
 
 namespace
 {
-    // RAII helper that redirects the global Logger to a temporary file and exposes the captured contents for
-    // assertions. On destruction the Logger is parked on a stable per-process file so the capture file's handle is
-    // released and remove() succeeds on Windows; subsequent tests overwrite the parking sink as needed via their own
-    // configure() calls. Sync mode is forced because the tests inspect the file immediately after the logging call
-    // returns.
-    class LoggerFileCapture
-    {
-    public:
-        LoggerFileCapture()
-        {
-            static std::atomic<int> counter{0};
-            const int n = counter.fetch_add(1, std::memory_order_relaxed);
-            m_capture_file = std::filesystem::temp_directory_path() /
-                             ("dmk_capture_" + std::to_string(_getpid()) + "_" + std::to_string(n) + ".log");
-            auto &logger = DetourModKit::log();
-            m_previous_async = logger.is_async_mode_enabled();
-            if (m_previous_async)
-            {
-                logger.disable_async_mode();
-            }
-            DetourModKit::Logger::configure("CAPTURE", m_capture_file.string(), "%H:%M:%S");
-            m_previous_level = logger.get_log_level();
-            logger.set_log_level(DetourModKit::LogLevel::Trace);
-        }
-
-        ~LoggerFileCapture()
-        {
-            auto &logger = DetourModKit::log();
-            logger.flush();
-            const auto parking =
-                std::filesystem::temp_directory_path() / ("dmk_capture_parked_" + std::to_string(_getpid()) + ".log");
-            DetourModKit::Logger::configure("PARKED", parking.string(), "%H:%M:%S");
-            logger.set_log_level(m_previous_level);
-            if (m_previous_async)
-            {
-                logger.enable_async_mode();
-            }
-            std::error_code ec;
-            std::filesystem::remove(m_capture_file, ec);
-        }
-
-        LoggerFileCapture(const LoggerFileCapture &) = delete;
-        LoggerFileCapture &operator=(const LoggerFileCapture &) = delete;
-
-        [[nodiscard]] std::string read_all() const
-        {
-            DetourModKit::log().flush();
-            std::ifstream in(m_capture_file);
-            if (!in)
-            {
-                return {};
-            }
-            return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-
-        [[nodiscard]] bool contains_warning_with(std::string_view needle) const
-        {
-            const std::string content = read_all();
-            std::size_t pos = 0;
-            while (true)
-            {
-                const std::size_t next = content.find('\n', pos);
-                const std::string_view line(
-                    content.data() + pos,
-                    (next == std::string::npos ? content.size() : next) - pos
-                );
-                if (line.find("[WARNING]") != std::string_view::npos && line.find(needle) != std::string_view::npos)
-                {
-                    return true;
-                }
-                if (next == std::string::npos)
-                {
-                    break;
-                }
-                pos = next + 1;
-            }
-            return false;
-        }
-
-        [[nodiscard]] std::size_t warning_count() const
-        {
-            const std::string content = read_all();
-            std::size_t count = 0;
-            std::size_t pos = 0;
-            while ((pos = content.find("[WARNING]", pos)) != std::string::npos)
-            {
-                ++count;
-                pos += 9;
-            }
-            return count;
-        }
-
-    private:
-        std::filesystem::path m_capture_file;
-        DetourModKit::LogLevel m_previous_level{DetourModKit::LogLevel::Info};
-        bool m_previous_async{false};
-    };
+    using dmk_test::LoggerFileCapture;
 
     // Drives the combo-list parser indirectly via config::bind_combos, which is the only reachable entry point for the
     // parser from outside the TU.
@@ -4463,7 +4368,10 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     ASSERT_TRUE(detail::InputTestSeams::adopt_intercept_owner_for_test());
     const std::uint16_t button = gamepad_mask(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+    // The INI set consume by name after registration, so only an unconditional release clear lifts it ([B-27]).
     guard.release();
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u)
+        << "the guard release left the INI-enabled consume rule published";
     input::Input::instance().shutdown();
 }
 

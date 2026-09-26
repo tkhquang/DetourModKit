@@ -28,9 +28,11 @@
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_test_seams.hpp"
 #include "internal/lifecycle_context.hpp"
+#include "internal/memory_guarded.hpp"
 #include "platform.hpp"
 #include "fixtures/intercept_lease.hpp"
 #include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/proof_section.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -43,6 +45,9 @@ namespace DetourModKit::detail
     extern void (*g_config_watcher_prehandshake_seam)();
     extern void (*g_logger_publication_probe)();
     extern void (*g_logger_post_publication_probe)();
+    extern void (*g_session_configure_test_hook)();
+    extern void (*g_memory_cache_before_running_publish_test_hook)();
+    void memory_cache_abandon_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 #if defined(_MSC_VER)
@@ -147,6 +152,30 @@ namespace
     };
 } // namespace
 
+namespace
+{
+    class SessionTest : public ::testing::Test
+    {
+    protected:
+        void TearDown() override
+        {
+#if !defined(_MSC_VER) && defined(_WIN64)
+            // Restore the process-wide epoch after all case-local Session owners retire.
+            DetourModKit::detail::reopen_guarded_engine();
+#endif
+        }
+    };
+
+    using SessionStart = SessionTest;
+    using SessionStartAsyncActivation = SessionTest;
+    using SessionMove = SessionTest;
+    using SessionTeardown = SessionTest;
+    using SessionLoggerConfiguration = SessionTest;
+    using SessionBootstrapReentrancy = SessionTest;
+    using SessionHotReload = SessionTest;
+    using SessionShutdownEventRace = SessionTest;
+} // namespace
+
 // The session.hpp `[B-100]` warning owns the teardown route. An exception from host teardown terminates the process.
 // This assertion pins the no-throw destructor.
 static_assert(std::is_nothrow_destructible_v<Session>, "~Session must stay noexcept during host teardown.");
@@ -177,9 +206,81 @@ TEST(SessionFreeFunctions, ModuleHandleNullBeforeBootstrap)
     EXPECT_EQ(module_handle(), nullptr);
 }
 
+// The identity the synchronous path publishes is the module that links the archive, here the test binary. It is
+// resolved with the same identity-only UNCHANGED_REFCOUNT capture the bootstrap happy path checks against.
+TEST_F(SessionStart, PublishesModuleIdentityForTheSessionLifetime)
+{
+    constexpr DWORD identity_flags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    HMODULE expected = nullptr;
+    ASSERT_TRUE(GetModuleHandleExW(identity_flags, reinterpret_cast<LPCWSTR>(&DetourModKit::module_handle), &expected));
+    ASSERT_NE(expected, nullptr);
+    ASSERT_EQ(module_handle(), nullptr) << "no session is live before start";
+
+    {
+        Result<Session> r = start_local_session("SESS_TEST", "sess_test_identity.log");
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        EXPECT_EQ(module_handle(), expected);
+        EXPECT_EQ(module_handle(), GetModuleHandleW(nullptr)) << "the linking module is the test executable";
+        EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
+    }
+
+    EXPECT_EQ(module_handle(), nullptr) << "~Session must retire the identity with the session";
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+}
+
+TEST_F(SessionStart, RejectedSecondStartLeavesTheLiveIdentityIntact)
+{
+    Result<Session> first = start_local_session("SESS_TEST", "sess_test_identity_intact.log");
+    ASSERT_TRUE(first.has_value()) << first.error().message();
+    const ModuleHandle live = module_handle();
+    ASSERT_NE(live, nullptr);
+
+    Result<Session> second = start_local_session("SESS_TEST_2", "sess_test_identity_intact_2.log");
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
+    EXPECT_EQ(module_handle(), live) << "a refused start must not touch the live session's identity";
+}
+
+TEST_F(SessionStart, FailedLoggerSetupRetiresThePublishedIdentity)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    const ModInfo info{
+        .name = "SESS_OOM",
+    };
+    const auto result = [&]() -> Result<Session>
+    {
+        const dmk_test::AllocFailScope failure{0};
+        return Session::start(info);
+    }();
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, ErrorCode::OutOfMemory);
+    EXPECT_EQ(module_handle(), nullptr);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+}
+
+TEST_F(SessionStart, UnexpectedLoggerFailureRetiresThePublishedIdentity)
+{
+    DetourModKit::detail::g_session_configure_test_hook = []() -> void
+    {
+        EXPECT_NE(module_handle(), nullptr);
+        throw std::runtime_error("configuration failure");
+    };
+    const auto result = Session::start(
+        ModInfo{
+            .name = "SESS_UNKNOWN",
+        }
+    );
+    DetourModKit::detail::g_session_configure_test_hook = nullptr;
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, ErrorCode::Unknown);
+    EXPECT_EQ(module_handle(), nullptr);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+}
+
 // Session::start gating
 
-TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
+TEST_F(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
 {
     Result<Session> r = Session::start(
         ModInfo{
@@ -191,11 +292,12 @@ TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
     );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
+    EXPECT_EQ(module_handle(), nullptr) << "a refused start publishes no identity";
 }
 
 // Async activation is fail-soft inside Session::start: a refused activation must not fail the start, and a committed
 // activation must never coexist with a returned failure. Both probes model the two halves of that boundary.
-TEST(SessionStartAsyncActivation, RefusedActivationDoesNotFailStart)
+TEST_F(SessionStartAsyncActivation, RefusedActivationDoesNotFailStart)
 {
     const std::filesystem::path log_path = unique_session_log_path("sess_test_async_soft");
     DetourModKit::detail::g_logger_publication_probe = []() { throw std::runtime_error("publication refused"); };
@@ -216,7 +318,7 @@ TEST(SessionStartAsyncActivation, RefusedActivationDoesNotFailStart)
     std::filesystem::remove(log_path, error_code);
 }
 
-TEST(SessionStartAsyncActivation, PostPublicationThrowLeavesWriterSessionOwned)
+TEST_F(SessionStartAsyncActivation, PostPublicationThrowLeavesWriterSessionOwned)
 {
     const std::filesystem::path log_path = unique_session_log_path("sess_test_async_owned");
     DetourModKit::detail::g_logger_post_publication_probe = []() { throw std::runtime_error("diagnostic refused"); };
@@ -388,7 +490,7 @@ namespace
     };
 } // namespace
 
-TEST(SessionStart, ChildArtifactCleanupRetriesTransientLocks)
+TEST_F(SessionStart, ChildArtifactCleanupRetriesTransientLocks)
 {
     const std::filesystem::path locked_path = unique_session_log_path("session_child_cleanup_lock");
     const HANDLE locked = CreateFileW(
@@ -418,7 +520,7 @@ TEST(SessionStart, ChildArtifactCleanupRetriesTransientLocks)
     EXPECT_FALSE(std::filesystem::exists(locked_path));
 }
 
-TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
+TEST_F(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
 {
     const std::wstring own = current_exe_path_wide();
     ASSERT_FALSE(own.empty());
@@ -465,7 +567,7 @@ TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
     ASSERT_TRUE(marker_stream) << "the child failed to commit its proof marker";
 }
 
-TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
+TEST_F(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
 {
     const std::wstring own = current_exe_path_wide();
     ASSERT_FALSE(own.empty());
@@ -568,7 +670,7 @@ TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
     ASSERT_TRUE(artifacts.cleanup(cleanup_error)) << "failed to remove child artifacts: " << cleanup_error.message();
 }
 
-TEST(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
+TEST_F(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
 {
     const std::string_view prefix = "Sess_Test_Mutex_EmptyGate_";
     HANDLE pre_owned = CreateMutexW(nullptr, FALSE, instance_mutex_name(prefix).c_str());
@@ -588,7 +690,7 @@ TEST(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
     CloseHandle(pre_owned);
 }
 
-TEST(SessionStart, InstanceMutexCollisionReturnsAlreadyRunning)
+TEST_F(SessionStart, InstanceMutexCollisionReturnsAlreadyRunning)
 {
     const std::string_view prefix = "Sess_Test_Mutex_Collision_";
     HANDLE pre_owned = CreateMutexW(nullptr, FALSE, instance_mutex_name(prefix).c_str());
@@ -610,7 +712,7 @@ TEST(SessionStart, InstanceMutexCollisionReturnsAlreadyRunning)
     CloseHandle(pre_owned);
 }
 
-TEST(SessionStart, InstanceMutexLongPrefixDoesNotOverflow)
+TEST_F(SessionStart, InstanceMutexLongPrefixDoesNotOverflow)
 {
     // A prefix far longer than any fixed-size formatting buffer must be formed intact, not truncated or overflowed.
     // Pre-own the name built exactly as Session::start builds it; a clean InstanceAlreadyRunning proves the long name
@@ -635,7 +737,7 @@ TEST(SessionStart, InstanceMutexLongPrefixDoesNotOverflow)
     CloseHandle(pre_owned);
 }
 
-TEST(SessionStart, SecondStartWhileActiveReturnsSessionAlreadyActive)
+TEST_F(SessionStart, SecondStartWhileActiveReturnsSessionAlreadyActive)
 {
     Result<Session> first = start_local_session("SESS_TEST", "sess_test_double.log");
     ASSERT_TRUE(first.has_value()) << first.error().message();
@@ -648,7 +750,7 @@ TEST(SessionStart, SecondStartWhileActiveReturnsSessionAlreadyActive)
     // start cleanly.
 }
 
-TEST(SessionStart, StartDestroyCyclesReleaseTheGuard)
+TEST_F(SessionStart, StartDestroyCyclesReleaseTheGuard)
 {
     // Reentrancy of the synchronous path: each ~Session must release the single-session guard AND the instance mutex so
     // the next start succeeds. Drive several full cycles and require each start to succeed.
@@ -669,7 +771,7 @@ TEST(SessionStart, StartDestroyCyclesReleaseTheGuard)
 
 // Move + inertness
 
-TEST(SessionMove, MovedFromSessionIsInert)
+TEST_F(SessionMove, MovedFromSessionIsInert)
 {
     Result<Session> r = start_local_session("SESS_TEST", "sess_test_move.log");
     ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -685,7 +787,7 @@ TEST(SessionMove, MovedFromSessionIsInert)
     // (b destructs here)
 }
 
-TEST(SessionMove, StartSucceedsAfterAMovedThenDroppedSession)
+TEST_F(SessionMove, StartSucceedsAfterAMovedThenDroppedSession)
 {
     {
         Result<Session> r = start_local_session("SESS_TEST", "sess_test_move2.log");
@@ -698,7 +800,7 @@ TEST(SessionMove, StartSucceedsAfterAMovedThenDroppedSession)
     EXPECT_TRUE(again.has_value()) << again.error().message();
 }
 
-TEST(SessionMove, MoveAssignEndsTheOverwrittenSession)
+TEST_F(SessionMove, MoveAssignEndsTheOverwrittenSession)
 {
     // Move-assigning over an ACTIVE Session must run its FULL ordered teardown (releasing the single-session guard),
     // not merely drop its handles. Build one live Session, move it so the source becomes inert, then move-assign the
@@ -723,7 +825,7 @@ TEST(SessionMove, MoveAssignEndsTheOverwrittenSession)
 
 // Ordered teardown (the ~Session body)
 
-TEST(SessionTeardown, TeardownWithNoSubsystemsInitialized)
+TEST_F(SessionTeardown, TeardownWithNoSubsystemsInitialized)
 {
     Result<Session> r = start_local_session("SESS_TEST", "sess_test_empty.log");
     ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -733,7 +835,7 @@ TEST(SessionTeardown, TeardownWithNoSubsystemsInitialized)
     });
 }
 
-TEST(SessionTeardown, ClearsConfigRegistryAllowingHotReload)
+TEST_F(SessionTeardown, ClearsConfigRegistryAllowingHotReload)
 {
     int call_count_a = 0;
     {
@@ -773,7 +875,7 @@ TEST(SessionTeardown, ClearsConfigRegistryAllowingHotReload)
     }
 }
 
-TEST(SessionTeardown, StopsAutoReloadWatcherFirst)
+TEST_F(SessionTeardown, StopsAutoReloadWatcherFirst)
 {
     // ~Session must stop the config auto-reload watcher before clearing state a watcher callback might touch. Prove it
     // deterministically: after teardown, re-enabling must return Started, not AlreadyRunning.
@@ -813,7 +915,7 @@ TEST(SessionTeardown, StopsAutoReloadWatcherFirst)
     }
 }
 
-TEST(SessionTeardown, FlushesConfiguredLogger)
+TEST_F(SessionTeardown, FlushesConfiguredLogger)
 {
     // Temp files here are named with the PID: under ctest PRE_TEST discovery each case runs in its own process, so the
     // PID makes the path unique across parallel cases (which never share a process) and repeated runs (each cleans up).
@@ -859,7 +961,7 @@ TEST(SessionTeardown, FlushesConfiguredLogger)
     }
 }
 
-TEST(SessionLoggerConfiguration, StartPropagatesNeverSourceStampMode)
+TEST_F(SessionLoggerConfiguration, StartPropagatesNeverSourceStampMode)
 {
     const auto log_path = unique_session_log_path("test_session_stamp_start");
     std::error_code error_code;
@@ -883,7 +985,7 @@ TEST(SessionLoggerConfiguration, StartPropagatesNeverSourceStampMode)
     std::filesystem::remove(log_path, error_code);
 }
 
-TEST(SessionTeardown, ResetsMemoryCache)
+TEST_F(SessionTeardown, ResetsMemoryCache)
 {
     {
         Result<Session> r = start_local_session("SESS_TEST", "sess_test_memcache.log");
@@ -901,7 +1003,7 @@ TEST(SessionTeardown, ResetsMemoryCache)
     memory::shutdown_cache();
 }
 
-TEST(SessionTeardown, ClearsInputBindings)
+TEST_F(SessionTeardown, ClearsInputBindings)
 {
     auto &mgr = input::Input::instance();
     mgr.shutdown(); // reset any residual bindings so the count assertions are deterministic
@@ -926,7 +1028,7 @@ TEST(SessionTeardown, ClearsInputBindings)
 
 // abandon() neutralizes the Session so ~Session does NOTHING: for process-exit only, it skips the ordered teardown.
 // Prove it: a config item registered before abandon() survives the (inert) destructor.
-TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
+TEST_F(SessionTeardown, AbandonSkipsOrderedTeardown)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -949,6 +1051,7 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
 
         s.abandon();
         EXPECT_FALSE(static_cast<bool>(s)) << "abandon() must neutralize the Session";
+        EXPECT_EQ(module_handle(), nullptr) << "abandon() must retire the identity";
         // s destructs here: inert, so config::clear() is NOT run and the registry entry survives.
     }
 
@@ -962,7 +1065,7 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
 // Session::abandon() must neutralize m_scope so ~Session runs no guard release. A held Hold binding cannot be driven
 // from a unit test (no GetAsyncKeyState seam), so a consume binding stands in: its release lifts suppression, which
 // is the observable "release ran" signal. abandon() must leave that suppression armed.
-TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
+TEST_F(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -1009,12 +1112,11 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
-// single subsystem in isolation; this activates ALL of them in one Session (the config registry and its auto-reload
-// watcher, an input binding, the memory cache, and the logger), then destroys the Session and asserts every leaf shut
-// down. It pins that ~Session runs the WHOLE ordered sequence (config watcher -> input -> memory cache -> config
-// registry -> logger, logger last) to completion when the entire stack coexists, so no leaf is skipped or
-// short-circuited by another's teardown.
-TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
+// single subsystem in isolation. This case activates the config registry and its auto-reload watcher, an input binding,
+// the memory cache, and the logger in one Session. It destroys the Session and asserts that each of those leaves shut
+// down, so no leaf is skipped or short-circuited by another's teardown.
+// Lifecycle.DiagnosticsTlsIndexReturnsWithTheSession pins the diagnostics leaf and its place after the config registry.
+TEST_F(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
 {
     input::Input::instance().shutdown(); // deterministic input baseline
     config::clear();
@@ -1119,7 +1221,7 @@ TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
 // before teardown is already unhooked, and teardown still runs its non-hook steps cleanly.
 namespace
 {
-    DMK_TEST_NOINLINE int session_raii_target(int x)
+    DMK_PROOF_TARGET int session_raii_target(int x)
     {
         volatile int r = x + 1;
         return r;
@@ -1130,7 +1232,7 @@ namespace
     }
 } // namespace
 
-TEST(SessionTeardown, HookLifetimeIsCallerOwned)
+TEST_F(SessionTeardown, HookLifetimeIsCallerOwned)
 {
     const Address target{reinterpret_cast<std::uintptr_t>(&session_raii_target)};
 
@@ -1166,9 +1268,75 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
     EXPECT_FALSE(is_target_hooked(target));
 }
 
+namespace
+{
+    class SessionVmtTarget
+    {
+    public:
+        virtual ~SessionVmtTarget() = default;
+        virtual int scale(int x) { return x * 2; }
+    };
+} // namespace
+
+// A VmtHook dropped after the Session must restore its object without a handler that outlives Session retirement.
+TEST_F(SessionTeardown, VmtHookOutlivingTheSessionRestoresItsObject)
+{
+    auto object = std::make_unique<SessionVmtTarget>();
+    const auto original_vptr = *reinterpret_cast<std::uintptr_t *>(object.get());
+    const auto leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    Result<Session> rs = start_local_session("SESS_TEST", "sess_test_vmt_outlives.log");
+    ASSERT_TRUE(rs.has_value()) << rs.error().message();
+    Session s = std::move(*rs);
+    Result<VmtHook> created = vmt_for("session_vmt_outlives", object.get());
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    VmtHook vmt = std::move(*created);
+    ASSERT_NE(*reinterpret_cast<std::uintptr_t *>(object.get()), original_vptr);
+
+    {
+        Session ended = std::move(s);
+        (void)ended;
+    }
+    {
+        VmtHook dropped = std::move(vmt);
+        (void)dropped;
+    }
+
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), original_vptr) << "the object must leave the clone";
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), leaks_before);
+#if !defined(_MSC_VER) && defined(_WIN64)
+    EXPECT_EQ(DetourModKit::detail::guarded_engine_tls_index_for_test(), TLS_OUT_OF_INDEXES)
+        << "the restore must not leave a guarded-read handler after Session retirement";
+#endif
+}
+
+// A cache start that a concurrent abandonment rolls back must keep the retired handler epoch closed.
+TEST_F(SessionTeardown, RolledBackCacheStartKeepsTheRetiredHandlerEpoch)
+{
+    memory::shutdown_cache();
+    {
+        Result<Session> rs = start_local_session("SESS_TEST", "sess_test_rolled_back_cache.log");
+        ASSERT_TRUE(rs.has_value()) << rs.error().message();
+    }
+
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = []()
+    { DetourModKit::detail::memory_cache_abandon_for_test(); };
+    const bool started = memory::init_cache(32, 5000);
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = nullptr;
+    EXPECT_FALSE(started);
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+    const std::uint64_t value = 42;
+    EXPECT_EQ(memory::read<std::uint64_t>(Address{reinterpret_cast<std::uintptr_t>(&value)}).value_or(0), value);
+    EXPECT_EQ(DetourModKit::detail::guarded_engine_tls_index_for_test(), TLS_OUT_OF_INDEXES)
+        << "a rolled-back cache start must not reopen lazy handler installation";
+#endif
+    memory::shutdown_cache();
+}
+
 // Async bootstrap / bootstrap_detach
 
-class SessionBootstrapTest : public ::testing::Test
+class SessionBootstrapTest : public SessionTest
 {
 protected:
     CallbackSignals m_sig;
@@ -1181,6 +1349,7 @@ protected:
             Result<void> drained = shutdown_and_wait();
             EXPECT_TRUE(drained.has_value()) << (drained ? "" : drained.error().message());
         }
+        SessionTest::TearDown();
     }
 };
 
@@ -1284,7 +1453,7 @@ TEST_F(SessionBootstrapTest, ProcessGateMismatchDoesNotSpawnWorker)
     EXPECT_EQ(m_sig.ready_calls.load(), 0) << "on_ready must not run when the gate rejects the process";
 }
 
-TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
+TEST_F(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
 {
     const std::string exe_name = current_exe_basename();
     ASSERT_FALSE(exe_name.empty());
@@ -1301,6 +1470,12 @@ TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
             },
             [&sig](Session &) -> Result<void>
             {
+#if !defined(_MSC_VER) && defined(_WIN64)
+                const std::uint64_t value = 42;
+                const auto address = Address{reinterpret_cast<std::uintptr_t>(&value)};
+                EXPECT_EQ(memory::read<std::uint64_t>(address).value_or(0), value);
+                EXPECT_NE(DetourModKit::detail::guarded_engine_tls_index_for_test(), TLS_OUT_OF_INDEXES);
+#endif
                 sig.signal_ready();
                 return {};
             }
@@ -1313,6 +1488,35 @@ TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
         ASSERT_TRUE(drained.has_value()) << drained.error().message();
         EXPECT_EQ(module_handle(), nullptr) << "cycle " << cycle << ": detach must clear the module handle";
     }
+}
+
+TEST_F(SessionBootstrapTest, FailedOnReadyRequestsShutdownAndRetiresIdentity)
+{
+    const auto started = bootstrap(
+        ModInfo{
+            .name = "SESS_READY_FAILURE",
+        },
+        [this](Session &) -> Result<void>
+        {
+            request_shutdown();
+            m_sig.signal_ready();
+            return std::unexpected(Error{ErrorCode::Unknown, "on_ready"});
+        }
+    );
+    ASSERT_TRUE(started);
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+    // The callback request alone must retire the generation before a control thread drains it.
+    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+    while ((module_handle() != nullptr ||
+            DetourModKit::detail::lifecycle().state() != DetourModKit::detail::LifecycleState::Stopped) &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(module_handle(), nullptr);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+    EXPECT_TRUE(shutdown_and_wait());
 }
 
 TEST_F(SessionBootstrapTest, OnReadyExceptionIsCaught)
@@ -1519,7 +1723,7 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
 
 namespace
 {
-    DMK_TEST_NOINLINE int logic_unload_target_add(int a, int b)
+    DMK_PROOF_TARGET int logic_unload_target_add(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -1528,7 +1732,7 @@ namespace
     {
         return a + b + 1;
     }
-    DMK_TEST_NOINLINE int logic_unload_target_sub(int a, int b)
+    DMK_PROOF_TARGET int logic_unload_target_sub(int a, int b)
     {
         volatile int r = a - b;
         return r;
@@ -1552,7 +1756,7 @@ namespace
 } // namespace
 
 // on_logic_dll_unload tears down the named bindings and the config registry; it does NOT touch hooks (caller-owned).
-TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
+TEST_F(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
 {
     input::Input::instance().shutdown();
 
@@ -1591,7 +1795,7 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
     // h drops here: RAII unhooks, proving lifetime is the caller's, not the unload helper's.
 }
 
-TEST(SessionHotReload, UnloadIsIdempotent)
+TEST_F(SessionHotReload, UnloadIsIdempotent)
 {
     input::Input::instance().shutdown();
 
@@ -1624,7 +1828,7 @@ TEST(SessionHotReload, UnloadIsIdempotent)
     EXPECT_TRUE(is_target_hooked(target));
 }
 
-TEST(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
+TEST_F(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
 {
     input::Input::instance().shutdown();
 
@@ -1680,7 +1884,7 @@ TEST(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
-TEST(SessionHotReload, UnloadAllIsIdempotent)
+TEST_F(SessionHotReload, UnloadAllIsIdempotent)
 {
     input::Input::instance().shutdown();
 
@@ -1700,7 +1904,7 @@ TEST(SessionHotReload, UnloadAllIsIdempotent)
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
-TEST(SessionHotReload, UnloadAllEmptyRegistriesIsNoOp)
+TEST_F(SessionHotReload, UnloadAllEmptyRegistriesIsNoOp)
 {
     input::Input::instance().shutdown();
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
@@ -1708,7 +1912,7 @@ TEST(SessionHotReload, UnloadAllEmptyRegistriesIsNoOp)
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
-TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
+TEST_F(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
 {
     input::Input::instance().shutdown();
 
@@ -1745,13 +1949,15 @@ TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
     EXPECT_EQ(press_count->load(), 0);
 }
 
-TEST(SessionHotReload, TypedPreparationRefusesSelfDelivery)
+TEST_F(SessionHotReload, TypedPreparationRefusesSelfDelivery)
 {
+    const DetourModKit::detail::DeliveryTlsOwner delivery_tls;
     const DetourModKit::detail::DeliveryScope delivery;
+    ASSERT_TRUE(delivery.admitted());
     EXPECT_EQ(prepare_logic_dll_unload({}), LogicDllUnloadStatus::SelfDelivery);
 }
 
-TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin)
+TEST_F(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -1851,7 +2057,7 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
     std::filesystem::remove(ini_path, ec);
 }
 
-TEST(SessionHotReload, ParkedWatcherStartupCannotConsumeTheTypedDrainDeadline)
+TEST_F(SessionHotReload, ParkedWatcherStartupCannotConsumeTheTypedDrainDeadline)
 {
     input::Input::instance().shutdown();
     config::disable_auto_reload();
@@ -1906,7 +2112,7 @@ TEST(SessionHotReload, ParkedWatcherStartupCannotConsumeTheTypedDrainDeadline)
     std::filesystem::remove(ini_path, ec);
 }
 
-TEST(SessionHotReload, UnloadClearsConfigRegisteredItems)
+TEST_F(SessionHotReload, UnloadClearsConfigRegisteredItems)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -1928,7 +2134,7 @@ TEST(SessionHotReload, UnloadClearsConfigRegisteredItems)
     EXPECT_EQ(sentinel.use_count(), 1L) << "the unload helper must drop the registry's captured setter copy";
 }
 
-TEST(SessionHotReload, UnloadStopsAutoReloadWatcher)
+TEST_F(SessionHotReload, UnloadStopsAutoReloadWatcher)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -1962,7 +2168,7 @@ TEST(SessionHotReload, UnloadStopsAutoReloadWatcher)
 // The catch-all overload drains bindings through a DIFFERENT engine path (clear_bindings) than the named overload
 // (remove_bindings_by_name), so its config-clear, hold-release suppression, and watcher-stop need their own coverage.
 
-TEST(SessionHotReload, UnloadAllSuppressesHoldReleaseCallbacks)
+TEST_F(SessionHotReload, UnloadAllSuppressesHoldReleaseCallbacks)
 {
     input::Input::instance().shutdown();
 
@@ -1991,7 +2197,7 @@ TEST(SessionHotReload, UnloadAllSuppressesHoldReleaseCallbacks)
         << "the catch-all helper must not invoke user release callbacks under a loader lock";
 }
 
-TEST(SessionHotReload, UnloadAllClearsConfigRegisteredItems)
+TEST_F(SessionHotReload, UnloadAllClearsConfigRegisteredItems)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -2013,7 +2219,7 @@ TEST(SessionHotReload, UnloadAllClearsConfigRegisteredItems)
     EXPECT_EQ(sentinel.use_count(), 1L) << "the catch-all helper must drop the registry's captured setter copy";
 }
 
-TEST(SessionHotReload, UnloadAllStopsAutoReloadWatcher)
+TEST_F(SessionHotReload, UnloadAllStopsAutoReloadWatcher)
 {
     input::Input::instance().shutdown();
     config::clear();
@@ -2091,7 +2297,7 @@ namespace
     }
 } // namespace
 
-TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
+TEST_F(SessionHotReload, UnloadFixtureDllRoundTrip)
 {
     input::Input::instance().shutdown();
 
@@ -2216,7 +2422,7 @@ namespace
 
 // request_shutdown() may fire from any thread while a synchronous drain retires the shutdown event. Retirement closes
 // admission and drains admitted signalers before closing the handle.
-TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetiredEventSafely)
+TEST_F(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetiredEventSafely)
 {
     Result<void> started = bootstrap(
         ModInfo{
@@ -2289,7 +2495,7 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetire
 // The racing case above can legitimately take either retirement branch, so the close itself is pinned here with no
 // concurrent signaler: the reader count is provably zero, so the bounded spin must observe it on its first look and
 // close. A regression that always retained (or never retired the pointer) fails deterministically.
-TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
+TEST_F(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
 {
     Result<void> started = bootstrap(
         ModInfo{
@@ -2322,7 +2528,7 @@ TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
 // straggling signaler may legitimately defer admission with SessionShutdownInProgress, but every generation must
 // eventually start and drain. This stress case does not claim deterministic coverage of a signaler suspended inside
 // the admission window; a corrupted access word instead manifests as a timeout at the test-process boundary.
-TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
+TEST_F(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
 {
     constexpr int GENERATIONS = 8;
     const ModInfo attach_info{

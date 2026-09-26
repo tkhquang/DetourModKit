@@ -57,6 +57,13 @@ namespace DetourModKit
          */
         inline constexpr std::size_t BACKEND_FALLBACK_MIN_PATCH = 14;
 
+        /**
+         * @brief Hard cap on the guarded vtable slot walk and on a manifest VMT binding index.
+         * @details No real vtable approaches this many methods, so a walk that reaches the cap fails closed as
+         *          malformed.
+         */
+        inline constexpr std::size_t MAX_VMT_SLOTS = 4096;
+
         /// Why @ref validate_backend_steal_window refused a target, or @ref TargetWindowVerdict::Ok if it did not.
         enum class TargetWindowVerdict : std::uint8_t
         {

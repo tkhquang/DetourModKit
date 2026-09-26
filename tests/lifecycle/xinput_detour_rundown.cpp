@@ -5,6 +5,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 
+#include "fixtures/proof_section.hpp"
 #include "raw_proof_error_mode.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
@@ -13,6 +14,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <safetyhook.hpp>
+#include <safetyhook/os.hpp>
 
 #include <windows.h>
 #include <Xinput.h>
@@ -35,14 +37,13 @@
 #include <vector>
 
 #if defined(_MSC_VER)
-#define DMK_LIFECYCLE_NOINLINE __declspec(noinline)
-#else
-#define DMK_LIFECYCLE_NOINLINE [[gnu::noinline]]
-#endif
-
-#if defined(_MSC_VER)
 #include <crtdbg.h>
 #endif
+
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_record_probe)(LogLevel, std::string_view) noexcept;
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -2320,7 +2321,7 @@ namespace
     // RUNTIME_FUNCTION is unwound as a leaf: the unwinder reads a return address out of the middle of the shadow
     // space and walks into nonsense. These cases hold the generated addresses and assert the platform's own answer.
 
-    DMK_LIFECYCLE_NOINLINE int routed_unwind_target(int a, int b)
+    DMK_PROOF_TARGET int routed_unwind_target(int a, int b)
     {
         volatile int result = a + b;
         return result;
@@ -2464,7 +2465,8 @@ namespace
                     return false;
                 }
             }
-            else if (i + 3 >= region_size || region[i + 2] != 0xFF || region[i + 3] != 0x25)
+            else if (i + 3 >= region_size ||
+                     (region[i + 2] != 0xE9 && (region[i + 2] != 0xFF || region[i + 3] != 0x25)))
             {
                 return false;
             }
@@ -2651,7 +2653,7 @@ namespace
 
         // Every generated region resolves through the platform's dynamic table, against the gateway allocation as its
         // base. This is the structural half: it holds whether or not a thread is currently inside them.
-        for (int index = 0; index < 3; ++index)
+        for (int index = 0; index < 4; ++index)
         {
             DWORD64 image_base = 0;
             auto *const region = hook.route_region_for_test(index);
@@ -2663,7 +2665,8 @@ namespace
             }
         }
         const bool gateway_unwinds = virtually_unwind_flag_region(gateway, 160, 2, false);
-        const bool wrapper_unwinds = virtually_unwind_wrapper_region(wrapper, 64);
+        const bool wrapper_unwinds = virtually_unwind_wrapper_region(wrapper, 32) &&
+                                     virtually_unwind_wrapper_region(hook.route_region_for_test(3), 32);
         const bool exit_unwinds = virtually_unwind_flag_region(exit_thunk, 64, 1, true);
         if (!gateway_unwinds || !wrapper_unwinds || !exit_unwinds)
         {
@@ -2812,7 +2815,7 @@ namespace
                 std::fprintf(stderr, "FAIL: routed creation did not recover after the refusal\n");
                 return 134;
             }
-            for (int index = 0; index < 3; ++index)
+            for (int index = 0; index < 4; ++index)
             {
                 DWORD64 image_base = 0;
                 if (RtlLookupFunctionEntry(
@@ -2825,9 +2828,9 @@ namespace
                     return 135;
                 }
             }
-            // Never enabled: destruction must withdraw all three records before their shared storage is reusable.
-            std::array<std::uintptr_t, 3> regions{};
-            for (int index = 0; index < 3; ++index)
+            // Destruction must withdraw every record before its shared storage becomes reusable.
+            std::array<std::uintptr_t, 4> regions{};
+            for (int index = 0; index < 4; ++index)
             {
                 regions[static_cast<std::size_t>(index)] =
                     reinterpret_cast<std::uintptr_t>(recovered->route_region_for_test(index));
@@ -2850,9 +2853,8 @@ namespace
 
     int run_route_metadata_retained_case()
     {
-        std::uintptr_t wrapper = 0;
-        std::uintptr_t gateway = 0;
-        std::uintptr_t exit_thunk = 0;
+        // Idle at teardown: the records and the arena go together, so a later lookup at the gateway finds nothing.
+        std::uintptr_t reclaimed_gateway = 0;
         {
             auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
             if (!created)
@@ -2861,27 +2863,89 @@ namespace
                 return 140;
             }
             safetyhook::InlineHook hook = std::move(*created);
-            gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
-            wrapper = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(1));
-            exit_thunk = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(2));
+            reclaimed_gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
             if (auto enabled = hook.enable(); !enabled)
             {
                 std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
                 return 141;
             }
             (void)call_routed_target(1, 1);
-            // Destroyed here. Publication already happened, so the code and its records are process-lifetime storage.
+            hook.reset();
+            if (hook.route_retained())
+            {
+                std::fprintf(stderr, "FAIL: an idle published route was retained at teardown\n");
+                return 300;
+            }
+        }
+        DWORD64 image_base = 0;
+        if (RtlLookupFunctionEntry(static_cast<DWORD64>(reclaimed_gateway), &image_base, nullptr) != nullptr)
+        {
+            std::fprintf(stderr, "FAIL: a reclaimed route left its unwind records registered\n");
+            return 301;
         }
 
-        DWORD64 image_base = 0;
+        // Parked before the entry increment: the code and its records must stay, because the thread still has to
+        // find them, and the parked call completes through the bypass once released.
+        std::uintptr_t wrapper = 0;
+        std::uintptr_t gateway = 0;
+        std::uintptr_t exit_thunk = 0;
+        {
+            auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!created)
+            {
+                std::fprintf(stderr, "FAIL: the parked routed hook could not be created\n");
+                return 302;
+            }
+            safetyhook::InlineHook hook = std::move(*created);
+            gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
+            wrapper = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(1));
+            exit_thunk = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(2));
+            if (auto enabled = hook.enable(); !enabled)
+            {
+                std::fprintf(stderr, "FAIL: the parked routed hook could not be enabled\n");
+                return 303;
+            }
+            const int detour_calls_before = s_routed_detour_calls.load(std::memory_order_relaxed);
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+            std::atomic<int> observed{0};
+            std::thread helper{[&observed] { observed.store(call_routed_target(2, 3), std::memory_order_release); }};
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            while (!safetyhook::route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::yield();
+            }
+            const bool parked = safetyhook::route_park_reached_for_test();
+            if (parked)
+            {
+                hook.reset();
+            }
+            const bool retained = hook.route_retained();
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            helper.join();
+            if (!parked)
+            {
+                std::fprintf(stderr, "FAIL: the helper never reached the gateway entry park\n");
+                return 304;
+            }
+            if (!retained)
+            {
+                std::fprintf(stderr, "FAIL: a route with a parked thread was reclaimed\n");
+                return 305;
+            }
+            if (observed.load(std::memory_order_acquire) != 5 ||
+                s_routed_detour_calls.load(std::memory_order_relaxed) != detour_calls_before)
+            {
+                std::fprintf(stderr, "FAIL: the parked call did not complete through the bypass\n");
+                return 306;
+            }
+        }
+
         if (RtlLookupFunctionEntry(static_cast<DWORD64>(wrapper), &image_base, nullptr) == nullptr ||
             image_base != static_cast<DWORD64>(gateway))
         {
             std::fprintf(stderr, "FAIL: the retained wrapper lost its unwind record when its handle was destroyed\n");
             return 142;
         }
-        // A thread parked before the gateway's first instruction after the handle is gone still has to find records,
-        // so a published route must never hand its metadata back.
         if (RtlLookupFunctionEntry(static_cast<DWORD64>(gateway), &image_base, nullptr) == nullptr)
         {
             std::fprintf(stderr, "FAIL: the retained gateway lost its unwind record\n");
@@ -2893,7 +2957,7 @@ namespace
             return 144;
         }
 
-        std::puts("PUBLISHED_ROUTE_METADATA_IS_RETAINED");
+        std::puts("PUBLISHED_ROUTE_METADATA_IS_RETAINED_ONLY_WHILE_PARKED");
         return 0;
     }
 
@@ -3090,7 +3154,7 @@ namespace
     int run_unwind_unregistration_refused_case()
     {
         const auto before = safetyhook::route_retention_stats();
-        std::array<std::uintptr_t, 3> regions{};
+        std::array<std::uintptr_t, 4> regions{};
         std::uintptr_t gateway = 0;
         std::size_t gateway_bytes = 0;
         {
@@ -3111,7 +3175,7 @@ namespace
                 return 149;
             }
             gateway_bytes = retained_logical - created->trampoline().size();
-            for (int index = 0; index < 3; ++index)
+            for (int index = 0; index < 4; ++index)
             {
                 regions[static_cast<std::size_t>(index)] =
                     reinterpret_cast<std::uintptr_t>(created->route_region_for_test(index));
@@ -3236,6 +3300,17 @@ namespace
             return 185;
         }
 
+        // Restored at teardown, the committed route is an ordinary published chain: the idle proof frees it and gives
+        // its charge back.
+        hook.reset();
+        const auto reclaimed = safetyhook::route_retention_stats();
+        if (hook.route_retained() || reclaimed.logical_charged != before.logical_charged ||
+            reclaimed.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the committed route was not reclaimed and refunded at teardown\n");
+            return 307;
+        }
+
         std::puts("ROUTE_RESTORE_FAILURE_CHARGES_PUBLICATION");
         return 0;
     }
@@ -3273,6 +3348,7 @@ namespace
     {
         const auto before = safetyhook::route_retention_stats();
         safetyhook::RouteRetentionCost inline_cost{};
+        std::size_t trampoline_bytes = 0;
         {
             auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
             if (!created)
@@ -3281,6 +3357,7 @@ namespace
                 return 190;
             }
             inline_cost = created->route_retention_for_test();
+            trampoline_bytes = created->trampoline().size();
         }
         const auto after_inline = safetyhook::route_retention_stats();
         if (after_inline.logical_reserved != before.logical_reserved ||
@@ -3312,7 +3389,7 @@ namespace
         }
         safetyhook::MidHook hook = std::move(*created);
         const auto mid_cost = hook.route_retention_for_test();
-        if (mid_cost.logical != inline_cost.logical + 404 ||
+        if (mid_cost.logical != trampoline_bytes + 1920 + 404 ||
             mid_cost.committed != inline_cost.committed + system_info.dwAllocationGranularity ||
             mid_cost.committed > static_cast<std::size_t>(system_info.dwAllocationGranularity) * 3)
         {
@@ -3334,7 +3411,290 @@ namespace
             return 195;
         }
 
+        // Clean teardown of the published chain frees its private arena and gives the charge back.
+        auto *const gateway = hook.route_region_for_test(0);
+        hook.reset();
+        const auto reclaimed = safetyhook::route_retention_stats();
+        if (hook.route_retained() || reclaimed.logical_charged != before.logical_charged ||
+            reclaimed.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the published MID chain was not reclaimed and refunded at teardown\n");
+            return 308;
+        }
+        MEMORY_BASIC_INFORMATION gateway_info{};
+        if (VirtualQuery(gateway, &gateway_info, sizeof(gateway_info)) == 0 || gateway_info.State != MEM_FREE)
+        {
+            std::fprintf(stderr, "FAIL: the reclaimed MID arena block remained mapped\n");
+            return 309;
+        }
+
         std::puts("MID_ROUTE_ACCOUNTING_INCLUDES_GENERATED_STUB");
+        return 0;
+    }
+
+    std::atomic<bool> s_chain_call_ready{false};
+    std::atomic<bool> s_chain_call_done{false};
+    std::atomic<bool> s_chain_fault_parked{false};
+    std::atomic<bool> s_chain_fault_release{false};
+    std::uintptr_t s_chain_fault_ip = 0;
+
+    LONG CALLBACK park_chain_fault(EXCEPTION_POINTERS *exception) noexcept
+    {
+        if (exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+            exception->ExceptionRecord->NumberParameters < 2 ||
+            exception->ExceptionRecord->ExceptionInformation[0] != 8 ||
+            exception->ContextRecord->Rip != s_chain_fault_ip)
+            return EXCEPTION_CONTINUE_SEARCH;
+        s_chain_fault_parked.store(true);
+        const auto deadline = GetTickCount64() + 10000;
+        while (!s_chain_fault_release.load())
+        {
+            if (GetTickCount64() >= deadline)
+                ExitProcess(9);
+            Sleep(1);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    void start_chain_call() noexcept
+    {
+        s_chain_call_ready.store(true);
+        const auto deadline = GetTickCount64() + 10000;
+        while (!s_chain_fault_parked.load() && !s_chain_call_done.load())
+        {
+            if (GetTickCount64() >= deadline)
+                ExitProcess(9);
+            Sleep(1);
+        }
+    }
+
+    int run_routed_chain_exception()
+    {
+        auto *const page =
+            static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (page == nullptr)
+            return 1;
+        constexpr std::uint8_t code[] = {
+            0x90,
+            0x90,
+            0x31,
+            0xC0,
+            0xC3,
+        };
+        std::memcpy(page, code, sizeof(code));
+        if (!FlushInstructionCache(GetCurrentProcess(), page, sizeof(code)))
+            return 2;
+        auto created = safetyhook::InlineHook::create(
+            page,
+            page,
+            static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
+            )
+        );
+        if (!created || !created->enable())
+            return 3;
+        // Offset two names an instruction inside the route with no relocated-call return site.
+        s_chain_fault_ip = reinterpret_cast<std::uintptr_t>(created->trampoline().data() + 2);
+        void *const handler = AddVectoredExceptionHandler(1, &park_chain_fault);
+        if (handler == nullptr)
+            return 4;
+        int observed = 0;
+        std::thread caller{
+            [&observed]() -> void
+            {
+                const auto deadline = GetTickCount64() + 10000;
+                while (!s_chain_call_ready.load())
+                {
+                    if (GetTickCount64() >= deadline)
+                        ExitProcess(9);
+                    Sleep(1);
+                }
+                int (*const volatile target)() = reinterpret_cast<int (*)()>(s_chain_fault_ip);
+                observed = target();
+                s_chain_call_done.store(true);
+            }
+        };
+        safetyhook::g_trap_protected_probe = &start_chain_call;
+        created->reset();
+        safetyhook::g_trap_protected_probe = nullptr;
+        if (s_chain_fault_parked.load() && !created->route_retained())
+        {
+            std::fputs("FAIL: saved routed exception context lost its executable chain\n", stderr);
+            ExitProcess(1);
+        }
+        if (!s_chain_fault_parked.load() && created->route_retained())
+        {
+            std::fputs("FAIL: prevented route fault did not permit clean reclamation\n", stderr);
+            ExitProcess(1);
+        }
+        s_chain_fault_release.store(true);
+        caller.join();
+        RemoveVectoredExceptionHandler(handler);
+        VirtualFree(page, 0, MEM_RELEASE);
+        return observed == 0 ? 0 : 5;
+    }
+
+    unsigned s_route_warnings = 0;
+
+    void observe_xinput_route_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
+    {
+        if (level == DetourModKit::LogLevel::Warning && message.starts_with("XInput route retention:"))
+        {
+            // The query takes the interception lock exclusively. A warning under that lock deadlocks here, and the
+            // CTest timeout fails the case.
+            (void)xinput_pair_coverage_for_test();
+            ++s_route_warnings;
+        }
+    }
+
+    int run_route_telemetry_case(std::string_view scenario)
+    {
+        const auto capacity_before = safetyhook::route_retention_stats();
+        const bool alias = scenario == "telemetry-alias";
+        const bool clean = scenario == "telemetry-clean";
+        const bool rollback = scenario == "telemetry-rollback";
+        const bool repeat = scenario == "telemetry-repeat";
+        HMODULE module = LoadLibraryW(alias ? L"dmk_xinput_proxy_alias.dll" : L"dmk_xinput_proxy_local.dll");
+        if (module == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the DMK-owned XInput fixture is absent\n");
+            return 1;
+        }
+        set_xinput_module_override_for_test(module);
+        void *const primary = reinterpret_cast<void *>(GetProcAddress(module, "XInputGetState"));
+        void *const extended =
+            reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (primary == nullptr || extended == nullptr || (primary == extended) != alias)
+        {
+            std::fprintf(stderr, "FAIL: fixture export identities differ from the scenario\n");
+            return 1;
+        }
+        const auto release_host_reference = [&module, primary, clean]() noexcept -> bool
+        {
+            if (module != nullptr)
+            {
+                FreeLibrary(module);
+                module = nullptr;
+            }
+            HMODULE mapped = nullptr;
+            const bool target_mapped =
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(primary),
+                    &mapped
+                ) != FALSE;
+            return target_mapped != clean;
+        };
+        const auto before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto old_probe = DetourModKit::detail::g_logger_record_probe;
+        DetourModKit::detail::g_logger_record_probe = &observe_xinput_route_warning;
+        if (rollback)
+        {
+            set_xinput_backend_toggle_exception_for_test(primary, false);
+            safetyhook::g_unwind_unregistration_failure.store(true);
+        }
+        const bool installed = install_xinput(0);
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        safetyhook::g_unwind_unregistration_failure.store(false);
+        if (installed == rollback)
+        {
+            std::fprintf(stderr, "FAIL: install did not reach the requested outcome\n");
+            return 1;
+        }
+        if (!rollback && !clean)
+        {
+            const auto target = reinterpret_cast<XInputGetStateFn>(scenario == "telemetry-ex" ? extended : primary);
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
+            DWORD result = ERROR_GEN_FAILURE;
+            DWORD packet = 0;
+            std::thread caller{
+                [target, &result, &packet]() -> void
+                {
+                    XINPUT_STATE state{};
+                    const XInputGetStateFn volatile indirect = target;
+                    result = indirect(7, &state);
+                    packet = state.dwPacketNumber;
+                }
+            };
+            const auto deadline = GetTickCount64() + 10000;
+            while (!safetyhook::route_park_reached_for_test() && GetTickCount64() < deadline)
+            {
+                std::this_thread::yield();
+            }
+            const bool reached = safetyhook::route_park_reached_for_test();
+            if (reached)
+            {
+                uninstall();
+                if (!release_host_reference())
+                {
+                    std::fprintf(stderr, "FAIL: the retained route lost its target DLL before its caller resumed\n");
+                    ExitProcess(6);
+                }
+            }
+            safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
+            caller.join();
+            const DWORD expected_packet = scenario == "telemetry-ex" ? 8 : 7;
+            if (!reached || result != ERROR_DEVICE_NOT_CONNECTED || packet != expected_packet)
+            {
+                std::fprintf(stderr, "FAIL: the parked route did not resume through its original function\n");
+                return 1;
+            }
+        }
+        else if (clean)
+        {
+            uninstall();
+        }
+        const auto expected = clean ? 0u : 1u;
+        const auto after =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto warnings = s_route_warnings;
+        // Without the owner, each repeated uninstall returns at the owner guard.
+        uninstall();
+        uninstall();
+        const auto refused =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        if (repeat)
+        {
+            // A renewed owner passes the guard, so each uninstall resets the already reported members again.
+            for (int i = 0; i < 2; ++i)
+            {
+                if (!adopt_owner_for_test(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+                {
+                    std::fprintf(stderr, "FAIL: the repeated uninstall could not renew its owner\n");
+                    return 1;
+                }
+                uninstall();
+            }
+        }
+        const auto repeated =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+        const auto capacity_after = safetyhook::route_retention_stats();
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        DetourModKit::detail::g_logger_record_probe = old_probe;
+        set_xinput_module_override_for_test(nullptr);
+        const bool module_lifetime = release_host_reference();
+        if (!module_lifetime || after - before != expected || warnings != expected || refused != after ||
+            repeated != after || s_route_warnings != warnings ||
+            DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) !=
+                expected ||
+            DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
+                expected ||
+            xinput_module_refs_held() != 0 || capacity_after.logical_reserved != capacity_before.logical_reserved ||
+            capacity_after.committed_reserved != capacity_before.committed_reserved ||
+            capacity_after.committed_charged - capacity_before.committed_charged !=
+                static_cast<std::uint64_t>(expected) * 2 * system_info.dwAllocationGranularity)
+        {
+            std::fprintf(
+                stderr,
+                "FAIL: route telemetry leaks=%zu warnings=%u expected=%u\n",
+                after - before,
+                warnings,
+                expected
+            );
+            return 1;
+        }
         return 0;
     }
 } // namespace
@@ -3353,7 +3713,8 @@ int main(int argc, char **argv)
             "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
             "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
             "route-restore-failure|route-allocator-reclamation|"
-            "mid-route-accounting|xinput-pair-capacity|fresh-primary-loss|"
+            "mid-route-accounting|telemetry-clean|telemetry-primary|telemetry-ex|telemetry-alias|"
+            "telemetry-rollback|telemetry-repeat|xinput-pair-capacity|fresh-primary-loss|"
             "installed-primary-loss|permanent-primary-loss|poller-maintains-pair>\n"
         );
         return 1;
@@ -3371,6 +3732,12 @@ int main(int argc, char **argv)
     dmk_lifecycle::configure_raw_proof_error_mode();
 
     const std::string_view selected_case{argv[1]};
+    if (selected_case == "routed-chain-exception")
+        return run_routed_chain_exception();
+    if (selected_case == "telemetry-clean" || selected_case == "telemetry-primary" || selected_case == "telemetry-ex" ||
+        selected_case == "telemetry-alias" || selected_case == "telemetry-rollback" ||
+        selected_case == "telemetry-repeat")
+        return run_route_telemetry_case(selected_case);
     if (selected_case == "wrapper-unwind")
         return run_wrapper_unwind_case();
     if (selected_case == "wrapper-native-exception")

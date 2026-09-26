@@ -17,6 +17,7 @@
 
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/diagnostics.hpp"
+#include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "internal/drain_backoff.hpp"
 
@@ -52,13 +53,13 @@ using namespace DetourModKit::hook;
 
 namespace
 {
-    DMK_TEST_NOINLINE int sum_first_second(int a, int b)
+    DMK_PROOF_TARGET int sum_first_second(int a, int b)
     {
         volatile int r = a + b; // a<-rcx, b<-rdx
         return r;
     }
 
-    DMK_TEST_NOINLINE int return_third(int a, int b, int c)
+    DMK_PROOF_TARGET int return_third(int a, int b, int c)
     {
         (void)a;
         (void)b;
@@ -66,13 +67,13 @@ namespace
         return r;
     }
 
-    DMK_TEST_NOINLINE int read_probe(int a, int b, int c)
+    DMK_PROOF_TARGET int read_probe(int a, int b, int c)
     {
         volatile int r = a + b + c;
         return r;
     }
 
-    DMK_TEST_NOINLINE int rip_original()
+    DMK_PROOF_TARGET int rip_original()
     {
         volatile int r = 11;
         return r;
@@ -84,7 +85,7 @@ namespace
         return r;
     }
 
-    DMK_TEST_NOINLINE float pass_float(float x)
+    DMK_PROOF_TARGET float pass_float(float x)
     {
         volatile float r = x; // x <- xmm0 (Win64 float-arg ABI)
         return r;
@@ -407,6 +408,35 @@ TEST(MidContextXmmViewTest, LaneFailsClosedOutOfRange)
     EXPECT_EQ(view.lane<std::uint64_t>(2), 0u); // lane 2 starts at byte 16 (out of range) -> zero
 }
 
+namespace
+{
+    // The negatives live in a template, so a rejected lane type evaluates to false instead of a hard error.
+    template <typename T> constexpr bool xmm_lane_admits = requires(const XmmView &view) { view.template lane<T>(0); };
+
+    struct NonTrivialLane
+    {
+        NonTrivialLane(const NonTrivialLane &) {}
+    };
+
+    static_assert(xmm_lane_admits<float>);
+    static_assert(xmm_lane_admits<double>);
+    static_assert(xmm_lane_admits<std::int32_t>);
+    static_assert(xmm_lane_admits<std::uint64_t>);
+    static_assert(xmm_lane_admits<std::byte>);
+    static_assert(!xmm_lane_admits<bool>, "a captured byte is not a valid bool object representation");
+    static_assert(!xmm_lane_admits<NonTrivialLane>);
+} // namespace
+
+// XmmView::lane admits trivially-copyable scalars and rejects bool. The static_asserts above are the proof. The case
+// keeps the set visible in the test inventory.
+TEST(MidContextXmmViewTest, LaneRejectsBoolAndAdmitsScalars)
+{
+    EXPECT_TRUE(xmm_lane_admits<float>);
+    EXPECT_TRUE(xmm_lane_admits<std::uint64_t>);
+    EXPECT_FALSE(xmm_lane_admits<bool>);
+    EXPECT_FALSE(xmm_lane_admits<NonTrivialLane>);
+}
+
 // T-XMM: every one of the 16 accessors selects its register by explicit member selection, pinned to the assembly
 // frame's fixed 16-byte slots by the compile-time offset/size assertions beside xmm() in src/hook.cpp. This runtime
 // half drives a synthetic context image carrying a distinct pattern per slot through all 16 indices in the optimized
@@ -470,55 +500,55 @@ namespace
         return indirect(args...);
     }
 
-    DMK_TEST_NOINLINE int throwing_site(int a)
+    DMK_PROOF_TARGET int throwing_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int recursion_site(int depth)
+    DMK_PROOF_TARGET int recursion_site(int depth)
     {
         volatile int result = depth;
         return result;
     }
 
-    DMK_TEST_NOINLINE int rundown_site(int a)
+    DMK_PROOF_TARGET int rundown_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int self_destroy_site(int a)
+    DMK_PROOF_TARGET int self_destroy_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int pinned_site(int a)
+    DMK_PROOF_TARGET int pinned_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int pinned_rundown_site(int a)
+    DMK_PROOF_TARGET int pinned_rundown_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int late_entrant_site(int a)
+    DMK_PROOF_TARGET int late_entrant_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int route_timeout_site(int a)
+    DMK_PROOF_TARGET int route_timeout_site(int a)
     {
         volatile int result = a;
         return result;
     }
 
-    DMK_TEST_NOINLINE int untracked_self_destroy_site(int a)
+    DMK_PROOF_TARGET int untracked_self_destroy_site(int a)
     {
         volatile int result = a;
         return result;
@@ -1126,7 +1156,7 @@ namespace
     // A family of distinct hookable functions. Each instantiation returns a different constant, so neither inlining nor
     // MSVC's identical-COMDAT folding can collapse them into one address, and the ledger refuses a second hook on the
     // same target, so distinct addresses are what make a pool-exhaustion test possible at all.
-    template <int N> DMK_TEST_NOINLINE int pool_site()
+    template <int N> DMK_PROOF_TARGET int pool_site()
     {
         volatile int result = N;
         return result;

@@ -84,18 +84,6 @@ namespace DetourModKit::detail
             m_loader_context.store(context, std::memory_order_release);
         }
 
-        /**
-         * @brief Reports whether the published context permits a teardown to block (join, wait, run user destruction).
-         * @details Only @ref LoaderContext::Normal and @ref LoaderContext::ExplicitDrain qualify. This is one of the
-         *          two authorizing halves of the decision; callers must use @ref blocking_teardown_permitted, which
-         *          also admits the bootstrap worker and applies the fail-closed loader-lock veto.
-         */
-        [[nodiscard]] bool context_permits_blocking() const noexcept
-        {
-            const LoaderContext context = loader_context();
-            return context == LoaderContext::Normal || context == LoaderContext::ExplicitDrain;
-        }
-
         /// Publishes the calling thread as the bootstrap worker. Called by the worker before consumer code can run.
         void publish_worker_thread() noexcept;
         /**
@@ -129,14 +117,17 @@ namespace DetourModKit::detail
     /// The one process-global session control block.
     [[nodiscard]] LifecycleContext &lifecycle() noexcept;
 
+    /** @brief Reports process termination from the published context or the native loader state. */
+    [[nodiscard]] bool process_is_exiting() noexcept;
+
     /**
      * @brief Reports whether the caller is authorized to block, before the loader-lock veto is applied.
-     * @details Either the published phase authorizes every thread (@ref LifecycleContext::context_permits_blocking),
-     *          or the caller is the bootstrap worker. The worker needs its own clause because the loader context is one
-     *          process-global word describing the DllMain thread's phase: a bare FreeLibrary publishes
-     *          @ref LoaderContext::LoaderDetach and returns, and the worker then runs the ordered teardown it was
-     *          created to run on a thread that is in no loader callback and still holds a counted module reference.
-     *          Widening the published phase instead would authorize every other thread for that whole window.
+     * @details Either the published phase is @ref LoaderContext::Normal or @ref LoaderContext::ExplicitDrain, which
+     *          authorizes every thread, or the caller is the bootstrap worker. The worker needs its own clause because
+     *          the loader context is one process-global word that describes the DllMain thread's phase. A bare
+     *          FreeLibrary publishes @ref LoaderContext::LoaderDetach and returns. The worker then runs the ordered
+     *          teardown it was created to run. That thread is in no loader callback and still holds a counted module
+     *          reference. A widened published phase instead authorizes every other thread for that whole window.
      */
     [[nodiscard]] bool teardown_caller_authorized() noexcept;
 

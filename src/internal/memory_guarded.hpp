@@ -227,6 +227,8 @@ namespace DetourModKit
          *          surviving holder; removing the last restores the original. The span is walked by VirtualQuery
          *          region so protection seams restore exactly. Query, protection, capacity, and allocation failures
          *          fail closed. A rollback failure is reported separately because a temporary protection may remain.
+         *          The walk holds the backend process coordinator, so a backend trap window cannot lend its transient
+         *          protection to the capture (`[B-18]`). A refused coordinator fails closed with `ERROR_BUSY`.
          */
         [[nodiscard]] ProtectionChangeOutcome protect_across_regions(
             std::uintptr_t address,
@@ -245,6 +247,7 @@ namespace DetourModKit
          *        or FlushInstructionCache can overwrite GetLastError).
          * @return true if every segment restored; false if any VirtualProtect failed (best-effort: it still attempts
          *         the remaining segments so a single failure does not strand the rest in the changed protection).
+         * @details Runs under the backend process coordinator. A refused coordinator still restores.
          */
         [[nodiscard]] bool
         restore_across_regions(const ProtectionSegment *segments, std::size_t count, std::uint32_t &os_error) noexcept;
@@ -451,23 +454,38 @@ namespace DetourModKit
 
 #if !defined(_MSC_VER) && defined(_WIN64)
         /**
-         * @brief Eagerly installs the MinGW process-wide vectored fault handler the guarded reads rely on.
-         * @details Lazy install also happens on the first guarded access, so this is purely an optimization: the cache
-         *          setup path calls it so the handler is present before a hook callback can be the first guarded read,
-         *          sparing that first read the VirtualQuery fallback. A no-op on MSVC (frame-based __try needs no
-         *          handler), hence the MinGW-x64 guard. Best-effort: a failed install only costs guarded reads their
-         *          fallback.
+         * @brief Installs the MinGW handler when its epoch permits it.
+         * @details A failed installation leaves byte access on its fallback and region scans closed.
          */
         void ensure_guarded_engine_installed() noexcept;
 
         /**
-         * @brief Drains in-flight guarded accesses, then removes the MinGW vectored fault handler.
-         * @details Called on memory-subsystem teardown so the handler cannot dangle into freed code if the DMK module
-         *          is unloaded. It waits for every guarded access already committed to the handler path to finish
-         *          before unregistering, so a fault can never arrive after the handler is gone. Idempotent and
-         *          re-installable: a later guarded access re-installs a fresh handler. A no-op on MSVC.
+         * @brief Drains guarded accesses, removes the MinGW handler, and returns its TLS index.
+         * @details A later access can reserve a fresh index unless Session retirement closed the epoch.
+         *          Process termination skips the release before any control lock or stripe wait.
          */
         void release_guarded_engine() noexcept;
+
+        /** @brief Retires the Session's handler epoch until an explicit reopen. */
+        void retire_session_guarded_engine() noexcept;
+
+        /** @brief Permits handler installation for a new Session or cache epoch. */
+        void reopen_guarded_engine() noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /** @brief Runs a proof callback with the VEH control lock held. */
+        void with_guarded_engine_lock_for_test(void (*callback)(void *) noexcept, void *context) noexcept;
+
+        /// Returns the guarded-read TLS index, or 0xFFFFFFFF while none is reserved.
+        [[nodiscard]] std::uint32_t guarded_engine_tls_index_for_test() noexcept;
+
+        /**
+         * @brief Makes the calling thread's guard-arm store report failure, or clears that state.
+         * @details No host can fail the arm store on demand. A refused arm routes a copy or write to its fallback and
+         *          fails a region closed.
+         */
+        void set_guard_arm_failure_for_test(bool fail) noexcept;
+#endif
 #endif
     } // namespace detail
 } // namespace DetourModKit

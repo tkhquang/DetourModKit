@@ -407,15 +407,6 @@ namespace DetourModKit
 
         std::shared_ptr<BindingLifecycle> make_binding_lifecycle()
         {
-            static std::atomic<bool> s_tls_warned{false};
-            if (!reserve_delivery_scope_tls() && !s_tls_warned.exchange(true, std::memory_order_relaxed))
-            {
-                (void)log().try_log(
-                    LogLevel::Error,
-                    "InputPoller: no TLS slot is available for the input delivery marker; input "
-                    "callbacks are refused rather than delivered without per-thread identity."
-                );
-            }
             return std::make_shared<BindingLifecycle>(next_binding_generation());
         }
 
@@ -799,6 +790,7 @@ namespace DetourModKit
 
             m_consume_rules.swap(caches.consume_rules);
             m_name_index.swap(caches.name_index);
+            m_name_index_authoritative = true;
             m_known_modifiers.swap(caches.known_modifiers);
             m_has_gamepad_bindings.store(caches.has_gamepad_bindings, std::memory_order_relaxed);
             m_has_consume_gamepad_bindings.store(caches.has_consume_gamepad_bindings, std::memory_order_relaxed);
@@ -852,6 +844,7 @@ namespace DetourModKit
             // Keep every derived cache conservative and index-safe rather than leave a stale name map whose old indices
             // can address past the new binding array.
             m_name_index.clear();
+            m_name_index_authoritative = false;
             m_known_modifiers.clear();
             m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
             m_has_wheel_bindings.store(false, std::memory_order_relaxed);
@@ -859,6 +852,47 @@ namespace DetourModKit
             m_consume_rules.clear();
             publish_consume_rules_locked(diagnostics);
             diagnostics.cache_rebuild_cleared = true;
+        }
+
+        template <typename Visit> bool InputPoller::for_each_named_locked(std::string_view name, Visit &&visit) const
+        {
+            if (name.empty())
+            {
+                return false;
+            }
+            if (m_name_index_authoritative)
+            {
+                const auto it = m_name_index.find(name);
+                if (it == m_name_index.end())
+                {
+                    return false;
+                }
+                for (const std::size_t idx : it->second)
+                {
+                    visit(idx);
+                }
+                return !it->second.empty();
+            }
+            bool matched = false;
+            for (std::size_t idx = 0; idx < m_bindings.size(); ++idx)
+            {
+                if (m_bindings[idx].name == name)
+                {
+                    visit(idx);
+                    matched = true;
+                }
+            }
+            return matched;
+        }
+
+        std::vector<std::size_t> InputPoller::named_indices_locked(std::string_view name) const
+        {
+            std::size_t matched = 0;
+            (void)for_each_named_locked(name, [&matched](std::size_t) noexcept { ++matched; });
+            std::vector<std::size_t> indices;
+            indices.reserve(matched);
+            (void)for_each_named_locked(name, [&indices](std::size_t idx) { indices.push_back(idx); });
+            return indices;
         }
 
         void InputPoller::publish_consume_rules_locked(DeferredDiagnostics &diagnostics) noexcept
@@ -885,6 +919,12 @@ namespace DetourModKit
                 publish_consume_rules_locked(diagnostics);
             }
             diagnostics.emit();
+        }
+
+        bool InputPoller::name_index_authoritative_for_test() const noexcept
+        {
+            std::shared_lock lock(m_bindings_rw_mutex);
+            return m_name_index_authoritative;
         }
 #endif
 
@@ -925,8 +965,8 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Error,
-                    "InputPoller: out of memory rebuilding modifier caches; "
-                    "name lookup and input interception disabled until the next successful rebuild"
+                    "InputPoller: out of memory rebuilding modifier caches; name lookup scans the "
+                    "binding set and input interception is disabled until the next successful rebuild"
                 );
             }
             if (add_binding_oom)
@@ -1009,7 +1049,7 @@ namespace DetourModKit
         bool InputPoller::has_bindings_by_name(std::string_view name) const noexcept
         {
             std::shared_lock lock(m_bindings_rw_mutex);
-            return m_name_index.contains(name);
+            return for_each_named_locked(name, [](std::size_t) noexcept {});
         }
 
         std::chrono::milliseconds InputPoller::poll_interval() const noexcept
@@ -1037,20 +1077,20 @@ namespace DetourModKit
         bool InputPoller::is_binding_active(std::string_view name) const noexcept
         {
             std::shared_lock lock(m_bindings_rw_mutex);
-            const auto it = m_name_index.find(name);
-            if (it != m_name_index.end())
-            {
-                for (const size_t idx : it->second)
+            bool active = false;
+            (void)for_each_named_locked(
+                name,
+                [this, &active](std::size_t idx) noexcept
                 {
                     // The shared lock holds idx in bounds. The explicit check is defense in depth against a future
                     // reshape that repopulates m_name_index without a corresponding m_active_states resize.
                     if (idx < m_bindings.size() && m_active_states[idx].load(std::memory_order_relaxed) != 0)
                     {
-                        return true;
+                        active = true;
                     }
                 }
-            }
-            return false;
+            );
+            return active;
         }
 
         input::BindingToken InputPoller::acquire_binding_token(std::string_view name) const noexcept
@@ -1059,15 +1099,13 @@ namespace DetourModKit
             try
             {
                 std::shared_lock lock(m_bindings_rw_mutex);
-                const auto it = m_name_index.find(name);
-                if (it == m_name_index.end())
+                // Collect the indices first because only this step can throw. Then stamp the generation. An allocation
+                // failure leaves the token invalid instead of valid but empty. An unknown name leaves generation zero.
+                token.m_indices = named_indices_locked(name);
+                if (token.m_indices.empty())
                 {
-                    // If the name is unknown, leave the token invalid with generation zero.
-                    return token;
+                    return input::BindingToken{};
                 }
-                // Copy the indices first because only this step can throw. Then stamp the generation. An allocation
-                // failure leaves the token invalid instead of valid but empty.
-                token.m_indices = it->second;
                 token.m_generation = m_binding_generation;
             }
             catch (...)
@@ -1122,20 +1160,18 @@ namespace DetourModKit
             DeferredDiagnostics diagnostics;
             {
                 std::unique_lock lock(m_bindings_rw_mutex);
-                const auto it = m_name_index.find(name);
-                if (it == m_name_index.end())
-                {
-                    return;
-                }
                 bool changed = false;
-                for (const size_t idx : it->second)
-                {
-                    if (m_bindings[idx].consume != consume)
+                (void)for_each_named_locked(
+                    name,
+                    [this, consume, &changed](std::size_t idx) noexcept
                     {
-                        m_bindings[idx].consume = consume;
-                        changed = true;
+                        if (m_bindings[idx].consume != consume)
+                        {
+                            m_bindings[idx].consume = consume;
+                            changed = true;
+                        }
                     }
-                }
+                );
                 // Refresh the interception gates only on a real transition, as set_consume_by_owner does. A redundant
                 // rebuild advances the generation and makes every live BindingToken stale despite no state change.
                 // InputTest.BindingTokenStaysCurrentAfterRedundantConsumeSet pins both no-op flag values.
@@ -1215,10 +1251,10 @@ namespace DetourModKit
                 return;
             }
 
-            if (m_poll_thread.get_id() == std::this_thread::get_id())
+            if (m_poll_thread.get_id() == std::this_thread::get_id() || current_thread_in_delivery())
             {
-                // The poll thread is its own teardown thread after a callback reaches this path. A self-join raises,
-                // and every later step is unsafe while this thread is inside the body those steps retire. The
+                // A callback reached this path. On the poll thread a self-join raises. On a control thread inside a
+                // synchronous delivery, the poll thread can park on that delivery's gate, so a join can deadlock. The
                 // owner hands this poller to the reaper, which re-enters shutdown() off-thread. See self_retiring().
                 m_running.store(false, std::memory_order_release);
                 m_self_retiring.store(true, std::memory_order_release);
@@ -1424,6 +1460,9 @@ namespace DetourModKit
                 std::array<int, 4> external_wheel_counts{};
                 std::uint64_t external_wheel_generation = 0;
                 bool external_wheel_counts_taken = false;
+                // Drained host counts that neither the pulse rollback point nor the carry holds yet. A failed pass
+                // parks them, because a drained notch has no physical equivalent to repeat ([B-92]).
+                bool external_wheel_counts_owed = false;
                 if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
                 {
                     {
@@ -1447,6 +1486,7 @@ namespace DetourModKit
                             external_wheel_counts[dir] += std::exchange(external_wheel_carry[dir], 0);
                         }
                         external_wheel_counts_taken = true;
+                        external_wheel_counts_owed = true;
 #ifdef DMK_ENABLE_TEST_SEAMS
                         if (g_input_external_wheel_post_drain_probe)
                         {
@@ -1492,12 +1532,14 @@ namespace DetourModKit
                             wheel_pulse_staged = wheel_pulse;
                             wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
                             wheel_drained = true;
+                            external_wheel_counts_owed = false;
                         }
                         else if (external_wheel_counts_taken)
                         {
                             // A reshape moved the generation between the drain and this evaluation. Park the drained
                             // counts so the next cycle's drain merges them.
                             external_wheel_carry = external_wheel_counts;
+                            external_wheel_counts_owed = false;
                         }
                     }
 
@@ -1687,9 +1729,14 @@ namespace DetourModKit
                 catch (...)
                 {
                     // Roll back every source that a staged edge needs. Return the drained notches to the backlog. Drop
-                    // the partial consume masks so suppression disarms wholly.
+                    // the partial consume masks so suppression disarms wholly. The drain merge emptied the carry, so
+                    // owed host counts replace it.
                     pending.clear();
                     wheel_pulse = wheel_pulse_staged;
+                    if (external_wheel_counts_owed)
+                    {
+                        external_wheel_carry = external_wheel_counts;
+                    }
                     gamepad_owned = 0;
                     wheel_owned = 0;
                     (void)log().try_log(
@@ -1728,9 +1775,9 @@ namespace DetourModKit
                 }
 
                 // Publish the per-direction wheel-swallow mask every cycle. Tie it to the drain instead of wheel_owned
-                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows. capture_enabled
-                // stays true while wheel bindings exist so the external host keeps counting between drains; the local
-                // backends ignore that argument because ownership drives their capture state.
+                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows. While wheel
+                // bindings exist, capture_enabled stays true, so the external host counts notches between drains. The
+                // local backend ignores that argument. Its capture follows ownership and wheel_capture_armable_locked.
                 wheel_source_publish_consume(wheel_drained ? wheel_owned : 0, has_wheel_bindings);
 
 #ifdef DMK_ENABLE_TEST_SEAMS
@@ -1819,19 +1866,13 @@ namespace DetourModKit
             try
             {
                 std::unique_lock lock(m_bindings_rw_mutex);
-                const auto it = m_name_index.find(name);
-                if (it == m_name_index.end())
+                std::vector<size_t> indices = named_indices_locked(name);
+                if (indices.empty())
                 {
                     // Release the writer lock before log output under the deferred-log convention.
                     lock.unlock();
                     (void)log()
                         .try_log(LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found", name);
-                    return ComboUpdate::NameAbsent;
-                }
-
-                std::vector<size_t> indices = it->second;
-                if (indices.empty())
-                {
                     return ComboUpdate::NameAbsent;
                 }
 
@@ -1881,7 +1922,6 @@ namespace DetourModKit
                 // held apart so the retained registration receives a new generation instead of a tombstone.
                 InputBinding prototype = m_bindings[indices.front()];
                 const std::shared_ptr<BindingLifecycle> prototype_lifecycle = prototype.lifecycle;
-                std::sort(indices.begin(), indices.end());
 
                 const size_t append_count = combos.empty() ? 1 : combos.size();
                 const size_t new_size = m_bindings.size() - indices.size() + append_count;
@@ -2139,14 +2179,11 @@ namespace DetourModKit
             try
             {
                 std::unique_lock lock(m_bindings_rw_mutex);
-                const auto it = m_name_index.find(name);
-                if (it == m_name_index.end())
+                std::vector<size_t> indices = named_indices_locked(name);
+                if (indices.empty())
                 {
                     return 0;
                 }
-
-                std::vector<size_t> indices = it->second;
-                std::sort(indices.begin(), indices.end());
 
                 // Capture release callbacks before erasure, then dispatch them after unlock. Logic-DLL retirement
                 // passes invoke_callbacks=false because the callbacks reside in a module near removal. Always capture a
@@ -2274,19 +2311,22 @@ namespace DetourModKit
             try
             {
                 std::shared_lock lock(m_bindings_rw_mutex);
-                const auto it = m_name_index.find(name);
-                if (it == m_name_index.end())
+                std::size_t matched = 0;
+                if (!for_each_named_locked(name, [&matched](std::size_t) noexcept { ++matched; }))
                 {
                     return true;
                 }
-                gates.reserve(it->second.size());
-                for (const size_t idx : it->second)
-                {
-                    if (m_bindings[idx].gate)
+                gates.reserve(matched);
+                (void)for_each_named_locked(
+                    name,
+                    [this, &gates](std::size_t idx)
                     {
-                        gates.push_back(m_bindings[idx].gate);
+                        if (m_bindings[idx].gate)
+                        {
+                            gates.push_back(m_bindings[idx].gate);
+                        }
                     }
-                }
+                );
             }
             catch (...)
             {
@@ -2403,6 +2443,7 @@ namespace DetourModKit
 
                 retired.swap(m_bindings);
                 m_name_index.clear();
+                m_name_index_authoritative = true;
                 m_known_modifiers.clear();
                 // clear_bindings does not route through recompute_modifier_caches_locked, so advance the generation
                 // here so live BindingTokens fail closed once the binding set is empty.

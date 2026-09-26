@@ -75,6 +75,25 @@ namespace staged_gen
         const char *log_file = nullptr;
         /// Selects the required resident wheel host when non-null. Null preserves the local MessageHook backend.
         const WheelHostTable *wheel_host = nullptr;
+        /// Installs and exercises six mid hooks when nonzero.
+        int enable_mid = 0;
+        /**
+         * @brief Parks one caller at the first mid route entry through StagedShutdown when nonzero.
+         * @details Teardown then retains that route. Requires enable_mid.
+         */
+        int retain_mid = 0;
+        /**
+         * @brief Subscribes the generation's namespace-scope dispatcher and emits one event when nonzero.
+         * @details The dispatcher lives until the image unloads, so its static destruction returns its TLS ownership.
+         */
+        int enable_dispatcher = 0;
+        /**
+         * @brief Subscribes to both diagnostics dispatchers before the hooks install when nonzero.
+         * @details StagedShutdown drops both subscriptions after the hooks clear and before ~Session.
+         */
+        int enable_diagnostics = 0;
+        /// Keeps the hook lifecycle subscription live across ~Session when nonzero. Requires enable_diagnostics.
+        int retain_diagnostics = 0;
     };
 
     /**
@@ -96,6 +115,18 @@ namespace staged_gen
         std::uint64_t total_module_pins = 0;
         std::uint64_t hook_calls = 0;
         std::uint64_t init_calls = 0;
+        std::uint64_t mid_calls = 0;
+        std::uintptr_t coordinator_identity = 0;
+        std::size_t coordinator_bytes = 0;
+        std::size_t coordinator_live = 0;
+        std::size_t coordinator_retained = 0;
+        /// The value that the parked caller returned through the retained route, or 0.
+        int parked_result = 0;
+        /// Events that the generation's dispatcher delivered.
+        std::uint64_t dispatched = 0;
+        /// Hook lifecycle events that the generation's diagnostics subscription observed.
+        std::uint64_t lifecycle_events = 0;
+        std::uint64_t diagnostics_leaks = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.

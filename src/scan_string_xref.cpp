@@ -1230,9 +1230,7 @@ namespace DetourModKit
                 {
                     return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});
                 }
-                // Phase 1 is a readable sweep, so it inherits the same authority rule as every other readable scan: a
-                // scope wider than one image or allocation also covers the caller's own copy of the literal, and a
-                // located address there would be the query finding itself rather than the image's string.
+                // Phase 1 is a readable sweep and follows the Readable authority rule of scan::Pages.
                 if (!detail::readable_scan_is_authoritative(range, Pages::Readable, declared_exclusions))
                 {
                     return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});

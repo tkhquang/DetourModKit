@@ -51,7 +51,7 @@ The per-region `VirtualQuery` gate proves readability only at gate time. On MSVC
 
 ## ASan and foreign reads
 
-The AOB scanner and the SEH-guarded probe deliberately read arbitrary mapped process memory. ASan reports that as false-positive overflows when it scans this process's own poisoned shadow. The AOB prefilter routes through a self-provided `dmk_memchr` in all builds, which is immune to libc interceptors by construction. The only ASan-specific treatment that remains is the `no_sanitize_address` attribute and the `__movsb` copy path under `#if defined(__SANITIZE_ADDRESS__)`. See [asan-memory-scanner.md](../guides/memory/asan-memory-scanner.md) for the mechanism and the pattern for any new foreign-memory primitive.
+The AOB scanner and the fault-guarded probe deliberately read arbitrary mapped process memory. ASan reports that as false-positive overflows when it scans this process's own poisoned shadow. The AOB prefilter routes through a self-provided `dmk_memchr` in all builds, which is immune to libc interceptors by construction. The only ASan-specific treatment that remains is the `no_sanitize_address` attribute and the `__movsb` copy path under `#if defined(__SANITIZE_ADDRESS__)`. See [asan-memory-scanner.md](../guides/memory/asan-memory-scanner.md) for the mechanism and the pattern for any new foreign-memory primitive.
 
 ## Guarded primitive mechanisms
 
@@ -63,7 +63,7 @@ The AOB scanner and the SEH-guarded probe deliberately read arbitrary mapped pro
 
 `memory::read<T>()` and `read_into()` are the typed and raw guarded reads:
 
-- MSVC guards with a single `__try` frame. MinGW runs a single `rep movsb` copy under a process-wide vectored exception handler, installed lazily or by `init_cache` and removed by `shutdown_cache`. The handler recovers through a non-unwinding `__builtin_setjmp` / `__builtin_longjmp`, so the success path runs no syscall.
+- MSVC uses a frame-based SEH guard. MinGW uses a process-wide vectored handler and a non-unwindable setjmp frame. The [`shutdown_cache` contract](../../include/DetourModKit/memory.hpp) owns handler lifetime and fallback behavior. `Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession` proves retirement after a late Hook destruction. `Lifecycle.GuardedReadHandlerReopensOnSessionRestart` and `Lifecycle.GuardedReadHandlerReopensOnCacheRestart` prove new epochs.
 - Both toolchains swallow the same foreign-read fault set through the shared predicate `detail::is_guarded_read_fault` : `EXCEPTION_ACCESS_VIOLATION`, `STATUS_GUARD_PAGE_VIOLATION`, and `EXCEPTION_IN_PAGE_ERROR`. The last is a file-backed or image-mapped page that fails to page in, for example during an RTTI or section walk. Any other fault continues the handler search. An access-class fault is claimed only when its address lies in the declared foreign range.
 - A claimed guard-page fault re-arms the `PAGE_GUARD` bit that the OS consumed on dispatch ( `rearm_guard_page_if_consumed`) before the read fails closed. A read of a foreign guard page therefore cannot disarm the host's fence and let a retry through it.
 - A guarded access publishes its foreign range to one per-thread slot and SAVES the enclosing value rather than a clear, so guarded accesses can nest. A nested read restores the outer range on the way out, and the enclosing span stays armed for the rest of the outer access. The same claimed fault set and guard-page re-arm apply at either depth. `FaultContainment.GuardedRegionStaysArmedAcrossANestedGuardedRead` pins that on both toolchains.
@@ -95,6 +95,8 @@ Preserve truthful failure precedence: restoration failure outranks a partial wri
 `VirtualProtect` over a multi-region span reports only the first page's prior protection. A `write_bytes` escalation or a `ProtectGuard` that straddles a `.rdata` / `.text` boundary then restores the executable region to `PAGE_READONLY`. The region access-violates under DEP on its next execution. Even a two-byte write can straddle two regions. Change and restore the span one VirtualQuery region at a time, each with its own captured prior protection. Fail closed if it crosses more distinct regions than the tracker holds. `detail::protect_across_regions` / `restore_across_regions` implement this, used by both `patch_bytes` and `ProtectGuard`.
 
 A page entry retires as soon as it holds no transaction, even when the OS refused its final restore. A retained entry gives its obsolete baseline to the next guard over that page. `MemoryTest.MemoryProtectGuardProof_FailedRestoreDoesNotPoisonDifferentLaterBaseline` pins this rule.
+
+A backend trap window holds a code page at `PAGE_READWRITE` under the process coordinator. A capture inside that window records the transient value as the original. The restore then leaves the page non-executable after the backend restores the real protection. `protect_across_regions` and `restore_across_regions` hold the coordinator through `detail::BackendCoordinatorHold`. A refused coordinator fails a change closed with `ERROR_BUSY` and lets a restore proceed, because a page left writable is the worse outcome. `TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow` and `TrapProtect.PatchCodeSlowPathWaitsForTheBackendTrapWindow` pin the exclusion.
 
 ### [B-19]
 

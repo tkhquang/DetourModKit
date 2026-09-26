@@ -353,7 +353,8 @@ namespace
 
 TEST(GateRaceProbe, HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
 {
-    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+    const DetourModKit::detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
 
     const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
     PausePoint callback_pause{deadline};
@@ -421,7 +422,8 @@ TEST(GateRaceProbe, HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
 
 TEST(GateRaceProbe, PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
 {
-    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+    const DetourModKit::detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
 
     const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
     PausePoint callback_pause{deadline};
@@ -489,7 +491,8 @@ TEST(GateRaceProbe, PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
 
 TEST(GateRaceProbe, HoldGateDeferredFinalClaimSharesLastSlotRelease)
 {
-    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+    const DetourModKit::detail::DeliveryTlsOwner delivery_tls;
+    ASSERT_TRUE(delivery_tls.reserved());
 
     const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
     PausePoint bookkeeping_pause{deadline};

@@ -16,6 +16,8 @@ Every such leak must meet these terms:
 - The reference releases after a clean off-loader-lock join (`detail::release_module_ref`, or `FreeLibraryAndExitThread` for the raw bootstrap worker). On a loader-lock detach it is left outstanding.
 - Do not take the reference from the detach path itself. The loader refuses to reference a module whose refcount already reached zero and unloads. See the `Hook` / `VmtHook` handle destructors, the bootstrap worker in `session.cpp`, and `Logger::shutdown_internal`.
 
+Mid-route continuation ownership, process coordination, and retention reside in the [hook note](hooking.md). XInput chain and pair attribution reside in the [input note](input.md).
+
 ## Loader-lock proof inventory
 
 `[B-100]` owns the public loader-lock contract. These proof families pin its boundaries:
@@ -27,12 +29,14 @@ Every such leak must meet these terms:
 - `AsyncLoggerTest.*LoaderLock*` pins the asynchronous logger boundary.
 - `FilesystemLoaderBoundary.*` pins the filesystem boundary.
 - `ProfilerLoaderBoundary.*` pins the profiler boundary.
-- `DiagnosticsLoaderBoundary.*` pins the diagnostics boundary.
+- `DiagnosticsLoaderBoundary.*` pins the diagnostics boundary. `Lifecycle.DiagnosticsTlsIndexLoaderLockReleaseNeverWaits` and `Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease` pin its teardown release.
 - `WheelHostProof.*` pins the WheelHost install, drain, and stop boundary.
 - `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` pins the Session direct route.
 - `Lifecycle.BootstrapWorkerDrainedUnloads` pins clean Session bootstrap teardown.
 - `Lifecycle.BootstrapProcessExitWithLiveWorker` pins Session bootstrap process exit.
 - `Lifecycle.FullLifecycleExit` pins process exit with every subsystem live.
+- `Lifecycle.GuardedReadDrainSkipsAtProcessExit` and `Lifecycle.GuardedReadLockSkipsAtProcessExit` prove the [`shutdown_cache` exit contract](../../include/DetourModKit/memory.hpp).
+- `Lifecycle.DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease` proves the native loader-state check without a published exit context.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
 - `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs.
 - `RegionLoaderBoundary.*` pins the Region boundary: allocation-free value operations, the loader-backed factories, and the loader-free `whole_process()`.
@@ -67,6 +71,8 @@ The process-default `input::scope()` uses this storage because its guard teardow
 A namespace-scope `Hook` or `VmtHook` can outlive each hook static that first use constructs after the owner. The hook translation units therefore register no exit-time destructor. The process VMT object gate is one such singleton.
 
 The emitted registration determines compliance, not the source spelling. For example, `static std::mutex gate` looks like an ordinary singleton. Current MSVC treats that mutex as trivially destructible. MinGW registers `atexit(pthread_mutex_destroy)`. The MinGW archive gate reads symbols with `scripts/check_hook_exit_destructors.py`. `Lifecycle.LateVmtOwnerOutlivesTheObjectGate` verifies late-owner teardown end to end.
+
+The `Hook` call-gate word, the memory cache cleanup thread handle, and the module directory caches use the same storage. `HookConcurrency.CallRacesDestructorOnRetainedStorage`, `Lifecycle.CacheShutdownRacesProcessExitFromSecondThread`, and `Lifecycle.LoggerConfigureAfterPathCacheDestruction` pin them. The cache `atexit` handler acts only in `Running`. In `Starting` or `Stopping` the thread that owns the lifecycle lock died with `ExitProcess`, so a shutdown from the handler waits forever.
 
 A Meyers singleton whose destructor DOES run at static teardown (for example `Input::instance()`) must instead route that destructor through the subsystem's own idempotent `shutdown()`. That path requests the worker's stop, detaches it when the loader lock forbids a join, and records the leak. The owner stays reachable through the keepalive precommitted before publication. A defaulted destructor performs none of those steps and leaves the worker to run for the rest of the process.
 
@@ -134,22 +140,24 @@ DMK's worker module references pin DMK, not consumer callbacks. Before the drain
 
 A binding still inside its callback at the deadline is reported `TimedOut` with the callable deliberately intact. A destroyed callable that a poll thread still runs frees the code out from under it.
 
+A failed engine cache rebuild that clears the name index never lets a named drain report `Drained` over a live binding (`InputLifecycleProof.NamedDrainAfterDegradedIndexRetiresTheBinding`).
+
 With those preconditions met, `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DMK worker callable remains. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` never authorize `FreeLibrary`.
 
-The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed but releases transaction ownership, so an off-loader retry can finish. Only complete session-level finalization reopens it.
+The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed with the rundown pending but releases transaction ownership, so an off-loader retry can finish. Only a retry that completes the drain clears the pending state. `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not (`InputLifecycleProof.TimedOutDrainCannotBeReopenedByAnAdmittedStart`, `SessionHotReload.ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin`).
 
 ### [B-90]
 
-A `join()` from the joined thread raises `std::system_error`, which terminates the host out of the surrounding `noexcept`. An owner destroyed there frees state that the still-running body reads. A bare detach loses the rundown that the teardown was supposed to perform.
+A `join()` from the joined thread raises `std::system_error`, which terminates the host out of the surrounding `noexcept`. An owner destroyed there frees state that the still-running body reads. A bare detach loses the rundown that the teardown was supposed to perform. On a control thread inside an input delivery, a join can deadlock instead, because the poll thread can wait on that delivery's gate.
 
 Instead, take these steps:
 
-1. Detect the self case and request stop.
+1. Detect the self case or an input delivery on this thread, and request stop.
 2. Publish the observable "no longer running" state.
 3. Precommit a self-keepalive before worker publication.
 4. Hand the facade's external reference to the process-lifetime reaper (`src/internal/lifecycle_reaper.hpp`). The reaper must invoke the ordinary shutdown while the owner is still alive and wait for the body to return. It clears the self-keepalive only after the complete rundown, and only then releases its reference. A destructor that joins from inside itself ends the owner's lifetime while the body can still read its members.
 
-Such a call is asynchronous by contract. Say so in the public documentation, because a caller must not assume that the rundown finished when the call returns.
+Such a call is asynchronous by contract. Say so in the public documentation, because a caller must not assume that the rundown finished when the call returns. `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread` verifies the control-thread arm.
 
 The queue must not depend on the heap. The reaper reserves its queue nodes up front, since the retirements that most need it happen under memory pressure. A queue that still refuses leaves the precommitted owner retention intact. A retirement with no rundown callback is refused rather than queued, because an owner whose worker cannot be run down must never be released.
 
@@ -162,3 +170,7 @@ The join itself stays wrapped. A join that fails for any other reason is contain
 First-use construction allocates, and `noexcept` turns that failure into host death. Give the accessor a no-fail path: construct with the failure caught, then publish an explicitly inert state (a null pimpl, fixed static storage). Every public operation on that state fails closed. Registration and start report `OutOfMemory`, queries read inactive, and mutators and teardown are no-ops.
 
 The failure latches for the process generation. Do not rely on a throwing local static to retry, because the retry re-runs the same allocation under the same pressure with no return channel. Where the singleton's destructor is load-bearing, keep the function-local static object and make its constructor `noexcept`, rather than the never-destroyed leaked-pointer form that `log()` uses. `~Input` is that case: it is the only teardown on a bare `FreeLibrary`. Prove each accessor in a fresh process with every allocation set to fail, also with concurrent first callers, and include a successful control.
+
+The MSVC STL allocates inside the default constructors of `unordered_map` and `list`. `new (std::nothrow)` covers only the object's own storage, and a `noexcept` constructor turns that member allocation into a terminate. Construct such objects inside a `noexcept` lambda whose catch publishes the inert state.
+
+`Lifecycle.ProtectionLedgerFirstUseOomFailsClosed`, `Lifecycle.HookLedgerFirstUseOomFailsClosed`, `Lifecycle.ReaperFirstUseOomFailsClosed`, and `Lifecycle.BackendAllocatorFirstUseOomFailsClosed` prove the four accessors, each with a constructor arm and a success control. The constructor arms prove on the MSVC release STL. libstdc++ allocates nothing in either constructor, so the two ledger arms skip there. The reaper arm refuses the parcel reserve and the allocator arm refuses the control block, so both run on libstdc++.

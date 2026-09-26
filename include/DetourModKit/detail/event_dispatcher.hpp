@@ -87,17 +87,24 @@ namespace DetourModKit::detail
         const void *dispatcher{nullptr};
         const void *type_tag{nullptr};
         EmitFrame *prev{nullptr};
+        /// The TLS index this frame was pushed under, so the pop restores that index and no other.
+        std::uint32_t tls_index{0xFFFFFFFFu};
     };
 
     /**
-     * @brief Reserves the emit chain's thread-local storage. Control-plane only; subscribe() calls it.
-     * @return false when the process has no index to give, which leaves every emit untracked and every rundown
-     *         Unwaitable rather than wrong.
-     * @details A Win32 TLS index rather than `thread_local`: emit_safe() is reached from hook callbacks on arbitrary
-     *          host threads, where the emutls first-touch allocation and uncatchable abort() are unacceptable
-     *          ([B-86]).
+     * @brief Registers one owner of the emit chain's Win32 TLS index. Control-plane only.
+     * @details subscribe() registers the dispatcher before its first handler publishes. A later subscription can
+     *          register it again after teardown returns that ownership. Destruction also returns ownership.
+     *          The last owner returns the index. Without an index, emits are untracked and concurrent rundown returns
+     *          Unwaitable.
+     *
+     *          Arbitrary host threads use a Win32 TLS index instead of thread_local ([B-86]).
+     *          Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher proves the return.
      */
-    [[nodiscard]] bool ensure_emit_frame_tls() noexcept;
+    void acquire_emit_frame_owner() noexcept;
+
+    /// Deregisters one owner that @ref acquire_emit_frame_owner registered.
+    void release_emit_frame_owner() noexcept;
 
     /**
      * @brief Pushes @p frame onto the calling thread's emit chain.
@@ -140,6 +147,12 @@ namespace DetourModKit::detail
      *          unit defines it, so the installed class definition stays token-stable under every build macro.
      */
     template <typename Event> struct EventDispatcherTestAccess;
+
+    /**
+     * @brief Returns the emit-chain TLS ownership of the never-destroyed diagnostics dispatchers at teardown.
+     * @details Declared here so the dispatcher can befriend it. Only `src/diagnostics.cpp` defines it.
+     */
+    struct DiagnosticsEmitOwner;
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -334,7 +347,23 @@ namespace DetourModKit
 
         // EntryNode enforces the callable ownership and lock boundary in [B-101] (proof: DispatchCow.*).
         using EntryNode = std::shared_ptr<const Entry>;
-        using HandlerList = std::vector<EntryNode>;
+
+        /**
+         * @brief One published handler list.
+         * @details Every list that one dispatcher publishes shares one epoch, so `epoch.use_count()` counts the live
+         *          lists. The epoch member comes first, so a superseded list drops its epoch reference only after it
+         *          destroys its entries and their callables.
+         */
+        struct HandlerList
+        {
+            HandlerList(std::shared_ptr<const char> list_epoch, std::vector<EntryNode> list_entries) noexcept
+                : epoch(std::move(list_epoch)), entries(std::move(list_entries))
+            {
+            }
+
+            std::shared_ptr<const char> epoch;
+            std::vector<EntryNode> entries;
+        };
         using SharedList = std::shared_ptr<const HandlerList>;
 
         /**
@@ -345,7 +374,13 @@ namespace DetourModKit
         inline static const char s_type_tag{};
 
     public:
-        EventDispatcher() : m_handlers(std::make_shared<const HandlerList>()), m_alive(std::make_shared<char>('\0')) {}
+        EventDispatcher()
+            : m_handlers(
+                  std::make_shared<const HandlerList>(std::make_shared<const char>('\0'), std::vector<EntryNode>{})
+              ),
+              m_alive(std::make_shared<char>('\0'))
+        {
+        }
 
         /**
          * @brief Retires every handler.
@@ -356,15 +391,20 @@ namespace DetourModKit
          *          Takes no lock of ours and allocates nothing, so the noexcept destructor is total: the gate stores
          *          are atomic and idempotent, and a subscribe() racing this is already a caller lifetime violation.
          *          (The snapshot load still takes the STL's internal lock for atomic<shared_ptr>, as everywhere else.)
+         *          A dispatcher that ever published a handler also deregisters its emit-chain TLS ownership.
          * @warning Does not wait. Destroying a dispatcher while one of its handlers is running is a caller lifetime
          *          violation; use tombstone_and_wait() first when that is possible.
          */
         ~EventDispatcher() noexcept
         {
             auto current = this->m_handlers.load(std::memory_order_acquire);
-            for (const auto &entry : *current)
+            for (const auto &entry : current->entries)
             {
                 entry->gate->live.store(false, std::memory_order_seq_cst);
+            }
+            if (this->m_emit_owner)
+            {
+                detail::release_emit_frame_owner();
             }
         }
 
@@ -386,7 +426,8 @@ namespace DetourModKit
          *         nothing, which is a truthful failure the caller can act on. Retiring a handler is the operation that
          *         must never depend on an allocation, and it does not.
          * @note Copy-on-write allocates the entry node and a new handler list of size N+1.
-         *       The control path also reserves the process emit-chain TLS index, so emit() only reads that index.
+         *       The control path also registers this dispatcher as an emit-chain TLS owner, so emit() only reads the
+         *       index.
          *       A thread's first TlsSetValue can still allocate an expansion array for an index beyond the TEB inline
          *       slots. This mechanism reports allocation failure, while emutls aborts the process.
          */
@@ -411,9 +452,9 @@ namespace DetourModKit
                 return {};
             }
 
-            // Reserved here, on the control plane, so that emit() only ever READS the index. A failure leaves every
-            // rundown Unwaitable rather than wrong, which is why it does not fail the subscribe.
-            (void)detail::ensure_emit_frame_tls();
+            // Registered here, on the control plane and outside the writer mutex, so that emit() only ever READS the
+            // index. The first publish keeps the registration, and every other exit returns it.
+            EmitOwnerRegistration registration;
 
             const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
@@ -440,10 +481,15 @@ namespace DetourModKit
                 }
                 superseded = this->m_handlers.load(std::memory_order_acquire);
                 auto next = std::make_shared<HandlerList>(*superseded);
-                next->push_back(std::move(node));
+                next->entries.push_back(std::move(node));
+                if (!this->m_emit_owner)
+                {
+                    this->m_emit_owner = true;
+                    registration.held = false;
+                }
                 // Publish the new count first so a reader that sees 0 on the counter and skips the snapshot load cannot
                 // miss a handler that has already been installed in the snapshot.
-                this->m_handler_count.store(next->size(), std::memory_order_release);
+                this->m_handler_count.store(next->entries.size(), std::memory_order_release);
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
             }
 
@@ -469,7 +515,7 @@ namespace DetourModKit
 
             SharedList snap = this->m_handlers.load(std::memory_order_acquire);
             EmitGuard guard{*this};
-            for (const auto &entry : *snap)
+            for (const auto &entry : snap->entries)
             {
                 InvocationGuard invocation{*entry->gate};
                 if (!invocation.admitted())
@@ -496,7 +542,7 @@ namespace DetourModKit
 
             SharedList snap = this->m_handlers.load(std::memory_order_acquire);
             EmitGuard guard{*this};
-            for (const auto &entry : *snap)
+            for (const auto &entry : snap->entries)
             {
                 InvocationGuard invocation{*entry->gate};
                 if (!invocation.admitted())
@@ -551,7 +597,7 @@ namespace DetourModKit
                 std::scoped_lock lock{this->m_writer_mutex};
                 // Retire first, so an allocation failure below cannot leave a live handler behind.
                 superseded = this->m_handlers.load(std::memory_order_acquire);
-                for (const auto &entry : *superseded)
+                for (const auto &entry : superseded->entries)
                 {
                     entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
@@ -559,7 +605,7 @@ namespace DetourModKit
                 std::shared_ptr<const HandlerList> empty_snap;
                 try
                 {
-                    empty_snap = std::make_shared<const HandlerList>();
+                    empty_snap = std::make_shared<const HandlerList>(superseded->epoch, std::vector<EntryNode>{});
                 }
                 catch (...)
                 {
@@ -575,7 +621,7 @@ namespace DetourModKit
                 // A synchronization failure must not escape this no-throw control path. Retire the stable snapshot
                 // visible now; a concurrent unordered subscribe may still publish after it.
                 auto current = this->m_handlers.load(std::memory_order_acquire);
-                for (const auto &entry : *current)
+                for (const auto &entry : current->entries)
                 {
                     entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
@@ -609,7 +655,7 @@ namespace DetourModKit
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 snap = this->m_handlers.load(std::memory_order_acquire);
-                for (const auto &entry : *snap)
+                for (const auto &entry : snap->entries)
                 {
                     entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
@@ -617,7 +663,7 @@ namespace DetourModKit
             catch (...)
             {
                 snap = this->m_handlers.load(std::memory_order_acquire);
-                for (const auto &entry : *snap)
+                for (const auto &entry : snap->entries)
                 {
                     entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
@@ -625,7 +671,7 @@ namespace DetourModKit
             }
 
             Rundown result = Rundown::Drained;
-            for (const auto &entry : *snap)
+            for (const auto &entry : snap->entries)
             {
                 if (drain_gate(*entry->gate, this) == Rundown::Unwaitable)
                 {
@@ -640,6 +686,84 @@ namespace DetourModKit
         // Unconditional friend: test access lives outside this installed definition, so its tokens never vary with a
         // build macro.
         friend struct detail::EventDispatcherTestAccess<Event>;
+        friend struct detail::DiagnosticsEmitOwner;
+
+        /// The outcome of @ref release_idle_emit_owner.
+        enum class EmitOwnerRelease : std::uint8_t
+        {
+            /// This dispatcher returned its emit-chain TLS ownership.
+            Released,
+            /// This dispatcher holds no ownership.
+            NotOwner,
+            /// A live entry keeps the ownership.
+            LiveSubscription,
+            /// A writer or an emit holds a list. A later call can succeed.
+            Busy,
+            /// As Busy, but the calling thread can be the holder, so a wait on it cannot end.
+            Unwaitable
+        };
+
+        /**
+         * @brief Returns this dispatcher's emit-chain TLS ownership when no emit can still run a handler.
+         * @param may_prune True to publish an empty list over retired entries before the return. A loader-lock caller
+         *                  passes false, because the prune allocates and destroys consumer callables.
+         * @details Never waits for the writer mutex. Idle means no live entry, no admitted invocation in the current
+         *          list, and no emit that holds any list. The epoch count covers a list that compaction superseded
+         *          while its handler still ran. A later subscribe registers again through the first-publish path.
+         */
+        [[nodiscard]] EmitOwnerRelease release_idle_emit_owner(bool may_prune) noexcept
+        {
+            // The outer lifetime follows EntryNode's post-unlock rule.
+            SharedList current;
+            std::unique_lock lock{this->m_writer_mutex, std::try_to_lock};
+            if (!lock.owns_lock())
+            {
+                return EmitOwnerRelease::Busy;
+            }
+            if (!this->m_emit_owner)
+            {
+                return EmitOwnerRelease::NotOwner;
+            }
+            current = this->m_handlers.load(std::memory_order_acquire);
+            bool admitted = false;
+            for (const auto &entry : current->entries)
+            {
+                if (entry->gate->live.load(std::memory_order_seq_cst))
+                {
+                    return EmitOwnerRelease::LiveSubscription;
+                }
+                admitted = admitted || entry->gate->in_flight.load(std::memory_order_seq_cst) != 0;
+            }
+            // The in-flight read pairs with InvocationGuard's recheck, as the drain does. Every list copy happens under
+            // the writer mutex, so an epoch count of one proves that no superseded list survives. The atomic and
+            // `current` are then the only expected holders of the current list.
+            if (admitted || current.use_count() != 2 || current->epoch.use_count() != 1)
+            {
+                return detail::thread_is_emitting_dispatcher(this) ||
+                               detail::untracked_emit_frames().load(std::memory_order_seq_cst) != 0
+                           ? EmitOwnerRelease::Unwaitable
+                           : EmitOwnerRelease::Busy;
+            }
+            // Pairs with the release decrement of the last holder, so its frame pop precedes the TlsFree below.
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (may_prune && !current->entries.empty())
+            {
+                SharedList empty;
+                try
+                {
+                    empty = std::make_shared<const HandlerList>(current->epoch, std::vector<EntryNode>{});
+                }
+                catch (...)
+                {
+                    return EmitOwnerRelease::Busy;
+                }
+                this->m_handler_count.store(0, std::memory_order_release);
+                this->m_handlers.store(std::move(empty), std::memory_order_release);
+            }
+            this->m_emit_owner = false;
+            detail::release_emit_frame_owner();
+            return EmitOwnerRelease::Released;
+        }
 
         /**
          * @brief Reclaims the list slot of an already-retired entry.
@@ -658,28 +782,28 @@ namespace DetourModKit
                 std::scoped_lock lock{this->m_writer_mutex};
                 superseded = this->m_handlers.load(std::memory_order_acquire);
                 auto it = std::find_if(
-                    superseded->begin(),
-                    superseded->end(),
+                    superseded->entries.begin(),
+                    superseded->entries.end(),
                     [id](const EntryNode &entry) { return entry->id == id; }
                 );
-                if (it == superseded->end())
+                if (it == superseded->entries.end())
                 {
                     return;
                 }
 
-                auto next = std::make_shared<HandlerList>();
-                next->reserve(superseded->size() - 1);
-                for (const auto &entry : *superseded)
+                auto next = std::make_shared<HandlerList>(superseded->epoch, std::vector<EntryNode>{});
+                next->entries.reserve(superseded->entries.size() - 1);
+                for (const auto &entry : superseded->entries)
                 {
                     if (entry->id != id)
                     {
-                        next->push_back(entry);
+                        next->entries.push_back(entry);
                     }
                 }
 
                 // Publish snapshot first, then the counter. An emit that loads a stale snapshot containing the removed
                 // handler is still safe: the entry is tombstoned, so its liveness check rejects it.
-                const size_t new_count = next->size();
+                const size_t new_count = next->entries.size();
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
                 this->m_handler_count.store(new_count, std::memory_order_release);
             }
@@ -865,6 +989,27 @@ namespace DetourModKit
             EmitGuard &operator=(EmitGuard &&) = delete;
         };
 
+        /// One emit-chain TLS ownership that subscribe() returns unless the dispatcher keeps it.
+        struct EmitOwnerRegistration
+        {
+            bool held{true};
+
+            EmitOwnerRegistration() noexcept { detail::acquire_emit_frame_owner(); }
+
+            ~EmitOwnerRegistration() noexcept
+            {
+                if (held)
+                {
+                    detail::release_emit_frame_owner();
+                }
+            }
+
+            EmitOwnerRegistration(const EmitOwnerRegistration &) = delete;
+            EmitOwnerRegistration &operator=(const EmitOwnerRegistration &) = delete;
+            EmitOwnerRegistration(EmitOwnerRegistration &&) = delete;
+            EmitOwnerRegistration &operator=(EmitOwnerRegistration &&) = delete;
+        };
+
         // alignas(64) keeps the hot atomics on their own cache line so the writer mutex and shared_ptr control-block
         // traffic do not produce false sharing with readers doing the fast-path counter load.
         alignas(64) mutable std::atomic<SharedList> m_handlers;
@@ -875,6 +1020,8 @@ namespace DetourModKit
          * @details Read under m_writer_mutex by subscribe(), which is what closes the set the rundown drains.
          */
         std::atomic<bool> m_closed{false};
+        /// True from the publish that kept an emit-chain TLS ownership until its return. Written under m_writer_mutex.
+        bool m_emit_owner{false};
         mutable std::mutex m_writer_mutex; // serializes writers
         // Prevents Subscription::reset() from compacting a destroyed dispatcher.
         std::shared_ptr<void> m_alive;

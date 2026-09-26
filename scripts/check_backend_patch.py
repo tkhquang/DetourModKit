@@ -1,44 +1,9 @@
 #!/usr/bin/env python3
-"""Fail if the vendored SafetyHook backend-patch model is broken.
+"""Verify the upstream pin, patch hash, required fixes, and exact backend checkout.
 
-``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
-actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's backend fixes --
-trap-transaction status reporting, commit-truthful state, executable-route rundown, allocation-free release,
-late-static handler retirement, and closed-window execute-fault retry -- exist on no upstream ref, so they are
-carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at configure time by
-``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
-each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
-
-1. ``.gitmodules`` gets repointed at a personal fork. The model is "upstream pin + vendored patches",
-   not a fork dependency; a fork URL means the patch directory is now dead weight and the release no
-   longer builds from an upstream-served ref.
-2. The patch directory is emptied or the patches drift off the pinned base, so ``git apply`` can no
-   longer reconstruct the reviewed backend tree.
-3. A patch is edited so a fix is dropped or its logic inverted. The patch set is frozen by a pinned
-   SHA-256, so any content change fails the gate until ``EXPECTED_PATCH_SHA256`` is deliberately updated.
-
-The check is offline and portable: it inspects ``.gitmodules`` and the patch files, confirms the patch
-set matches the pinned hash and carries every fix marker, that the parent gitlink and (when initialized)
-the submodule HEAD are the documented base commit, and that each patch applies cleanly to that base or
-is already present. No network or built archive is needed. See AGENTS.md [B-01].
-
-A fourth way to ship an un-reviewed backend has nothing to do with the patch files: the submodule working
-tree is where the patch is applied, so source-capable content left in it can enter the build too. Only two states are
-legitimate -- the pristine pinned base before any configure, and exactly the reviewed patch output after
-one -- and this check refuses everything between and beyond them: an extra tracked edit, staged content,
-an untracked source, or a patched file whose bytes are not the reconstruction of base plus patch. The
-configure-time lock marker and frozen non-source output roots that SafetyHook deliberately ignores are
-the only exceptions. ``--expect-state`` pins which state a caller requires, so the quality workflow can
-prove the checkout is pristine BEFORE configure and exactly the reviewed output AFTER it.
-
-``cmake/DMKBackendPatch.cmake`` decides the same question at configure time, over the same model:
-``patch_targets`` names the owned paths, and each one is compared against base-plus-patch rebuilt in a
-scratch tree that is never the live checkout. The two implementations spell the canonical normalization
-differently -- ``lf()`` here, ``git diff --ignore-cr-at-eol`` there -- because one has Python and the
-other has only git, so ``test_check_backend_patch.py`` asserts they accept and refuse the same states
-rather than trusting the two spellings to stay equivalent. Neither may rule on the changed-path SET
-alone: an edit inside a target the patch already owns leaves that set identical and keeps the
-idempotence reverse-apply clean, so only byte equality decides it.
+The checkout must equal the pinned base or the reconstructed patch output.
+Only declared non-source output roots and the configure lock marker are exempt.
+The CMake entry point enforces the same byte comparison. See AGENTS.md [B-01].
 """
 
 import argparse
@@ -79,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "020125d09d358785259c1a9f40da1b3e9973d13604614a5ca53f30c2cd5f5669"
+EXPECTED_PATCH_SHA256 = "29d01a25546938b170b6526e8ad3f83155ebdb1ad2d29553a3f48f10a113d55c"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -114,7 +79,7 @@ PR43_SENTINELS = [
     "std::move(free_node)",  # each live allocation carries its own return node
     "void Allocation::abandon() noexcept",  # refused executable teardown can retain without allocator mutation
     "RoutedExternal",  # raw redirected entry opts into the stable executable route
-    "struct InlineHook::RouteControl",  # never-reclaimed state cell owns route admission and allocator lifetime
+    "struct InlineHook::RouteControl",  # state cell owns route admission and allocator lifetime
     # Every marker below names code, never comment prose: a reworded comment must not be able to fail this gate, and
     # rewriting logic while leaving its comment intact must not be able to pass it.
     "ROUTE_WRAPPER_OFFSET",  # the gateway's fixed region layout that admission and rundown are emitted into
@@ -125,7 +90,7 @@ PR43_SENTINELS = [
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route
     "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
-    "m_hook.set_mid_route();",  # mid entry stays admitted across the generated stub
+    "if (auto result = set_mid_route(); !result)",  # mid entry stays admitted across the generated stub
     "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
     "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
     "std::atomic<uint64_t> admission",  # high-bit close and low-bit entry count share one ordered cell
@@ -139,21 +104,34 @@ PR43_SENTINELS = [
 
 REQUIRED_SENTINELS += PR43_SENTINELS
 
+PR10_SENTINELS = [
+    "if (!idle_again.has_value() || !*idle_again)",
+    "bool InlineHook::caller_owns_route() const noexcept",
+    "bool current_thread_returns_to",
+    "ClosedNonMidBypassHasAStackOnlyWitness",
+    "ROUTE_BYPASS_WRAPPER_OFFSET",
+    "std::span<const AddressRange> executable_ranges",
+    "coordinator_state()->routes",
+    "operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE",
+]
+REQUIRED_SENTINELS += PR10_SENTINELS
+
+
 # PR-47 checkpoint B additions: routed-frame unwind metadata and retained-chain capacity accounting. Kept separate for
 # the same reason as PR43_SENTINELS, and drawn from code rather than comment prose.
 PR47B_SENTINELS = [
     "vm_register_unwind_table",  # generated frames publish platform unwind metadata ...
     "RtlAddFunctionTable",  # ... through the platform's dynamic function table ...
-    "vm_unregister_unwind_table",  # ... which is withdrawn only for storage nothing ever reached ...
+    "vm_unregister_unwind_table",  # ... which is withdrawn before its storage is freed ...
     "g_unwind_registration_failure",  # ... and whose refusal is drivable, so the rollback branch is proved
     "g_unwind_unregistration_failure",  # failed removal is also drivable and retains all referenced storage
-    "struct RouteUnwindTable",  # the records live inside the gateway allocation, sharing the code's lifetime
+    "MID_UNWIND_OFFSET",  # the records live inside the gateway allocation, sharing the code's lifetime
     "Error::failed_to_register_unwind",  # a refused registration fails creation instead of publishing blind frames
     "emit_flag_frame",  # each routed flag frame saves a nonvolatile register before capturing RFLAGS ...
     "emit_flag_restore",  # ... then restores RFLAGS before the flag-transparent pop/jump epilogue
     "push_rbx_at_1",  # the unwind record describes the saved nonvolatile stack word
     "alloc_8_at_2",  # and separately describes pushfq's eight-byte stack effect
-    "route_retention_stats",  # the permanently retained chain is accounted ...
+    "route_retention_stats",  # the published chain is accounted ...
     "logical_high_water",  # ... on a monotonic logical high-water ...
     "committed_reserved",  # ... through an independently bounded committed reservation ...
     "committed_high_water",  # ... and a backing-block committed high-water ...
@@ -203,6 +181,59 @@ REQUIRED_SENTINELS += PR2_SENTINELS
 VMT_SENTINELS = ["VmtHook(VmtHook&& other);"]
 
 REQUIRED_SENTINELS += VMT_SENTINELS
+
+# PR-06 additions: a published routed chain is reclaimed after an idle proof. Code tokens only, as above.
+PR06_SENTINELS = [
+    "threads_idle_outside",  # the teardown idle proof suspends each other thread in turn ...
+    "CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)",  # ... after every handle was opened, so nothing allocates ...
+    "GetThreadContext(thread, &context)",  # ... and reads only the control context
+    "reclaim_published_route",  # a chain that passes the proof is freed with its records ...
+    "refund_route_chain",  # ... and its charge is given back
+    "register_retained_route",  # a retained chain joins later proofs on the same target
+    "RouteParkStage::AT_ENTRY",  # deterministic proof parks a thread where the entry counter does not cover it
+    "route_retained() const noexcept",  # callers learn whether the chain was retained
+    "stack_holds_return_site",  # a thread still returning into a relocated call is found on its stack
+]
+
+REQUIRED_SENTINELS += PR06_SENTINELS
+
+# Mid continuations retain ownership until a generated exit or transaction transfer releases it.
+PR07_SENTINELS = [
+    "MID_CONTINUATION_SLOT",
+    "m_mid_route",
+    "trampoline_end",
+    "route_entries->fetch_add",
+    "!from_original && trap->route_entries != nullptr",
+    "ff_result.error().type != Error::BAD_ALLOCATION",
+]
+
+REQUIRED_SENTINELS += PR07_SENTINELS
+
+# Participants share one process coordinator for patch order, route records, and reclamation scans.
+PROCESS_COORDINATOR_SENTINELS = [
+    "class SAFETYHOOK_API ProcessCoordinator final",  # one process-owned serialization point ...
+    "state->version != expected_version",  # ... refuses an incompatible protocol ...
+    "result->mapping = mapping;",  # ... and leaves its first mapping to the process
+    "state->owner.load(std::memory_order_relaxed) == thread_id",  # the owner acquires again without a call ...
+    "__readgsdword(0x48)",  # ... and reads its thread identity without an export
+    "__readfsdword(0x24)",  # ... on both Windows pointer widths
+    "const ProcessCoordinator coordinator;",  # scans and patch transactions acquire before any suspension
+    "return std::unexpected{Error::coordination_unavailable(target)};",  # creation refuses before publication
+    "record.order > own->order && patches_overlap(record, *own)",  # a newer overlapping layer refuses a toggle
+    "record.order == 0 || !patches_overlap(record, *own)",  # reclamation weighs only overlapping records ...
+    "if (&record != own && record.order > own->order)",  # ... and refuses under any newer one
+    "void retain_route() noexcept",  # a leaked owner still marks its record retained
+    "coordinator.enabled(m_trampoline.data(), m_enabled);",  # a reconciled enable state reaches the record
+    "else if (m_process_registered && m_trampoline) {",  # a raw lock failure retains its record and storage
+    "coordinator.remove(m_trampoline.data());",  # clean teardown removes its record before storage release
+    "g_coordinator_state.store(state, std::memory_order_release);",  # a refused first connection stays retryable
+    # a coordinator refusal of the teardown restore names the retention cause
+    "restore_refused = !disabled && disabled.error().type == Error::COORDINATION_UNAVAILABLE;",
+    "is_canonical_view(view, view->canonical)",  # a mapping that another process created cannot redirect writes
+    "if (reason != RouteRetentionReason::None) {",  # every unpublished retention converts its reservation to a charge
+]
+
+REQUIRED_SENTINELS += PROCESS_COORDINATOR_SENTINELS
 
 
 def patch_files(patch_dir: Path):

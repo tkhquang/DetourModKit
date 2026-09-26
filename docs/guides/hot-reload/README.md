@@ -138,6 +138,10 @@ Never load two generations by the same file name. If the loader maps the build o
 
 A retained image keeps its code mapped, but it can still contain live old behavior. Only documented `MessageHookKeepalive` and XInput retention become inert after teardown. The reference loader requests a restart when an accepted image stays mapped. Every retained image counts against the reload budget.
 
+An inline or mid hook retains its executable route at teardown when its storage cannot be freed safely. Causes include a failed idle proof, a refused or timed-out process coordinator, and a newer overlapping route in any participant. The retained route keeps its module reference, so the image stays mapped. The retention is booked as a `LeakSubsystem::HookManager` leak, and the warning names its cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator).
+
+Each linked copy that initializes the trap runtime retains one executable trap page. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the fixture budget for each toolchain.
+
 A custom staged-name loader can continue after an inert retention verdict. It must refuse every other pin and enforce count and byte budgets. `ExternalHost` removes the wheel pin, but every other unload proof still applies.
 
 Do not fight the pins:
@@ -181,7 +185,7 @@ When several handles target the same address, destroy them newest-first. `hook::
 
 ### Session teardown owns the process-wide subsystems
 
-`~Session` first clears its input scope. It then stops the config watcher, input, memory cache, config registry, and logger. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
+The [`Session` contract](../../../include/DetourModKit/session.hpp) owns the subsystem teardown order. The process-default logger storage has process lifetime, so CRT static destructors never touch it. Teardown flushes and closes its sink. The default `LogOpenMode::Truncate` starts a clean log on the first sink open. `LogOpenMode::Append` preserves prior generation records.
 
 Destroy the `Session` before `FreeLibrary`. If code skips this step, the old sink and async writer can outlive the image.
 
@@ -192,7 +196,7 @@ This table follows the reference topology.
 | State | Owner | Result after a clean unmap | Required action |
 | --- | --- | --- | --- |
 | Logic globals and function-local statics | Logic generation | Reset | Recreate them in `Init()`. |
-| `Session`, hooks, workers, and bindings | Logic generation | Destroyed | Drain them in `Shutdown()`. |
+| `Session`, hooks, workers, and bindings | Logic generation | Destroyed | Drain them in `Shutdown()` and on every failed `Init()` path. |
 | Profiler ring samples | Logic generation | Lost | Export required samples before `Shutdown()`. |
 | Direct game-memory writes | Game process | Preserved | Track and revert raw patches before the unload drain. |
 | INI file | File system | Preserved | Load it again from the new generation. |
@@ -201,6 +205,12 @@ This table follows the reference topology.
 Do not pass C++ containers, pointers with ownership, exceptions, or standard-library objects across a mixed-toolchain boundary. Keep every pointer in the request valid for its documented lifetime.
 
 ### Threads, TLS, and static constructors
+
+Each DMK TLS index returns with its last owner. A clean generation therefore returns every DMK index that it reserved. The [`hook_lifecycle()` contract](../../../include/DetourModKit/diagnostics.hpp) owns diagnostics teardown. A retained mid route and a namespace-scope dispatcher keep their indices while their image stays mapped. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for each toolchain.
+
+A MinGW generation that imports `libwinpthread-1.dll` takes one TLS index on each fresh load that it uses, and the runtime never returns it. A host that keeps the runtime loaded avoids that cost. With the runtime kept loaded, a thread that used emulated TLS inside a generation must exit before that generation unloads. A C++ exception or a `thread_local` access is such a use. Otherwise the thread exit calls a destructor in the unmapped image, the runtime keeps its key lock, and the next key creation hangs.
+
+The MinGW GCC 15.1 reference logic DLL with a static runtime consumes one TLS index per reload after loader warm-up. That measurement applies to the reference DLL, not every static runtime. Measure the exact linked runtime before a deployment budget includes this cost.
 
 Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
 
@@ -227,7 +237,7 @@ Read pin counters after `~Session`, because XInput retention occurs there. The c
 
 Latch the first hook restore failure across retries. Keep every saved original pointer and target-module reference after a failure. A retained inline route can still enter the detour.
 
-With the local wheel backend, accept only the documented inert pin and leak set. With `ExternalHost`, require zero logic-image pins and intentional leaks. Refuse every other nonzero reason.
+With the local wheel backend, accept only the documented inert pin and leak set. With `ExternalHost`, require zero logic-image pins and intentional leaks. Refuse every other nonzero reason. On either backend, refuse a `LeakSubsystem::Diagnostics` event, because a diagnostics handler can still run in the image.
 
 ## Advanced topology: DetourModKit in a persistent host
 
@@ -243,7 +253,7 @@ The host links the archive and owns every DetourModKit object. The logic DLL lin
 
 `prepare_logic_dll_unload(binding_names)` retires named input bindings and closes callback admission. It requests watcher and reload-servicer stop, then waits to one end-to-end deadline.
 
-`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. A timeout leaves input admission closed. Only session finalization reopens it.
+`SafeToUnload` means no selected input callable, config setter, user reload callback, or DetourModKit worker callable remains. Every other status refuses `FreeLibrary`. Keep the DLL mapped and retry from an off-loader-lock control thread. [`[B-74]`](../../design/lifecycle.md) owns the timeout and admission rules.
 
 `prepare_logic_dll_unload_all()` clears every input binding but keeps the poll thread alive. Use it only when the DLL that unloads owns the whole process-wide input and config surface. The registry is process-scoped, so the all-bindings form also retires a sibling DLL's bindings. Prefer the named-list overload when several logic DLLs share one instance.
 
@@ -251,11 +261,7 @@ After `FreeLibrary`, verify the unmap. Probe an export address captured before t
 
 ### Binding guards during the drain
 
-Drop a consumer-owned `BindingGuard` before, during, or after the drain. Retirement reaches the callback through the binding's delivery gate, so a guard you keep cannot hold a callable alive. A Hold binding still held when the drain runs receives its balancing `on_state_change(false)` there, while your module is still mapped.
-
-Before a guard drop, release every lock or join that its callback or capture destructor can wait on. Otherwise the two threads can deadlock.
-
-[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract and the binding-guard rules.
+[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the transaction contract and the binding-guard drain rules. The `BindingGuard` contract in `input.hpp` owns the lock and join rule for guard destruction. The `prepare_logic_dll_unload` contract in `session.hpp` states what a retained guard still does.
 
 ## Idempotency on a second `Init()`
 
@@ -273,6 +279,8 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 
 `input::register_combo` is append-only. The engine treats `name` as a label, not a key. That is the most common surprise across reloads. Under staged generations, re-registration from each generation's `Init()` is the supported path. `config::bind_*` replaces the item in place, and the previous generation's `Shutdown()` retired its bindings.
 
+A retained mid continuation keeps its backend and module references. The `mid_at` contract also requires host quiescence for saved contexts outside counted execution. The [hook note](../../design/hooking.md) identifies the permanent proofs.
+
 ## Diagnose a failed reload
 
 | Symptom | Check | Safe response |
@@ -285,24 +293,7 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 | Export resolution fails. | Check `Init`, `Shutdown`, `Revision`, calling convention, and protocol revision. | Release the failed stage only through the normal unmap proof. |
 | A breakpoint names old source lines. | Check the module name, revision, and loaded symbol file. | Reload debugger symbols for the current staged image. |
 | A reload starts from another application. | Check the foreground-process guard around `GetAsyncKeyState`. | Accept the hotkey only while the game owns the foreground window. |
-
-## Reload checklists
-
-Before the first reload:
-
-- Select one [ownership topology](#choose-the-ownership-topology).
-- Build and deploy the [reference pair](#start-with-the-reference-pair).
-- Define loader-owned and generation-owned state under [State ownership across reloads](#state-ownership-across-reloads).
-- Export `Init`, `Shutdown`, and a build revision through one stable C protocol.
-- Set a retained-generation count and byte budget.
-
-Before `FreeLibrary`:
-
-- Require the accepted result from [Reload sequence](#reload-sequence-staged-generations).
-- Apply the consumer order from [Threads, TLS, and static constructors](#threads-tls-and-static-constructors).
-- Read the complete verdict from [What pins the module that hosts DetourModKit](#what-pins-the-module-that-hosts-detourmodkit).
-- Close the loader probe lease.
-- Save one logic code address, call `FreeLibrary` once, and require the address-unmap probe.
+| `Init()` returns zero. | Check that the failure path ran the same teardown as `Shutdown()`: workers joined, hooks cleared newest-first, `~Session`. | Release the stage only through the normal unmap proof, as the reference loader does. |
 
 ## Proof pointers
 

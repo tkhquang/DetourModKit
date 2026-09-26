@@ -254,11 +254,12 @@ namespace DetourModKit::detail
      * @param user_index The XInput controller index whose state may be masked.
      * @param owner Nonzero interception-layer owner id.
      * @return true only when coverage is complete for this owner; false when not ready, owned elsewhere, or degraded.
-     * @note Every resource a non-draining teardown would need is secured here, before any prologue is patched: a
-     *       reference on this module, one on the primary target module, another on a distinct forwarded target module
-     *       when needed, and the storage the hook objects would be retained in. A reference that cannot be taken fails
-     *       the install rather than publishing a detour that teardown could only free out from under a live thread.
-     *       uninstall() releases them on a drained teardown.
+     * @note Installation acquires references to this module, the primary target module, and any distinct forwarded
+     *       target module before publication. It also reserves storage for retained hook objects ([B-89]).
+     *       A failed reference acquisition fails installation. uninstall() releases the references only after the
+     *       detours drain and both backend chains reclaim.
+     *       The backend preserves executable route pages and counts closed bypass calls through provider completion.
+     *       Lifecycle.RoutedBypassSurvivesDormantFiber verifies the provider lifetime after teardown.
      */
     [[nodiscard]] bool install_xinput(int user_index, std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
@@ -528,8 +529,8 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether permanent storage currently owns a primary raw hook.
-     * @details Distinguishes a permanent-retention latch on the canonical hook and keepalives from a witnessed clean
-     *          logical release. The backend's stable published gateway remains process-lifetime storage in either case.
+     * @details The result reports the permanent-retention latch on the canonical hook and keepalives.
+     *          A false result does not describe backend storage. reset() can reclaim or retain that storage.
      */
     [[nodiscard]] bool xinput_permanent_primary_retained() noexcept;
 

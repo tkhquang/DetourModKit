@@ -210,9 +210,7 @@ namespace DetourModKit
                 }
                 if (!detail::readable_scan_is_authoritative(range, request.pages, request.exclusions))
                 {
-                    // A readable scope wider than one image contains the memory the caller's own copies of the ladder's
-                    // query bytes live on, and DMK cannot enumerate those copies. Every candidate would resolve under
-                    // that doubt, so refuse the request rather than grade each tier against evidence it cannot trust.
+                    // The Readable authority rule of scan::Pages refuses the request before any tier is graded.
                     return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::resolve"});
                 }
 
@@ -555,10 +553,8 @@ namespace DetourModKit
             }
             catch (const std::bad_alloc &)
             {
-                // The per-request result container itself could not be allocated under true out-of-memory, so there is
-                // no batch to hand back. The whole-batch failure rides the OUTER Result, which a caller must unwrap
-                // before touching any per-request slot. There is no silently-undersized vector to index. Error is
-                // const-char*-backed, so building it here allocates nothing and keeps this path no-throw.
+                // The resolve_batch docblock in scan.hpp owns this outer-Result arm. Error holds a const char*, so
+                // this path allocates nothing.
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "scan::resolve_batch"});
             }
             catch (...)

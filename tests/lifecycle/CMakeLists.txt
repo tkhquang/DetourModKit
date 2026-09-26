@@ -38,7 +38,8 @@ add_executable(hook_static_order test_hook_static_order.cpp)
 target_link_libraries(hook_static_order PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(hook_static_order PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(hook_static_order PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(hook_static_order)
 add_dependencies(dmk_lifecycle_proof_hosts hook_static_order)
@@ -152,6 +153,128 @@ dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
   LABELS "lifecycle-proof")
 
+# The four `[B-91]` accessor hosts below share first_use_oom_poison.hpp. Each has an oom arm that refuses every
+# allocation and a success control. Each constructor arm grants the object its storage and refuses the constructor's
+# own allocation. A constructor arm skips where the STL constructor allocates nothing. Exit status is the oracle.
+add_executable(protection_ledger_first_use_oom protection_ledger_first_use_oom.cpp)
+target_link_libraries(protection_ledger_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(protection_ledger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(protection_ledger_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts protection_ledger_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProtectionLedgerFirstUseSuccessRecordsProtection
+  COMMAND $<TARGET_FILE:protection_ledger_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:protection_ledger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+add_executable(hook_ledger_first_use_oom hook_ledger_first_use_oom.cpp)
+target_link_libraries(hook_ledger_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(hook_ledger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(hook_ledger_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts hook_ledger_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.HookLedgerFirstUseSuccessRecordsInstall
+  COMMAND $<TARGET_FILE:hook_ledger_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_ledger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# The reaper host reaches the internal retirement entry and the module reference helper directly.
+add_executable(reaper_first_use_oom reaper_first_use_oom.cpp)
+target_link_libraries(reaper_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(reaper_first_use_oom PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(reaper_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts reaper_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ReaperFirstUseSuccessJoinsOffThread
+  COMMAND $<TARGET_FILE:reaper_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:reaper_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# The allocator host names the backend island header, so it links the backend for its include path.
+add_executable(backend_allocator_first_use_oom backend_allocator_first_use_oom.cpp)
+target_link_libraries(backend_allocator_first_use_oom PRIVATE DetourModKit safetyhook dmk_coverage)
+target_include_directories(backend_allocator_first_use_oom PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(backend_allocator_first_use_oom)
+add_dependencies(dmk_lifecycle_proof_hosts backend_allocator_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorConstructorOomFailsClosed
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> constructor-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.BackendAllocatorFirstUseSuccessInstalls
+  COMMAND $<TARGET_FILE:backend_allocator_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:backend_allocator_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# Two `[B-47]` storage forms. A process exit inside the cache shutdown window meets a joinable cleanup handle, and a
+# static destructor reconfigures the logger through the module directory cache. Both need a fresh process.
+add_executable(never_destroyed_storage never_destroyed_storage.cpp)
+target_link_libraries(never_destroyed_storage PRIVATE DetourModKit dmk_coverage)
+target_include_directories(never_destroyed_storage PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(never_destroyed_storage PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(never_destroyed_storage)
+add_dependencies(dmk_lifecycle_proof_hosts never_destroyed_storage)
+
+dmk_add_raw_proof(NAME Lifecycle.CacheShutdownRacesProcessExitFromSecondThread
+  COMMAND $<TARGET_FILE:never_destroyed_storage> exit-during-shutdown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:never_destroyed_storage>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerConfigureAfterPathCacheDestruction
+  COMMAND $<TARGET_FILE:never_destroyed_storage> configure-after-static-destruction
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:never_destroyed_storage>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # In the persistent-failure case the writer's batch reservation is refused for the whole run, so the regression is a
 # hang rather than a wrong value. TEST_TIMEOUT is the oracle: without the one-record progress floor the writer spins
 # and shutdown's join never returns. The host reaches into internal/ headers to drive one AsyncLogger directly.
@@ -248,6 +371,138 @@ while(hook_instance_scope_proofs)
     WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_instance_scope>
     LABELS "lifecycle-proof")
 endwhile()
+
+# The MinGW guarded-read vectored handler lives in the image whose first guarded read installed it, and only the cache
+# teardown removes it. A generation that hooked without init_cache used to leave it registered after FreeLibrary, and
+# the next exception the dispatcher passed through it killed the host. The fixture links the archive like a mod DLL.
+# The host links nothing from DetourModKit, unloads the image, proves the unmap, then dispatches a continuable
+# exception and a C++ throw. Exit status is the oracle. MSVC contains guarded reads in frame-based SEH and installs no
+# handler, so the host skips there (77).
+add_library(veh_unmap_dll SHARED veh_unmap_dll.cpp)
+set_target_properties(veh_unmap_dll PROPERTIES PREFIX "" OUTPUT_NAME "veh_unmap_dll")
+target_link_libraries(veh_unmap_dll PRIVATE DetourModKit dmk_coverage)
+target_include_directories(veh_unmap_dll PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(veh_unmap_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(veh_unmap_dll SHARED)
+
+add_executable(veh_survives_unmap veh_survives_unmap.cpp)
+add_dependencies(veh_survives_unmap veh_unmap_dll)
+dmk_static_runtime(veh_survives_unmap)
+add_dependencies(dmk_lifecycle_proof_hosts veh_survives_unmap)
+
+set(veh_survives_unmap_proofs
+  Lifecycle.GuardedReadHandlerRetiresWithTheSession                  session
+  Lifecycle.GuardedReadHandlerRetiresOnCacheShutdownWithoutASession  hook-only
+  Lifecycle.GuardedReadHandlerRetiresWithTheInitializedCache         with-init-cache
+  Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession    hook-outlives-session
+  Lifecycle.GuardedReadHandlerReopensOnSessionRestart               session-restart
+  Lifecycle.GuardedReadHandlerReopensOnCacheRestart                 cache-restart)
+while(veh_survives_unmap_proofs)
+  list(POP_FRONT veh_survives_unmap_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:veh_survives_unmap> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endwhile()
+
+# The unknown-token control uses the rationale above the input_gate_abba control. The host rejects the token before
+# its toolchain skip, so the control holds on MSVC too.
+add_test(NAME Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:veh_survives_unmap> no-such-scenario)
+set_tests_properties(Lifecycle.GuardedReadHandlerProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:veh_survives_unmap>
+  LABELS "lifecycle-proof")
+
+add_executable(route_continuation_lifetime route_continuation_lifetime.cpp)
+target_link_libraries(route_continuation_lifetime PRIVATE DetourModKit safetyhook dmk_coverage)
+dmk_static_runtime(route_continuation_lifetime)
+add_dependencies(dmk_lifecycle_proof_hosts route_continuation_lifetime)
+
+set(route_continuation_proofs
+  Lifecycle.MidRouteBypassDuringIdleScanRetains scan-race
+  Lifecycle.MidRouteSurvivesDormantFiber fiber
+  Lifecycle.MidRouteSurvivesDormantTailCallee tail-fiber
+  Lifecycle.MidRouteSurvivesExceptionContinuation exception
+  Lifecycle.MidRouteUnwindSettlesRouteOwnership unwind
+  Lifecycle.MidRouteIdleContinuationReclaims idle
+  Lifecycle.MidRouteReturnReclaims return
+  Lifecycle.MidRouteExternalBranchReclaims branch
+  Lifecycle.MidRouteConditionalBranchReclaims conditional
+  Lifecycle.MidRouteIndirectBranchReclaims indirect
+  Lifecycle.MidRouteInternalBranchReclaims internal
+  Lifecycle.MidRouteSelectedExternalResumeReclaims redirect
+  Lifecycle.MidRouteSelectedInternalResumeReclaims resume
+  Lifecycle.MidRouteFarPatchReclaims ff
+  Lifecycle.MidRouteExitPreservesRegistersAndFlags state
+  Lifecycle.MidRouteExitUnwindRestoresCaller metadata
+  Lifecycle.MidRouteSelectedEpilogueReclaims resume-end
+  Lifecycle.MidRouteClosedBypassPreservesOwnership bypass
+  Lifecycle.MidRouteInternalReturnPreservesOwnership internal-return
+  Lifecycle.MidRouteInternalReturnPopPreservesOwnership internal-return-pop
+  Lifecycle.MidRouteInternalTailBranchPreservesOwnership internal-tail-branch
+  Lifecycle.MidRouteInternalTailConditionalPreservesOwnership internal-tail-conditional
+  Lifecycle.MidRouteInternalTailIndirectPreservesOwnership internal-tail-indirect)
+while(route_continuation_proofs)
+  list(POP_FRONT route_continuation_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_continuation_lifetime> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_continuation_lifetime>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+# The proof retains five executable blocks for the process lifetime, parks threads inside generated code, and names
+# the backend for route_retention_stats(). It therefore runs in its own host rather than the shared unit binary.
+add_executable(mid_route_retention test_mid_route_retention.cpp)
+target_link_libraries(mid_route_retention PRIVATE DetourModKit safetyhook dmk_coverage)
+target_include_directories(mid_route_retention PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests)
+dmk_static_runtime(mid_route_retention)
+add_dependencies(dmk_lifecycle_proof_hosts mid_route_retention)
+
+dmk_add_raw_proof(NAME Lifecycle.PublishedMidRouteReclaimsUnlessParked
+  COMMAND $<TARGET_FILE:mid_route_retention>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 120
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.TrapMappingPreservesTransactionDirection
+  COMMAND $<TARGET_FILE:mid_route_retention> trap-mapping
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.DestroyLockFailureRetainsRoute
+  COMMAND $<TARGET_FILE:mid_route_retention> destroy-lock-failure
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ReconciledRouteReleasesProcessRecord
+  COMMAND $<TARGET_FILE:mid_route_retention> reconciled-reset
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownNamesCoordinator
+  COMMAND $<TARGET_FILE:mid_route_retention> refused-teardown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedTeardownCompletesRetention
+  COMMAND $<TARGET_FILE:mid_route_retention> refused-retention
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProofSectionHoldsOnlyItsTargets
+  COMMAND $<TARGET_FILE:mid_route_retention> proof-section
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
 
 # A deadlock needs an isolated process so its timeout cannot wedge the shared unit binary.
 add_executable(input_gate_abba test_input_gate_abba.cpp)
@@ -388,7 +643,7 @@ set_tests_properties(InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario PR
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
   LABELS "lifecycle-proof")
 
-# Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
+# Exhausting every TLS index is process-wide, so this needs its own host.
 add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
 target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(input_tls_exhaustion PRIVATE
@@ -404,7 +659,7 @@ dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
-# Positive control. The case above proves a zero callback count, which a binding that never matched would also produce.
+# Positive control: the same facade drive on a process that never exhausted its indices.
 dmk_add_raw_proof(NAME InputLifecycleProof.TrackedDeliveryIsAdmitted
   COMMAND $<TARGET_FILE:input_tls_exhaustion> available
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
@@ -427,6 +682,14 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBe
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# A consume binding registered without a delivery index must leave its trigger to the game. Its own process because
+# the facade engine it starts publishes the process-global consume table.
+dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> consume-exhausted
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Negative control for the scenarios above, for the reason spelled out over the input_gate_abba control.
 add_test(NAME InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:input_tls_exhaustion> no-such-scenario)
@@ -434,6 +697,79 @@ set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScena
   WILL_FAIL TRUE
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  LABELS "lifecycle-proof")
+
+# Each DMK Win32 TLS index returns with its last owner and stays with a live one. Every scenario owns its process,
+# because a census reads the whole process and a defective return can write through another owner's index.
+add_executable(tls_index_return tls_index_return.cpp)
+add_library(process_exit_release_dll SHARED process_exit_release_dll.cpp)
+set_target_properties(process_exit_release_dll PROPERTIES PREFIX "")
+target_link_libraries(process_exit_release_dll PRIVATE DetourModKit dmk_coverage)
+target_include_directories(process_exit_release_dll PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(process_exit_release_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(process_exit_release_dll SHARED)
+add_dependencies(tls_index_return process_exit_release_dll)
+target_link_libraries(tls_index_return PRIVATE DetourModKit dmk_coverage)
+target_include_directories(tls_index_return PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
+target_compile_definitions(tls_index_return PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(tls_index_return)
+add_dependencies(dmk_lifecycle_proof_hosts tls_index_return)
+
+foreach(tls_proof IN ITEMS
+    "MidEntryTlsIndexReturnsWithTheLastSlot|mid-return"
+    "MidEntryTlsIndexStaysWithARetainedSlot|mid-retained"
+    "MidEntryTlsIndexRefusalReleasesItsClaim|mid-exhausted"
+    "EmitTlsIndexReturnsWithTheLastSubscribedDispatcher|emit-return"
+    "EmitTlsIndexStaysWithALiveDispatcher|emit-live-owner"
+    "DeliveryTlsIndexReturnsWithTheLastGate|delivery-return"
+    "DeliveryTlsIndexStaysWithALiveGate|delivery-live-owner"
+    "DiagnosticsTlsIndexReturnsWithTheSession|diagnostics-session"
+    "DiagnosticsTlsIndexReturnsOnCacheShutdownWithoutASession|diagnostics-cache-shutdown"
+    "DiagnosticsTlsIndexStaysThroughACacheRestart|diagnostics-cache-restart"
+    "DiagnosticsTlsIndexStaysWithALiveSubscription|diagnostics-live"
+    "DiagnosticsTlsIndexWaitsForARunningHandler|diagnostics-running"
+    "DiagnosticsTlsIndexStaysWithAParkedHandler|diagnostics-parked"
+    "DiagnosticsTlsIndexTeardownInsideAHandlerNeverWaits|diagnostics-self"
+    "DiagnosticsTlsIndexLoaderLockReleaseNeverWaits|diagnostics-loader-lock"
+    "DiagnosticsTlsIndexProcessExitSkipsTheRelease|diagnostics-process-exit"
+    "DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease|diagnostics-loader-shutdown"
+    "DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits|diagnostics-untracked")
+  string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
+  list(GET tls_proof_parts 0 tls_proof_name)
+  list(GET tls_proof_parts 1 tls_proof_scenario)
+  dmk_add_raw_proof(NAME Lifecycle.${tls_proof_name}
+    COMMAND $<TARGET_FILE:tls_index_return> ${tls_proof_scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
+    TEST_TIMEOUT 60
+    LABELS "lifecycle-proof")
+endforeach()
+
+# The guarded-read index exists only on the MinGW vectored-handler arm, so MSVC reports the absent subject with 77.
+foreach(tls_proof IN ITEMS
+    "GuardedReadTlsIndexReturnsOnRelease|guarded-read-return"
+    "GuardedReadTlsIndexWaitsForTheInFlightAccess|guarded-read-in-flight"
+    "GuardedReadDrainSkipsAtProcessExit|guarded-process-exit"
+    "GuardedReadLockSkipsAtProcessExit|guarded-lock-process-exit")
+  string(REPLACE "|" ";" tls_proof_parts "${tls_proof}")
+  list(GET tls_proof_parts 0 tls_proof_name)
+  list(GET tls_proof_parts 1 tls_proof_scenario)
+  dmk_add_raw_proof(NAME Lifecycle.${tls_proof_name}
+    COMMAND $<TARGET_FILE:tls_index_return> ${tls_proof_scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
+    TEST_TIMEOUT 60
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endforeach()
+
+add_test(NAME Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:tls_index_return> no-such-scenario)
+set_tests_properties(Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:tls_index_return>
   LABELS "lifecycle-proof")
 
 # The reload servicer's reaper self-retirement (a config setter on the servicer thread calling clear()) is language and
@@ -493,6 +829,37 @@ dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownB
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# A rebind on a control thread delivers the hold release inside the gate delivery. The poll thread's next delivery for
+# the rebuilt binding waits for that release. A shutdown() join from that release deadlocks, so a watchdog exit code is
+# the oracle. Threading behavior: both toolchains. The release-only arm is the synchronous external-shutdown control.
+add_executable(input_control_thread_shutdown input_control_thread_shutdown.cpp)
+target_link_libraries(input_control_thread_shutdown PRIVATE DetourModKit dmk_coverage)
+target_include_directories(input_control_thread_shutdown PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_control_thread_shutdown PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_control_thread_shutdown)
+add_dependencies(dmk_lifecycle_proof_hosts input_control_thread_shutdown)
+
+dmk_add_raw_proof(NAME Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> shutdown-in-release
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ControlThreadReleaseWithoutShutdownRunsDown
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> release-only
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Bounded negative cleanup control. The release parks after its shutdown() call while the main thread abandons the
+# premise. Exit zero requires the parked body released, the deferred rundown observed complete, and then the seams
+# cleared.
+dmk_add_raw_proof(NAME Lifecycle.ControlThreadShutdownAbandonedPremiseRunsDownBeforeClearing
+  COMMAND $<TARGET_FILE:input_control_thread_shutdown> abandoned-premise
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_control_thread_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # First-use singleton state is allocation and language behavior, so these run on both toolchains. The driver replaces
 # plain global operator new for its single- and concurrent-OOM modes and supplies a successful control.
 add_executable(input_first_use_oom input_first_use_oom.cpp)
@@ -521,12 +888,12 @@ dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
 # Retention scenarios latch process-lifetime raw hook storage, while exception scenarios replace global allocation or
 # backend behavior. Isolate every case, and give the reference-balance case sole ownership of its XInput module load.
 add_executable(xinput_detour_rundown xinput_detour_rundown.cpp)
-# The routed-unwind scenarios assert against the generated regions themselves, so this one host names the backend
-# directly. Every other test target deliberately carries no backend include path.
+# The routed-unwind scenarios assert against the generated regions themselves, so this host names the backend directly.
 target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit safetyhook dmk_coverage psapi)
 target_include_directories(xinput_detour_rundown PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(xinput_detour_rundown PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_detour_rundown)
 add_dependencies(dmk_lifecycle_proof_hosts xinput_detour_rundown)
@@ -1015,7 +1382,8 @@ add_executable(full_lifecycle test_full_lifecycle.cpp)
 target_link_libraries(full_lifecycle PRIVATE DetourModKit dmk_coverage)
 target_include_directories(full_lifecycle PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 dmk_static_runtime(full_lifecycle)
 add_dependencies(dmk_lifecycle_proof_hosts full_lifecycle)
 
@@ -1089,10 +1457,11 @@ endwhile()
 # The generation target links one archive instance. Test seams replace its window and XInput dependencies.
 add_library(staged_generation_dll SHARED staged_generation_dll.cpp)
 set_target_properties(staged_generation_dll PROPERTIES PREFIX "" OUTPUT_NAME "staged_generation_dll")
-target_link_libraries(staged_generation_dll PRIVATE DetourModKit dmk_coverage)
+target_link_libraries(staged_generation_dll PRIVATE DetourModKit safetyhook dmk_coverage)
 target_include_directories(staged_generation_dll PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(staged_generation_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
 add_dependencies(staged_generation_dll hook_target_lib xinput_forwarding_proxy_local)
 dmk_static_runtime(staged_generation_dll SHARED)
@@ -1216,3 +1585,142 @@ set_tests_properties(Lifecycle.StagedGenerationProofRejectsAnUnknownScenario PRO
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
   LABELS "lifecycle-proof")
+
+add_dependencies(xinput_detour_rundown xinput_alias_ex_proxy)
+set(xinput_route_telemetry_proofs
+  Lifecycle.XInputCleanRouteResetReportsNoLeak telemetry-clean
+  Lifecycle.XInputParkedRouteReportsRetention telemetry-primary
+  Lifecycle.XInputParkedOrdinalRouteReportsRetention telemetry-ex
+  Lifecycle.XInputAliasedRouteReportsOneRetention telemetry-alias
+  Lifecycle.XInputRollbackReportsRouteRetention telemetry-rollback
+  Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention telemetry-repeat)
+while(xinput_route_telemetry_proofs)
+  list(POP_FRONT xinput_route_telemetry_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:xinput_detour_rundown> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+add_test(NAME Lifecycle.MidRouteProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:route_continuation_lifetime> invalid-scenario)
+set_tests_properties(Lifecycle.MidRouteProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+
+add_test(NAME Lifecycle.XInputTelemetryProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> telemetry-invalid)
+set_tests_properties(Lifecycle.XInputTelemetryProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+
+foreach(participant IN ITEMS a b)
+  add_library(route_copy_${participant} SHARED route_copy_dll.cpp)
+  set_target_properties(route_copy_${participant} PROPERTIES PREFIX "")
+  target_link_libraries(route_copy_${participant} PRIVATE DetourModKit safetyhook dmk_coverage)
+  dmk_static_runtime(route_copy_${participant} SHARED)
+endforeach()
+add_executable(route_copy_host route_copy_host.cpp)
+target_link_libraries(route_copy_host PRIVATE dmk_coverage)
+target_compile_features(route_copy_host PRIVATE cxx_std_23)
+dmk_static_runtime(route_copy_host)
+add_dependencies(route_copy_host route_copy_a route_copy_b)
+add_dependencies(dmk_lifecycle_proof_hosts route_copy_host)
+add_test(NAME Lifecycle.RouteCopiesRejectUnknownScenario
+  COMMAND $<TARGET_FILE:route_copy_host> invalid-scenario)
+set_tests_properties(Lifecycle.RouteCopiesRejectUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
+set(route_copy_proofs
+  Lifecycle.RouteCopiesSerializeConcurrentScans scans
+  Lifecycle.RouteCopiesSerializePatchAndScan patch
+  Lifecycle.RouteCopiesRetainLayeredDependencies layers
+  Lifecycle.RouteCopiesRetainInlineDependencies layers-inline
+  Lifecycle.RouteCopiesRetainOverlappingDependencies layers-overlap
+  Lifecycle.RouteCopiesReleaseOlderLayerAfterDrainFailure drain-leak
+  Lifecycle.RouteCopiesReleaseOlderLayerAfterAdapterDrainFailure adapter-leak
+  Lifecycle.RouteCoordinatorSurvivesParticipantUnload unload
+  Lifecycle.RouteCopiesRejectUncoordinatedReclamation missing
+  Lifecycle.RouteCopiesRejectIncompatibleCoordination incompatible
+  Lifecycle.RouteCopiesShareRegistrationCapacity capacity
+  Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout timeout
+  Lifecycle.RouteCopiesRetainArmedHookAfterCoordinatorTimeout timeout-armed
+  Lifecycle.RouteCopiesRetryDisarmedTeardownAfterCoordinatorRefusal teardown-retry
+  Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal teardown-retry-armed
+  Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
+  Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
+  Lifecycle.RouteCopiesReportLayerConflict layer-conflict
+  Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict stale-layer-conflict
+  Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause)
+while(route_copy_proofs)
+  list(POP_FRONT route_copy_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_copy_host> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_copy_host>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+set(route_copy_stub_proofs
+  Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub stub-page
+  Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait wait-export
+  Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread stub-thread)
+while(route_copy_stub_proofs)
+  list(POP_FRONT route_copy_stub_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:route_copy_host> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:route_copy_host>
+    TEST_TIMEOUT 30
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+endwhile()
+
+dmk_add_raw_proof(NAME Lifecycle.StagedGenerationResourcesStayWithinBudget
+  COMMAND $<TARGET_FILE:staged_generation_soak> resources
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 300
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+if(DMK_ENABLE_SANITIZERS)
+  set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+add_library(routed_bypass_provider SHARED routed_bypass_provider.cpp)
+set_target_properties(routed_bypass_provider PROPERTIES PREFIX "" OUTPUT_NAME "dmk_routed_bypass_provider")
+dmk_static_runtime(routed_bypass_provider)
+add_executable(routed_bypass_continuation routed_bypass_continuation.cpp)
+target_link_libraries(routed_bypass_continuation PRIVATE DetourModKit safetyhook dmk_coverage onecore)
+target_include_directories(routed_bypass_continuation PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(routed_bypass_continuation PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(routed_bypass_continuation)
+add_dependencies(routed_bypass_continuation routed_bypass_provider)
+add_dependencies(dmk_lifecycle_proof_hosts routed_bypass_continuation)
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassSurvivesDormantFiber
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> fiber
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassCleanRoutesReclaim
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> clean
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassDrainsBeforeReclaim
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> drain
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+add_test(NAME Lifecycle.RoutedBypassProofRejectsUnknownScenario
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> unknown)
+set_tests_properties(Lifecycle.RoutedBypassProofRejectsUnknownScenario PROPERTIES
+  WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof"
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>)
+dmk_add_raw_proof(NAME Lifecycle.MidRouteStaleSlotRefusesCreation
+  COMMAND $<TARGET_FILE:mid_route_retention> stale-slot
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RoutedChainExceptionPreservesLifetime
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> routed-chain-exception
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InlineSelfTeardownReportsRetention
+  COMMAND $<TARGET_FILE:mid_route_retention> inline-self-teardown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")

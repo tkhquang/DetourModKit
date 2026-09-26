@@ -104,10 +104,10 @@ index c05d06f..47dab1f 100644
      static void combine_adjacent_freenodes(Memory& memory);
      [[nodiscard]] static std::expected<uint8_t*, Error> allocate_nearby_memory(
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..e2632ef 100644
+index 58801fa..9096666 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
-@@ -16,9 +16,88 @@ import std.compat;
+@@ -16,9 +16,100 @@ import std.compat;
  
  #include "safetyhook/allocator.hpp"
  #include "safetyhook/common.hpp"
@@ -121,6 +121,8 @@ index 58801fa..e2632ef 100644
 +    NONE,
 +    BEFORE_DESTINATION,
 +    BEFORE_EXIT,
++    /// Inside the gateway before its entry increment, where the entry counter does not yet cover the thread.
++    AT_ENTRY,
 +};
 +
 +/// @brief Arms one routed executable park, or releases it with NONE.
@@ -130,7 +132,7 @@ index 58801fa..e2632ef 100644
 +[[nodiscard]] bool SAFETYHOOK_API route_park_reached_for_test() noexcept;
 +#endif
 +
-+/// @brief Bytes a routed hook removes from reuse for the rest of the process.
++/// @brief Bytes a routed chain holds from publication until reclamation, or for the process lifetime when retained.
 +/// @details `logical` counts requested sub-allocation bytes. `committed` counts each sub-allocation's whole backing
 +///          pool block; shared blocks are counted once per sub-allocation, so the figure is a conservative upper bound.
 +struct RouteRetentionCost {
@@ -139,13 +141,13 @@ index 58801fa..e2632ef 100644
 +};
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+/// @brief Process-wide accounting for executable storage that publication makes permanent.
++/// @brief Process-wide accounting for reserved and published executable storage.
 +struct RouteRetentionStats {
 +    uint64_t logical_reserved;     ///< Reserved but neither charged nor released.
-+    uint64_t logical_charged;      ///< Permanently retained by a published route.
++    uint64_t logical_charged;      ///< Charged until route reclamation.
 +    uint64_t logical_high_water;   ///< Highest observed reserved-plus-charged logical total.
 +    uint64_t committed_reserved;   ///< Backing-block bytes reserved before publication.
-+    uint64_t committed_charged;    ///< Permanently retained backing-block bytes.
++    uint64_t committed_charged;    ///< Charged backing-block bytes until reclamation.
 +    uint64_t committed_high_water; ///< Highest observed reserved-plus-charged committed total.
 +    uint64_t logical_capacity;     ///< Logical ceiling enforced at reservation time.
 +    uint64_t committed_capacity;   ///< Backing-commitment ceiling enforced at reservation time.
@@ -193,10 +195,20 @@ index 58801fa..e2632ef 100644
 +    bool m_held{false};
 +};
 +
++/// @brief Cause of a retained route after reset.
++enum class RouteRetentionReason : uint8_t {
++    None,
++    IdleProofFailed,
++    CoordinatorUnavailable,
++    DependentRoute,
++    UnwindRecords,
++    OwnerLock,
++};
++
  /// @brief An inline hook.
  class SAFETYHOOK_API InlineHook final {
  public:
-@@ -26,13 +105,17 @@ public:
+@@ -26,13 +117,19 @@ public:
      struct Error {
          /// @brief The type of error.
          enum : uint8_t {
@@ -215,13 +227,38 @@ index 58801fa..e2632ef 100644
 +            FAILED_TO_UNPROTECT,                    ///< Failed to unprotect memory.
 +            NOT_ENOUGH_SPACE,                       ///< Not enough space to create the hook.
 +            FAILED_TO_REGISTER_UNWIND,              ///< The platform refused the routed wrapper's unwind metadata.
-+            ROUTE_RETENTION_EXHAUSTED,              ///< The routed retention ceiling refused the permanent chain.
++            ROUTE_RETENTION_EXHAUSTED,              ///< The routed retention ceiling refused the chain.
 +            FAILED_TO_FLUSH_INSTRUCTION_CACHE,      ///< The platform refused required cache maintenance.
 +            NON_EXECUTABLE_TRANSACTION_UNAVAILABLE, ///< A multi-byte patch cannot use a non-executable window.
++            COORDINATION_UNAVAILABLE,
++            LAYER_CONFLICT,
          } type;
  
          /// @brief Extra information about the error.
-@@ -110,12 +193,48 @@ public:
+@@ -41,6 +138,22 @@ public:
+             uint8_t* ip;                      ///< IP of the problematic instruction.
+         };
+ 
++        /// @brief Reports unavailable, incompatible, or exhausted process coordination.
++        [[nodiscard]] static Error coordination_unavailable(uint8_t* ip) {
++            Error error{};
++            error.type = COORDINATION_UNAVAILABLE;
++            error.ip = ip;
++            return error;
++        }
++
++        /// @brief Reports that a newer hook owns overlapping target bytes.
++        [[nodiscard]] static Error layer_conflict(uint8_t* ip) {
++            Error error{};
++            error.type = LAYER_CONFLICT;
++            error.ip = ip;
++            return error;
++        }
++
+         /// @brief Create a BAD_ALLOCATION error.
+         /// @param err The Allocator::Error that failed.
+         /// @return The new BAD_ALLOCATION error.
+@@ -110,12 +223,50 @@ public:
              error.ip = ip;
              return error;
          }
@@ -267,10 +304,12 @@ index 58801fa..e2632ef 100644
          StartDisabled = 1 << 0, ///< Start the hook disabled.
 +        /// Admit a non-throwing x64 destination with register-only arguments through a stable rundown gateway.
 +        RoutedExternal = 1 << 1,
++        /// Keep a mid route admitted through the relocated window.
++        RoutedMid = 1 << 2,
      };
  
      /// @brief Create an inline hook.
-@@ -150,6 +269,11 @@ public:
+@@ -150,6 +301,11 @@ public:
      [[nodiscard]] static std::expected<InlineHook, Error> create(
          const std::shared_ptr<Allocator>& allocator, void* target, void* destination, Flags flags = Default);
  
@@ -282,7 +321,21 @@ index 58801fa..e2632ef 100644
      /// @brief Create an inline hook with a given Allocator.
      /// @param allocator The allocator to use.
      /// @param target The address of the function to hook.
-@@ -208,6 +332,42 @@ public:
+@@ -171,9 +327,11 @@ public:
+     ~InlineHook();
+ 
+     /// @brief Reset the hook.
+-    /// @details This will restore the original function and remove the hook.
++    /// @details This will restore the original function and remove the hook. A published routed chain is freed when
++    ///          the idle proof of threads_idle_outside succeeds and retained otherwise (see route_retained()).
+     /// @note This is called automatically in the destructor.
+-    void reset();
++    /// @note Never call this under the loader lock while a route is published: the idle proof suspends threads.
++    void reset() noexcept;
+ 
+     /// @brief Get a pointer to the target.
+     /// @return A pointer to the target.
+@@ -208,6 +366,73 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_original_bytes; }
  
@@ -298,6 +351,10 @@ index 58801fa..e2632ef 100644
 +    /// @note The caller must serialize this with enable(), disable(), and enabled().
 +    void reconcile_enabled(bool enabled) noexcept;
 +
++    /// @brief Records this chain as permanently retained for an owner that never calls reset() on this object.
++    /// @note Nothing is freed. The caller must serialize this with enable(), disable(), and reset().
++    void retain_route() noexcept;
++
 +    /// @brief Closes routed admission while teardown decides whether the target can be restored.
 +    void begin_route_rundown() noexcept;
 +
@@ -310,8 +367,35 @@ index 58801fa..e2632ef 100644
 +    /// @brief Returns the number of callers admitted to the routed destination.
 +    [[nodiscard]] uint32_t route_entries() const noexcept;
 +
++    /// @brief Checks the Windows caller stack for a possible return into the displaced window.
++    /// @note A matching word or failed stack query returns true. Serialize with reset().
++    [[nodiscard]] bool caller_owns_route() const noexcept;
++
++    /// @brief Reports whether the most recent reset() or destruction through this object retained its chain.
++    /// @details True when the trampoline, any routed gateway, and their allocator block stay mapped for the process
++    ///          lifetime. route_retention_reason() names the cause.
++    [[nodiscard]] bool route_retained() const noexcept { return m_route_retained; }
++
++    /// @brief Names the cause of the most recent retained reset.
++    [[nodiscard]] const char* route_retention_reason() const noexcept {
++        switch (m_retention_reason) {
++        case RouteRetentionReason::CoordinatorUnavailable:
++            return "process coordinator unavailable or timed out";
++        case RouteRetentionReason::DependentRoute:
++            return "a dependent process route remains registered";
++        case RouteRetentionReason::UnwindRecords:
++            return "unwind records remain registered";
++        case RouteRetentionReason::OwnerLock:
++            return "hook owner lock refused";
++        case RouteRetentionReason::IdleProofFailed:
++            return "route idle proof refused";
++        default:
++            return "no route retention";
++        }
++    }
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+    /// @brief Test-only addresses of the three generated routed regions, or null when this hook has no route.
++    /// @brief Test-only addresses of gateway, destination wrapper, exit, and non-mid bypass wrapper, or null if absent.
 +    /// @note Structural unwind proofs need the exact generated addresses, which no shipping caller has any use for.
 +    [[nodiscard]] uint8_t* route_region_for_test(int index) const noexcept;
 +
@@ -325,7 +409,7 @@ index 58801fa..e2632ef 100644
      /// @brief Calls the original function.
      /// @tparam RetT The return type of the function.
      /// @tparam ...Args The argument types of the function.
-@@ -349,6 +509,8 @@ public:
+@@ -349,29 +574,78 @@ public:
  private:
      friend class MidHook;
  
@@ -334,10 +418,14 @@ index 58801fa..e2632ef 100644
      enum class Type {
          Unset,
          E9,
-@@ -358,20 +520,51 @@ private:
+         FF,
+     };
+ 
++    bool m_process_registered{};
      uint8_t* m_target{};
      uint8_t* m_destination{};
      Allocation m_trampoline{};
++    std::unique_ptr<Allocation> m_retention_holder{};
 +    Allocation m_route_gateway{};
 +    RouteControl* m_route_control{};
      std::vector<uint8_t> m_original_bytes{};
@@ -351,7 +439,15 @@ index 58801fa..e2632ef 100644
      std::recursive_mutex m_mutex{};
      bool m_enabled{};
 +    bool m_route_published{};
++    bool m_mid_route{};
 +    bool m_route_retention_charged{};
++    // The verdict of this object's most recent teardown. Not transferred by a move, so it always names a chain this
++    // object itself took down.
++    bool m_route_retained{};
++    RouteRetentionReason m_retention_reason{RouteRetentionReason::None};
++    // The byte after each call the trampoline relocated. A thread inside such a callee holds one of these as a return
++    // address while its instruction pointer is outside every range the idle proof scans.
++    ReturnSites m_trampoline_return_sites{};
 +    // Points into the gateway allocation, so it stays valid for exactly as long as the code it describes.
 +    void* m_route_unwind_table{};
 +    RouteRetentionCost m_route_retention{};
@@ -364,11 +460,15 @@ index 58801fa..e2632ef 100644
 +        Flags flags, RouteRetentionCredit* credit);
      std::expected<void, Error> e9_hook(const std::shared_ptr<Allocator>& allocator);
 +    std::expected<void, Error> setup_route(const std::shared_ptr<Allocator>& allocator, RouteRetentionCredit* credit);
-+    void set_mid_route() noexcept;
++    std::expected<void, Error> set_mid_route();
 +    [[nodiscard]] uint8_t* route_exit() const noexcept;
 +    [[nodiscard]] RouteRetentionCost route_retention_cost() const noexcept;
 +    /// @brief Folds storage owned outside this hook, but retained with it, into the chain's reservation and charge.
 +    [[nodiscard]] bool add_route_retention(const Allocation& allocation) noexcept;
++    /// @brief Frees a published chain after the idle proof, or returns false so the caller retains it.
++    [[nodiscard]] bool reclaim_published_route() noexcept;
++    /// @brief Marks a retained chain so a later teardown on an overlapping target includes it in its proof.
++    void register_retained_route() noexcept;
  
  #if SAFETYHOOK_ARCH_X86_64
      std::expected<void, Error> ff_hook(const std::shared_ptr<Allocator>& allocator);
@@ -379,6 +479,8 @@ index 58801fa..e2632ef 100644
  };
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++/// @brief Makes the matching destroy lock acquisition report resource exhaustion once.
++extern std::atomic<uint8_t*> SAFETYHOOK_API g_destroy_lock_failure_target;
 +/// @brief Forces the next E9 setup to fall through to the FF setup path.
 +void SAFETYHOOK_API force_ff_hook_for_test(bool force) noexcept;
 +/// @brief Returns the boundary count from the latest E9 setup on the current thread.
@@ -390,10 +492,10 @@ index 58801fa..e2632ef 100644
 +#endif
  } // namespace safetyhook
 diff --git a/include/safetyhook/mid_hook.hpp b/include/safetyhook/mid_hook.hpp
-index 68e44fd..18643be 100644
+index 68e44fd..950fd6b 100644
 --- a/include/safetyhook/mid_hook.hpp
 +++ b/include/safetyhook/mid_hook.hpp
-@@ -117,7 +117,7 @@ public:
+@@ -117,12 +117,14 @@ public:
      MidHook(MidHook&& other) noexcept;
      MidHook& operator=(const MidHook&) = delete;
      MidHook& operator=(MidHook&& other) noexcept;
@@ -401,8 +503,17 @@ index 68e44fd..18643be 100644
 +    ~MidHook();
  
      /// @brief Reset the hook.
-     /// @details This will remove the hook and free the stub.
-@@ -140,6 +140,16 @@ public:
+-    /// @details This will remove the hook and free the stub.
++    /// @details This will remove the hook and free the stub. The published routed chain is freed when the idle proof
++    ///          of threads_idle_outside succeeds and retained otherwise (see route_retained()).
+     /// @note This is called automatically in the destructor.
+-    void reset();
++    /// @note Never call this under the loader lock after the hook was enabled: the idle proof suspends threads.
++    void reset() noexcept;
+ 
+     /// @brief Get a pointer to the target.
+     /// @return A pointer to the target.
+@@ -140,6 +142,19 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_hook.m_original_bytes; }
  
@@ -416,10 +527,13 @@ index 68e44fd..18643be 100644
 +    /// @brief Reconciles the underlying inline hook's logical enabled state after an independent byte witness.
 +    void reconcile_enabled(bool enabled) noexcept { m_hook.reconcile_enabled(enabled); }
 +
++    /// @brief Records the underlying chain as permanently retained. See InlineHook::retain_route().
++    void retain_route() noexcept { m_hook.retain_route(); }
++
      /// @brief Tests if the hook is valid.
      /// @return true if the hook is valid, false otherwise.
      explicit operator bool() const { return static_cast<bool>(m_stub); }
-@@ -153,13 +163,33 @@ public:
+@@ -153,13 +168,52 @@ public:
      /// @brief Check if the hook is enabled.
      [[nodiscard]] bool enabled() const { return m_hook.enabled(); }
  
@@ -432,13 +546,29 @@ index 68e44fd..18643be 100644
 +    /// @brief Marks the generated route retired after the target has been restored.
 +    void finish_route_rundown() noexcept { m_hook.finish_route_rundown(); }
 +
++    /// @brief Checks for a possible caller-stack return. See InlineHook::caller_owns_route().
++    [[nodiscard]] bool caller_owns_route() const noexcept { return m_hook.caller_owns_route(); }
++
 +    /// @brief Returns callers still executing the generated mid route.
 +    [[nodiscard]] uint32_t route_entries() const noexcept { return m_hook.route_entries(); }
++
++    /// @brief Reports whether the most recent reset() or destruction through this object retained its chain.
++    /// @details See InlineHook::route_retained(). The mid stub follows the same verdict.
++    [[nodiscard]] bool route_retained() const noexcept { return m_route_retained; }
++    /// @brief Names the cause of the most recent retained reset.
++    [[nodiscard]] const char* route_retention_reason() const noexcept {
++        return m_route_retention_reason != nullptr ? m_route_retention_reason : m_hook.route_retention_reason();
++    }
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    /// @brief Test-only complete retained cost, including this MID hook's generated stub.
 +    [[nodiscard]] RouteRetentionCost route_retention_for_test() const noexcept {
 +        return m_hook.route_retention_for_test();
++    }
++
++    /// @brief Test-only address of one generated routed region of the underlying inline hook, or null.
++    [[nodiscard]] uint8_t* route_region_for_test(int index) const noexcept {
++        return m_hook.route_region_for_test(index);
 +    }
 +#endif
 +
@@ -448,6 +578,9 @@ index 68e44fd..18643be 100644
      uint8_t* m_target{};
 -    Allocation m_stub{};
      MidHookFn m_destination{};
++    bool m_route_retained{};
++    // Captured with m_route_retained, because a later move into m_hook resets the inner verdict.
++    const char* m_route_retention_reason{};
  
      std::expected<void, Error> setup(
          const std::shared_ptr<Allocator>& allocator, uint8_t* target, MidHookFn destination);
@@ -455,21 +588,23 @@ index 68e44fd..18643be 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..84b8a3f 100644
+index 8cb1fbe..50c4101 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
-@@ -5,6 +5,10 @@
+@@ -2,9 +2,12 @@
+ #pragma once
+ 
+ #ifndef SAFETYHOOK_USE_CXXMODULES
++#include <array>
++#include <atomic>
  #include <cstdint>
  #include <expected>
  #include <functional>
 +#include <span>
-+#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+#include <atomic>
-+#endif
  #else
  import std.compat;
  #endif
-@@ -23,6 +27,7 @@ enum class OsError {
+@@ -23,6 +26,7 @@ enum class OsError {
      FAILED_TO_FREEZE_THREAD,
      FAILED_TO_UNFREEZE_THREAD,
      FAILED_TO_GET_THREAD_ID,
@@ -477,7 +612,7 @@ index 8cb1fbe..84b8a3f 100644
  };
  
  struct VmAccess {
-@@ -55,6 +60,7 @@ std::expected<VmBasicInfo, OsError> SAFETYHOOK_API vm_query(uint8_t* address);
+@@ -55,6 +59,7 @@ std::expected<VmBasicInfo, OsError> SAFETYHOOK_API vm_query(uint8_t* address);
  bool SAFETYHOOK_API vm_is_readable(uint8_t* address, size_t size);
  bool SAFETYHOOK_API vm_is_writable(uint8_t* address, size_t size);
  bool SAFETYHOOK_API vm_is_executable(uint8_t* address);
@@ -485,7 +620,7 @@ index 8cb1fbe..84b8a3f 100644
  
  struct SystemInfo {
      uint32_t page_size;
-@@ -65,9 +71,105 @@ struct SystemInfo {
+@@ -65,9 +70,223 @@ struct SystemInfo {
  
  SystemInfo SAFETYHOOK_API system_info();
  
@@ -501,6 +636,91 @@ index 8cb1fbe..84b8a3f 100644
 +/// @return True when the table is no longer registered, or when the platform needs no table.
 +/// @note Only legal while no thread can reach the described code.
 +[[nodiscard]] bool SAFETYHOOK_API vm_unregister_unwind_table(void* table);
++
++/// @brief A half-open range of generated code.
++struct AddressRange {
++    uint8_t* begin{};
++    uint8_t* end{};
++};
++
++/// @brief The return addresses a thread holds only while it still has to return into generated code: the byte after
++///        each call that a trampoline relocated, as offsets from that code.
++/// @details Kept as a base plus small offsets so no frame of the scan itself ever holds a return address.
++struct ReturnSites {
++    const uint8_t* code{};
++    std::array<uint8_t, 8> offsets{};
++    uint8_t count{};
++};
++
++#if SAFETYHOOK_OS_WINDOWS
++/// @brief Bounds the route registry that every participant shares.
++inline constexpr size_t PROCESS_ROUTE_CAPACITY = 512;
++
++/// @brief Serializes participating copies through process-owned data without participant callbacks.
++/// @details Lock order: hook mutex, coordinator, local transaction lock, trap lock. The exclusive owner of a hook can
++///          also hold the coordinator before that hook mutex. Acquisition times out after two seconds. The owning
++///          thread acquires again without a call, because a trap window or a route that it closed can hold the wait
++///          and release exports. Records that patch overlapping target bytes share one layer order.
++class SAFETYHOOK_API ProcessCoordinator final {
++public:
++    /// @brief Acquires the coordinator. A missing, incompatible, poisoned, or timed-out coordinator, or a mapping with
++    ///        no canonical view in this process, leaves this object unusable. A later object retries a process
++    ///        connection that did not complete.
++    ProcessCoordinator() noexcept;
++    /// @brief Releases an acquisition that this object made.
++    ~ProcessCoordinator() noexcept;
++    ProcessCoordinator(const ProcessCoordinator&) = delete;
++    ProcessCoordinator& operator=(const ProcessCoordinator&) = delete;
++    /// @brief Reports whether this object holds the coordinator.
++    [[nodiscard]] explicit operator bool() const noexcept { return m_state != nullptr; }
++    /// @brief Registers a route keyed by its trampoline address.
++    /// @return False for a zero or oversized patch, a full registry, or exhausted creation order.
++    [[nodiscard]] bool add(uint8_t* target, size_t patch_size, AddressRange trampoline, AddressRange gateway,
++        const std::atomic<uint32_t>* entries, const ReturnSites& return_sites) noexcept;
++    /// @brief Reports whether @p key has a record and no newer overlapping record is live or enabled.
++    /// @param include_retained Also refuses when a newer overlapping record is retained.
++    [[nodiscard]] bool top(uint8_t* key, bool include_retained = false) const noexcept;
++    /// @brief Records the enable state of @p key. An unknown key changes nothing.
++    void enabled(uint8_t* key, bool value) noexcept;
++    /// @brief Removes the record of @p key. An unknown key changes nothing.
++    void remove(uint8_t* key) noexcept;
++    /// @brief Marks the record of @p key as retained. An unknown key changes nothing.
++    void retain(uint8_t* key) noexcept;
++    /// @brief Collects the ranges and return sites that the idle proof for @p key must scan.
++    /// @return False for an unknown or enabled record, any newer overlapping record, an enabled or entered retained
++    ///         record, or full output spans.
++    [[nodiscard]] bool dependencies(uint8_t* key, std::span<AddressRange> ranges, size_t& range_count,
++        std::span<const ReturnSites*> sites, size_t& site_count) const noexcept;
++
++private:
++    void* m_state{};
++    bool m_nested{};
++};
++#endif
++
++/// @brief Reports whether no thread of this process is inside any of @p ranges or still has to return into them.
++/// @details Every thread handle is opened before the first suspension, so nothing allocates, takes a lock, or calls
++///          back while a thread is suspended. Each other thread is suspended in turn, its control context is read,
++///          its committed stack is read for a return site, and it is resumed before the next one is touched. The
++///          current thread's stack is read last, because it is the one thread that can be retiring a route from
++///          inside a relocated call's callee. The scan is serialized with trap_threads transactions and with other
++///          scans of every compatible participant on Windows.
++/// @param ranges Generated code that no other thread's instruction pointer may be inside.
++/// @param return_sites Return addresses that a thread holds only while it still has to return into that code. Lists
++///        with no site skip the stack reads.
++/// @return True when no thread was observed inside the ranges or holding a return site. False when one was, when a
++///         thread suspension, context read, or stack query failed, when a stack exceeded the read bound, or when
++///         the process has more threads than the fixed handle capacity. False also when the process coordinator is
++///         unusable. An OsError when no thread snapshot was available.
++/// @note Never call this under the loader lock. The caller must have closed every entry into the ranges first:
++///       an observation proves idleness only when no thread can enter the ranges afterwards. A return address on a
++///       stack that no thread is running, such as a dormant fiber's, is not observed.
++[[nodiscard]] std::expected<bool, OsError> SAFETYHOOK_API threads_idle_outside(
++    std::span<const AddressRange> ranges, std::span<const ReturnSites* const> return_sites);
++
++/// @brief Checks the Windows caller stack for words that match supplied return sites.
++/// @return True for a matching word or an unreadable stack. False on other platforms.
++[[nodiscard]] bool SAFETYHOOK_API current_thread_returns_to(std::span<const ReturnSites* const> return_sites) noexcept;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +/// @brief Test-only: makes the next vm_register_unwind_table call report platform refusal.
@@ -520,10 +740,18 @@ index 8cb1fbe..84b8a3f 100644
 +    size_t trampoline_offset;
 +};
 +
++/// @brief The sole permitted instruction-pointer transfer during a patch transaction.
++enum class TrapDirection : uint8_t {
++    ORIGINAL_TO_TRAMPOLINE,
++    TRAMPOLINE_TO_ORIGINAL,
++};
++
 +std::expected<void, OsError> SAFETYHOOK_API trap_threads(
 +    uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
 +std::expected<void, OsError> SAFETYHOOK_API trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
-+    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn);
++    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn,
++    TrapDirection direction = TrapDirection::ORIGINAL_TO_TRAMPOLINE, std::atomic<uint32_t>* route_entries = nullptr,
++    std::span<const AddressRange> executable_ranges = {});
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +/// @brief Transaction point at which the exception seam throws after setup has succeeded.
@@ -537,6 +765,8 @@ index 8cb1fbe..84b8a3f 100644
 +/// @note Reaches the post-commit transaction outcome, which a host cannot provoke on demand. Compiled out unless
 +///       SAFETYHOOK_ENABLE_TEST_SEAMS is defined, so no shipping archive carries it.
 +extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_restore_failure_override;
++/// @brief Observes the protected transaction before target mutation.
++extern void (*SAFETYHOOK_API g_trap_protected_probe)() noexcept;
 +
 +/// @brief Test-only target for throwing before or after the transaction mutation callback.
 +/// @note Cleanup still runs and the exception is rethrown. Compiled out of shipping archives.
@@ -544,10 +774,33 @@ index 8cb1fbe..84b8a3f 100644
 +/// @brief Test-only transaction stage paired with g_trap_exception_target_override.
 +extern std::atomic<TrapExceptionStage> SAFETYHOOK_API g_trap_exception_stage_override;
 +
++/// @brief Dispatches one synthetic execute fault through the live trap handler.
++[[nodiscard]] bool SAFETYHOOK_API dispatch_trap_fault_for_test(
++    ThreadContext context, uint8_t* faulting_address) noexcept;
++
 +/// @brief Test-only transaction park immediately before the first protection change.
 +extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_hold;
 +/// @brief Test-only witness that a held transaction owns the live-handler interval.
 +extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_reached;
++#if SAFETYHOOK_OS_WINDOWS
++/// @brief Test-only scan hold before any thread suspension.
++extern std::atomic<bool> SAFETYHOOK_API g_route_scan_hold;
++/// @brief Reports that the scan owns its serialization gate.
++extern std::atomic<bool> SAFETYHOOK_API g_route_scan_reached;
++/// @brief Selects 0 for no refusal, 1 for unavailable coordination, 2 for an incompatible protocol, or 3 for one
++///        unavailable acquisition.
++/// @details The value applies to this participant only.
++extern std::atomic<unsigned> SAFETYHOOK_API g_coordinator_refusal_for_test;
++/// @brief Reports the fixed process owner and its bounded route population.
++struct ProcessCoordinatorSnapshot {
++    uintptr_t identity{}; ///< Address of the canonical view.
++    size_t bytes{};       ///< Size of the shared state.
++    size_t live{};        ///< Records that no teardown retained.
++    size_t retained{};    ///< Records that a teardown retained.
++};
++/// @brief Reads the process owner and counts its records under the coordinator.
++[[nodiscard]] ProcessCoordinatorSnapshot SAFETYHOOK_API process_coordinator_snapshot_for_test() noexcept;
++#endif
 +/// @brief Test-only count of protection calls made by trap_threads transactions.
 +extern std::atomic<size_t> SAFETYHOOK_API g_trap_protect_calls;
 +/// @brief Test-only call index whose instruction-cache flush reports failure, or zero to disable the seam.
@@ -833,10 +1086,11 @@ index 268ce9b..1a1b82f 100644
 +Allocator::~Allocator() = default;
 +} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..d82ca44 100644
+index a5b3700..74acedd 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
-@@ -1,4 +1,10 @@
+@@ -1,5 +1,13 @@
++#include <algorithm>
 +#include <array>
 +#include <atomic>
 +#include <initializer_list>
@@ -845,20 +1099,31 @@ index a5b3700..d82ca44 100644
 +#include <mutex>
 +#include <new>
  #include <optional>
++#include <system_error>
  
  #if __has_include("Zydis/Zydis.h")
-@@ -18,6 +24,285 @@
+ #include "Zydis/Zydis.h"
+@@ -18,6 +26,323 @@
  
  namespace safetyhook {
  
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++std::atomic<uint8_t*> g_destroy_lock_failure_target{nullptr};
++#endif
++
 +namespace {
 +constexpr uint32_t ROUTE_LIVE = 0;
 +constexpr uint32_t ROUTE_CLOSING = 1;
 +constexpr uint32_t ROUTE_CLOSED = 2;
 +constexpr size_t ROUTE_WRAPPER_OFFSET = 160;
++constexpr size_t ROUTE_BYPASS_WRAPPER_OFFSET = 192;
 +constexpr size_t ROUTE_EXIT_OFFSET = 224;
 +constexpr size_t ROUTE_UNWIND_OFFSET = 288;
 +constexpr size_t ROUTE_CONTROL_OFFSET = 384;
++constexpr size_t MID_CONTINUATION_OFFSET = 512;
++constexpr size_t MID_CONTINUATION_SLOT = 64;
++constexpr size_t MID_CONTINUATION_CAPACITY = 16;
++constexpr size_t MID_CONTINUATION_DESTINATION_OFFSET = 40;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +struct RouteTestControl {
@@ -882,7 +1147,11 @@ index a5b3700..d82ca44 100644
 +    uint8_t* route_destination{};
 +    uint8_t* detour_destination{};
 +    uint8_t* bypass_destination{};
++    uint8_t* trampoline_end{};
 +    std::shared_ptr<Allocator> allocator_hold{};
++    // Lives in the gateway, never on a stack, so the idle proof can read a thread's stack for these without a frame
++    // of its own holding one.
++    ReturnSites return_sites{};
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    RouteTestControl* test_control{&g_route_test_control};
 +#endif
@@ -894,10 +1163,11 @@ index a5b3700..d82ca44 100644
 +          allocator_hold{allocator} {}
 +};
 +
-+constexpr size_t ROUTE_GATEWAY_MAX_LOGICAL = 447;
-+constexpr size_t ROUTE_TRAMPOLINE_MAX_LOGICAL = 58;
++constexpr size_t MID_UNWIND_OFFSET = MID_CONTINUATION_OFFSET + MID_CONTINUATION_SLOT * MID_CONTINUATION_CAPACITY;
++constexpr size_t ROUTE_GATEWAY_MAX_LOGICAL = 1920;
++constexpr size_t ROUTE_TRAMPOLINE_MAX_LOGICAL = 128;
 +constexpr size_t ROUTE_MID_STUB_LOGICAL = 404;
-+static_assert(ROUTE_GATEWAY_MAX_LOGICAL + ROUTE_TRAMPOLINE_MAX_LOGICAL + ROUTE_MID_STUB_LOGICAL <= 1024);
++static_assert(ROUTE_GATEWAY_MAX_LOGICAL + ROUTE_TRAMPOLINE_MAX_LOGICAL + ROUTE_MID_STUB_LOGICAL <= 4096);
 +
 +namespace {
 +constexpr uint32_t ROUTE_UNWIND_FUNCTION_COUNT = 3;
@@ -920,25 +1190,15 @@ index a5b3700..d82ca44 100644
 +    uint16_t codes[2];
 +};
 +
-+struct RouteUnwindTable {
-+    RouteRuntimeFunction functions[ROUTE_UNWIND_FUNCTION_COUNT];
-+    RouteUnwindInfo infos[ROUTE_UNWIND_FUNCTION_COUNT];
-+};
 +#pragma pack(pop)
 +
 +static_assert(sizeof(RouteRuntimeFunction) == 12);
 +static_assert(sizeof(RouteUnwindInfo) == 8);
-+static_assert(sizeof(RouteUnwindTable) == 60);
-+static_assert(alignof(RouteUnwindTable) == 4);
 +
-+// A complete x64 MID chain has one gateway (at most 447 requested bytes), one E9/FF trampoline (at most 58), and the
-+// compile-pinned 404-byte stub: 909 bytes, conservatively rounded to a 1024-byte logical slot. Each component lives in
-+// one fixed-granularity block of its route-specific arena, so three blocks are the committed worst case. The 96 MiB
-+// committed ceiling admits 512 permanently published MID chains on Win64's 64 KiB allocation granularity (eight
-+// complete 64-slot adapter populations), while the separate 4 MiB logical ceiling catches corrupt size accounting.
++// Three arena blocks bound the committed cost. The logical slot includes the mid continuation exits and metadata.
 +constexpr uint64_t DEFAULT_ROUTE_LOGICAL_CAPACITY = 4ULL * 1024ULL * 1024ULL;
 +constexpr uint64_t DEFAULT_ROUTE_COMMITTED_CAPACITY = 96ULL * 1024ULL * 1024ULL;
-+constexpr size_t ROUTE_WORST_CASE_LOGICAL = 1024;
++constexpr size_t ROUTE_WORST_CASE_LOGICAL = 4096;
 +constexpr size_t ROUTE_WORST_CASE_BLOCKS = 3;
 +
 +// Constant-initialized and trivially destructible, so it is neither allocated on first use nor torn down before the
@@ -1035,6 +1295,40 @@ index a5b3700..d82ca44 100644
 +        state.committed_high_water = committed_outstanding;
 +    }
 +}
++
++// A reclaimed chain gives its charge back, so the ceiling bounds live and retained chains rather than every chain ever
++// published. The high-water marks stay monotonic.
++void refund_route_chain(const RouteRetentionCost& actual) noexcept {
++    auto& state = route_retention();
++    const RouteRetentionGuard guard;
++    state.logical_charged -= std::min<uint64_t>(state.logical_charged, actual.logical);
++    state.committed_charged -= std::min<uint64_t>(state.committed_charged, actual.committed);
++}
++
++#if SAFETYHOOK_ARCH_X86_64 && !SAFETYHOOK_OS_WINDOWS
++// A chain retained with a thread inside it can still deliver that thread into an older chain on the same target: the
++// retained trampoline holds the older chain's relocated entry jump. The idle proof of a later teardown on that target
++// therefore also covers every chain retained on it. The fixed capacity keeps the registry allocation-free. Past it,
++// every later proof on this instance retains.
++struct RetainedRouteRecord {
++    uint8_t* target;
++    AddressRange gateway;
++    AddressRange trampoline;
++    const std::atomic<uint32_t>* entries;
++    const ReturnSites* return_sites;
++};
++
++constexpr size_t RETAINED_ROUTE_CAPACITY = 64;
++
++struct RetainedRouteRegistry {
++    std::array<RetainedRouteRecord, RETAINED_ROUTE_CAPACITY> records{};
++    size_t count{0};
++    bool overflowed{false};
++};
++
++// Constant-initialized and guarded by the retention spin lock, which is never taken while a thread is suspended.
++RetainedRouteRegistry g_retained_routes{};
++#endif
 +
 +[[nodiscard]] bool scale_cost(RouteRetentionCost unit, size_t count, RouteRetentionCost& total) noexcept {
 +    if (count == 0 || unit.logical > std::numeric_limits<size_t>::max() / count ||
@@ -1133,7 +1427,7 @@ index a5b3700..d82ca44 100644
  #pragma pack(push, 1)
  struct JmpE9 {
      uint8_t opcode{0xE9};
-@@ -159,8 +444,27 @@ std::expected<InlineHook, InlineHook::Error> InlineHook::create(
+@@ -159,8 +484,27 @@ std::expected<InlineHook, InlineHook::Error> InlineHook::create(
      const std::shared_ptr<Allocator>& allocator, void* target, void* destination, Flags flags) {
      InlineHook hook{};
  
@@ -1163,7 +1457,12 @@ index a5b3700..d82ca44 100644
          !setup_result) {
          return std::unexpected{setup_result.error()};
      }
-@@ -187,15 +491,34 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+@@ -184,18 +528,43 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+ 
+         std::scoped_lock lock{m_mutex, other.m_mutex};
+ 
++        m_process_registered = std::exchange(other.m_process_registered, false);
++        m_retention_holder = std::move(other.m_retention_holder);
          m_target = other.m_target;
          m_destination = other.m_destination;
          m_trampoline = std::move(other.m_trampoline);
@@ -1177,7 +1476,9 @@ index a5b3700..d82ca44 100644
 +        m_patch_bytes_valid = other.m_patch_bytes_valid;
          m_enabled = other.m_enabled;
 +        m_route_published = other.m_route_published;
++        m_mid_route = other.m_mid_route;
 +        m_route_retention_charged = other.m_route_retention_charged;
++        m_trampoline_return_sites = other.m_trampoline_return_sites;
 +        m_route_unwind_table = other.m_route_unwind_table;
 +        m_route_retention = other.m_route_retention;
 +        m_route_reservation = other.m_route_reservation;
@@ -1194,11 +1495,18 @@ index a5b3700..d82ca44 100644
 +        other.m_patch_bytes_valid = false;
          other.m_enabled = false;
 +        other.m_route_published = false;
++        other.m_mid_route = false;
 +        other.m_route_retention_charged = false;
++        other.m_trampoline_return_sites = {};
          other.m_type = Type::Unset;
      }
  
-@@ -210,12 +533,15 @@ void InlineHook::reset() {
+@@ -206,18 +575,34 @@ InlineHook::~InlineHook() {
+     destroy();
+ }
+ 
+-void InlineHook::reset() {
++void InlineHook::reset() noexcept {
      *this = {};
  }
  
@@ -1206,8 +1514,18 @@ index a5b3700..d82ca44 100644
 -    const std::shared_ptr<Allocator>& allocator, uint8_t* target, uint8_t* destination) {
 +std::expected<void, InlineHook::Error> InlineHook::setup(const std::shared_ptr<Allocator>& allocator, uint8_t* target,
 +    uint8_t* destination, Flags flags, RouteRetentionCredit* credit) {
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    if (!coordinator)
++        return std::unexpected{Error::coordination_unavailable(target)};
++#endif
      m_target = target;
      m_destination = destination;
++    m_mid_route = (flags & (RoutedMid | RoutedExternal)) == (RoutedMid | RoutedExternal);
++#if SAFETYHOOK_OS_WINDOWS
++    if ((flags & RoutedExternal) == 0)
++        m_retention_holder = std::make_unique<Allocation>();
++#endif
  
      if (auto e9_result = e9_hook(allocator); !e9_result) {
 +        if (e9_result.error().type == Error::FAILED_TO_FLUSH_INSTRUCTION_CACHE) {
@@ -1215,8 +1533,13 @@ index a5b3700..d82ca44 100644
 +        }
  #if SAFETYHOOK_ARCH_X86_64
          if (auto ff_result = ff_hook(allocator); !ff_result) {
++            if (ff_result.error().type != Error::BAD_ALLOCATION) {
++                return e9_result;
++            }
              return ff_result;
-@@ -225,12 +551,280 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+         }
+ #elif SAFETYHOOK_ARCH_X86_32
+@@ -225,12 +610,354 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  #endif
      }
  
@@ -1224,18 +1547,29 @@ index a5b3700..d82ca44 100644
 +        if (auto route_result = setup_route(allocator, credit); !route_result) {
 +            return route_result;
 +        }
++        if (m_mid_route) {
++            if (auto result = set_mid_route(); !result)
++                return result;
++        }
 +    }
++#if SAFETYHOOK_OS_WINDOWS
++    if (!coordinator.add(m_target, m_original_bytes.size(),
++            {m_trampoline.data(), m_trampoline.data() + m_trampoline.size()},
++            {m_route_gateway.data(), m_route_gateway ? m_route_gateway.data() + m_route_gateway.size() : nullptr},
++            m_route_control != nullptr ? &m_route_control->entries : nullptr, m_trampoline_return_sites))
++        return std::unexpected{Error::coordination_unavailable(target)};
++    m_process_registered = true;
++#endif
++    return {};
++}
 +
-     return {};
- }
- 
 +std::expected<void, InlineHook::Error> InlineHook::setup_route(
 +    const std::shared_ptr<Allocator>& allocator, RouteRetentionCredit* credit) {
 +#if SAFETYHOOK_ARCH_X86_64
 +    constexpr size_t route_alignment = alignof(RouteControl);
-+    constexpr size_t route_bytes = ROUTE_CONTROL_OFFSET + route_alignment - 1 + sizeof(RouteControl);
-+    static_assert(route_bytes <= ROUTE_GATEWAY_MAX_LOGICAL);
-+    auto route_allocation = allocator->allocate_near({m_target}, route_bytes);
++    const size_t route_bytes =
++        m_mid_route ? ROUTE_GATEWAY_MAX_LOGICAL : ROUTE_CONTROL_OFFSET + route_alignment - 1 + sizeof(RouteControl);
++    auto route_allocation = allocator->allocate_near({m_target, m_trampoline.data()}, route_bytes);
 +    if (!route_allocation) {
 +        return std::unexpected{Error::bad_allocation(route_allocation.error())};
 +    }
@@ -1245,13 +1579,12 @@ index a5b3700..d82ca44 100644
 +    const auto aligned_control = (unaligned_control + route_alignment - 1) & ~(route_alignment - 1);
 +    m_route_control =
 +        ::new (reinterpret_cast<void*>(aligned_control)) RouteControl{allocator, m_destination, m_trampoline.data()};
++    m_route_control->return_sites = m_trampoline_return_sites;
++    m_route_control->trampoline_end = m_trampoline.data() + m_relocated_size + 1;
 +
 +    auto* const entry = m_route_gateway.data();
 +    auto* cursor = entry;
-+    // Each of the three emitted regions occupies a fixed slot in the gateway allocation, and the region after it (or
-+    // RouteControl itself) begins where its budget ends. Growing an encoding past its budget would splice the next
-+    // region instead of failing, so every region is bounds-checked before the hook can publish. setup_route runs at
-+    // create time and destroy() reclaims a never-published gateway, so refusing here is always safe.
++    // Each emitted region has a fixed slot. Refuse an oversized region before publication to protect the next slot.
 +    auto region_fits = [entry](
 +                           const uint8_t* end, size_t budget) { return static_cast<size_t>(end - entry) <= budget; };
 +    auto emit_byte = [&cursor](uint8_t value) { *cursor++ = value; };
@@ -1307,6 +1640,9 @@ index a5b3700..d82ca44 100644
 +#endif
 +
 +    emit_flag_frame();
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    emit_test_park(RouteParkStage::AT_ENTRY);
++#endif
 +    auto* const retry = cursor;
 +    emit_byte(0xF0);
 +    emit_byte(0xFF);
@@ -1353,46 +1689,58 @@ index a5b3700..d82ca44 100644
 +    emit_byte(0x74);
 +    auto* const retry_displacement = cursor++;
 +    patch_rel8(retry_displacement, retry);
-+    emit_flag_restore();
++    emit_byte(0xF0);
 +    emit_byte(0xFF);
-+    emit_byte(0x25); // jmp qword ptr [rip+bypass_destination]
-+    emit_rip32(&m_route_control->bypass_destination);
++    emit_byte(0x05); // lock inc dword ptr [rip+entries]
++    emit_rip32(&m_route_control->entries);
++    emit_flag_restore();
++    if (m_mid_route) {
++        emit_byte(0xFF);
++        emit_byte(0x25); // jmp qword ptr [rip+bypass_destination]
++        emit_rip32(&m_route_control->bypass_destination);
++    } else {
++        emit_byte(0xE9);
++        emit_rip32(entry + ROUTE_BYPASS_WRAPPER_OFFSET);
++    }
 +
 +    if (!region_fits(cursor, ROUTE_WRAPPER_OFFSET)) {
 +        return std::unexpected{Error::not_enough_space(m_target)};
 +    }
 +    auto* const gateway_end = cursor;
 +
-+    // The wrapper is the only region that establishes a call frame, and it is the one an exception raised inside a
-+    // routed destination has to unwind through. Its entry decrement follows the call and precedes the frame release,
-+    // so the epilogue is exactly the `add rsp, imm` / `ret` pair the unwinder can simulate. Flags are not preserved
-+    // across it because the destination call already clobbered them and the ret returns to the hooked function's
-+    // caller, which the ABI forbids from depending on them.
-+    auto* const wrapper = m_route_gateway.data() + ROUTE_WRAPPER_OFFSET;
-+    cursor = wrapper;
-+    emit_byte(0x48);
-+    emit_byte(0x83);
-+    emit_byte(0xEC);
-+    emit_byte(0x28); // sub rsp, 40
++    // Separate wrappers own destination calls and closed bypass calls. original() keeps the destination's ownership.
++    const auto emit_wrapper = [&](size_t offset, uint8_t* const* destination) {
++        cursor = entry + offset;
++        emit_byte(0x48);
++        emit_byte(0x83);
++        emit_byte(0xEC);
++        emit_byte(0x28); // sub rsp, 40
++        emit_byte(0xFF);
++        emit_byte(0x15); // call qword ptr [rip+destination]
++        emit_rip32(destination);
++        emit_byte(0xF0);
++        emit_byte(0xFF);
++        emit_byte(0x0D); // lock dec dword ptr [rip+entries]
++        emit_rip32(&m_route_control->entries);
++        emit_byte(0x48);
++        emit_byte(0x83);
++        emit_byte(0xC4);
++        emit_byte(0x28); // add rsp, 40
++        emit_byte(0xC3);
++        return cursor;
++    };
 +    constexpr uint8_t wrapper_prologue_size = 4;
-+    emit_byte(0xFF);
-+    emit_byte(0x15); // call qword ptr [rip+detour_destination]
-+    emit_rip32(&m_route_control->detour_destination);
-+    emit_byte(0xF0);
-+    emit_byte(0xFF);
-+    emit_byte(0x0D); // lock dec dword ptr [rip+entries]
-+    emit_rip32(&m_route_control->entries);
-+    emit_byte(0x48);
-+    emit_byte(0x83);
-+    emit_byte(0xC4);
-+    emit_byte(0x28); // add rsp, 40
-+    emit_byte(0xC3); // ret
-+
-+    if (!region_fits(cursor, ROUTE_EXIT_OFFSET)) {
++    auto* const wrapper = entry + ROUTE_WRAPPER_OFFSET;
++    auto* const wrapper_end = emit_wrapper(ROUTE_WRAPPER_OFFSET, &m_route_control->detour_destination);
++    if (!region_fits(wrapper_end, ROUTE_BYPASS_WRAPPER_OFFSET))
 +        return std::unexpected{Error::not_enough_space(m_target)};
-+    }
 +    m_route_control->route_destination = wrapper;
-+    auto* const wrapper_end = cursor;
++    uint8_t* bypass_wrapper_end = nullptr;
++    if (!m_mid_route) {
++        bypass_wrapper_end = emit_wrapper(ROUTE_BYPASS_WRAPPER_OFFSET, &m_route_control->bypass_destination);
++        if (!region_fits(bypass_wrapper_end, ROUTE_EXIT_OFFSET))
++            return std::unexpected{Error::not_enough_space(m_target)};
++    }
 +
 +    auto* const exit_thunk = m_route_gateway.data() + ROUTE_EXIT_OFFSET;
 +    cursor = exit_thunk;
@@ -1400,10 +1748,31 @@ index a5b3700..d82ca44 100644
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    emit_test_park(RouteParkStage::BEFORE_EXIT);
 +#endif
++    uint8_t* continuation_displacement = nullptr;
++    if (m_mid_route) {
++        const uint8_t load_resume[] = {0x48, 0x8B, 0x5C, 0x24, 0x10};
++        for (const auto byte : load_resume)
++            emit_byte(byte);
++        emit_byte(0x48);
++        emit_byte(0x3B);
++        emit_byte(0x1D);
++        emit_rip32(&m_route_control->bypass_destination);
++        emit_byte(0x72);
++        auto* const outside_displacement = cursor++;
++        emit_byte(0x48);
++        emit_byte(0x3B);
++        emit_byte(0x1D);
++        emit_rip32(&m_route_control->trampoline_end);
++        emit_byte(0x72);
++        continuation_displacement = cursor++;
++        patch_rel8(outside_displacement, cursor);
++    }
 +    emit_byte(0xF0);
 +    emit_byte(0xFF);
 +    emit_byte(0x0D); // lock dec dword ptr [rip+entries]
 +    emit_rip32(&m_route_control->entries);
++    if (continuation_displacement != nullptr)
++        patch_rel8(continuation_displacement, cursor);
 +    emit_flag_restore();
 +    emit_byte(0xC3); // ret to the context-selected mid-hook resume address
 +
@@ -1412,20 +1781,24 @@ index a5b3700..d82ca44 100644
 +    }
 +    auto* const exit_end = cursor;
 +
-+    // The metadata lives in the gateway allocation so that it shares the code's lifetime exactly: a published route is
-+    // abandoned rather than freed, which leaves both the code and the records describing it mapped, and a route that
-+    // never published unregisters and frees them together.
-+    const auto unaligned_unwind = m_route_gateway.address() + ROUTE_UNWIND_OFFSET;
-+    const auto aligned_unwind = (unaligned_unwind + alignof(uint32_t) - 1) & ~(alignof(uint32_t) - 1);
-+    auto* const table = ::new (reinterpret_cast<void*>(aligned_unwind)) RouteUnwindTable{};
-+    if (reinterpret_cast<uintptr_t>(table + 1) > aligned_control) {
++    // The metadata lives in the gateway allocation so that it shares the code's lifetime exactly: a retained route
++    // keeps both the code and its records mapped, and a reclaimed or never-published route unregisters and frees
++    // them together.
++    const auto unwind_offset = m_mid_route ? MID_UNWIND_OFFSET : ROUTE_UNWIND_OFFSET;
++    const auto function_count =
++        static_cast<uint32_t>(ROUTE_UNWIND_FUNCTION_COUNT + (m_mid_route ? MID_CONTINUATION_CAPACITY : 1));
++    const auto info_offset = unwind_offset + sizeof(RouteRuntimeFunction) * function_count;
++    const auto limit = m_mid_route ? m_route_gateway.address() + m_route_gateway.size() : aligned_control;
++    if (m_route_gateway.address() + info_offset + sizeof(RouteUnwindInfo) * function_count > limit) {
 +        return std::unexpected{Error::not_enough_space(m_target)};
 +    }
++    auto* const functions = ::new (static_cast<void*>(entry + unwind_offset)) RouteRuntimeFunction[function_count]{};
++    auto* const infos = ::new (static_cast<void*>(entry + info_offset)) RouteUnwindInfo[function_count]{};
 +
 +    const auto rva = [entry](const uint8_t* address) { return static_cast<uint32_t>(address - entry); };
 +    const auto describe = [&](size_t index, const uint8_t* begin, const uint8_t* end, uint8_t prologue_size,
 +                              const std::initializer_list<uint16_t> codes) {
-+        auto& info = table->infos[index];
++        auto& info = infos[index];
 +        info.version_and_flags = 1;
 +        info.size_of_prolog = prologue_size;
 +        info.count_of_codes = static_cast<uint8_t>(codes.size());
@@ -1434,9 +1807,9 @@ index a5b3700..d82ca44 100644
 +        for (const uint16_t code : codes) {
 +            info.codes[slot++] = code;
 +        }
-+        table->functions[index].begin_address = rva(begin);
-+        table->functions[index].end_address = rva(end);
-+        table->functions[index].unwind_info_address = rva(reinterpret_cast<const uint8_t*>(&info));
++        functions[index].begin_address = rva(begin);
++        functions[index].end_address = rva(end);
++        functions[index].unwind_info_address = rva(reinterpret_cast<const uint8_t*>(&info));
 +    };
 +    // The codes are ordered by descending prologue offset. pushfq has the stack effect of an eight-byte allocation;
 +    // push rbx is the preceding nonvolatile save that lets the restore finish without changing RFLAGS.
@@ -1445,11 +1818,34 @@ index a5b3700..d82ca44 100644
 +    constexpr uint16_t alloc_40_at_4 = 4 | (2 << 8) | (4 << 12);
 +    describe(0, entry, gateway_end, flag_frame_prologue_size, {alloc_8_at_2, push_rbx_at_1});
 +    describe(1, wrapper, wrapper_end, wrapper_prologue_size, {alloc_40_at_4});
-+    describe(2, exit_thunk, exit_end, flag_frame_prologue_size, {alloc_8_at_2, push_rbx_at_1});
++    if (!m_mid_route)
++        describe(2, entry + ROUTE_BYPASS_WRAPPER_OFFSET, bypass_wrapper_end, wrapper_prologue_size, {alloc_40_at_4});
++    describe(m_mid_route ? 2 : 3, exit_thunk, exit_end, flag_frame_prologue_size, {alloc_8_at_2, push_rbx_at_1});
 +
-+    // Reserved before anything can publish this route, and charged only when publication actually happens. Refusing
-+    // here leaves a hook that was never created, so nothing has been made permanent. It also precedes function-table
-+    // registration: a capacity refusal must not create an OS reference whose later removal could itself fail.
++    if (m_mid_route) {
++        for (size_t index = 0; index < MID_CONTINUATION_CAPACITY; ++index) {
++            auto* const continuation = entry + MID_CONTINUATION_OFFSET + index * MID_CONTINUATION_SLOT;
++            // An internal call can tail-jump outside the window and later return into it.
++            constexpr uint8_t code[] = {0x53, 0x9C, 0x48, 0x8B, 0x5C, 0x24, 0x10, 0x48, 0x3B, 0x1D, 0, 0, 0, 0, 0x72, 9,
++                0x48, 0x3B, 0x1D, 0, 0, 0, 0, 0x72, 7, 0xF0, 0xFF, 0x0D, 0, 0, 0, 0, 0x9D, 0x5B, 0xFF, 0x25, 0, 0, 0,
++                0};
++            static_assert(sizeof(code) == MID_CONTINUATION_DESTINATION_OFFSET);
++            std::copy(std::begin(code), std::end(code), continuation);
++            const auto rip_store = [continuation](size_t offset, const void* target) {
++                store(continuation + offset, static_cast<int32_t>(reinterpret_cast<const uint8_t*>(target) -
++                                                                  (continuation + offset + sizeof(int32_t))));
++            };
++            rip_store(10, &m_route_control->bypass_destination);
++            rip_store(19, &m_route_control->trampoline_end);
++            rip_store(28, &m_route_control->entries);
++            describe(ROUTE_UNWIND_FUNCTION_COUNT + index, continuation, continuation + sizeof(code),
++                flag_frame_prologue_size, {alloc_8_at_2, push_rbx_at_1});
++        }
++    }
++
++    // Reserved before anything can publish this route, and charged only at publication. A refusal here leaves a hook
++    // that was never created, so nothing is charged. The reservation also precedes function-table registration, so a
++    // capacity refusal creates no OS reference whose later removal can itself fail.
 +    RouteRetentionCost reservation{};
 +    if (credit != nullptr ? !credit->consume(reservation) : !reserve_route_chain(route_worst_case())) {
 +        return std::unexpected{Error::route_retention_exhausted(m_target)};
@@ -1469,19 +1865,19 @@ index a5b3700..d82ca44 100644
 +        return std::unexpected{Error::failed_to_flush_instruction_cache(m_route_gateway.data())};
 +    }
 +
-+    if (!vm_register_unwind_table(table->functions, ROUTE_UNWIND_FUNCTION_COUNT, entry)) {
++    if (!vm_register_unwind_table(functions, function_count, entry)) {
 +        return std::unexpected{Error::failed_to_register_unwind(entry)};
 +    }
-+    m_route_unwind_table = table->functions;
++    m_route_unwind_table = functions;
 +
-+    return {};
+     return {};
 +#else
 +    (void)allocator;
 +    (void)credit;
 +    return std::unexpected{Error::not_enough_space(m_target)};
 +#endif
-+}
-+
+ }
+ 
  std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr<Allocator>& allocator) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_force_ff_hook.exchange(false, std::memory_order_acq_rel)) {
@@ -1494,10 +1890,11 @@ index a5b3700..d82ca44 100644
 +    m_patch_bytes_valid = false;
      m_trampoline_size = sizeof(TrampolineEpilogueE9);
 +    m_relocated_size = 0;
++    m_trampoline_return_sites = {};
  
      std::vector<uint8_t*> desired_addresses{m_target};
      ZydisDecodedInstruction ix{};
-@@ -240,7 +834,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -240,7 +967,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              return std::unexpected{Error::failed_to_decode_instruction(ip)};
          }
  
@@ -1507,7 +1904,7 @@ index a5b3700..d82ca44 100644
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
  
          const auto is_relative = (ix.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0;
-@@ -255,16 +850,30 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -255,16 +983,41 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
              } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
                  const auto target_address = ip + ix.length + static_cast<int32_t>(ix.raw.imm[0].value.s);
                  desired_addresses.emplace_back(target_address);
@@ -1522,8 +1919,19 @@ index a5b3700..d82ca44 100644
                  return std::unexpected{Error::unsupported_instruction_in_trampoline(ip)};
              }
          }
++        if (ix.meta.category == ZYDIS_CATEGORY_CALL) {
++            if (m_trampoline_return_sites.count == m_trampoline_return_sites.offsets.size()) {
++                return std::unexpected{Error::unsupported_instruction_in_trampoline(ip)};
++            }
++            m_trampoline_return_sites.offsets[m_trampoline_return_sites.count++] =
++                static_cast<uint8_t>(m_relocated_size + relocated_length);
++        }
++        if (m_mid_route && (ix.meta.category == ZYDIS_CATEGORY_RET ||
++                               (ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR && !ix.raw.imm[0].is_relative))) {
++            relocated_length = 5;
++        }
 +        m_relocated_size += relocated_length;
-     }
++    }
 +    m_trampoline_size += m_relocated_size;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -1534,27 +1942,41 @@ index a5b3700..d82ca44 100644
 +            m_instruction_boundaries[i].original_offset, std::memory_order_relaxed);
 +        g_instruction_boundary_trampoline_offsets[i].store(
 +            m_instruction_boundaries[i].trampoline_offset, std::memory_order_relaxed);
-+    }
+     }
 +    g_instruction_boundary_trace_size.store(boundary_count, std::memory_order_release);
 +#endif
  
      auto trampoline_allocation = allocator->allocate_near(desired_addresses, m_trampoline_size);
  
-@@ -274,6 +883,13 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -273,6 +1026,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+     }
  
      m_trampoline = std::move(*trampoline_allocation);
- 
++    m_trampoline_return_sites.code = m_trampoline.data();
++
 +    const auto relocated_boundary = [this](uint8_t* target_address) -> uint8_t* {
 +        const auto found = std::find_if(m_instruction_boundaries.begin(), m_instruction_boundaries.end(),
 +            [this, target_address](
 +                const InstructionBoundary& boundary) { return m_target + boundary.original_offset == target_address; });
 +        return found == m_instruction_boundaries.end() ? nullptr : m_trampoline.data() + found->trampoline_offset;
 +    };
-+
+ 
      for (auto ip = m_target, tramp_ip = m_trampoline.data(); ip < m_target + m_original_bytes.size(); ip += ix.length) {
          if (!decode(&ix, ip)) {
-             m_trampoline.free();
-@@ -299,7 +915,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -290,7 +1051,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+         }
+ #endif
+ 
+-        if (is_relative && ix.raw.disp.size == 32) {
++        if (m_mid_route && (ix.meta.category == ZYDIS_CATEGORY_RET ||
++                               (ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR && !ix.raw.imm[0].is_relative))) {
++            std::fill_n(tramp_ip, 5, uint8_t{0x90});
++            tramp_ip += 5;
++        } else if (is_relative && ix.raw.disp.size == 32) {
+             std::copy_n(ip, ix.length, tramp_ip);
+             const auto target_address = ip + ix.length + ix.raw.disp.value;
+             const auto new_disp = target_address - (tramp_ip + ix.length);
+@@ -299,7 +1064,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
          } else if (is_relative && ix.raw.imm[0].size == 32) {
              std::copy_n(ip, ix.length, tramp_ip);
              const auto target_address = ip + ix.length + ix.raw.imm[0].value.s;
@@ -1570,7 +1992,7 @@ index a5b3700..d82ca44 100644
              store(tramp_ip + ix.raw.imm[0].offset, static_cast<int32_t>(new_disp));
              tramp_ip += ix.length;
          } else if (ix.meta.category == ZYDIS_CATEGORY_COND_BR && ix.meta.branch_type == ZYDIS_BRANCH_TYPE_SHORT) {
-@@ -308,7 +931,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -308,7 +1080,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1583,7 +2005,7 @@ index a5b3700..d82ca44 100644
              }
  
              *tramp_ip = 0x0F;
-@@ -321,7 +948,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -321,7 +1097,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  
              // Handle the case where the target is now in the trampoline.
              if (target_address >= m_target && target_address < m_target + m_original_bytes.size()) {
@@ -1596,7 +2018,7 @@ index a5b3700..d82ca44 100644
              }
  
              *tramp_ip = 0xE9;
-@@ -360,7 +991,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -360,7 +1140,14 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
      }
  #endif
  
@@ -1611,7 +2033,7 @@ index a5b3700..d82ca44 100644
  
      return {};
  }
-@@ -368,7 +1006,11 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,7 +1155,12 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
@@ -1620,19 +2042,54 @@ index a5b3700..d82ca44 100644
 +    m_patch_bytes_valid = false;
      m_trampoline_size = sizeof(TrampolineEpilogueFF);
 +    m_relocated_size = 0;
++    m_trampoline_return_sites = {};
      ZydisDecodedInstruction ix{};
  
      for (auto ip = m_target; ip < m_target + sizeof(JmpFF) + sizeof(uintptr_t); ip += ix.length) {
-@@ -384,6 +1026,8 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -384,7 +1176,20 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          }
  
          m_original_bytes.insert(m_original_bytes.end(), ip, ip + ix.length);
+-        m_trampoline_size += ix.length;
++        if (ix.meta.category == ZYDIS_CATEGORY_CALL) {
++            if (m_trampoline_return_sites.count == m_trampoline_return_sites.offsets.size()) {
++                return std::unexpected{Error::unsupported_instruction_in_trampoline(ip)};
++            }
++            m_trampoline_return_sites.offsets[m_trampoline_return_sites.count++] =
++                static_cast<uint8_t>(m_relocated_size + ix.length);
++        }
 +        m_instruction_boundaries.push_back(InstructionBoundary{static_cast<size_t>(ip - m_target), m_relocated_size});
-+        m_relocated_size += ix.length;
-         m_trampoline_size += ix.length;
++        const size_t relocated_length =
++            m_mid_route && (ix.meta.category == ZYDIS_CATEGORY_RET || ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR)
++                ? 5
++                : ix.length;
++        m_relocated_size += relocated_length;
++        m_trampoline_size += relocated_length;
      }
  
-@@ -409,7 +1053,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+     auto trampoline_allocation = allocator->allocate(m_trampoline_size);
+@@ -394,8 +1199,18 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+     }
+ 
+     m_trampoline = std::move(*trampoline_allocation);
+-
+-    std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_trampoline.data());
++    m_trampoline_return_sites.code = m_trampoline.data();
++
++    for (const auto& boundary : m_instruction_boundaries) {
++        auto* const original = m_target + boundary.original_offset;
++        decode(&ix, original);
++        auto* const relocated = m_trampoline.data() + boundary.trampoline_offset;
++        if (m_mid_route && (ix.meta.category == ZYDIS_CATEGORY_RET || ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR)) {
++            std::fill_n(relocated, 5, uint8_t{0x90});
++        } else {
++            std::copy_n(original, ix.length, relocated);
++        }
++    }
+ 
+     const auto trampoline_epilogue =
+         reinterpret_cast<TrampolineEpilogueFF*>(m_trampoline.data() + m_trampoline_size - sizeof(TrampolineEpilogueFF));
+@@ -409,7 +1224,12 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          return std::unexpected{result.error()};
      }
  
@@ -1645,9 +2102,17 @@ index a5b3700..d82ca44 100644
  
      return {};
  }
-@@ -422,37 +1071,94 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -421,38 +1241,113 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+     if (m_enabled) {
          return {};
      }
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    if (!coordinator)
++        return std::unexpected{Error::coordination_unavailable(m_target)};
++    if (!coordinator.top(m_trampoline.data()))
++        return std::unexpected{Error::layer_conflict(m_target)};
++#endif
  
 -    std::optional<Error> error;
 +    begin_route_rundown();
@@ -1673,9 +2138,16 @@ index a5b3700..d82ca44 100644
 +    };
 +    // jmp from original to trampoline.
 +    std::expected<void, OsError> trap_result;
++    const std::array<AddressRange, 2> generated_ranges{{
++        {m_trampoline.data(), m_trampoline.data() + m_trampoline.size()},
++        {m_route_gateway.data(), m_route_gateway ? m_route_gateway.data() + m_route_gateway.size() : nullptr},
++    }};
++    const auto executable_ranges = m_route_control != nullptr ? std::span<const AddressRange>{generated_ranges}
++                                                              : std::span<const AddressRange>{};
 +    try {
-+        trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size,
-+            m_instruction_boundaries, [this, &error] {
++        trap_result = trap_threads(
++            m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size, m_instruction_boundaries,
++            [&] {
 +                if (m_route_control != nullptr) {
 +                    if (auto result = emit_jmp_e9(m_target, m_route_gateway.data(), m_original_bytes.size()); !result) {
 +                        error = result.error();
@@ -1706,12 +2178,16 @@ index a5b3700..d82ca44 100644
 +                        error = result.error();
 +                    }
 +                }
-+#endif
+ #endif
+-    });
 +
 +                if (!error) {
 +                    // The write is the state transition: cleanup after this callback can still fail or throw, so the
 +                    // backend state must already agree with the live target before control returns to trap_threads.
 +                    m_enabled = true;
++#if SAFETYHOOK_OS_WINDOWS
++                    coordinator.enabled(m_trampoline.data(), true);
++#endif
 +                    m_route_published = m_route_control != nullptr;
 +                    cancel_route_rundown();
 +                    // Read the emitted encoding back rather than reconstructing it: the emit helpers pad to
@@ -1723,11 +2199,12 @@ index a5b3700..d82ca44 100644
 +                        error = Error::failed_to_flush_instruction_cache(m_target);
 +                    }
 +                }
-+            });
++            },
++            TrapDirection::ORIGINAL_TO_TRAMPOLINE, m_mid_route ? &m_route_control->entries : nullptr, executable_ranges);
 +    } catch (...) {
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
-+        // trap_threads has already unwound its suspension/protection transaction. A committed callback made this
-+        // storage permanent even though cleanup threw, so convert the reservation before propagating the error.
++        // trap_threads already unwound its protection transaction. A committed callback published this storage even
++        // though cleanup threw, so charge the reservation before the error propagates.
 +        charge_publication();
 +        throw;
 +    }
@@ -1743,8 +2220,7 @@ index a5b3700..d82ca44 100644
 +                                            : Error::failed_to_unprotect(m_target);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        g_last_inline_hook_error_type.store(transaction_error.type, std::memory_order_relaxed);
- #endif
--    });
++#endif
 +        return std::unexpected{transaction_error};
 +    }
  
@@ -1761,34 +2237,52 @@ index a5b3700..d82ca44 100644
      return {};
  }
  
-@@ -463,23 +1169,229 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -462,24 +1357,563 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+     if (!m_enabled) {
          return {};
      }
- 
--    trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
--        [this] { std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target); });
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    if (!coordinator)
++        return std::unexpected{Error::coordination_unavailable(m_target)};
++    if (!coordinator.top(m_trampoline.data()))
++        return std::unexpected{Error::layer_conflict(m_target)};
++#endif
++
 +    begin_route_rundown();
- 
--    m_enabled = false;
++
 +    std::optional<Error> error;
 +    std::expected<void, OsError> trap_result;
++    const std::array<AddressRange, 2> generated_ranges{{
++        {m_trampoline.data(), m_trampoline.data() + m_trampoline.size()},
++        {m_route_gateway.data(), m_route_gateway ? m_route_gateway.data() + m_route_gateway.size() : nullptr},
++    }};
++    const auto executable_ranges = m_route_control != nullptr ? std::span<const AddressRange>{generated_ranges}
++                                                              : std::span<const AddressRange>{};
 +    try {
-+        trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size,
-+            m_instruction_boundaries, [this, &error] {
++        trap_result = trap_threads(
++            m_target, m_trampoline.data(), m_original_bytes.size(), m_relocated_size, m_instruction_boundaries,
++            [&] {
 +                std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target);
 +                // Symmetric with enable(): the restored bytes are the transition, even if trap cleanup later fails or
 +                // throws.
 +                m_enabled = false;
++#if SAFETYHOOK_OS_WINDOWS
++                coordinator.enabled(m_trampoline.data(), false);
++#endif
 +                finish_route_rundown();
 +                if (!vm_flush_instruction_cache(m_target, m_original_bytes.size())) {
 +                    error = Error::failed_to_flush_instruction_cache(m_target);
 +                }
-+            });
++            },
++            TrapDirection::TRAMPOLINE_TO_ORIGINAL, m_mid_route ? &m_route_control->entries : nullptr, executable_ranges);
 +    } catch (...) {
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +        throw;
 +    }
-+
+ 
+-    trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
+-        [this] { std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target); });
 +    if (!trap_result) {
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +        const Error transaction_error = trap_result.error() == OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE
@@ -1799,7 +2293,8 @@ index a5b3700..d82ca44 100644
 +#endif
 +        return std::unexpected{transaction_error};
 +    }
-+
+ 
+-    m_enabled = false;
 +    if (error) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        g_last_inline_hook_error_type.store(error->type, std::memory_order_relaxed);
@@ -1820,7 +2315,24 @@ index a5b3700..d82ca44 100644
 +        finish_route_rundown();
 +    }
 +}
-+
+ 
+-    std::scoped_lock lock{m_mutex};
++void InlineHook::retain_route() noexcept {
++#if SAFETYHOOK_OS_WINDOWS
++    if (m_process_registered) {
++        ProcessCoordinator coordinator;
++        coordinator.enabled(m_trampoline.data(), m_enabled);
++        coordinator.retain(m_trampoline.data());
++    }
++#else
++    if (m_route_control != nullptr) {
++        register_retained_route();
++    }
++#endif
++}
+ 
+-    if (!m_trampoline) {
+-        return;
 +void InlineHook::begin_route_rundown() noexcept {
 +    if (m_route_control != nullptr) {
 +        m_route_control->state.store(ROUTE_CLOSING, std::memory_order_seq_cst);
@@ -1843,10 +2355,99 @@ index a5b3700..d82ca44 100644
 +    return m_route_control != nullptr ? m_route_control->entries.load(std::memory_order_seq_cst) : 0;
 +}
 +
-+void InlineHook::set_mid_route() noexcept {
-+    if (m_route_control != nullptr) {
-+        m_route_control->route_destination = m_route_control->detour_destination;
++std::expected<void, InlineHook::Error> InlineHook::set_mid_route() {
++#if SAFETYHOOK_ARCH_X86_64
++    if (m_route_control == nullptr)
++        return {};
++    bool saw_call = false;
++    ZydisDecoder decoder{};
++    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
++    for (const auto& boundary : m_instruction_boundaries) {
++        auto* const original = m_target + boundary.original_offset;
++        ZydisDecodedInstruction instruction{};
++        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
++        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, original,
++                m_original_bytes.size() - boundary.original_offset, &instruction, operands)))
++            return std::unexpected{Error::failed_to_decode_instruction(original)};
++        // After a completed call, an explicit RSP destination can expose the stale return word. Push, pop, and call
++        // replace or discard that word, and a nonnegative ADD discards it.
++        const auto visible = std::span{operands, instruction.operand_count_visible};
++        const bool writes_rsp = std::ranges::any_of(visible, [](const ZydisDecodedOperand& operand) {
++            return operand.type == ZYDIS_OPERAND_TYPE_REGISTER && operand.reg.value == ZYDIS_REGISTER_RSP &&
++                   (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
++        });
++        const bool raises_rsp = instruction.mnemonic == ZYDIS_MNEMONIC_ADD && visible.size() == 2 &&
++                                visible[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && visible[1].imm.value.s >= 0;
++        if (saw_call && writes_rsp && !raises_rsp)
++            return std::unexpected{Error::unsupported_instruction_in_trampoline(original)};
++        saw_call = saw_call || instruction.meta.category == ZYDIS_CATEGORY_CALL;
 +    }
++    m_route_control->route_destination = m_route_control->detour_destination;
++    size_t count = 0;
++    const auto make_exit = [&](uint8_t* destination) -> uint8_t* {
++        if (count == MID_CONTINUATION_CAPACITY)
++            return nullptr;
++        auto* const entry = m_route_gateway.data() + MID_CONTINUATION_OFFSET + count++ * MID_CONTINUATION_SLOT;
++        store(entry + MID_CONTINUATION_DESTINATION_OFFSET, destination);
++        return entry;
++    };
++    auto* const fallthrough = make_exit(m_target + m_original_bytes.size());
++    auto* const epilogue = m_trampoline.data() + m_relocated_size;
++    const auto fallthrough_result =
++        m_type == Type::FF ? emit_jmp_ff(epilogue, fallthrough, epilogue + 6) : emit_jmp_e9(epilogue, fallthrough);
++    if (!fallthrough_result)
++        return fallthrough_result;
++    for (const auto& boundary : m_instruction_boundaries) {
++        auto* const original = m_target + boundary.original_offset;
++        ZydisDecodedInstruction instruction{};
++        if (!decode(&instruction, original))
++            return std::unexpected{Error::failed_to_decode_instruction(original)};
++        auto* const relocated = m_trampoline.data() + boundary.trampoline_offset;
++        const bool terminal =
++            instruction.meta.category == ZYDIS_CATEGORY_RET ||
++            (instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR && !instruction.raw.imm[0].is_relative);
++        if (terminal) {
++            auto* const exit = make_exit(nullptr);
++            if (exit == nullptr)
++                return std::unexpected{Error::not_enough_space(original)};
++            auto* const payload = exit + MID_CONTINUATION_DESTINATION_OFFSET + sizeof(uint8_t*);
++            std::copy_n(original, instruction.length, payload);
++            if (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
++                const auto destination = original + instruction.length + instruction.raw.disp.value;
++                const auto displacement = destination - (payload + instruction.length);
++                if (displacement < std::numeric_limits<int32_t>::min() ||
++                    displacement > std::numeric_limits<int32_t>::max())
++                    return std::unexpected{Error::ip_relative_instruction_out_of_range(original)};
++                store(payload + instruction.raw.disp.offset, static_cast<int32_t>(displacement));
++            }
++            store(exit + MID_CONTINUATION_DESTINATION_OFFSET, payload);
++            if (auto result = emit_jmp_e9(relocated, exit); !result)
++                return result;
++            continue;
++        }
++        if ((instruction.meta.category != ZYDIS_CATEGORY_COND_BR &&
++                instruction.meta.category != ZYDIS_CATEGORY_UNCOND_BR) ||
++            !instruction.raw.imm[0].is_relative)
++            continue;
++        auto* const destination = original + instruction.length + instruction.raw.imm[0].value.s;
++        if (destination >= m_target && destination < m_target + m_original_bytes.size())
++            continue;
++        auto* const exit = make_exit(destination);
++        if (exit == nullptr)
++            return std::unexpected{Error::not_enough_space(original)};
++        ZydisDecodedInstruction emitted{};
++        if (!decode(&emitted, relocated) || emitted.raw.imm[0].size != 32)
++            return std::unexpected{Error::unsupported_instruction_in_trampoline(original)};
++        const auto displacement = exit - (relocated + emitted.length);
++        if (displacement < std::numeric_limits<int32_t>::min() || displacement > std::numeric_limits<int32_t>::max())
++            return std::unexpected{Error::ip_relative_instruction_out_of_range(original)};
++        store(relocated + emitted.raw.imm[0].offset, static_cast<int32_t>(displacement));
++    }
++    if (!vm_flush_instruction_cache(m_trampoline.data(), m_trampoline.size()) ||
++        !vm_flush_instruction_cache(m_route_gateway.data(), m_route_gateway.size()))
++        return std::unexpected{Error::failed_to_flush_instruction_cache(m_trampoline.data())};
++#endif
++    return {};
 +}
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -1888,6 +2489,11 @@ index a5b3700..d82ca44 100644
 +    return m_route_control != nullptr ? m_route_gateway.data() + ROUTE_EXIT_OFFSET : nullptr;
 +}
 +
++bool InlineHook::caller_owns_route() const noexcept {
++    const ReturnSites* const sites = &m_trampoline_return_sites;
++    return current_thread_returns_to(std::span<const ReturnSites* const>{&sites, 1});
++}
++
 +RouteRetentionCost InlineHook::route_retention_cost() const noexcept {
 +    return RouteRetentionCost{
 +        m_route_gateway.size() + m_trampoline.size(), m_route_gateway.backing_size() + m_trampoline.backing_size()};
@@ -1900,7 +2506,7 @@ index a5b3700..d82ca44 100644
 +    if (allocation.size() > std::numeric_limits<size_t>::max() - m_route_retention.logical ||
 +        allocation.backing_size() > std::numeric_limits<size_t>::max() - m_route_retention.committed) {
 +        return false;
-+    }
+     }
 +    const RouteRetentionCost combined{
 +        m_route_retention.logical + allocation.size(), m_route_retention.committed + allocation.backing_size()};
 +    if (combined.logical > m_route_reservation.logical || combined.committed > m_route_reservation.committed) {
@@ -1909,7 +2515,7 @@ index a5b3700..d82ca44 100644
 +    m_route_retention = combined;
 +    return true;
 +}
-+
+ 
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +uint8_t* InlineHook::route_region_for_test(int index) const noexcept {
 +    if (m_route_control == nullptr) {
@@ -1922,6 +2528,8 @@ index a5b3700..d82ca44 100644
 +        return m_route_gateway.data() + ROUTE_WRAPPER_OFFSET;
 +    case 2:
 +        return m_route_gateway.data() + ROUTE_EXIT_OFFSET;
++    case 3:
++        return m_mid_route ? nullptr : m_route_gateway.data() + ROUTE_BYPASS_WRAPPER_OFFSET;
 +    default:
 +        return nullptr;
 +    }
@@ -1936,49 +2544,239 @@ index a5b3700..d82ca44 100644
 +}
 +#endif
 +
++#if SAFETYHOOK_ARCH_X86_64
++bool InlineHook::reclaim_published_route() noexcept {
++    m_retention_reason = RouteRetentionReason::IdleProofFailed;
++    // The route is closed by now, but only a restored target proves that nothing can enter it again.
++    if (m_enabled || m_route_control->entries.load(std::memory_order_seq_cst) != 0) {
++        return false;
++    }
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    std::array<AddressRange, 2 * PROCESS_ROUTE_CAPACITY> ranges{};
++    std::array<const ReturnSites*, PROCESS_ROUTE_CAPACITY> return_sites{};
++    size_t range_count = 0;
++    size_t list_count = 0;
++    if (!coordinator) {
++        m_retention_reason = RouteRetentionReason::CoordinatorUnavailable;
++        return false;
++    }
++    if (!coordinator.dependencies(m_trampoline.data(), ranges, range_count, return_sites, list_count)) {
++        m_retention_reason = RouteRetentionReason::DependentRoute;
++        return false;
++    }
++#else
++    std::array<AddressRange, 2 + 2 * RETAINED_ROUTE_CAPACITY> ranges{};
++    size_t range_count = 0;
++    ranges[range_count++] = AddressRange{m_route_gateway.data(), m_route_gateway.data() + m_route_gateway.size()};
++    ranges[range_count++] = AddressRange{m_trampoline.data(), m_trampoline.data() + m_trampoline.size()};
++    // Pointers into gateways and the registry, never the return addresses themselves.
++    std::array<const ReturnSites*, 1 + RETAINED_ROUTE_CAPACITY> return_sites{};
++    size_t list_count = 0;
++    return_sites[list_count++] = &m_route_control->return_sites;
++    {
++        const RouteRetentionGuard guard;
++        if (g_retained_routes.overflowed) {
++            return false;
++        }
++        for (size_t i = 0; i < g_retained_routes.count; ++i) {
++            const RetainedRouteRecord& record = g_retained_routes.records[i];
++            if (record.target != m_target) {
++                continue;
++            }
++            if (record.entries->load(std::memory_order_seq_cst) != 0) {
++                return false;
++            }
++            ranges[range_count++] = record.gateway;
++            ranges[range_count++] = record.trampoline;
++            return_sites[list_count++] = record.return_sites;
++        }
++    }
++#endif
++    const auto idle = threads_idle_outside(std::span<const AddressRange>{ranges.data(), range_count},
++        std::span<const ReturnSites* const>{return_sites.data(), list_count});
++    if (!idle.has_value() || !*idle) {
++        return false;
++    }
++    // A gateway entrant can acquire ownership and leave its active stack during the first scan.
++    if (m_route_control->entries.load(std::memory_order_seq_cst) != 0) {
++        return false;
++    }
++#if SAFETYHOOK_OS_WINDOWS
++    range_count = 0;
++    list_count = 0;
++    if (!coordinator.dependencies(m_trampoline.data(), ranges, range_count, return_sites, list_count)) {
++        m_retention_reason = RouteRetentionReason::DependentRoute;
++        return false;
++    }
++#endif
++    const auto idle_again = threads_idle_outside(std::span<const AddressRange>{ranges.data(), range_count},
++        std::span<const ReturnSites* const>{return_sites.data(), list_count});
++    if (!idle_again.has_value() || !*idle_again) {
++        return false;
++    }
++    // Records are withdrawn only after the proof and before the storage that holds them is freed. A refusal keeps the
++    // chain exactly as a failed proof does.
++    if (m_route_unwind_table != nullptr && !vm_unregister_unwind_table(m_route_unwind_table)) {
++        m_retention_reason = RouteRetentionReason::UnwindRecords;
++        return false;
++    }
++    if (m_route_retention_charged) {
++        refund_route_chain(m_route_retention);
++    } else {
++        release_route_chain(m_route_reservation);
++    }
++#if SAFETYHOOK_OS_WINDOWS
++    coordinator.remove(m_trampoline.data());
++#endif
++    m_route_control->~RouteControl();
++    m_route_gateway.free();
+     m_trampoline.free();
++    m_retention_reason = RouteRetentionReason::None;
++    return true;
++}
++
++void InlineHook::register_retained_route() noexcept {
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    coordinator.enabled(m_trampoline.data(), m_enabled);
++    coordinator.retain(m_trampoline.data());
++#else
++    const RouteRetentionGuard guard;
++    if (g_retained_routes.count == g_retained_routes.records.size()) {
++        g_retained_routes.overflowed = true;
++        return;
++    }
++    g_retained_routes.records[g_retained_routes.count++] = RetainedRouteRecord{
++        m_target,
++        AddressRange{m_route_gateway.data(), m_route_gateway.data() + m_route_gateway.size()},
++        AddressRange{m_trampoline.data(), m_trampoline.data() + m_trampoline.size()},
++        &m_route_control->entries,
++        &m_route_control->return_sites,
++    };
++#endif
++}
++#else
++bool InlineHook::reclaim_published_route() noexcept {
++    return false;
++}
++
++void InlineHook::register_retained_route() noexcept {
++}
++#endif
++
 +void InlineHook::destroy() noexcept {
++    if (!m_trampoline && m_route_control == nullptr) {
++        m_route_retained = false;
++        m_retention_reason = RouteRetentionReason::None;
++        return;
++    }
++    // A coordinator refusal of this restore, not the later proof, causes any retention of the armed patch.
++    bool restore_refused = false;
 +    try {
-+        (void)disable();
++        const auto disabled = disable();
++        restore_refused = !disabled && disabled.error().type == Error::COORDINATION_UNAVAILABLE;
 +    } catch (...) {
 +        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +    }
- 
-     std::scoped_lock lock{m_mutex};
- 
--    if (!m_trampoline) {
-+    if (m_route_control != nullptr) {
-+        if (m_route_published) {
-+            // A caller may be parked before the gateway's first instruction. The gateway, its control cell, the
-+            // unwind records inside it, and the ordinary trampoline it bypasses to are therefore process-lifetime
-+            // storage after first publication. The metadata stays registered for exactly the same reason: a thread
-+            // faulting in the retained wrapper after this handle is gone must still find its records.
-+            finish_route_rundown();
++
++    std::unique_lock lock{m_mutex, std::defer_lock};
++    try {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        auto* expected = m_target;
++        if (expected != nullptr && g_destroy_lock_failure_target.compare_exchange_strong(expected, nullptr)) {
++            throw std::system_error{std::make_error_code(std::errc::resource_unavailable_try_again)};
++        }
++#endif
++        lock.lock();
++    } catch (...) {
++        if (m_route_control != nullptr) {
 +            if (!m_route_retention_charged) {
 +                charge_route_chain(m_route_retention, m_route_reservation);
 +                m_route_reservation = {};
 +                m_route_retention_charged = true;
 +            }
++            m_retention_reason = RouteRetentionReason::OwnerLock;
++            register_retained_route();
 +            m_trampoline.abandon();
 +            m_route_gateway.abandon();
++            m_route_retained = true;
++            m_route_unwind_table = nullptr;
++            m_route_control = nullptr;
++        }
++#if SAFETYHOOK_OS_WINDOWS
++        else if (m_process_registered && m_trampoline) {
++            m_retention_reason = RouteRetentionReason::OwnerLock;
++            register_retained_route();
++            *m_retention_holder = std::move(m_trampoline);
++            (void)m_retention_holder.release();
++            m_route_retained = true;
++        }
++#endif
++        return;
++    }
++    m_route_retained = false;
++    m_retention_reason = RouteRetentionReason::None;
++#if SAFETYHOOK_OS_WINDOWS
++    ProcessCoordinator coordinator;
++    // reconcile_enabled() takes no coordinator, so the record learns a reconciled state here.
++    if (m_process_registered)
++        coordinator.enabled(m_trampoline.data(), m_enabled);
++#endif
++
++    if (m_route_control != nullptr) {
++        if (m_route_published) {
++            // The repeated idle proof covers intervals outside entry ownership. A failed proof retains the chain.
++            finish_route_rundown();
++            if (!reclaim_published_route()) {
++                if (restore_refused)
++                    m_retention_reason = RouteRetentionReason::CoordinatorUnavailable;
++                if (!m_route_retention_charged) {
++                    charge_route_chain(m_route_retention, m_route_reservation);
++                    m_route_reservation = {};
++                    m_route_retention_charged = true;
++                }
++                register_retained_route();
++                m_trampoline.abandon();
++                m_route_gateway.abandon();
++                m_route_retained = true;
++            }
 +        } else {
 +            // Nothing ever reached this code, so the records can be withdrawn before the storage holding them goes
 +            // back to the allocator. Order matters: freeing first would leave the platform pointing at reusable memory.
++            auto reason = RouteRetentionReason::None;
 +            if (m_route_unwind_table != nullptr && !vm_unregister_unwind_table(m_route_unwind_table)) {
-+                // The OS still owns a pointer into the gateway. Retain its entire arena and account it permanently;
-+                // freeing either allocation would turn a platform metadata lookup into a use-after-free.
++                // The OS still owns a pointer into the gateway. A release of either allocation turns a platform
++                // metadata lookup into a use-after-free.
++                reason = RouteRetentionReason::UnwindRecords;
++            }
++#if SAFETYHOOK_OS_WINDOWS
++            else if (!coordinator && m_process_registered) {
++                // A refused coordinator leaves a record that still names this storage.
++                reason = RouteRetentionReason::CoordinatorUnavailable;
++            }
++#endif
++            if (reason != RouteRetentionReason::None) {
++                // Retain the entire arena and account it permanently.
 +                if (m_route_retention.logical == 0 && m_route_retention.committed == 0) {
 +                    m_route_retention = route_retention_cost();
 +                }
 +                charge_route_chain(m_route_retention, m_route_reservation);
 +                m_route_reservation = {};
 +                m_route_retention_charged = true;
++                m_retention_reason = reason;
++                register_retained_route();
 +                m_trampoline.abandon();
 +                m_route_gateway.abandon();
++                m_route_retained = true;
 +                m_route_unwind_table = nullptr;
 +                m_route_retention = {};
 +                m_route_control = nullptr;
 +                return;
 +            }
++#if SAFETYHOOK_OS_WINDOWS
++            coordinator.remove(m_trampoline.data());
++#endif
 +            release_route_chain(m_route_reservation);
 +            m_route_control->~RouteControl();
 +            m_route_gateway.free();
@@ -1989,17 +2787,30 @@ index a5b3700..d82ca44 100644
 +        m_route_reservation = {};
 +        m_route_retention_charged = false;
 +        m_route_control = nullptr;
-         return;
-     }
- 
--    m_trampoline.free();
++        return;
++    }
++
 +    if (m_trampoline) {
++#if SAFETYHOOK_OS_WINDOWS
++        if (m_process_registered && (!coordinator || m_enabled || !coordinator.top(m_trampoline.data(), true))) {
++            m_retention_reason = !coordinator || restore_refused ? RouteRetentionReason::CoordinatorUnavailable
++                                                                 : RouteRetentionReason::DependentRoute;
++            // A later acquisition can mark the record after a refused one. A live record refuses older layers.
++            register_retained_route();
++            // Raw hooks have no RouteControl to retain the allocator.
++            *m_retention_holder = std::move(m_trampoline);
++            (void)m_retention_holder.release();
++            m_route_retained = true;
++            return;
++        }
++        coordinator.remove(m_trampoline.data());
++#endif
 +        m_trampoline.free();
 +    }
  }
  } // namespace safetyhook
 diff --git a/src/mid_hook.cpp b/src/mid_hook.cpp
-index 339bef8..6c72b1c 100644
+index 339bef8..966b1d1 100644
 --- a/src/mid_hook.cpp
 +++ b/src/mid_hook.cpp
 @@ -96,9 +96,11 @@ MidHook::MidHook(MidHook&& other) noexcept {
@@ -2019,12 +2830,13 @@ index 339bef8..6c72b1c 100644
      return *this;
  }
  
+-void MidHook::reset() {
+-    *this = {};
 +MidHook::~MidHook() {
 +    destroy();
 +}
 +
- void MidHook::reset() {
--    *this = {};
++void MidHook::reset() noexcept {
 +    destroy();
  }
  
@@ -2035,9 +2847,9 @@ index 339bef8..6c72b1c 100644
  
 -    auto stub_allocation = allocator->allocate(asm_data.size());
 +#if SAFETYHOOK_ARCH_X86_64
-+    // A routed MID chain is retained as one unit after publication. Isolating its stub, trampoline, and gateway in a
-+    // fresh arena makes the pre-publication committed worst case finite and prevents unrelated allocator blocks from
-+    // becoming collateral when RouteControl holds the arena for the process lifetime.
++    // A routed MID chain is freed or retained as one unit after publication. Isolating its stub, trampoline, and
++    // gateway in a fresh arena makes the pre-publication committed worst case finite and prevents unrelated allocator
++    // blocks from becoming collateral when RouteControl holds the arena for a retained chain.
 +    (void)allocator;
 +    const auto route_allocator = Allocator::create();
 +#else
@@ -2106,7 +2918,7 @@ index 339bef8..6c72b1c 100644
 -    auto hook_result = InlineHook::create(allocator, m_target, m_stub.data(), InlineHook::StartDisabled);
 +#if SAFETYHOOK_ARCH_X86_64
 +    constexpr auto inline_flags =
-+        static_cast<InlineHook::Flags>(InlineHook::StartDisabled | InlineHook::RoutedExternal);
++        static_cast<InlineHook::Flags>(InlineHook::StartDisabled | InlineHook::RoutedExternal | InlineHook::RoutedMid);
 +#else
 +    constexpr auto inline_flags = InlineHook::StartDisabled;
 +#endif
@@ -2114,15 +2926,13 @@ index 339bef8..6c72b1c 100644
  
      if (!hook_result) {
          m_stub.free();
-@@ -145,13 +209,30 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -145,13 +209,28 @@ std::expected<void, MidHook::Error> MidHook::setup(
      }
  
      m_hook = std::move(*hook_result);
 +#if SAFETYHOOK_ARCH_X86_64
-+    m_hook.set_mid_route();
-+    // The stub is reached only through the route and is abandoned by the same publication rule, so it belongs to the
-+    // route's retained chain rather than to a separate budget. Folding it in before anything can publish keeps the
-+    // refusal on the create path, where nothing has been made permanent yet.
++    // Only the route reaches the stub, so the stub shares the chain's reclamation, retention, and budget. The stub
++    // joins the chain before publication, so a capacity refusal stays on the create path, where nothing is charged.
 +    if (!m_hook.add_route_retention(m_stub)) {
 +        m_hook = {};
 +        m_stub.free();
@@ -2146,7 +2956,7 @@ index 339bef8..6c72b1c 100644
      return {};
  }
  
-@@ -170,4 +251,26 @@ std::expected<void, MidHook::Error> MidHook::disable() {
+@@ -170,4 +249,29 @@ std::expected<void, MidHook::Error> MidHook::disable() {
  
      return {};
  }
@@ -2169,12 +2979,15 @@ index 339bef8..6c72b1c 100644
 +        }
 +    }
 +    m_hook.reset();
++    // The inner hook ran the idle proof over the published chain. Its verdict is this hook's verdict.
++    m_route_retained = m_hook.route_retained();
++    m_route_retention_reason = m_hook.route_retention_reason();
 +    m_target = nullptr;
 +    m_destination = nullptr;
 +}
  } // namespace safetyhook
 diff --git a/src/os.linux.cpp b/src/os.linux.cpp
-index d3f37f0..af27a0e 100644
+index d3f37f0..15a3cfd 100644
 --- a/src/os.linux.cpp
 +++ b/src/os.linux.cpp
 @@ -2,8 +2,11 @@
@@ -2189,11 +3002,17 @@ index d3f37f0..af27a0e 100644
  
  #include <sys/mman.h>
  #include <unistd.h>
-@@ -186,13 +189,127 @@ SystemInfo system_info() {
+@@ -186,18 +189,145 @@ SystemInfo system_info() {
      return info;
  }
  
 -void trap_threads([[maybe_unused]] uint8_t* from, [[maybe_unused]] uint8_t* to, [[maybe_unused]] size_t len,
+-    const std::function<void()>& run_fn) {
+-    auto from_protect = vm_protect(from, len, VM_ACCESS_RWX).value_or(0);
+-    auto to_protect = vm_protect(to, len, VM_ACCESS_RWX).value_or(0);
+-    run_fn();
+-    vm_protect(to, len, to_protect);
+-    vm_protect(from, len, from_protect);
 +bool vm_flush_instruction_cache(uint8_t* address, size_t size) noexcept {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    size_t failure_call = g_instruction_cache_flush_failure_call.load(std::memory_order_acquire);
@@ -2224,10 +3043,17 @@ index d3f37f0..af27a0e 100644
 +    return true;
 +}
 +
++std::expected<bool, OsError> threads_idle_outside([[maybe_unused]] std::span<const AddressRange> ranges,
++    [[maybe_unused]] std::span<const ReturnSites* const> return_sites) {
++    // No thread snapshot is available here, so a published routed chain is retained as before.
++    return std::unexpected{OsError::FAILED_TO_GET_NEXT_THREAD};
++}
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +std::atomic<bool> g_unwind_registration_failure{false};
 +std::atomic<bool> g_unwind_unregistration_failure{false};
 +std::atomic<uint8_t*> g_trap_restore_failure_override{nullptr};
++void (*g_trap_protected_probe)() noexcept = nullptr;
 +std::atomic<uint8_t*> g_trap_exception_target_override{nullptr};
 +std::atomic<TrapExceptionStage> g_trap_exception_stage_override{TrapExceptionStage::NONE};
 +std::atomic<size_t> g_trap_protect_calls{0};
@@ -2256,12 +3082,9 @@ index d3f37f0..af27a0e 100644
 +
 +std::expected<void, OsError> trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
 +    size_t trampoline_size, [[maybe_unused]] std::span<const InstructionBoundary> boundaries,
-     const std::function<void()>& run_fn) {
--    auto from_protect = vm_protect(from, len, VM_ACCESS_RWX).value_or(0);
--    auto to_protect = vm_protect(to, len, VM_ACCESS_RWX).value_or(0);
--    run_fn();
--    vm_protect(to, len, to_protect);
--    vm_protect(from, len, from_protect);
++    const std::function<void()>& run_fn, [[maybe_unused]] TrapDirection direction,
++    [[maybe_unused]] std::atomic<uint32_t>* route_entries,
++    [[maybe_unused]] std::span<const AddressRange> executable_ranges) {
 +    const auto from_protect = vm_protect(original, original_size, VM_ACCESS_RWX);
 +    if (!from_protect) {
 +        return std::unexpected{from_protect.error()};
@@ -2323,13 +3146,24 @@ index d3f37f0..af27a0e 100644
  }
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
+ }
+ 
++bool current_thread_returns_to([[maybe_unused]] std::span<const ReturnSites* const> return_sites) noexcept {
++    return false;
++}
++
+ } // namespace safetyhook
+ 
+ #endif
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..6d5ff8f 100644
+index 64eb0bb..91943c1 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
-@@ -1,6 +1,11 @@
+@@ -1,6 +1,13 @@
++#include <algorithm>
 +#include <array>
 +#include <atomic>
++#include <cwchar>
 +#include <exception>
  #include <map>
  #include <memory>
@@ -2339,7 +3173,7 @@ index 64eb0bb..6d5ff8f 100644
  
  #include "safetyhook/common.hpp"
  #include "safetyhook/utility.hpp"
-@@ -10,7 +15,6 @@
+@@ -10,7 +17,6 @@
  #ifndef NOMINMAX
  #define NOMINMAX
  #endif
@@ -2347,7 +3181,319 @@ index 64eb0bb..6d5ff8f 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -157,33 +161,200 @@ SystemInfo system_info() {
+@@ -18,10 +24,311 @@
+ #else
+ #error "Windows.h not found"
+ #endif
++#include <intrin.h>
++#include <tlhelp32.h>
+ 
+ #include "safetyhook/os.hpp"
+ 
+ namespace safetyhook {
++namespace {
++constexpr uint64_t COORDINATOR_MAGIC = 0x444d4b524f555445ULL;
++constexpr uint32_t COORDINATOR_VERSION = 1;
++constexpr DWORD COORDINATOR_WAIT_MS = 2000;
++
++struct ProcessRoute {
++    uint64_t order{};
++    uint8_t* target{};
++    AddressRange trampoline{};
++    AddressRange gateway{};
++    const std::atomic<uint32_t>* entries{};
++    ReturnSites return_sites{};
++    bool retained{};
++    bool enabled{};
++    uint32_t patch_size{};
++};
++
++// Only the canonical view supplies addresses. No callable or container belongs to a participant.
++struct CoordinatorState {
++    uint64_t magic{};
++    uint32_t version{};
++    uint32_t bytes{};
++    CoordinatorState* canonical{};
++    HANDLE mutex{};
++    HANDLE mapping{};
++    uint64_t next_order{1};
++    bool poisoned{};
++    std::atomic<uint32_t> owner{};
++    std::array<ProcessRoute, PROCESS_ROUTE_CAPACITY> routes{};
++};
++
++// Participants from different compilers share this layout. Every participant in one process has the same pointer width.
++#if SAFETYHOOK_ARCH_X86_64
++static_assert(sizeof(ReturnSites) == 24);
++static_assert(sizeof(ProcessRoute) == 88);
++static_assert(offsetof(CoordinatorState, owner) == 52);
++static_assert(offsetof(CoordinatorState, routes) == 56);
++#elif SAFETYHOOK_ARCH_X86_32
++static_assert(sizeof(ReturnSites) == 16);
++static_assert(sizeof(ProcessRoute) == 56);
++static_assert(offsetof(CoordinatorState, owner) == 44);
++static_assert(offsetof(CoordinatorState, routes) == 48);
++#endif
++
++// Reads the TEB client ID without a call, because the export that returns it can sit behind a closed route.
++[[nodiscard]] uint32_t current_thread_id() noexcept {
++#if SAFETYHOOK_ARCH_X86_64
++    return static_cast<uint32_t>(__readgsdword(0x48));
++#elif SAFETYHOOK_ARCH_X86_32
++    return static_cast<uint32_t>(__readfsdword(0x24));
++#endif
++}
++
++// Another process can create the mapping first and store any address in it. Only a view of the same section in this
++// process reads back a value written through the new view. The caller holds the lock, so the probe races no reader.
++[[nodiscard]] bool is_canonical_view(CoordinatorState* view, CoordinatorState* canonical) noexcept {
++    MEMORY_BASIC_INFORMATION region{};
++    if (canonical == view || VirtualQuery(canonical, &region, sizeof(region)) != sizeof(region) ||
++        region.BaseAddress != canonical || region.State != MEM_COMMIT || region.Type != MEM_MAPPED ||
++        region.Protect != PAGE_READWRITE || region.RegionSize < sizeof(CoordinatorState))
++        return false;
++    volatile uint64_t& written = view->next_order;
++    const volatile uint64_t& observed = canonical->next_order;
++    const uint64_t original = written;
++    const uint64_t probe = original ^ (__rdtsc() | 1);
++    written = probe;
++    const bool same = observed == probe;
++    written = original;
++    return same;
++}
++
++[[nodiscard]] CoordinatorState* connect_coordinator() noexcept {
++    FILETIME created{}, exited{}, kernel{}, user{};
++    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
++        return nullptr;
++    wchar_t mutex_name[128]{};
++    wchar_t mapping_name[128]{};
++    // The name excludes the protocol version so incompatible participants meet and refuse.
++    swprintf_s(mutex_name, L"Local\\DMK.Route.%lu.%08lx%08lx.Lock", GetCurrentProcessId(), created.dwHighDateTime,
++        created.dwLowDateTime);
++    swprintf_s(mapping_name, L"Local\\DMK.Route.%lu.%08lx%08lx.Data", GetCurrentProcessId(), created.dwHighDateTime,
++        created.dwLowDateTime);
++    const HANDLE mutex = CreateMutexW(nullptr, FALSE, mutex_name);
++    if (mutex == nullptr)
++        return nullptr;
++    const DWORD acquired = WaitForSingleObject(mutex, COORDINATOR_WAIT_MS);
++    if (acquired != WAIT_OBJECT_0 && acquired != WAIT_ABANDONED) {
++        CloseHandle(mutex);
++        return nullptr;
++    }
++    const HANDLE mapping = CreateFileMappingW(
++        INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(sizeof(CoordinatorState)), mapping_name);
++    const bool existing = mapping != nullptr && GetLastError() == ERROR_ALREADY_EXISTS;
++    auto* const view = mapping == nullptr ? nullptr
++                                          : static_cast<CoordinatorState*>(MapViewOfFile(mapping,
++                                                FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(CoordinatorState)));
++    CoordinatorState* result = nullptr;
++    bool owner = false;
++    if (view != nullptr) {
++        if (!existing && acquired == WAIT_OBJECT_0) {
++            result = ::new (view) CoordinatorState{};
++            result->magic = COORDINATOR_MAGIC;
++            result->version = COORDINATOR_VERSION;
++            result->bytes = sizeof(CoordinatorState);
++            result->canonical = result;
++            result->mutex = mutex;
++            result->mapping = mapping;
++            owner = true;
++        } else if (view->magic == COORDINATOR_MAGIC && view->version == COORDINATOR_VERSION &&
++                   view->bytes == sizeof(CoordinatorState) && is_canonical_view(view, view->canonical)) {
++            result = view->canonical;
++            if (acquired == WAIT_ABANDONED)
++                result->poisoned = true;
++        }
++        if (!owner)
++            UnmapViewOfFile(view);
++    }
++    if (mapping != nullptr && !owner)
++        CloseHandle(mapping);
++    ReleaseMutex(mutex);
++    if (!owner)
++        CloseHandle(mutex);
++    // The first view and both handles belong to the process, even with no live participant.
++    return result;
++}
++
++std::atomic<CoordinatorState*> g_coordinator_state{nullptr};
++
++[[nodiscard]] CoordinatorState* coordinator_state() noexcept {
++    if (auto* const state = g_coordinator_state.load(std::memory_order_acquire))
++        return state;
++    auto* const state = connect_coordinator();
++    if (state != nullptr)
++        g_coordinator_state.store(state, std::memory_order_release);
++    return state;
++}
++
++[[nodiscard]] ProcessRoute* find_process_route(CoordinatorState& state, uint8_t* key) noexcept {
++    for (auto& record : state.routes) {
++        if (record.order != 0 && record.trampoline.begin == key)
++            return &record;
++    }
++    return nullptr;
++}
++
++// A newer trampoline relocates every older jump that its patched bytes cover.
++[[nodiscard]] bool patches_overlap(const ProcessRoute& left, const ProcessRoute& right) noexcept {
++    const auto left_begin = reinterpret_cast<uintptr_t>(left.target);
++    const auto right_begin = reinterpret_cast<uintptr_t>(right.target);
++    return left_begin < right_begin + right.patch_size && right_begin < left_begin + left.patch_size;
++}
++} // namespace
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++std::atomic<unsigned> g_coordinator_refusal_for_test{0};
++#endif
++
++ProcessCoordinator::ProcessCoordinator() noexcept {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    unsigned refusal = g_coordinator_refusal_for_test.load();
++    if (refusal == 1 || (refusal == 3 && g_coordinator_refusal_for_test.compare_exchange_strong(refusal, 0)))
++        return;
++#endif
++    auto* const state = coordinator_state();
++    if (state == nullptr)
++        return;
++    const uint32_t thread_id = current_thread_id();
++    if (state->owner.load(std::memory_order_relaxed) == thread_id) {
++        m_state = state;
++        m_nested = true;
++        return;
++    }
++    const DWORD acquired = WaitForSingleObject(state->mutex, COORDINATOR_WAIT_MS);
++    if (acquired == WAIT_ABANDONED) {
++        state->owner.store(0, std::memory_order_relaxed);
++        state->poisoned = true;
++        ReleaseMutex(state->mutex);
++        return;
++    }
++    if (acquired != WAIT_OBJECT_0)
++        return;
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    const uint32_t expected_version = COORDINATOR_VERSION + (g_coordinator_refusal_for_test.load() == 2 ? 1 : 0);
++#else
++    constexpr uint32_t expected_version = COORDINATOR_VERSION;
++#endif
++    if (state->poisoned || state->magic != COORDINATOR_MAGIC || state->version != expected_version ||
++        state->bytes != sizeof(CoordinatorState)) {
++        ReleaseMutex(state->mutex);
++        return;
++    }
++    state->owner.store(thread_id, std::memory_order_relaxed);
++    m_state = state;
++}
++
++ProcessCoordinator::~ProcessCoordinator() noexcept {
++    if (m_state != nullptr && !m_nested) {
++        auto* const state = static_cast<CoordinatorState*>(m_state);
++        state->owner.store(0, std::memory_order_relaxed);
++        ReleaseMutex(state->mutex);
++    }
++}
++
++bool ProcessCoordinator::add(uint8_t* target, size_t patch_size, AddressRange trampoline, AddressRange gateway,
++    const std::atomic<uint32_t>* entries, const ReturnSites& return_sites) noexcept {
++    if (m_state == nullptr || patch_size == 0 || patch_size > UINT32_MAX)
++        return false;
++    auto& state = *static_cast<CoordinatorState*>(m_state);
++    if (state.next_order == UINT64_MAX)
++        return false;
++    for (auto& record : state.routes) {
++        if (record.order == 0) {
++            record = ProcessRoute{state.next_order++, target, trampoline, gateway, entries, return_sites, false, false,
++                static_cast<uint32_t>(patch_size)};
++            return true;
++        }
++    }
++    return false;
++}
++
++bool ProcessCoordinator::top(uint8_t* key, bool include_retained) const noexcept {
++    if (m_state == nullptr)
++        return false;
++    auto& state = *static_cast<CoordinatorState*>(m_state);
++    const auto* const own = find_process_route(state, key);
++    if (own == nullptr)
++        return false;
++    for (const auto& record : state.routes) {
++        if (record.order > own->order && patches_overlap(record, *own) &&
++            (include_retained || !record.retained || record.enabled))
++            return false;
++    }
++    return true;
++}
++
++void ProcessCoordinator::enabled(uint8_t* key, bool value) noexcept {
++    if (m_state != nullptr) {
++        if (auto* record = find_process_route(*static_cast<CoordinatorState*>(m_state), key))
++            record->enabled = value;
++    }
++}
++
++void ProcessCoordinator::remove(uint8_t* key) noexcept {
++    if (m_state != nullptr) {
++        if (auto* record = find_process_route(*static_cast<CoordinatorState*>(m_state), key))
++            *record = {};
++    }
++}
++
++void ProcessCoordinator::retain(uint8_t* key) noexcept {
++    if (m_state != nullptr) {
++        if (auto* record = find_process_route(*static_cast<CoordinatorState*>(m_state), key))
++            record->retained = true;
++    }
++}
++
++bool ProcessCoordinator::dependencies(uint8_t* key, std::span<AddressRange> ranges, size_t& range_count,
++    std::span<const ReturnSites*> sites, size_t& site_count) const noexcept {
++    if (m_state == nullptr)
++        return false;
++    auto& state = *static_cast<CoordinatorState*>(m_state);
++    const auto* const own = find_process_route(state, key);
++    if (own == nullptr || own->enabled)
++        return false;
++    for (const auto& record : state.routes) {
++        if (record.order == 0 || !patches_overlap(record, *own))
++            continue;
++        // A retained newer route can hold a saved exception context outside every scanned range.
++        if (&record != own && record.order > own->order)
++            return false;
++        if (&record != own && !record.retained)
++            continue;
++        if (record.enabled || (record.entries != nullptr && record.entries->load(std::memory_order_seq_cst) != 0))
++            return false;
++        if (range_count + 2 > ranges.size() || site_count == sites.size())
++            return false;
++        ranges[range_count++] = record.trampoline;
++        ranges[range_count++] = record.gateway;
++        sites[site_count++] = &record.return_sites;
++    }
++    return true;
++}
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++ProcessCoordinatorSnapshot process_coordinator_snapshot_for_test() noexcept {
++    const ProcessCoordinator guard;
++    if (!guard)
++        return {};
++    const auto* state = coordinator_state();
++    ProcessCoordinatorSnapshot snapshot{reinterpret_cast<uintptr_t>(state), sizeof(CoordinatorState), 0, 0};
++    for (const auto& record : state->routes) {
++        if (record.order != 0) {
++            record.retained ? ++snapshot.retained : ++snapshot.live;
++        }
++    }
++    return snapshot;
++}
++#endif
++
+ std::expected<uint8_t*, OsError> vm_allocate(uint8_t* address, size_t size, VmAccess access) {
+     DWORD protect = 0;
+ 
+@@ -157,33 +464,213 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -2358,6 +3504,17 @@ index 64eb0bb..6d5ff8f 100644
 +std::atomic<size_t> g_instruction_cache_flush_failure_call{0};
 +thread_local std::array<InstructionCacheFlushObservation, 16> g_instruction_cache_flush_trace{};
 +thread_local size_t g_instruction_cache_flush_trace_size{0};
++
++namespace {
++// Emulated TLS allocates each variable on the first touch from a thread, and that allocation can call an export on a
++// trapped page. trap_threads touches the trace before its first protection change.
++void prime_instruction_cache_flush_trace() noexcept {
++    size_t* volatile size = &g_instruction_cache_flush_trace_size;
++    InstructionCacheFlushObservation* volatile trace = g_instruction_cache_flush_trace.data();
++    (void)size;
++    (void)trace;
++}
++} // namespace
 +#endif
 +
 +bool vm_flush_instruction_cache(uint8_t* address, size_t size) noexcept {
@@ -2449,6 +3606,8 @@ index 64eb0bb..6d5ff8f 100644
 +    size_t original_size;
 +    size_t trampoline_size;
 +    std::span<const InstructionBoundary> boundaries;
++    TrapDirection direction;
++    std::atomic<uint32_t>* route_entries;
  };
  
 -class TrapManager final {
@@ -2456,11 +3615,6 @@ index 64eb0bb..6d5ff8f 100644
 -    static std::mutex mutex;
 -    static std::unique_ptr<TrapManager> instance;
 -    static bool is_destructed;
--
--    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
--    ~TrapManager() {
--        if (m_trap_veh != nullptr) {
--            RemoveVectoredExceptionHandler(m_trap_veh);
 +struct ProtectSegment {
 +    uint8_t* address;
 +    size_t size;
@@ -2477,7 +3631,11 @@ index 64eb0bb..6d5ff8f 100644
 +
 +    while (cursor < end) {
 +        MEMORY_BASIC_INFORMATION mbi{};
-+
+ 
+-    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
+-    ~TrapManager() {
+-        if (m_trap_veh != nullptr) {
+-            RemoveVectoredExceptionHandler(m_trap_veh);
 +        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT) {
 +            return false;
          }
@@ -2563,13 +3721,14 @@ index 64eb0bb..6d5ff8f 100644
          });
  
          if (search == m_traps.end()) {
-@@ -213,115 +384,588 @@ public:
+@@ -213,115 +700,893 @@ public:
          return nullptr;
      }
  
 -    void add_trap(uint8_t* from, uint8_t* to, size_t len) {
 +    void add_trap(uint8_t* original, uint8_t* trampoline, size_t original_size, size_t trampoline_size,
-+        std::span<const InstructionBoundary> boundaries) {
++        std::span<const InstructionBoundary> boundaries, TrapDirection direction,
++        std::atomic<uint32_t>* route_entries) {
          TrapInfo info{};
 -        info.from_page_start = align_down(from, 0x1000);
 -        info.from_page_end = align_up(from + len, 0x1000);
@@ -2589,6 +3748,8 @@ index 64eb0bb..6d5ff8f 100644
 +        info.original_size = original_size;
 +        info.trampoline_size = trampoline_size;
 +        info.boundaries = boundaries;
++        info.direction = direction;
++        info.route_entries = route_entries;
 +
 +        m_traps.insert_or_assign(original, std::move(info));
      }
@@ -2639,22 +3800,53 @@ index 64eb0bb..6d5ff8f 100644
          }
  
          auto* ctx = exp->ContextRecord;
++        const bool from_original =
++            faulting_address >= trap->original && faulting_address < trap->original + trap->original_size;
++        // Enable moves only toward the trampoline. Disable moves only toward the restored target.
++        // Counted mid routes finish in their trampoline, including any nested return into that window.
++        if (!from_original && trap->route_entries != nullptr) {
++            return EXCEPTION_CONTINUE_EXECUTION;
++        }
++        if (from_original != (trap->direction == TrapDirection::ORIGINAL_TO_TRAMPOLINE)) {
++            return EXCEPTION_CONTINUE_EXECUTION;
++        }
  
 -        for (size_t i = 0; i < trap->len; i++) {
 -            fix_ip(ctx, trap->from + i, trap->to + i);
++#if SAFETYHOOK_ARCH_X86_64
++        const auto previous_ip = ctx->Rip;
++#else
++        const auto previous_ip = ctx->Eip;
++#endif
 +        if (trap->boundaries.empty()) {
 +            const size_t shared_size = std::min(trap->original_size, trap->trampoline_size);
 +            for (size_t i = 0; i < shared_size; ++i) {
-+                fix_ip(ctx, trap->original + i, trap->trampoline + i);
-+                fix_ip(ctx, trap->trampoline + i, trap->original + i);
++                if (from_original) {
++                    fix_ip(ctx, trap->original + i, trap->trampoline + i);
++                } else {
++                    fix_ip(ctx, trap->trampoline + i, trap->original + i);
++                }
 +            }
 +        } else {
 +            for (const InstructionBoundary& boundary : trap->boundaries) {
-+                fix_ip(ctx, trap->original + boundary.original_offset, trap->trampoline + boundary.trampoline_offset);
-+                fix_ip(ctx, trap->trampoline + boundary.trampoline_offset, trap->original + boundary.original_offset);
++                if (from_original) {
++                    fix_ip(
++                        ctx, trap->original + boundary.original_offset, trap->trampoline + boundary.trampoline_offset);
++                } else {
++                    fix_ip(
++                        ctx, trap->trampoline + boundary.trampoline_offset, trap->original + boundary.original_offset);
++                }
 +            }
          }
  
++#if SAFETYHOOK_ARCH_X86_64
++        const bool transferred = ctx->Rip != previous_ip;
++#else
++        const bool transferred = ctx->Eip != previous_ip;
++#endif
++        if (transferred && trap->route_entries != nullptr) {
++            trap->route_entries->fetch_add(1, std::memory_order_seq_cst);
++        }
          return EXCEPTION_CONTINUE_EXECUTION;
      }
 +
@@ -2688,11 +3880,8 @@ index 64eb0bb..6d5ff8f 100644
 +        }
 +        return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;
 +    }
- };
- 
--std::mutex TrapManager::mutex;
--std::unique_ptr<TrapManager> TrapManager::instance;
--bool TrapManager::is_destructed = false;
++};
++
 +[[nodiscard]] static bool initialize_trap_gateway(TrapRuntime& runtime) noexcept {
 +    if (runtime.vectored_handle != nullptr) {
 +        return true;
@@ -2875,8 +4064,11 @@ index 64eb0bb..6d5ff8f 100644
 +
 +private:
 +    TrapRuntime* m_runtime;
-+};
-+
+ };
+ 
+-std::mutex TrapManager::mutex;
+-std::unique_ptr<TrapManager> TrapManager::instance;
+-bool TrapManager::is_destructed = false;
 +[[nodiscard]] static TrapRuntime* trap_runtime() noexcept {
 +    static TrapRuntime* const runtime = new (std::nothrow) TrapRuntime{};
 +    static TrapShutdown shutdown{runtime};
@@ -2914,6 +4106,203 @@ index 64eb0bb..6d5ff8f 100644
 +    // The gateway and its data page stay mapped: a callback selected before removal may not yet have executed its
 +    // first instruction. Its closed branch contains the exact committed-executable DEP retry and names no module code.
 +}
++
++namespace {
++// Every handle is opened before the first suspension, so the scan never allocates while a thread is stopped. A process
++// with more threads than this cannot be proved idle and retains.
++constexpr size_t MAX_SCANNED_THREADS = 1024;
++
++class ThreadHandleSet final {
++public:
++    ThreadHandleSet() = default;
++    ~ThreadHandleSet() {
++        for (size_t i = 0; i < m_count; ++i) {
++            CloseHandle(m_handles[i]);
++        }
++    }
++
++    ThreadHandleSet(const ThreadHandleSet&) = delete;
++    ThreadHandleSet& operator=(const ThreadHandleSet&) = delete;
++
++    [[nodiscard]] bool add(HANDLE handle) noexcept {
++        if (m_count == m_handles.size()) {
++            return false;
++        }
++        m_handles[m_count++] = handle;
++        return true;
++    }
++
++    [[nodiscard]] size_t count() const noexcept { return m_count; }
++    [[nodiscard]] HANDLE at(size_t index) const noexcept { return m_handles[index]; }
++
++private:
++    std::array<HANDLE, MAX_SCANNED_THREADS> m_handles{};
++    size_t m_count{0};
++};
++
++// Opens every other thread of this process from one snapshot. A thread that exited after the snapshot was taken cannot
++// be inside any code range, so it is skipped. Every other failure leaves the set incomplete.
++[[nodiscard]] bool open_other_threads(HANDLE snapshot, ThreadHandleSet& handles) noexcept {
++    const DWORD process_id = GetCurrentProcessId();
++    const DWORD current_thread_id = GetCurrentThreadId();
++    THREADENTRY32 entry{};
++    entry.dwSize = sizeof(entry);
++    if (Thread32First(snapshot, &entry) == FALSE) {
++        return false;
++    }
++    do {
++        const bool has_owner =
++            entry.dwSize >= FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) + sizeof(entry.th32OwnerProcessID);
++        if (has_owner && entry.th32OwnerProcessID == process_id && entry.th32ThreadID != current_thread_id) {
++            const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, entry.th32ThreadID);
++            if (thread == nullptr) {
++                if (GetLastError() != ERROR_INVALID_PARAMETER) {
++                    return false;
++                }
++            } else if (!handles.add(thread)) {
++                CloseHandle(thread);
++                return false;
++            }
++        }
++        entry.dwSize = sizeof(entry);
++    } while (Thread32Next(snapshot, &entry) != FALSE);
++    return GetLastError() == ERROR_NO_MORE_FILES;
++}
++
++[[nodiscard]] bool instruction_pointer_inside(const CONTEXT& context, std::span<const AddressRange> ranges) noexcept {
++#if SAFETYHOOK_ARCH_X86_64
++    auto* const ip = reinterpret_cast<uint8_t*>(context.Rip);
++#elif SAFETYHOOK_ARCH_X86_32
++    auto* const ip = reinterpret_cast<uint8_t*>(context.Eip);
++#endif
++    return std::any_of(
++        ranges.begin(), ranges.end(), [ip](const AddressRange& range) { return ip >= range.begin && ip < range.end; });
++}
++
++[[nodiscard]] uintptr_t stack_pointer_of(const CONTEXT& context) noexcept {
++#if SAFETYHOOK_ARCH_X86_64
++    return context.Rsp;
++#elif SAFETYHOOK_ARCH_X86_32
++    return context.Esp;
++#endif
++}
++
++[[nodiscard]] bool any_return_site(std::span<const ReturnSites* const> lists) noexcept {
++    return std::any_of(lists.begin(), lists.end(), [](const ReturnSites* list) { return list->count != 0; });
++}
++
++// The largest committed stack the read covers before it gives up, which retains.
++constexpr size_t MAX_SCANNED_STACK_BYTES = size_t{64} << 20;
++
++// Reads the committed stack from `stack_pointer` to the top of its reservation for a return site. The addresses it
++// compares are formed only in this frame, so no caller's frame carries one and the current thread can be read from a
++// marker in its caller. A query failure, a non-readable page, or a stack past the bound reports a hit.
++[[nodiscard]] SAFETYHOOK_NOINLINE bool stack_holds_return_site(
++    uintptr_t stack_pointer, std::span<const ReturnSites* const> lists) noexcept {
++    constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
++                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
++    uintptr_t cursor = stack_pointer & ~static_cast<uintptr_t>(sizeof(uintptr_t) - 1);
++    MEMORY_BASIC_INFORMATION region{};
++    if (VirtualQuery(reinterpret_cast<const void*>(cursor), &region, sizeof(region)) != sizeof(region)) {
++        return true;
++    }
++    const void* const reservation = region.AllocationBase;
++    size_t scanned = 0;
++    for (;;) {
++        if (region.State != MEM_COMMIT || (region.Protect & readable) == 0 ||
++            (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
++            return true;
++        }
++        const auto region_end = reinterpret_cast<uintptr_t>(region.BaseAddress) + region.RegionSize;
++        for (; cursor + sizeof(uintptr_t) <= region_end; cursor += sizeof(uintptr_t)) {
++            scanned += sizeof(uintptr_t);
++            if (scanned > MAX_SCANNED_STACK_BYTES) {
++                return true;
++            }
++            const auto value = *reinterpret_cast<const uintptr_t*>(cursor);
++            for (const ReturnSites* list : lists) {
++                for (size_t i = 0; i < list->count; ++i) {
++                    if (value == reinterpret_cast<uintptr_t>(list->code + list->offsets[i])) {
++                        return true;
++                    }
++                }
++            }
++        }
++        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &region, sizeof(region)) != sizeof(region) ||
++            region.AllocationBase != reservation) {
++            return false;
++        }
++    }
++}
++} // namespace
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++std::atomic<bool> g_route_scan_hold{false};
++std::atomic<bool> g_route_scan_reached{false};
++#endif
++
++bool current_thread_returns_to(std::span<const ReturnSites* const> return_sites) noexcept {
++    volatile uintptr_t marker = 0;
++    return any_return_site(return_sites) && stack_holds_return_site(reinterpret_cast<uintptr_t>(&marker), return_sites);
++}
++
++std::expected<bool, OsError> threads_idle_outside(
++    std::span<const AddressRange> ranges, std::span<const ReturnSites* const> return_sites) {
++    TrapRuntime* const runtime = trap_runtime();
++    if (runtime == nullptr) {
++        return std::unexpected{OsError::FAILED_TO_GET_NEXT_THREAD};
++    }
++    const ProcessCoordinator coordinator;
++    if (!coordinator)
++        return false;
++    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    g_route_scan_reached.store(true);
++    while (g_route_scan_hold.load()) {
++        Sleep(1);
++    }
++#endif
++    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++    if (snapshot == INVALID_HANDLE_VALUE) {
++        return std::unexpected{OsError::FAILED_TO_GET_NEXT_THREAD};
++    }
++    ThreadHandleSet handles;
++    const bool opened = open_other_threads(snapshot, handles);
++    CloseHandle(snapshot);
++    if (!opened) {
++        return false;
++    }
++
++    // The owner rechecks continuation counts between scans. Each suspend-to-resume interval avoids allocation and
++    // locks.
++    const bool read_stacks = any_return_site(return_sites);
++    for (size_t i = 0; i < handles.count(); ++i) {
++        const HANDLE thread = handles.at(i);
++        if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
++            return false;
++        }
++        CONTEXT context{};
++        context.ContextFlags = CONTEXT_CONTROL;
++        const bool read = GetThreadContext(thread, &context) != FALSE;
++        const bool inside =
++            read && (instruction_pointer_inside(context, ranges) ||
++                        (read_stacks && stack_holds_return_site(stack_pointer_of(context), return_sites)));
++        (void)ResumeThread(thread);
++        if (!read || inside) {
++            return false;
++        }
++    }
++    if (read_stacks) {
++        // This thread can be retiring the route from inside a relocated call's callee. The read starts at this frame,
++        // above the only frame that forms return addresses.
++        volatile uintptr_t marker = 0;
++        if (stack_holds_return_site(reinterpret_cast<uintptr_t>(&marker), return_sites)) {
++            return false;
++        }
++    }
++    return true;
++}
  
  void find_me() {
  }
@@ -2921,6 +4310,7 @@ index 64eb0bb..6d5ff8f 100644
 -static std::mutex virtual_protect_mutex;
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +std::atomic<uint8_t*> g_trap_restore_failure_override{nullptr};
++void (*g_trap_protected_probe)() noexcept = nullptr;
 +std::atomic<uint8_t*> g_trap_exception_target_override{nullptr};
 +std::atomic<TrapExceptionStage> g_trap_exception_stage_override{TrapExceptionStage::NONE};
 +std::atomic<bool> g_trap_transaction_hold{false};
@@ -2937,12 +4327,23 @@ index 64eb0bb..6d5ff8f 100644
 +size_t trap_restore_trace_size_for_test() noexcept {
 +    return g_trap_restore_trace_size.load(std::memory_order_acquire);
 +}
-+
+ 
+-void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +uint8_t* trap_restore_trace_address_for_test(size_t index) noexcept {
 +    if (index >= trap_restore_trace_size_for_test() || index >= g_trap_restore_trace.size()) {
 +        return nullptr;
 +    }
 +    return g_trap_restore_trace[index].load(std::memory_order_relaxed);
++}
++
++bool dispatch_trap_fault_for_test(ThreadContext context, uint8_t* faulting_address) noexcept {
++    EXCEPTION_RECORD record{};
++    record.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
++    record.NumberParameters = 2;
++    record.ExceptionInformation[0] = 8;
++    record.ExceptionInformation[1] = reinterpret_cast<ULONG_PTR>(faulting_address);
++    EXCEPTION_POINTERS exception{&record, static_cast<CONTEXT*>(context)};
++    return TrapManager::trap_handler(&exception) == EXCEPTION_CONTINUE_EXECUTION;
 +}
 +
 +void retire_trap_runtime_for_test() noexcept {
@@ -2953,14 +4354,14 @@ index 64eb0bb..6d5ff8f 100644
 +    return reinterpret_cast<uint8_t*>(find_me);
 +}
 +#endif
- 
--void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++
 +std::expected<void, OsError> trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +    return trap_threads(from, to, len, len, {}, run_fn);
 +}
 +
 +std::expected<void, OsError> trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
-+    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn) {
++    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn,
++    TrapDirection direction, std::atomic<uint32_t>* route_entries, std::span<const AddressRange> executable_ranges) {
      MEMORY_BASIC_INFORMATION find_me_mbi{};
      MEMORY_BASIC_INFORMATION from_mbi{};
      MEMORY_BASIC_INFORMATION to_mbi{};
@@ -3009,16 +4410,14 @@ index 64eb0bb..6d5ff8f 100644
 +            new_protect = PAGE_EXECUTE_READWRITE;
 +            break;
 +        }
-     }
- 
--    auto si = system_info();
--    auto* from_page_start = align_down(from, si.page_size);
--    auto* from_page_end = align_up(from + len, si.page_size);
--    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
--    auto* vp_end = vp_start + 0x20;
++    }
++
 +    if (new_protect == PAGE_EXECUTE_READWRITE && original_size > 1) {
 +        return std::unexpected{OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE};
 +    }
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    prime_instruction_cache_flush_trace();
++#endif
 +
 +    // The transaction state and both SRW locks live in a never-destroyed cell. Shutdown takes this same lock, so a
 +    // transaction either completes under the registered stable gateway or loses the race and refuses here, before the
@@ -3027,6 +4426,9 @@ index 64eb0bb..6d5ff8f 100644
 +    if (runtime == nullptr) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
++    const ProcessCoordinator coordinator;
++    if (!coordinator)
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
 +    if (runtime->transactions_closed) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
@@ -3043,7 +4445,8 @@ index 64eb0bb..6d5ff8f 100644
 +                return std::unexpected{OsError::FAILED_TO_PROTECT};
 +            }
 +        }
-+        runtime->manager->add_trap(original, trampoline, original_size, trampoline_size, boundaries);
++        runtime->manager->add_trap(
++            original, trampoline, original_size, trampoline_size, boundaries, direction, route_entries);
 +    }
 +
 +    const auto remove_trap = [runtime, original] {
@@ -3059,7 +4462,7 @@ index 64eb0bb..6d5ff8f 100644
 +        while (g_trap_transaction_hold.load(std::memory_order_acquire)) {
 +            SwitchToThread();
 +        }
-+    }
+     }
 +    const auto protect = [](void* address, size_t size, DWORD protection, DWORD* previous) {
 +        g_trap_protect_calls.fetch_add(1, std::memory_order_relaxed);
 +        return VirtualProtect(address, size, protection, previous);
@@ -3069,7 +4472,12 @@ index 64eb0bb..6d5ff8f 100644
 +        return VirtualProtect(address, size, protection, previous);
 +    };
 +#endif
-+
+ 
+-    auto si = system_info();
+-    auto* from_page_start = align_down(from, si.page_size);
+-    auto* from_page_end = align_up(from + len, si.page_size);
+-    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
+-    auto* vp_end = vp_start + 0x20;
 +    // VirtualProtect operates on complete pages. The normalized union enters each shared page once.
 +    uint8_t* span0_begin = from_page_start;
 +    uint8_t* span0_end = from_page_end;
@@ -3095,6 +4503,58 @@ index 64eb0bb..6d5ff8f 100644
  
 -    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
 -        new_protect = PAGE_EXECUTE_READWRITE;
++    // Exclude the supplied ranges and every registered routed chain from the normalized segments, so a transaction on
++    // a page that a chain shares keeps that chain executable. A target on one of those pages cannot use this protocol.
++    const auto exclude = [&](const AddressRange& range) -> std::expected<void, OsError> {
++        if (range.begin == nullptr)
++            return {};
++        auto* const begin = align_down(range.begin, si.page_size);
++        auto* const end = align_up(range.end, si.page_size);
++        if (address_less(from_page_start, end) && address_less(begin, from_page_end))
++            return std::unexpected{OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE};
++        std::array<ProtectSegment, MAX_PROTECT_SEGMENTS> filtered{};
++        size_t filtered_count = 0;
++        const auto append = [&](uint8_t* first, uint8_t* last) {
++            if (!address_less(first, last))
++                return true;
++            if (filtered_count == filtered.size())
++                return false;
++            filtered[filtered_count++] = ProtectSegment{first, static_cast<size_t>(last - first), 0};
++            return true;
++        };
++        for (size_t i = 0; i < segment_count; ++i) {
++            auto* const first = segments[i].address;
++            auto* const last = first + segments[i].size;
++            const bool disjoint = !address_less(first, end) || !address_less(begin, last);
++            const bool fits = disjoint ? append(first, last)
++                                       : append(first, address_less(begin, last) ? begin : last) &&
++                                             append(address_less(first, end) ? end : first, last);
++            if (!fits)
++                return std::unexpected{OsError::FAILED_TO_PROTECT};
++        }
++        segments = filtered;
++        segment_count = filtered_count;
++        return {};
++    };
++    std::expected<void, OsError> excluded{};
++    for (const auto& range : executable_ranges) {
++        if (excluded)
++            excluded = exclude(range);
++    }
++    for (const auto& record : coordinator_state()->routes) {
++        if (excluded && record.order != 0 && record.entries != nullptr) {
++            excluded = exclude(record.trampoline);
++            if (excluded)
++                excluded = exclude(record.gateway);
++        }
++    }
++    if (!excluded) {
++        remove_trap();
++        return std::unexpected{excluded.error()};
+     }
+ 
+-    if (!TrapManager::is_destructed) {
+-        std::scoped_lock lock{TrapManager::mutex};
 +    const auto restore = [&protect](ProtectSegment& segment) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        const size_t trace_index = g_trap_restore_trace_size.load(std::memory_order_relaxed);
@@ -3135,10 +4595,13 @@ index 64eb0bb..6d5ff8f 100644
 +        }
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-     }
- 
--    if (!TrapManager::is_destructed) {
--        std::scoped_lock lock{TrapManager::mutex};
++    }
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    if (g_trap_protected_probe != nullptr)
++        g_trap_protected_probe();
++#endif
++
 +    std::exception_ptr run_error;
 +    try {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -3225,7 +4688,7 @@ index 6aa11d5..bf5569a 100644
  }
  
 diff --git a/test/inline_hook.cpp b/test/inline_hook.cpp
-index 3da7a85..d13ab7b 100644
+index 3da7a85..633e14c 100644
 --- a/test/inline_hook.cpp
 +++ b/test/inline_hook.cpp
 @@ -1,5 +1,7 @@
@@ -3236,7 +4699,7 @@ index 3da7a85..d13ab7b 100644
  #include <string>
  #include <string_view>
  #include <thread>
-@@ -8,6 +10,10 @@
+@@ -8,9 +10,95 @@
  #include <safetyhook.hpp>
  #include <xbyak/xbyak.h>
  
@@ -3247,7 +4710,92 @@ index 3da7a85..d13ab7b 100644
  using namespace std::literals;
  using namespace Xbyak::util;
  
-@@ -768,3 +774,61 @@ TEST(InlineHook, FunctionHookCanBeEnableAndDisabled) {
++TEST(InlineHook, FailedFallbackPreservesFirstContentRejection) {
++    Xbyak::CodeGenerator code{};
++    constexpr uint8_t bytes[] = {0xEB, 0x03, 0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3};
++    code.db(bytes, sizeof(bytes));
++    const auto created = safetyhook::InlineHook::create(
++        const_cast<uint8_t*>(code.getCode()), +[] { return 0; }, safetyhook::InlineHook::StartDisabled);
++    ASSERT_FALSE(created.has_value());
++    EXPECT_EQ(created.error().type, safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE);
++}
++
++TEST(InlineHook, MidTerminalReturnReleasesContinuationOwnership) {
++    Xbyak::CodeGenerator code{};
++    code.push(37);
++    code.pop(rax);
++    code.ret();
++    code.nop(16);
++    auto created = safetyhook::MidHook::create(const_cast<uint8_t*>(code.getCode()), +[](SafetyHookContext&) {});
++    ASSERT_TRUE(created.has_value());
++    auto hook = std::move(*created);
++    const auto target = code.getCode<int (*)()>();
++    EXPECT_EQ(target(), 37);
++    EXPECT_EQ(hook.route_entries(), 0u);
++    hook.reset();
++    EXPECT_FALSE(hook.route_retained());
++}
++
++#if SAFETYHOOK_ARCH_X86_64
++TEST(InlineHook, RoutedMidCreateInitializesContinuationExits) {
++    for (const bool start_disabled : {false, true}) {
++        SCOPED_TRACE(start_disabled);
++        Xbyak::CodeGenerator code{};
++        code.push(37);
++        code.pop(rax);
++        code.ret();
++        code.nop();
++        code.xor_(eax, eax);
++        code.ret();
++        code.nop(16);
++
++        uint8_t* trampoline = nullptr;
++        Xbyak::CodeGenerator destination{};
++        destination.mov(rax, reinterpret_cast<uintptr_t>(&trampoline));
++        destination.jmp(ptr[rax]);
++        const auto flags = static_cast<safetyhook::InlineHook::Flags>(
++            safetyhook::InlineHook::RoutedExternal | safetyhook::InlineHook::RoutedMid |
++            (start_disabled ? safetyhook::InlineHook::StartDisabled : 0));
++        auto created = safetyhook::InlineHook::create(
++            const_cast<uint8_t*>(code.getCode()), const_cast<uint8_t*>(destination.getCode()), flags);
++        ASSERT_TRUE(created.has_value());
++        auto hook = std::move(*created);
++        trampoline = hook.trampoline().data();
++        ASSERT_TRUE(hook.enable().has_value());
++        EXPECT_EQ(code.getCode<int (*)()>()(), 37);
++        EXPECT_EQ(hook.route_entries(), 0u);
++        hook.reset();
++        EXPECT_FALSE(hook.route_retained());
++    }
++}
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++TEST(InlineHook, MidFarFallbackRejectsRelativeUnconditionalBranches) {
++    for (const bool near_branch : {false, true}) {
++        SCOPED_TRACE(near_branch);
++        Xbyak::CodeGenerator code{};
++        Xbyak::Label destination;
++        code.jmp(destination, near_branch ? Xbyak::CodeGenerator::T_NEAR : Xbyak::CodeGenerator::T_SHORT);
++        code.nop(16);
++        code.L(destination);
++        code.ret();
++        const std::string original(reinterpret_cast<const char*>(code.getCode()), code.getSize());
++        safetyhook::force_ff_hook_for_test(true);
++        const auto created = safetyhook::MidHook::create(
++            const_cast<uint8_t*>(code.getCode()), +[](SafetyHookContext&) {}, safetyhook::MidHook::StartDisabled);
++        ASSERT_FALSE(created.has_value());
++        EXPECT_EQ(created.error().type, safetyhook::MidHook::Error::BAD_INLINE_HOOK);
++        EXPECT_EQ(created.error().inline_hook_error.type, safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE);
++        EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(code.getCode()), code.getSize()), original);
++    }
++}
++#endif
++#endif
++
+ TEST(InlineHook, FunctionHookedMultipleTimes) {
+     struct Target {
+         SAFETYHOOK_NOINLINE static std::string fn(std::string name) { return "hello " + name; }
+@@ -768,3 +856,465 @@ TEST(InlineHook, FunctionHookCanBeEnableAndDisabled) {
      EXPECT_EQ(fn(2), 4);
      EXPECT_EQ(fn(3), 6);
  }
@@ -3307,5 +4855,409 @@ index 3da7a85..d13ab7b 100644
 +    ASSERT_NE(VirtualFree(target, 0, MEM_RELEASE), FALSE);
 +    (void)target_guard.release();
 +    EXPECT_FALSE(hook.enable().has_value());
++}
++#endif
++
++#if SAFETYHOOK_OS_WINDOWS && SAFETYHOOK_ARCH_X86_64
++namespace {
++struct RoutedTarget {
++    SAFETYHOOK_NOINLINE static int add(int a, int b) {
++        volatile int sum = a + b;
++        return sum;
++    }
++};
++
++int routed_add_detour(int a, int b) {
++    return a + b + 100;
++}
++
++using RoutedAddFn = int (*)(int, int);
++
++// A private arena: after reclamation its one block must be wholly free, which a shared arena cannot show.
++[[nodiscard]] std::expected<SafetyHookInline, SafetyHookInline::Error> create_routed_add_hook() {
++    return SafetyHookInline::create(safetyhook::Allocator::create(), reinterpret_cast<void*>(&RoutedTarget::add),
++        reinterpret_cast<void*>(&routed_add_detour),
++        static_cast<SafetyHookInline::Flags>(SafetyHookInline::StartDisabled | SafetyHookInline::RoutedExternal));
++}
++
++[[nodiscard]] bool region_is_free(const void* address) {
++    MEMORY_BASIC_INFORMATION info{};
++    return VirtualQuery(address, &info, sizeof(info)) == sizeof(info) && info.State == MEM_FREE;
++}
++
++[[nodiscard]] safetyhook::AddressRange image_range() {
++    auto* const base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
++    const auto* const dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
++    const auto* const nt_headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos_header->e_lfanew);
++    return {base, base + nt_headers->OptionalHeader.SizeOfImage};
++}
++} // namespace
++
++TEST(InlineHook, ThreadsIdleOutsideSeesAThreadParkedInsideARange) {
++    // A spin loop in a private executable page: it announces itself, then waits for its release byte.
++    static std::atomic<uint8_t> flags[2]{};
++    flags[0].store(0, std::memory_order_relaxed);
++    flags[1].store(0, std::memory_order_relaxed);
++    Xbyak::CodeGenerator cg{};
++    Xbyak::Label spin{};
++    cg.mov(rax, reinterpret_cast<uintptr_t>(&flags[0]));
++    cg.mov(byte[rax + 1], 1);
++    cg.L(spin);
++    cg.cmp(byte[rax], 0);
++    cg.je(spin);
++    cg.ret();
++    auto* const code = const_cast<uint8_t*>(cg.getCode());
++    const safetyhook::AddressRange parked{code, code + cg.getSize()};
++
++    std::thread helper{cg.getCode<void (*)()>()};
++    while (flags[1].load(std::memory_order_acquire) == 0) {
++        std::this_thread::yield();
++    }
++
++    const auto inside = safetyhook::threads_idle_outside(std::span<const safetyhook::AddressRange>{&parked, 1}, {});
++    ASSERT_TRUE(inside.has_value());
++    EXPECT_FALSE(*inside);
++
++    // The current thread is skipped: this image holds its own frames, and the helper sits outside it.
++    const safetyhook::AddressRange image = image_range();
++    const auto outside = safetyhook::threads_idle_outside(std::span<const safetyhook::AddressRange>{&image, 1}, {});
++    ASSERT_TRUE(outside.has_value());
++    EXPECT_TRUE(*outside);
++
++    flags[0].store(1, std::memory_order_release);
++    helper.join();
++}
++
++TEST(InlineHook, RoutedHookReclaimsItsChainWhenNoThreadIsInsideIt) {
++    RoutedAddFn volatile add = &RoutedTarget::add;
++    auto created = create_routed_add_hook();
++    ASSERT_TRUE(created.has_value());
++    SafetyHookInline hook = std::move(*created);
++    const uint8_t* const trampoline = hook.trampoline().data();
++    ASSERT_TRUE(hook.enable().has_value());
++    EXPECT_EQ(add(1, 2), 103);
++
++    hook.reset();
++
++    EXPECT_FALSE(hook.route_retained());
++    EXPECT_STREQ(hook.route_retention_reason(), "no route retention");
++    EXPECT_EQ(add(1, 2), 3);
++    EXPECT_TRUE(region_is_free(trampoline));
++}
++
++// A target whose first instruction is a call. The callee announces itself in flags[1], then waits for flags[0].
++[[nodiscard]] uint8_t* emit_call_first_target(Xbyak::CodeGenerator& cg, std::atomic<uint8_t>* flags) {
++    Xbyak::Label callee{};
++    Xbyak::Label spin{};
++    cg.call(callee);
++    cg.ret();
++    cg.L(callee);
++    cg.mov(rax, reinterpret_cast<uintptr_t>(flags));
++    cg.mov(byte[rax + 1], 1);
++    cg.L(spin);
++    cg.cmp(byte[rax], 0);
++    cg.je(spin);
++    cg.mov(eax, 7);
++    cg.ret();
++    return const_cast<uint8_t*>(cg.getCode());
++}
++
++TEST(InlineHook, RoutedHookWithACallInItsWindowReclaimsOnceNoThreadIsInsideIt) {
++    // The callee returns at once, so after the call completes no thread is inside the chain or returning into it.
++    static std::atomic<uint8_t> flags[2]{};
++    flags[0].store(1, std::memory_order_relaxed);
++    flags[1].store(0, std::memory_order_relaxed);
++    Xbyak::CodeGenerator cg{};
++    auto* const target = emit_call_first_target(cg, flags);
++
++    auto created = SafetyHookMid::create(target, [](SafetyHookContext&) {});
++    ASSERT_TRUE(created.has_value());
++    SafetyHookMid hook = std::move(*created);
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    const uint8_t* const gateway = hook.route_region_for_test(0);
++    ASSERT_NE(gateway, nullptr);
++#endif
++    auto volatile fn = reinterpret_cast<int (*)()>(target);
++    EXPECT_EQ(fn(), 7);
++
++    hook.reset();
++
++    EXPECT_FALSE(hook.route_retained());
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    EXPECT_TRUE(region_is_free(gateway));
++#endif
++    EXPECT_EQ(fn(), 7);
++}
++
++TEST(InlineHook, RoutedHookWithACallInItsWindowRetainsWhileAThreadIsInsideTheCallee) {
++    // The callee waits for its release byte, so the thread's return address sits inside the trampoline while its
++    // instruction pointer is outside every range the idle proof scans. Only the stack read sees it, and the chain
++    // must stay mapped until that return completes.
++    static std::atomic<uint8_t> flags[2]{};
++    flags[0].store(0, std::memory_order_relaxed);
++    flags[1].store(0, std::memory_order_relaxed);
++    Xbyak::CodeGenerator cg{};
++    auto* const target = emit_call_first_target(cg, flags);
++
++    auto created = SafetyHookMid::create(target, [](SafetyHookContext&) {});
++    ASSERT_TRUE(created.has_value());
++    SafetyHookMid hook = std::move(*created);
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    const uint8_t* const gateway = hook.route_region_for_test(0);
++    ASSERT_NE(gateway, nullptr);
++#endif
++
++    std::atomic<int> observed{-1};
++    std::thread helper{[&observed, target] {
++        auto volatile fn = reinterpret_cast<int (*)()>(target);
++        observed.store(fn(), std::memory_order_release);
++    }};
++    while (flags[1].load(std::memory_order_acquire) == 0) {
++        std::this_thread::yield();
++    }
++
++    hook.reset();
++    const bool retained = hook.route_retained();
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    const bool still_mapped = !region_is_free(gateway);
++#endif
++
++    flags[0].store(1, std::memory_order_release);
++    helper.join();
++
++    EXPECT_TRUE(retained);
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    EXPECT_TRUE(still_mapped);
++#endif
++    EXPECT_EQ(observed.load(std::memory_order_acquire), 7);
++}
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++TEST(InlineHook, ClosedNonMidBypassHasAStackOnlyWitness) {
++    static std::atomic<uint8_t> flags[2]{};
++    flags[0].store(0);
++    flags[1].store(0);
++    Xbyak::CodeGenerator cg{};
++    auto* const target = emit_call_first_target(cg, flags);
++    const auto route_flags =
++        static_cast<SafetyHookInline::Flags>(SafetyHookInline::StartDisabled | SafetyHookInline::RoutedExternal);
++    auto created = SafetyHookInline::create(target, reinterpret_cast<void*>(&routed_add_detour), route_flags);
++    ASSERT_TRUE(created.has_value());
++    SafetyHookInline hook = std::move(*created);
++    ASSERT_TRUE(hook.enable().has_value());
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
++    int observed = 0;
++    std::thread helper{[target, &observed] {
++        auto volatile fn = reinterpret_cast<int (*)()>(target);
++        observed = fn();
++    }};
++    const auto deadline = std::chrono::steady_clock::now() + 5s;
++    while (!safetyhook::route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::yield();
++    }
++    const bool parked = safetyhook::route_park_reached_for_test();
++    const bool disabled = hook.disable().has_value();
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
++    while (flags[1].load() == 0 && std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::yield();
++    }
++    const bool entered = flags[1].load() != 0;
++    const safetyhook::AddressRange range{hook.trampoline().data(), hook.trampoline().data() + hook.trampoline().size()};
++    safetyhook::ReturnSites sites{};
++    sites.code = hook.trampoline().data();
++    sites.offsets[0] = 5;
++    sites.count = 1;
++    const safetyhook::ReturnSites* const list = &sites;
++    // The scan receives no counter. Its instruction-pointer-only control must report idle.
++    const auto without_stack = safetyhook::threads_idle_outside({&range, 1}, {});
++    const auto with_stack = safetyhook::threads_idle_outside({&range, 1}, {&list, 1});
++    flags[0].store(1);
++    helper.join();
++    EXPECT_TRUE(parked);
++    EXPECT_TRUE(disabled);
++    EXPECT_TRUE(entered);
++    ASSERT_TRUE(without_stack.has_value());
++    EXPECT_TRUE(*without_stack);
++    ASSERT_TRUE(with_stack.has_value());
++    EXPECT_FALSE(*with_stack);
++    EXPECT_EQ(observed, 7);
++}
++
++TEST(InlineHook, RoutedHookRetainsItsChainWhileAThreadIsParkedAtEntry) {
++    auto created = create_routed_add_hook();
++    ASSERT_TRUE(created.has_value());
++    SafetyHookInline hook = std::move(*created);
++    const uint8_t* const trampoline = hook.trampoline().data();
++    ASSERT_TRUE(hook.enable().has_value());
++
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
++    std::atomic<int> observed{-1};
++    std::thread helper{[&observed] {
++        RoutedAddFn volatile add = &RoutedTarget::add;
++        observed.store(add(2, 3), std::memory_order_release);
++    }};
++    const auto deadline = std::chrono::steady_clock::now() + 5s;
++    while (!safetyhook::route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::yield();
++    }
++    const bool parked = safetyhook::route_park_reached_for_test();
++
++    // The parked thread sits before the entry increment, so only the instruction-pointer scan can see it.
++    hook.reset();
++    const bool retained = hook.route_retained();
++    const bool still_mapped = !region_is_free(trampoline);
++
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
++    helper.join();
++
++    ASSERT_TRUE(parked);
++    EXPECT_TRUE(retained);
++    EXPECT_TRUE(still_mapped);
++    // The route was closed before the park released, so the thread bypassed the detour.
++    EXPECT_EQ(observed.load(std::memory_order_acquire), 5);
++}
++#endif
++#endif
++
++#if SAFETYHOOK_OS_WINDOWS && defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++TEST(InlineHook, ProcessCoordinatorRetainsUnroutedAllocationOwner) {
++    auto created =
++        SafetyHookInline::create(safetyhook::Allocator::create(), reinterpret_cast<void*>(&RoutedTarget::add),
++            reinterpret_cast<void*>(&routed_add_detour), SafetyHookInline::StartDisabled);
++    ASSERT_TRUE(created.has_value());
++    SafetyHookInline hook = std::move(*created);
++    const auto* const trampoline = hook.trampoline().data();
++    safetyhook::g_coordinator_refusal_for_test = 1;
++    hook.reset();
++    safetyhook::g_coordinator_refusal_for_test = 0;
++    EXPECT_TRUE(hook.route_retained());
++    EXPECT_FALSE(region_is_free(trampoline));
++}
++
++TEST(InlineHook, ProcessCoordinatorRejectsIncompatibleRegistration) {
++    const auto before = safetyhook::process_coordinator_snapshot_for_test();
++    safetyhook::g_coordinator_refusal_for_test = 2;
++    auto created = create_routed_add_hook();
++    safetyhook::g_coordinator_refusal_for_test = 0;
++    ASSERT_FALSE(created.has_value());
++    EXPECT_EQ(created.error().type, safetyhook::InlineHook::Error::COORDINATION_UNAVAILABLE);
++    const auto after = safetyhook::process_coordinator_snapshot_for_test();
++    EXPECT_EQ(after.identity, before.identity);
++    EXPECT_EQ(after.live, before.live);
++    EXPECT_EQ(after.retained, before.retained);
++}
++
++TEST(InlineHook, ProcessCoordinatorKeepsTargetOrderAcrossEqualByteWitnesses) {
++    auto first = create_routed_add_hook();
++    ASSERT_TRUE(first.has_value());
++    auto second = create_routed_add_hook();
++    ASSERT_TRUE(second.has_value());
++    const auto refused = first->enable();
++    ASSERT_FALSE(refused.has_value());
++    EXPECT_EQ(refused.error().type, safetyhook::InlineHook::Error::LAYER_CONFLICT);
++    second->reset();
++    EXPECT_TRUE(first->enable().has_value());
++    first->reset();
++    EXPECT_FALSE(first->route_retained());
++}
++
++TEST(InlineHook, MidHookKeepsRetentionReasonAcrossMoveAssignment) {
++    static std::atomic<uint8_t> flags[2]{};
++    flags[0].store(1, std::memory_order_relaxed);
++    Xbyak::CodeGenerator cg{};
++    auto* const target = emit_call_first_target(cg, flags);
++    auto created = SafetyHookMid::create(target, [](SafetyHookContext&) {}, SafetyHookMid::StartDisabled);
++    ASSERT_TRUE(created.has_value());
++    SafetyHookMid hook = std::move(*created);
++    safetyhook::g_coordinator_refusal_for_test = 1;
++    hook = SafetyHookMid{};
++    safetyhook::g_coordinator_refusal_for_test = 0;
++    EXPECT_TRUE(hook.route_retained());
++    EXPECT_STREQ(hook.route_retention_reason(), "process coordinator unavailable or timed out");
++}
++TEST(InlineHook, RoutedTransactionsExcludeSharedGeneratedPages) {
++    auto* const pages = static_cast<uint8_t*>(
++        VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
++    ASSERT_NE(pages, nullptr);
++    const safetyhook::AddressRange generated[] = {{pages + 4096, pages + 4101}, {pages + 4128, pages + 4160}};
++    bool target_trapped = false;
++    bool chain_executable = false;
++    const auto result = safetyhook::trap_threads(pages, pages + 4096, 5, 5, {}, [&] {
++        MEMORY_BASIC_INFORMATION target{}, chain{};
++        target_trapped = VirtualQuery(pages, &target, sizeof(target)) == sizeof(target) &&
++                         target.Protect == PAGE_READWRITE;
++        chain_executable = VirtualQuery(pages + 4096, &chain, sizeof(chain)) == sizeof(chain) &&
++                           chain.Protect == PAGE_EXECUTE_READWRITE;
++    }, safetyhook::TrapDirection::TRAMPOLINE_TO_ORIGINAL, nullptr, generated);
++    const safetyhook::AddressRange alias{pages + 8, pages + 16};
++    bool alias_mutated = false;
++    const auto refused = safetyhook::trap_threads(pages, pages + 4096, 5, 5, {}, [&] { alias_mutated = true; },
++        safetyhook::TrapDirection::TRAMPOLINE_TO_ORIGINAL, nullptr, {&alias, 1});
++    VirtualFree(pages, 0, MEM_RELEASE);
++    EXPECT_TRUE(result.has_value());
++    EXPECT_TRUE(target_trapped);
++    EXPECT_TRUE(chain_executable);
++    ASSERT_FALSE(refused.has_value());
++    EXPECT_EQ(refused.error(), safetyhook::OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE);
++    EXPECT_FALSE(alias_mutated);
++}
++TEST(InlineHook, TransactionsKeepSharedRoutedChainsExecutable) {
++    auto* const page =
++        static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
++    ASSERT_NE(page, nullptr);
++    constexpr uint8_t body[] = {0x48, 0x83, 0xEC, 0x28, 0x31, 0xC0, 0x48, 0x83, 0xC4, 0x28, 0xC3};
++    std::copy_n(body, sizeof(body), page);
++    std::copy_n(body, sizeof(body), page + 64);
++    ASSERT_TRUE(FlushInstructionCache(GetCurrentProcess(), page, 4096));
++    // One arena places the routed chain on the page of the unrouted trampoline.
++    const auto allocator = safetyhook::Allocator::create();
++    auto routed = SafetyHookInline::create(allocator, page + 64, reinterpret_cast<void*>(&routed_add_detour),
++        static_cast<SafetyHookInline::Flags>(SafetyHookInline::StartDisabled | SafetyHookInline::RoutedExternal));
++    ASSERT_TRUE(routed.has_value());
++    auto plain = SafetyHookInline::create(allocator, page, reinterpret_cast<void*>(&routed_add_detour));
++    ASSERT_TRUE(plain.has_value());
++    static uint8_t* chain[2]{};
++    static MEMORY_BASIC_INFORMATION observed[2]{};
++    chain[0] = routed->route_region_for_test(0);
++    chain[1] = routed->trampoline().data();
++    const auto page_of = [](const void* address) { return reinterpret_cast<uintptr_t>(address) & ~uintptr_t{0xFFF}; };
++    ASSERT_EQ(page_of(plain->trampoline().data()), page_of(chain[0]));
++    safetyhook::g_trap_protected_probe = +[]() noexcept {
++        for (size_t i = 0; i < 2; ++i)
++            VirtualQuery(chain[i], &observed[i], sizeof(observed[i]));
++    };
++    const bool disabled = plain->disable().has_value();
++    safetyhook::g_trap_protected_probe = nullptr;
++    plain->reset();
++    routed->reset();
++    VirtualFree(page, 0, MEM_RELEASE);
++    EXPECT_TRUE(disabled);
++    constexpr DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
++    for (const auto& region : observed)
++        EXPECT_NE(region.Protect & executable, 0u);
++}
++TEST(InlineHook, ClosedNonMidBypassReclaimsAfterReturn) {
++    auto created = create_routed_add_hook();
++    ASSERT_TRUE(created.has_value());
++    ASSERT_TRUE(created->enable().has_value());
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
++    int observed = 0;
++    std::thread caller{[&observed] {
++        RoutedAddFn volatile target = &RoutedTarget::add;
++        observed = target(2, 3);
++    }};
++    const auto deadline = std::chrono::steady_clock::now() + 5s;
++    while (!safetyhook::route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline)
++        std::this_thread::yield();
++    const bool parked = safetyhook::route_park_reached_for_test();
++    const bool disabled = created->disable().has_value();
++    safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
++    caller.join();
++    EXPECT_TRUE(parked);
++    EXPECT_TRUE(disabled);
++    EXPECT_EQ(observed, 5);
++    EXPECT_EQ(created->route_entries(), 0);
++    created->reset();
++    EXPECT_FALSE(created->route_retained());
 +}
 +#endif

@@ -9,10 +9,11 @@
  *   L4 solve_fingerprint:     recover one uniform shift across many fields.
  *   L5 HealScheduler:         drive the heals on a frame cadence, latch per group, warn once on real drift.
  *
- * Every L1-L4 entry point is noexcept and fails closed. The hot self-heal path allocates nothing (it reuses one stack
- * PointeeType); only the explicitly tooling-only block scanner grows a vector. All reads go through the same
- * SEH-guarded, module-bound-checked prelude the forward walker uses, so an unmapped page or forged COL is a clean
- * non-match, never a fault. Matching is byte-exact on the MSVC most-derived mangled name (no UnDecorateSymbolName).
+ * Every L1-L4 entry point is noexcept and fails closed. The hot self-heal path allocates nothing, because it reuses one
+ * stack PointeeType. Only the explicitly tooling-only block scanner grows a vector. All reads go through the
+ * fault-guarded, module-bound-checked prelude of the forward walker. An unmapped page or forged COL is therefore a
+ * clean non-match, never a fault. Matching is byte-exact on the MSVC most-derived mangled name
+ * (no UnDecorateSymbolName).
  *
  * The public surface uses Address and reports failures through the ErrorCategory::Rtti block. Address <-> integer
  * punning is confined to the raw-slot arithmetic below.

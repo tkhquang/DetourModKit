@@ -12,7 +12,7 @@ Lifecycle takes a `mutex`. Reads go through an `atomic<shared_ptr<detail::InputP
 
 - When first-use allocation fails, `instance()` publishes an inert singleton: a null pimpl whose every operation fails closed. The function-local static stays, so `~Input` still runs the bare- `FreeLibrary` teardown.
 - Each started poller precommits a self-keepalive before publication and clears it only after a clean join and rundown. Loader-lock, failed-join, and failed-reaper paths therefore retain the complete owner without an allocation.
-- A `shutdown()` reached from a binding callback requests stop, publishes not-running, and hands its external reference to the off-thread reaper (`src/internal/lifecycle_reaper.hpp`). The reaper invokes shutdown while the owner remains alive, then releases it only after the join, the detour uninstall, and the final `on_state_change(false)` complete. The method documents that asynchronous contract.
+- A `shutdown()` reached from a binding callback on any thread requests stop, publishes not-running, and hands its external reference to the off-thread reaper (`src/internal/lifecycle_reaper.hpp`). The reaper invokes shutdown while the owner remains alive, then releases it only after the join, the detour uninstall, and the final `on_state_change(false)` complete. The method documents that asynchronous contract.
 
 - See `InputBinding` for the unlocked retirement contract. The seven `InputLifecycleProof.*DestroysCallablesOutside*` modes verify both lock domains.
 - The process-default Scope follows `[B-47]`. `Lifecycle.InputLoaderDetachRetainsCompleteOwner` verifies its loader-detach lifetime.
@@ -27,6 +27,7 @@ State lives in an atomic `m_active_states[]` array.
 - The poll thread re-reserves its deferred-callback staging vector to the live binding count each cycle and stages under one catch. Runtime binding growth past the startup reserve therefore cannot reallocate-then-throw out of the `jthread` body.
 - The cycle is a transaction. Each staged edge carries its own `m_active_states` transition, and a non-throwing store loop commits the whole batch after the pass. The drained wheel backlog rolls back, and the accumulated consume masks clear. A failed pass therefore owes no callback whose state it already consumed. The next cycle re-derives every such edge from the unchanged physical input, with no physical release and repress needed.
 - The derived name/modifier caches rebuild build-then-swap. A rebuild driven by a flag-only change (`set_consume`) retains those caches on allocation failure. It does not clear an index that still describes the binding set. It still disarms gamepad consume suppression, because the flag change can be a retirement and a retained rule list outlives its binding.
+- A failed rebuild after a reshape clears the name index, and name lookups scan the binding set until a rebuild succeeds. `InputPollerTest.ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe` verifies it.
 
 The `input::BindingGuard` owns a per-binding teardown gate (`src/internal/input_binding_gate.hpp`): a `HoldGate` for a hold combo, a `PressGate` for a press combo.
 
@@ -55,6 +56,8 @@ File-scope atomics are shared between the poll thread and the game's threads (XI
 - The same witness runs on every maintenance call rather than a short-circuit on the published flag, so a post-publication loss is detected rather than hidden.
 - Degradation is symmetric and fail-open. Either member can be the missing one, both detours go pass-through, and both forwarding chains stay published for already-admitted callers. Recovery re-arms the missing member through that member's OWN existing hook object. It never layers a new hook over a prologue that the pair already patched.
 - Teardown retires and drains, classifies both raw hooks before either restore, and frees only after both witness `Original`. Otherwise it moves the pair and keepalives into the reserved cell, so a newer layer and its original chain stay callable.
+- Each raw-hook reset reads the backend retention verdict. Each retained chain adds one Input leak event and one warning after the interception lock releases. A retained chain keeps the install-time code-provider references for the process lifetime. Clean reset releases those references and adds no event or warning. Install rollback follows the same rule, while pair retention remains one separate event. `Lifecycle.XInput*Reports*` and `Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention` verify attribution and lock release.
+- Routed transactions preserve executable generated pages under the [hook contract](hooking.md#concurrency-model). Non-mid bypass ownership spans the complete provider call, including a dormant fiber. Each raw-hook reset waits up to one second for bypass calls that the restore released. `Lifecycle.RoutedBypassSurvivesDormantFiber` verifies provider retention, `Lifecycle.RoutedBypassCleanRoutesReclaim` verifies clean reset, and `Lifecycle.RoutedBypassDrainsBeforeReclaim` verifies the bypass wait.
 - The wheel hook removes itself with `UnhookWindowsHookEx`. The poll thread installs it, so the OS reclaims the thread-owned hook when that thread exits. A later control-thread removal that reports an invalid handle is a successful removal, not a live-thread cleanup failure.
 - Teardown is skipped under loader lock.
 
@@ -123,7 +126,7 @@ The TTL only self-heals a poll thread that stopped. A loop still in its cycle re
 
 ### [B-27]
 
-Suppression is enforced off the engine entry's `consume` flag. The poll loop's `gamepad_owned` / `wheel_owned` pass and the detour-side rules read that flag, NOT the guard's callback-enable flag. A released `BindingGuard` therefore gates the callback but leaves the game deprived of the chord for the rest of the process. A consume binding's guard teardown must therefore also clear the `consume` bit and republish (through `recompute_modifier_caches_locked`). Suppression then lasts exactly as long as the guard is held.
+Suppression is enforced off the engine entry's `consume` flag. The poll loop's `gamepad_owned` / `wheel_owned` pass and the detour-side rules read that flag, NOT the guard's callback-enable flag. A released `BindingGuard` therefore gates the callback but leaves the game deprived of the chord for the rest of the process. Every guard teardown must therefore also clear the `consume` bit and republish (through `recompute_modifier_caches_locked`), whether the registration or a later `set_consume` set it. Suppression then lasts exactly as long as the guard is held. `InputTest.ReleaseClearsConsumeEnabledAfterRegistration` verifies the late-set case.
 
 Clear it by binding IDENTITY, not by name: `set_consume_by_owner` keyed on the per-registration `consume_owner`, NOT `set_consume(name, false)`. An empty name is legal but is skipped when the poller's name index is built. A name-keyed clear therefore silently misses an empty-name consume binding and leaves suppression armed for the process lifetime.
 
@@ -141,7 +144,7 @@ A `BindingGuard::release()` that only clears a flag lets an in-flight `on_press`
 
 The unlocked callback keeps the wait chain off the thread that runs user code. Two bindings whose teardown callbacks release each other therefore cannot form an ABBA cycle. Do not collapse this back to a gate lock held across the callback, with a `recursive_mutex` or otherwise.
 
-A release reached at delivery depth > 0 must not wait at all. That case is a one-shot binding that destroys its own guard, or one binding's callback that releases another's. It marks the gate released and defers any balancing edge to the in-flight delivery's unwind. When the gate it releases has no delivery in flight, it runs that edge inline.
+A release reached at delivery depth > 0 must not wait at all. That case is a one-shot binding that destroys its own guard, or one binding's callback that releases another's. It marks the gate released and defers any balancing edge to the in-flight delivery's unwind. When the gate it releases has no delivery in flight, it runs that edge inline. `Input::shutdown()` at delivery depth > 0 never joins either (`[B-90]`, `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread`).
 
 The promise belongs to each CALLER, not to the gate. A teardown that finds the gate already released still waits out the claimant's consumer-code span before it returns. Its own caller is equally about to destroy captured state. Retirement's span includes callable disposal, while a release's span ends after its balancing edge. Claim that span under the mutex at the same moment the gate is marked released. A claimant drops the mutex to wait for deliveries to drain. An in-flight count alone therefore leaves a window in which a second teardown reads a quiesced gate and returns early. The same claim makes the unload drain's retirement and a retained guard's release exclude each other in both directions.
 
@@ -159,6 +162,8 @@ The two off-table forms reconstruct through different readers. A source-tagged t
 
 MinGW lowers `thread_local` to `__emutls_get_address`, which allocates on each thread's first touch and serializes on a process-wide mutex to do it. A detour entered from a game thread runs both inside a hooked function. Worse than either, libgcc's `emutls.c` calls `abort()` when that allocation fails. SIGABRT is not interceptable by a catch frame, so an enclosing `noexcept` boundary contains nothing. First-touch OOM is host death, not a reportable error. Reserve a Win32 TLS index at install time and read it from the callback instead.
 
+Each linked copy reserves its indices again, so an index that no owner returns exhausts the process TLS set across reloads. The last owner of each DMK index therefore returns it (`Lifecycle.StagedGenerationResourcesStayWithinBudget` and the `Lifecycle.*TlsIndex*` proofs).
+
 That primitive is not infallible either. An index past the TEB's inline slots is backed by a lazily heap-allocated expansion array, so a store can fail under memory pressure. Treat a failed store as unknown state rather than absence, and resolve that unknown where the record is read:
 
 - When the record only decides whether storage stays alive, pin it. `mid_hook_adapter.hpp` counts the unrecorded entry, so a rundown retains the stub instead of a conclusion that the thread is elsewhere and a free.
@@ -173,6 +178,8 @@ This rule governs the mechanism, not the spelling, and the spellings are not int
 An edge state advanced (or a one-shot input backlog drained) as each item is evaluated invites a mid-pass allocation failure. That failure destroys the callbacks it already staged while the state says they fired. The edge is consumed, never delivered, and never re-derived. Carry each item's state transition in the staged record. Apply it in a non-throwing loop after the pass, still under the lock that keeps the indices stable. Roll back any source the pass consumed destructively. `detail::InputPoller::poll_loop` does this for `m_active_states` and for the wheel-notch backlog, whose notches have no physical repress a user can repeat.
 
 The rule extends to anything the pass publishes from partial work. Reset the accumulated consume masks on the rollback path, so suppression disarms wholly rather than in an index-dependent fragment. That is the fail-open direction `[B-26]` already requires.
+
+`InterceptMessageHookPollerTest.StagingFailureDoesNotDestroyTheWheelNotch` and the three `InputPollerExternalWheelTest.StagingFailure*` cases verify the notch rollback for each wheel backend.
 
 ### [B-95]
 
@@ -204,4 +211,4 @@ Reserved. Never reuse this ID.
 
 A target liveness check can settle physical health. It cannot prove that the caller abandoned a target. A query must therefore preserve every active transaction. Otherwise, capture can resume on the old thread.
 
-The host derives `capture_armable` from lifecycle state, both snapshot states, and the current lease. This field gives every client one authoritative predicate.
+The host derives `capture_armable` from lifecycle state, both snapshot states, and the current lease. This field gives every client one authoritative predicate. The local `MessageHook` backend opens capture over a mounted wheel hook only on a Ready route. `InterceptMessageHookTest.RepublishOnRetryableRouteKeepsCaptureOff` and `InterceptMessageHookTest.RepublishOnCleanupBlockedRouteKeepsCaptureOff` verify it.

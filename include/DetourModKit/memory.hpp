@@ -669,15 +669,27 @@ namespace DetourModKit
 
         /**
          * @brief Shuts the cache down and joins the background cleanup thread.
-         * @details Call before module unload to terminate the cleanup thread cleanly. After shutdown, the cache cannot
-         *          be reused without re-initialization. Under loader lock the thread is detached rather than joined to
-         *          avoid deadlock, and on MinGW the vectored fault handler is drained and removed.
+         * @details After shutdown, @ref init_cache must initialize the cache before reuse. Under loader lock, teardown
+         *          detaches the cleanup thread. At process termination, it skips the MinGW handler release because a
+         *          terminated thread can retain a VEH lock or an active read.
+         *          The first guarded read can install that handler without @ref init_cache. Without a @ref Session,
+         *          call this after the module's last guarded read and before unload. Off-loader-lock Hook destruction
+         *          takes a guarded read.
+         *
+         *          Session teardown blocks lazy handler installation until Session setup or
+         *          @ref init_cache succeeds. During that interval, MinGW byte access uses the validated
+         *          fallback and guarded region scans fail closed. A VMT hook object update installs the
+         *          handler only for the duration of that call.
+         *
          *          Teardown closes reader admission first. A later permission query takes the uncached `VirtualQuery`
          *          route. The wait for admitted readers has a fixed deadline. The cache precommits a module reference
          *          before admission opens. On expiry it retains that reference and the cache storage. It also records
          *          one @ref diagnostics::LeakSubsystem::MemoryCache event. A later @ref init_cache or
          *          @ref shutdown_cache call can reclaim the storage after the stalled reader exits. A clean shutdown
          *          releases the cache reference.
+         *
+         *          Without an active @ref Session, this call also returns the emit-chain TLS index of each idle
+         *          diagnostics dispatcher. @ref diagnostics::hook_lifecycle owns that contract.
          * @note Setup/control-plane only.
          */
         void shutdown_cache() noexcept;
