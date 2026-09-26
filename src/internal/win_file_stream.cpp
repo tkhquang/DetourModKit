@@ -1,5 +1,7 @@
 #include "internal/win_file_stream.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -103,22 +105,11 @@ namespace DetourModKit::detail
 
     bool WinFileStreamBuf::open(const std::string &path, std::ios_base::openmode mode)
     {
-        // Convert narrow string to wide. Try UTF-8 first, fall back to ACP.
-        int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
-        UINT code_page = CP_UTF8;
-        if (wide_len <= 0)
-        {
-            code_page = CP_ACP;
-            wide_len = MultiByteToWideChar(CP_ACP, 0, path.c_str(), -1, nullptr, 0);
-        }
-        if (wide_len <= 0)
+        const std::wstring wide_path = widen_utf8(path);
+        if (wide_path.empty())
         {
             return false;
         }
-
-        std::wstring wide_path(static_cast<size_t>(wide_len - 1), L'\0');
-        MultiByteToWideChar(code_page, 0, path.c_str(), -1, wide_path.data(), wide_len);
-
         return open(wide_path, mode);
     }
 

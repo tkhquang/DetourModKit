@@ -141,8 +141,8 @@ namespace DetourModKit
 
         /**
          * @brief Exports recorded samples to a JSON file on disk.
-         * @param path File path to write (created or overwritten).
-         * @return true on success, false on I/O failure.
+         * @param path UTF-8 file path to write (created or overwritten).
+         * @return true on success, false on ill-formed UTF-8, an embedded NUL, or I/O failure.
          */
         [[nodiscard]] bool export_to_file(std::string_view path) const;
 

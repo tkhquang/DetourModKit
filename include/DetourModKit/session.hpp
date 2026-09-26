@@ -40,7 +40,8 @@ namespace DetourModKit
      * @brief Identity, single-instance gating, process gating, and async-logger settings for a mod.
      * @details Every entry copies or borrows each field before return, so string literals suffice. @p name also
      *          supplies the logger prefix and mod identity. A non-empty @p game_process_name must match the process
-     *          executable's basename (case-insensitive) or start() returns ErrorCode::ProcessMismatch. A non-empty
+     *          executable's basename or start() returns ErrorCode::ProcessMismatch. The match decodes the name as UTF-8
+     *          and folds case with CompareStringOrdinal, so the C runtime locale does not affect it. A non-empty
      *          @p instance_mutex_prefix creates a per-PID named mutex, so a second load of the same mod fails with
      *          ErrorCode::InstanceAlreadyRunning. There is no INI path here: the config registry is bind-then-load,
      *          so load the INI from on_ready via session.ini().load(path) after the binds exist.

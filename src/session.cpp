@@ -239,9 +239,6 @@ namespace DetourModKit
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
         }
 
-        // Compares the running executable's basename (case-insensitive) against @p expected. An empty expectation
-        // always passes. Resolved as wide (not GetModuleFileNameA) so a non-ASCII EXE basename is not mangled through
-        // the active code page and cannot false-match or false-miss the gate.
         Result<bool> is_target_process(std::string_view expected, const char *operation) noexcept
         {
             if (expected.empty())
@@ -285,8 +282,7 @@ namespace DetourModKit
             {
                 return false;
             }
-            expected_buf[wide_len] = L'\0';
-            return _wcsicmp(exe_name, expected_buf) == 0;
+            return CompareStringOrdinal(exe_name, -1, expected_buf, wide_len, TRUE) == CSTR_EQUAL;
         }
 
         /**

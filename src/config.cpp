@@ -17,15 +17,18 @@
 #include "internal/config_reload_gate.hpp"
 #include "internal/config_reload_lifecycle.hpp"
 #include "internal/config_watch_control.hpp"
+#include "internal/utf8_conversion.hpp"
 
 #include <SimpleIni.h>
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -34,6 +37,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace DetourModKit::detail
@@ -307,11 +311,17 @@ namespace DetourModKit
 
             /**
              * @brief Selects the argument type the deferred setter receives.
-             * @details The string bind delivers a std::string_view valid only for the call. Every other bound type
-             *          passes the parsed value by value.
+             * @details The string bind delivers a std::string_view valid only for the call. The combo bind delivers a
+             *          const reference. Every other bound type passes the parsed value by value.
              */
             template <typename T>
-            using SetterArg = std::conditional_t<std::same_as<T, std::string>, std::string_view, T>;
+            using SetterArg = std::conditional_t<
+                std::same_as<T, std::string>,
+                std::string_view,
+                std::conditional_t<std::same_as<T, input::KeyComboList>, const input::KeyComboList &, T>>;
+
+            /// Copies of a shared setter share one target, so a copy under the registry mutex runs no consumer code.
+            template <typename T> using SharedSetter = std::shared_ptr<const std::function<void(SetterArg<T>)>>;
 
             /// ConfigItemBase stores typed configuration items polymorphically in the registry.
             struct ConfigItemBase
@@ -404,13 +414,13 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Stores a configuration item with a std::function value setter.
-             * @note Setter callbacks run outside the config mutex. This prevents deadlocks. The bind_* functions and
-             *       load() use this deferred invocation pattern.
+             * @brief Stores a configuration item with a shared setter.
+             * @note `[B-101]`: the registry mutex copies and drops only shared references. The last reference drops
+             *       after unlock.
              */
             template <typename T> struct CallbackConfigItem : public ConfigItemBase
             {
-                std::function<void(SetterArg<T>)> setter;
+                SharedSetter<T> setter;
                 T default_value;
                 T current_value;
 
@@ -418,7 +428,7 @@ namespace DetourModKit
                     std::string sec,
                     std::string key,
                     std::string log_name,
-                    std::function<void(SetterArg<T>)> set_fn,
+                    SharedSetter<T> set_fn,
                     T def_val
                 )
                     : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)), setter(std::move(set_fn)),
@@ -581,11 +591,11 @@ namespace DetourModKit
                     if constexpr (std::same_as<T, std::string>)
                     {
                         // Capture the owned string by value and hand out a view into that copy.
-                        return [fn = setter, val = current_value]() mutable { fn(std::string_view{val}); };
+                        return [fn = setter, val = current_value]() { (*fn)(std::string_view{val}); };
                     }
                     else
                     {
-                        return [fn = setter, val = current_value]() mutable { fn(std::move(val)); };
+                        return [fn = setter, val = current_value]() mutable { (*fn)(std::move(val)); };
                     }
                 }
             };
@@ -803,23 +813,31 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Replaces an item with the same section+key, or appends if none exists.
-             * @note Caller must hold get_config_mutex().
+             * @brief Replaces the item with the same section and key, or appends @p item.
+             * @details Takes get_config_mutex().
              */
             void replace_or_append(std::unique_ptr<ConfigItemBase> item)
             {
-                // Advance the binding generation so reload()'s unchanged-content fast path re-hydrates this item.
-                ++get_binding_generation();
+                // Declared before the lock, so a displaced setter drops after unlock (`[B-101]`).
+                std::unique_ptr<ConfigItemBase> displaced;
+                std::lock_guard<std::mutex> lock(get_config_mutex());
                 auto &items = get_registered_config_items();
-                for (auto &existing : items)
+                const auto existing = std::ranges::find_if(
+                    items,
+                    [&item](const std::unique_ptr<ConfigItemBase> &candidate) noexcept
+                    { return candidate->section == item->section && candidate->ini_key == item->ini_key; }
+                );
+                if (existing != items.end())
                 {
-                    if (existing->section == item->section && existing->ini_key == item->ini_key)
-                    {
-                        existing = std::move(item);
-                        return;
-                    }
+                    displaced = std::exchange(*existing, std::move(item));
                 }
-                items.push_back(std::move(item));
+                else
+                {
+                    items.push_back(std::move(item));
+                }
+                // Advance the binding generation after the fallible append, so reload()'s unchanged-content fast path
+                // re-hydrates this item.
+                ++get_binding_generation();
             }
 
         } // anonymous namespace
@@ -829,8 +847,18 @@ namespace DetourModKit
             // Contract in internal/config_pass.hpp.
             std::filesystem::path get_ini_file_path(const std::string &ini_filename, DeferredDiagnostics &diags)
             {
-                std::wstring module_dir = get_runtime_directory();
+                const std::wstring wide_filename = DetourModKit::detail::widen_utf8(ini_filename);
+                if (!ini_filename.empty() && wide_filename.empty())
+                {
+                    defer_diagnostic(
+                        diags,
+                        LogLevel::Error,
+                        "Config: INI filename is not well-formed UTF-8 or holds a NUL."
+                    );
+                    return {};
+                }
 
+                const std::wstring module_dir = get_runtime_directory();
                 if (module_dir.empty() || module_dir == L".")
                 {
                     defer_diagnostic(
@@ -840,42 +868,17 @@ namespace DetourModKit
                         "Using relative path for INI: {}",
                         ini_filename
                     );
-                    return std::filesystem::path(ini_filename);
+                    return std::filesystem::path(wide_filename);
                 }
 
-                try
-                {
-                    std::filesystem::path ini_path_obj =
-                        (std::filesystem::path(module_dir) / ini_filename).lexically_normal();
-                    defer_diagnostic(
-                        diags,
-                        LogLevel::Debug,
-                        "Config: Determined INI file path: {}",
-                        ini_path_obj.string()
-                    );
-                    return ini_path_obj;
-                }
-                catch (const std::filesystem::filesystem_error &fs_err)
-                {
-                    defer_diagnostic(
-                        diags,
-                        LogLevel::Warning,
-                        "Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}",
-                        fs_err.what(),
-                        ini_filename
-                    );
-                }
-                catch (const std::exception &e)
-                {
-                    defer_diagnostic(
-                        diags,
-                        LogLevel::Warning,
-                        "Config: General error constructing INI path: {}. Using relative path for INI: {}",
-                        e.what(),
-                        ini_filename
-                    );
-                }
-                return std::filesystem::path(ini_filename); // Fallback
+                std::filesystem::path ini_path = (std::filesystem::path(module_dir) / wide_filename).lexically_normal();
+                defer_diagnostic(
+                    diags,
+                    LogLevel::Debug,
+                    "Config: Determined INI file path: {}",
+                    DetourModKit::detail::utf8_from_wide(ini_path.native())
+                );
+                return ini_path;
             }
         } // namespace detail
 
@@ -885,44 +888,39 @@ namespace DetourModKit
             // setter runs after release, so a setter can re-enter the data-plane config API with no deadlock.
             // The load()/reload() pass lock is a separate, stricter contract documented on those functions.
             template <typename T>
-            void bind_scalar(
+            void bind_setter(
                 std::string_view section,
                 std::string_view ini_key,
                 std::string_view log_key_name,
                 std::function<void(SetterArg<T>)> setter,
-                T default_value
+                const T &default_value
             )
             {
-                std::function<void()> deferred;
+                // Build the node and the item before replace_or_append locks, so the consumer move runs unlocked.
+                SharedSetter<T> shared_setter;
+                if (setter)
                 {
-                    std::lock_guard<std::mutex> lock(get_config_mutex());
-                    replace_or_append(
-                        std::make_unique<CallbackConfigItem<T>>(
-                            std::string(section),
-                            std::string(ini_key),
-                            std::string(log_key_name),
-                            setter,
-                            default_value
-                        )
-                    );
-                    if (setter)
-                    {
-                        deferred = [setter = std::move(setter), val = std::move(default_value)]() mutable
-                        {
-                            if constexpr (std::same_as<T, std::string>)
-                            {
-                                setter(std::string_view{val});
-                            }
-                            else
-                            {
-                                setter(val);
-                            }
-                        };
-                    }
+                    shared_setter = std::make_shared<const std::function<void(SetterArg<T>)>>(std::move(setter));
                 }
-                if (deferred)
+                replace_or_append(
+                    std::make_unique<CallbackConfigItem<T>>(
+                        std::string(section),
+                        std::string(ini_key),
+                        std::string(log_key_name),
+                        shared_setter,
+                        default_value
+                    )
+                );
+                if (shared_setter)
                 {
-                    deferred();
+                    if constexpr (std::same_as<T, std::string>)
+                    {
+                        (*shared_setter)(std::string_view{default_value});
+                    }
+                    else
+                    {
+                        (*shared_setter)(default_value);
+                    }
                 }
             }
 
@@ -936,7 +934,7 @@ namespace DetourModKit
             int default_value
         )
         {
-            bind_scalar<int>(section, key, display_name, std::move(setter), default_value);
+            bind_setter<int>(section, key, display_name, std::move(setter), default_value);
         }
 
         void bind_float(
@@ -947,7 +945,7 @@ namespace DetourModKit
             float default_value
         )
         {
-            bind_scalar<float>(section, key, display_name, std::move(setter), default_value);
+            bind_setter<float>(section, key, display_name, std::move(setter), default_value);
         }
 
         void bind_bool(
@@ -958,7 +956,7 @@ namespace DetourModKit
             bool default_value
         )
         {
-            bind_scalar<bool>(section, key, display_name, std::move(setter), default_value);
+            bind_setter<bool>(section, key, display_name, std::move(setter), default_value);
         }
 
         void bind_string(
@@ -969,7 +967,7 @@ namespace DetourModKit
             std::string_view default_value
         )
         {
-            bind_scalar<std::string>(section, key, display_name, std::move(setter), std::string(default_value));
+            bind_setter<std::string>(section, key, display_name, std::move(setter), std::string(default_value));
         }
 
         void bind_parsed(
@@ -1013,31 +1011,11 @@ namespace DetourModKit
         )
         {
             detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
-            input::KeyComboList default_combos =
+            const input::KeyComboList default_combos =
                 detail::parse_key_combo_list(std::string(default_value), diags, display_name);
             detail::emit_deferred_diagnostics(diags);
 
-            std::function<void()> deferred;
-            {
-                std::lock_guard<std::mutex> lock(get_config_mutex());
-                replace_or_append(
-                    std::make_unique<CallbackConfigItem<input::KeyComboList>>(
-                        std::string(section),
-                        std::string(key),
-                        std::string(display_name),
-                        setter,
-                        default_combos
-                    )
-                );
-                if (setter)
-                {
-                    deferred = [setter = std::move(setter), combos = std::move(default_combos)]() { setter(combos); };
-                }
-            }
-            if (deferred)
-            {
-                deferred();
-            }
+            bind_setter<input::KeyComboList>(section, key, display_name, std::move(setter), default_combos);
         }
 
         void consume_flag(
@@ -1058,6 +1036,27 @@ namespace DetourModKit
                 default_value
             );
         }
+
+        namespace detail
+        {
+            void bind_combo_rebind_item(
+                std::string_view section,
+                std::string_view ini_key,
+                std::string_view log_name,
+                std::string_view binding_name,
+                std::string_view default_combo
+            )
+            {
+                bind_combos(
+                    section,
+                    ini_key,
+                    log_name,
+                    [name = std::string(binding_name)](const input::KeyComboList &combos)
+                    { (void)input::Input::instance().rebind(name, combos); },
+                    default_combo
+                );
+            }
+        } // namespace detail
 
         namespace
         {
@@ -1109,14 +1108,7 @@ namespace DetourModKit
                 }
 
                 // The setter rebinds the named binding on every load()/reload() without another registration.
-                bind_combos(
-                    section,
-                    ini_key,
-                    log_name,
-                    [binding_name_str](const input::KeyComboList &combos)
-                    { (void)input::Input::instance().rebind(binding_name_str, combos); },
-                    default_combo
-                );
+                detail::bind_combo_rebind_item(section, ini_key, log_name, binding_name_str, default_combo);
 
                 // Register the consume facet only after the binding exists. Otherwise its immediate default reaches
                 // set_consume()'s unknown-name no-op and is lost.
@@ -1187,6 +1179,9 @@ namespace DetourModKit
             // again after an unload latched them off.
             detail::rearm_reloads();
 
+            // Declared before the pass lock, so an unwind drops setter references after that lock releases.
+            std::vector<std::function<void()>> deferred_callbacks;
+
             // Serialize the whole pass (see internal/config_reload_lifecycle.hpp). Fail fast on same-thread re-entry.
             detail::ReloadApplyLock apply_lock;
             if (!apply_lock.engaged())
@@ -1199,16 +1194,13 @@ namespace DetourModKit
                 return;
             }
 
-            std::vector<std::function<void()>> deferred_callbacks;
-            std::string loaded_resolved_path;
             std::optional<std::uint64_t> hash_to_commit;
             std::uint64_t generation_to_commit = 0;
 
             // The filename is a caller argument, so the whole path resolution runs before the registry lock.
             detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
-            std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), diags);
-            std::string ini_path_str = ini_path.string();
-            loaded_resolved_path = ini_path_str;
+            const std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), diags);
+            const std::string ini_path_text = DetourModKit::detail::utf8_from_wide(ini_path.native());
 
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -1225,7 +1217,7 @@ namespace DetourModKit
                         diags,
                         LogLevel::Error,
                         "Config: Failed to open '{}'. Using defaults.",
-                        ini_path_str
+                        ini_path_text
                     );
                     // Wipe the cached hash so the next reload() does not short-circuit against a stale value.
                     get_last_loaded_ini_hash().reset();
@@ -1236,7 +1228,7 @@ namespace DetourModKit
                         diags,
                         LogLevel::Error,
                         "Config: Failed to parse '{}' (error {}). Using defaults.",
-                        ini_path_str,
+                        ini_path_text,
                         static_cast<int>(outcome.parse_rc)
                     );
                     // Clear the hash: it was computed for bytes that did not parse and must not enable a hash-skip.
@@ -1244,7 +1236,7 @@ namespace DetourModKit
                 }
                 else
                 {
-                    detail::defer_diagnostic(diags, LogLevel::Debug, "Config: Opened {}", ini_path_str);
+                    detail::defer_diagnostic(diags, LogLevel::Debug, "Config: Opened {}", ini_path_text);
                     // Do not publish this hash until every deferred setter succeeds.
                     // Reset the prior snapshot so a setter failure cannot suppress an identical-byte retry.
                     get_last_loaded_ini_hash().reset();
@@ -1274,7 +1266,7 @@ namespace DetourModKit
                     LogLevel::Info,
                     "Config: Loaded {} items from {}",
                     get_registered_config_items().size(),
-                    ini_path_str
+                    ini_path_text
                 );
             }
 
@@ -1313,7 +1305,7 @@ namespace DetourModKit
             // to the active file never trigger reload. The stale watcher joins only after pass-lock release, so a
             // queued background reload can finish and let the old watcher exit.
             {
-                detail::WatchRepoint repoint = detail::detach_watcher_if_repointed(loaded_resolved_path);
+                detail::WatchRepoint repoint = detail::detach_watcher_if_repointed(ini_path.native());
 
                 // Drop the pass lock before the stale-watcher join. Perform the join OUTSIDE both mutexes. The stale
                 // worker's final callback can enter disable/enable. A held watcher mutex then causes deadlock.
@@ -1340,6 +1332,9 @@ namespace DetourModKit
             {
                 out_setters_ran = false;
 
+                // Declared before the pass lock, so a reference that outlived its registry entry drops after unlock.
+                std::vector<std::function<void()>> deferred_callbacks;
+
                 // Serialize the whole pass (see internal/config_reload_lifecycle.hpp). Fail fast on same-thread
                 // re-entry.
                 ReloadApplyLock apply_lock;
@@ -1353,7 +1348,6 @@ namespace DetourModKit
                     return false;
                 }
 
-                std::vector<std::function<void()>> deferred_callbacks;
                 std::string ini_filename;
                 std::optional<std::uint64_t> hash_to_commit;
                 std::uint64_t generation_to_commit = 0;
@@ -1374,8 +1368,8 @@ namespace DetourModKit
                         return false;
                     }
 
-                    std::filesystem::path ini_path = get_ini_file_path(ini_filename, diags);
-                    std::string ini_path_str = ini_path.string();
+                    const std::filesystem::path ini_path = get_ini_file_path(ini_filename, diags);
+                    const std::string ini_path_text = DetourModKit::detail::utf8_from_wide(ini_path.native());
 
                     CSimpleIniA ini;
                     ini.SetUnicode(false);
@@ -1394,7 +1388,7 @@ namespace DetourModKit
                             LogLevel::Warning,
                             "Config: reload() could not open '{}'; retaining last values (setters not "
                             "re-run).",
-                            ini_path_str
+                            ini_path_text
                         );
                         return true;
                     }
@@ -1433,7 +1427,7 @@ namespace DetourModKit
                                 LogLevel::Warning,
                                 "Config: reload() parse error on '{}' (error {}); retaining last values "
                                 "(setters not re-run).",
-                                ini_path_str,
+                                ini_path_text,
                                 static_cast<int>(outcome.parse_rc)
                             );
                             return true;
@@ -1445,7 +1439,7 @@ namespace DetourModKit
                         get_last_loaded_ini_hash().reset();
                         get_applied_binding_generation().reset();
                         hash_to_commit = current_hash;
-                        defer_diagnostic(diags, LogLevel::Debug, "Config: Reloading from {}", ini_path_str);
+                        defer_diagnostic(diags, LogLevel::Debug, "Config: Reloading from {}", ini_path_text);
                     }
 
                     for (const auto &item : get_registered_config_items())
@@ -1463,7 +1457,7 @@ namespace DetourModKit
                         LogLevel::Info,
                         "Config: Reloaded {} items from {}",
                         get_registered_config_items().size(),
-                        ini_path_str
+                        ini_path_text
                     );
                     return std::nullopt;
                 }();
@@ -1582,14 +1576,13 @@ namespace DetourModKit
             }
 
             size_t count = 0;
+            // Declared before the lock, so the retired setters are destroyed after unlock (`[B-101]`).
+            std::vector<std::unique_ptr<ConfigItemBase>> retired_items;
 
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
-                count = get_registered_config_items().size();
-                if (count > 0)
-                {
-                    get_registered_config_items().clear();
-                }
+                retired_items.swap(get_registered_config_items());
+                count = retired_items.size();
 
                 // Drop the remembered path, hash, and generation so the next load() starts clean. The watcher's
                 // lifecycle stays with disable_auto_reload().
@@ -1597,13 +1590,14 @@ namespace DetourModKit
                 get_last_loaded_ini_hash().reset();
                 get_applied_binding_generation().reset();
             }
+            retired_items.clear();
 
             // Move the hotkey guards and servicer out under the watcher mutex. Dispose after unlock. A guard release
             // can wait on a drain whose disposal joins the servicer, whose worker needs this mutex.
             detail::WatchHotkeyControl hotkey_control = detail::detach_hotkey_control();
             detail::dispose_reload_hotkey_guards(hotkey_control.guards);
-            // A live hotkey binding's callback capture keeps the servicer alive. Otherwise this reset can be the
-            // final drop, which runs outside get_config_mutex so a worker inside reload() cannot deadlock.
+            // This reset can be the final drop. It runs outside get_config_mutex so a worker inside reload() cannot
+            // deadlock.
             hotkey_control.servicer.reset();
 
             // Use try_log rather than debug(). A sink exception breaks this noexcept contract.

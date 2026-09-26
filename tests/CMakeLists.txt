@@ -568,13 +568,17 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationExistingCandidateUsesFreshName
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
     Lifecycle.VmtUnreadableModuleHeader
-    Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader)
+    Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader
+    Lifecycle.LegacyCodePageResolvesIniBesideCjkModuleDirectory
+    Lifecycle.ResolvesIniBesideModuleDirectoryOutsideEveryCodePage
+    Lifecycle.LegacyCodePageSinkOpenFailureLeavesClosedDefault
+    Lifecycle.SinkOpenFailureOutsideEveryCodePageLeavesClosedDefault)
   # --require checks each listed proof by name. The floor is the listed count plus this inventory test.
   set(lifecycle_inventory_command
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 247)
+    --minimum 251)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

@@ -36,7 +36,11 @@ namespace DetourModKit::config::detail
     /// Takes the config mutex and returns a tear-free copy of the INI path last passed to load().
     [[nodiscard]] std::string snapshot_last_loaded_ini_path();
 
-    /// Determines the full INI path and records each diagnostic for later emission.
+    /**
+     * @brief Determines the full INI path and records each diagnostic for later emission.
+     * @details @p ini_filename is UTF-8. An ill-formed name or an embedded NUL returns an empty path with an Error
+     *          record.
+     */
     [[nodiscard]] std::filesystem::path get_ini_file_path(const std::string &ini_filename, DeferredDiagnostics &diags);
 
     /**
@@ -47,6 +51,18 @@ namespace DetourModKit::config::detail
      */
     [[nodiscard]] input::KeyComboList
     parse_key_combo_list(const std::string &input, DeferredDiagnostics &diags, std::string_view binding_log_name = {});
+
+    /**
+     * @brief Registers the combo config item that rebinds @p binding_name on every load() and reload().
+     * @details The item applies the parsed @p default_combo at registration. A rebind of an unknown name is a no-op.
+     */
+    void bind_combo_rebind_item(
+        std::string_view section,
+        std::string_view ini_key,
+        std::string_view log_name,
+        std::string_view binding_name,
+        std::string_view default_combo
+    );
 } // namespace DetourModKit::config::detail
 
 #endif // DETOURMODKIT_INTERNAL_CONFIG_PASS_HPP

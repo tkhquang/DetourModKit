@@ -15,6 +15,7 @@ Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded i
 - When the writer thread detaches under loader lock, the writer's counted module reference stays outstanding.
 - The `shared_ptr<AsyncLogger>` moves into a per-call permanent cell. The normal path uses `new (std::nothrow)`. The fallback path uses non-CRT permanent storage. A heap allocation failure therefore cannot drop the last handle while the writer still runs.
 - If first-use construction fails under OOM, the process-default `log()` publishes an inert drop/count logger with no sink, shared sink mutex, or writer. The noexcept accessor never terminates.
+- `shutdown_internal` retires a writer that a `configure` and `enable_async_mode` pair publishes inside its dropped-mutex window. It never closes a sink that a detached writer still owns (`LoggerTest.ShutdownKeepsTheSinkForAWriterDetachedInsideTheGap`). `[B-48]` in [lifecycle.md](lifecycle.md) owns the rule.
 - `enable_async_mode` is noexcept and fail-soft. A refused activation leaves synchronous delivery and releases the unpublished writer's retention root. A committed activation stays published. `LoggerTest.PostPublicationThrowIsContainedAndKeepsThePublishedWriter` and `LoggerTest.NonStandardThrowBeforePublicationIsContainedAndBreaksTheRoot` prove the boundary.
 - `set_log_level` uses a private route that bypasses the level filter. A stricter threshold cannot hide its transition record. `LoggerTest.SetLogLevel_ChangedThresholdsEmitInfoControlRecord` proves the contract.
 - `dropped_count()` aggregates facade and async drops as best-effort observability.
@@ -34,7 +35,7 @@ A producer wakes a parked writer through the auto-reset Win32 event (`SetEvent`)
 - A callback-safe Drop-policy producer never blocks behind a flusher. The separate `m_flush_mutex` and condition variable serve only control-plane flushers that await a drain.
 - The busy-writer wake check stays syscall-free because the producer signals only a parked writer.
 
-Each record's output timestamp uses its enqueue time with millisecond granularity. A write batch reuses one calendar-time conversion only for consecutive records that share the same second.
+Each record's output timestamp uses its enqueue time with millisecond granularity. A write batch reuses one calendar-time conversion only for consecutive records that share the same second. The millisecond field has three digits, zero-padded on the left, as the synchronous sink writes it (`[B-32]`). One producer's queued records keep their order. A `SyncFallback` write or a concurrent producer can reorder records inside one second.
 
 Hot-path mechanism: The enqueue costs atomic sequence numbers per slot and a flag-gated writer wake.
 

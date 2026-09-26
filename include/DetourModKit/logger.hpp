@@ -221,6 +221,9 @@ namespace DetourModKit
      *          The level-named templates and variadic log()/try_log() take a LocatedFormat.
      *          These methods apply the stamp policy, and the compiler validates their format strings.
      *          The raw log() and log_noexcept() forms add no stamp.
+     *          Every file_name is a UTF-8 path.
+     *          Ill-formed UTF-8 opens no file.
+     *          A first open then leaves the sink closed, and a reconfiguration keeps the previous sink.
      */
     class Logger
     {
@@ -702,7 +705,12 @@ namespace DetourModKit
         /// Renders the current time through @p format, with a millisecond fraction appended.
         std::string get_timestamp(const std::string &format) const;
 
-        /// Resolves the absolute path for @p file_name (wide for Unicode fidelity), relative to the runtime directory.
+        /**
+         * @brief Resolves the absolute path for @p file_name (wide for Unicode fidelity), relative to the runtime
+         *        directory.
+         * @return The wide path, or an empty path when @p file_name is ill-formed UTF-8, holds a NUL, or exceeds
+         *         INT_MAX bytes.
+         */
         std::wstring generate_log_file_path(const std::string &file_name) const;
 
         /**

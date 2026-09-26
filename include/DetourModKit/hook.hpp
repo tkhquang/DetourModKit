@@ -261,6 +261,12 @@ namespace DetourModKit
             [[nodiscard]] Result<Hook> inline_at_raw(InlineRequest request, void *detour);
         } // namespace detail
 
+#ifdef _MSC_VER
+#pragma warning(push)
+// The gate slot storage carries the slot's alignment, so the padding that C4324 reports is intended.
+#pragma warning(disable : 4324)
+#endif
+
         /**
          * @class Hook
          * @brief Move-only RAII handle for one installed inline or mid hook; its destructor restores the prologue.
@@ -564,6 +570,10 @@ namespace DetourModKit
             friend Result<Hook> mid_at(MidRequest request, MidHookFn detour);
             friend Result<Hook> detail::inline_at_raw(InlineRequest request, void *detour);
         };
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
         /**
          * @class HookStack

@@ -5,6 +5,8 @@
 
 #include "DetourModKit/profiler.hpp"
 
+#include "internal/utf8_conversion.hpp"
+
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
@@ -191,13 +193,18 @@ namespace DetourModKit
 
     bool Profiler::export_to_file(std::string_view path) const
     {
+        // A narrow CRT open decodes through the ANSI code page, so the UTF-8 path opens in its wide form.
+        const std::wstring wide_path = detail::widen_utf8(path);
+        if (wide_path.empty())
+        {
+            return false;
+        }
         const std::string json = export_chrome_json();
-        const std::string path_str(path);
 
         const auto closer = [](std::FILE *f) { std::fclose(f); };
         std::FILE *file_ptr = nullptr;
 
-        const errno_t err = fopen_s(&file_ptr, path_str.c_str(), "wb");
+        const errno_t err = _wfopen_s(&file_ptr, wide_path.c_str(), L"wb");
         if (err != 0 || file_ptr == nullptr)
         {
             return false;

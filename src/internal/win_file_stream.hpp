@@ -58,6 +58,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Opens @p path, closing any current file first.
+         * @details The narrow overload takes UTF-8. A narrow path that is empty, ill-formed, or holds an embedded NUL
+         *          returns false before the close, so the current file stays open.
          * @return false when the current file cannot be closed cleanly, or the new file cannot be opened. A failed
          *         close keeps the current handle and its buffered bytes, and the new file is not created.
          */

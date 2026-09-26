@@ -827,7 +827,7 @@ TEST(LifecycleCounters, ReaperStartRecordsThePermanentPin)
     {
         ~Probe() { s_destroyed.store(true, std::memory_order_release); }
     };
-    detail::reap_owner(std::make_unique<Probe>());
+    detail::reap_owner(std::make_unique<Probe>(), [](void *) noexcept { return true; });
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (!s_destroyed.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
@@ -861,6 +861,29 @@ TEST(LifecycleCounters, RefusedSharedOwnerRundownCountsAnAbandonedOwner)
     EXPECT_EQ(diagnostics::lifecycle_counters().abandoned_owners, before.abandoned_owners + 1)
         << "a refused rundown must count as an abandoned owner";
     EXPECT_FALSE(observed.expired()) << "an abandoned owner must stay retained, never released";
+}
+
+TEST(LifecycleCounters, RefusedOwnerRundownRetainsTheOwner)
+{
+    const diagnostics::LifecycleCounters before = diagnostics::lifecycle_counters();
+
+    static std::atomic<bool> s_destroyed{false};
+    s_destroyed.store(false, std::memory_order_release);
+    struct Probe
+    {
+        ~Probe() { s_destroyed.store(true, std::memory_order_release); }
+    };
+    detail::reap_owner(std::make_unique<Probe>(), [](void *) noexcept { return false; });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (diagnostics::lifecycle_counters().abandoned_owners == before.abandoned_owners &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(diagnostics::lifecycle_counters().abandoned_owners, before.abandoned_owners + 1)
+        << "a refused rundown must count as an abandoned owner";
+    EXPECT_FALSE(s_destroyed.load(std::memory_order_acquire)) << "a refused rundown must retain the unique owner";
 }
 
 TEST(LifecycleCounters, SnapshotCarriesTheLifecycleCounters)

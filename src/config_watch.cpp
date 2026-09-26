@@ -19,11 +19,16 @@
 #include "internal/config_watcher.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
+#include "internal/utf8_conversion.hpp"
 #include "internal/worker_start_log.hpp"
+
+#include <windows.h>
 
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -87,11 +92,16 @@ namespace DetourModKit
                 return *s_watcher;
             }
 
-            // Stores a copy of the user on_reload callback. ConfigWatcher swallows it with no getter, so only this
-            // copy lets load()'s re-point reconstruct an equivalent watcher. get_watcher_mutex() guards it.
-            std::function<void(bool)> &get_reload_user_callback() noexcept
+            /// Copies share one reload callback target, so a copy under the watcher mutex runs no consumer code.
+            using SharedReloadCallback = std::shared_ptr<const std::function<void(bool)>>;
+
+            /**
+             * @brief Returns the on_reload node that load()'s re-point shares with the new watcher.
+             * @details get_watcher_mutex() guards the pointer only (`[B-101]`).
+             */
+            SharedReloadCallback &get_reload_user_callback() noexcept
             {
-                static std::function<void(bool)> s_callback;
+                static SharedReloadCallback s_callback;
                 return s_callback;
             }
 
@@ -105,28 +115,28 @@ namespace DetourModKit
                 return s_generation;
             }
 
-            // Compares two resolved INI paths without case sensitivity. Separators and normalization already match. An
-            // ordinal ASCII fold is correct for case-insensitive Windows paths. A locale fold is deliberately avoided,
-            // per the watcher's ordinal filename match.
-            [[nodiscard]] bool resolved_paths_equivalent(std::string_view a, std::string_view b) noexcept
+            /**
+             * @brief Compares two resolved INI paths with the watcher's ordinal case-insensitive file name match.
+             * @details Separators and normalization already match. A spurious mismatch only restarts an equivalent
+             *          watcher (`ConfigTest.RepointKeepsTheWatcherForANonAsciiCaseVariant`).
+             */
+            [[nodiscard]] bool resolved_paths_equivalent(std::wstring_view a, std::wstring_view b) noexcept
             {
-                if (a.size() != b.size())
+                if (a.size() != b.size() || a.size() > static_cast<std::size_t>(INT_MAX))
                 {
                     return false;
                 }
-                const auto ascii_lower = [](char c) noexcept -> unsigned char
+                if (a.empty())
                 {
-                    const auto u = static_cast<unsigned char>(c);
-                    return (u >= 'A' && u <= 'Z') ? static_cast<unsigned char>(u + ('a' - 'A')) : u;
-                };
-                for (size_t i = 0; i < a.size(); ++i)
-                {
-                    if (ascii_lower(a[i]) != ascii_lower(b[i]))
-                    {
-                        return false;
-                    }
+                    return true;
                 }
-                return true;
+                return ::CompareStringOrdinal(
+                           a.data(),
+                           static_cast<int>(a.size()),
+                           b.data(),
+                           static_cast<int>(b.size()),
+                           TRUE
+                       ) == CSTR_EQUAL;
             }
 
             // Keeps reload-hotkey BindingGuards alive for the process lifetime. ~BindingGuard disables the binding, so
@@ -168,14 +178,13 @@ namespace DetourModKit
              *          It is separate from the servicer shell. The loader-lock teardown branch can detach the worker
              *          and leak the Channel under the ConfigWatcher discipline. It starts on the first reload_hotkey
              *          call.
-             *          A std::shared_ptr prevents a press callback concurrent with shutdown from access to a freed
-             *          servicer.
+             *          The press callback locks a std::weak_ptr per press, so it never reaches a freed servicer.
              *          The worker contains exceptions from reload(), so the service remains alive.
              */
             class ReloadServicer
             {
-                // Channel stores every field that the worker reads. The worker member appears last, so ~Channel
-                // destroys it first and joins before the mutex or condition variable dies.
+                // Channel stores every field that the worker reads. Every destroy path with a live worker runs
+                // retire_channel first.
                 struct Channel
                 {
                     std::mutex mutex;
@@ -254,29 +263,21 @@ namespace DetourModKit
                     {
                         // Self-shutdown off the loader lock cannot join this worker from itself because
                         // std::system_error results. Inline Channel destruction frees storage that service_loop uses.
-                        // Hand the Channel to the off-thread reaper. It joins the worker, then destroys the Channel.
-                        // No permanent leak remains.
+                        // The reaper runs retire_channel while the Channel is alive.
 #if defined(DMK_ENABLE_TEST_SEAMS)
                         DetourModKit::detail::g_servicer_reaped_on_worker.store(true, std::memory_order_release);
 #endif
-                        DetourModKit::detail::reap_owner(std::move(m_channel));
+                        DetourModKit::detail::reap_owner(
+                            std::move(m_channel),
+                            [](void *raw_channel) noexcept
+                            { return retire_channel(*static_cast<Channel *>(raw_channel)); }
+                        );
                         return;
                     }
 
-                    // Off the loader lock and off the worker thread. shutdown() rechecks the teardown veto, so a join
-                    // path can finish as a detach. Observe the body's exit publication, not another TOCTOU-prone veto
-                    // check. Retain the Channel while the body remains active, as ~ConfigWatcher does. A leak is the
-                    // safe direction.
-                    if (m_channel->worker)
-                    {
-                        m_channel->worker->shutdown();
-                    }
-                    if (!m_channel->worker_exited.load(std::memory_order_acquire))
+                    if (!retire_channel(*m_channel))
                     {
                         (void)m_channel.release();
-                        DetourModKit::diagnostics::record_intentional_leak(
-                            DetourModKit::diagnostics::LeakSubsystem::Worker
-                        );
                         return;
                     }
                     m_channel.reset();
@@ -339,6 +340,28 @@ namespace DetourModKit
                 }
 
             private:
+                /**
+                 * @brief Runs the Channel's worker down and reports whether the Channel can be destroyed.
+                 * @details shutdown() re-queries the teardown veto for itself, so a join can finish as a detach. The
+                 *          body's exit publication decides, and a live body keeps its Channel as a Worker leak.
+                 * @return true once the body published its exit.
+                 */
+                [[nodiscard]] static bool retire_channel(Channel &channel) noexcept
+                {
+                    if (channel.worker)
+                    {
+                        channel.worker->shutdown();
+                    }
+                    if (channel.worker_exited.load(std::memory_order_acquire))
+                    {
+                        return true;
+                    }
+                    DetourModKit::diagnostics::record_intentional_leak(
+                        DetourModKit::diagnostics::LeakSubsystem::Worker
+                    );
+                    return false;
+                }
+
                 static void service_loop(Channel &channel, std::stop_token st) noexcept
                 {
                     class ExitGuard
@@ -463,22 +486,32 @@ namespace DetourModKit
                 std::unique_ptr<Channel> m_channel;
             };
 
-            // A shared_ptr lets a press callback keep its own strong reference when clear() resets the slot.
+            /**
+             * @brief Returns the servicer slot, the only long-lived servicer owner.
+             * @details get_watcher_mutex() guards the slot. A press callback holds a reference only for one request,
+             *          so the poll thread never runs the final drop
+             *          (`ConfigTest.ReloadHotkeyClearKeepsThePollThreadPolling`).
+             */
             std::shared_ptr<ReloadServicer> &get_reload_servicer() noexcept
             {
                 static std::shared_ptr<ReloadServicer> s_servicer;
                 return s_servicer;
             }
 
-            // start_watcher_locked creates an auto-reload watcher on a resolved path, then connects the persisted user
-            // callback. The caller must hold get_watcher_mutex(). enable_auto_reload() and load()'s re-point use this
-            // single construction site, so the presence guard and construction are atomic.
+            /**
+             * @brief Creates an auto-reload watcher on a resolved path and shares @p user_callback with it.
+             * @details The caller must hold get_watcher_mutex(). enable_auto_reload() and load()'s re-point use this
+             *          single construction site, so the presence guard and construction are atomic. A failed start
+             *          moves the persisted node into @p failed_callback, which the caller drops after unlock.
+             */
             [[nodiscard]] AutoReloadStatus start_watcher_locked(
-                const std::string &resolved_path,
+                const std::wstring &resolved_path,
                 std::chrono::milliseconds debounce,
+                const SharedReloadCallback &user_callback,
                 detail::DeferredDiagnostics &diags,
                 DetourModKit::detail::ConfigWatcher::StartGate &start_gate,
-                std::unique_ptr<DetourModKit::detail::ConfigWatcher> &failed_watcher
+                std::unique_ptr<DetourModKit::detail::ConfigWatcher> &failed_watcher,
+                SharedReloadCallback &failed_callback
             )
             {
                 auto &watcher = get_config_watcher();
@@ -499,12 +532,10 @@ namespace DetourModKit
                     return AutoReloadStatus::AlreadyRunning;
                 }
 
-                // Copy the persisted user callback into the reload lambda. The persisted slot must survive. A later
-                // load()-driven re-point can then reconstruct an equivalent watcher.
                 watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
                     resolved_path,
                     debounce,
-                    [user_cb = get_reload_user_callback(), birth_epoch = detail::current_reload_lifecycle_epoch()]()
+                    [user_callback, birth_epoch = detail::current_reload_lifecycle_epoch()]() -> void
                     {
                         // Gate the whole pass on the unload latch and this watcher's lifecycle epoch. The guard holds
                         // the in-flight count across BOTH the setter pass and the user callback.
@@ -518,9 +549,9 @@ namespace DetourModKit
                         bool setters_ran = false;
                         (void)detail::reload_impl(setters_ran, &reload_guard);
                         // Re-check the latch. An unload can set it during the pass.
-                        if (user_cb && reload_guard.current())
+                        if (user_callback && reload_guard.current())
                         {
-                            user_cb(setters_ran);
+                            (*user_callback)(setters_ran);
                         }
                     }
                 );
@@ -533,21 +564,22 @@ namespace DetourModKit
                 catch (...)
                 {
                     failed_watcher = std::move(watcher);
-                    get_reload_user_callback() = nullptr;
+                    failed_callback = std::move(get_reload_user_callback());
                     throw;
                 }
                 if (!started)
                 {
                     failed_watcher = std::move(watcher);
-                    // Drop the persisted callback with the failed watcher so it cannot pin Logic DLL references.
-                    get_reload_user_callback() = nullptr;
+                    // Hand the persisted node to the caller with the failed watcher, so it cannot pin Logic DLL
+                    // references.
+                    failed_callback = std::move(get_reload_user_callback());
                     try
                     {
                         detail::defer_diagnostic(
                             diags,
                             LogLevel::Error,
                             "Config: Auto-reload watcher failed to start for {}",
-                            resolved_path
+                            DetourModKit::detail::utf8_from_wide(resolved_path)
                         );
                     }
                     catch (...)
@@ -569,10 +601,22 @@ namespace DetourModKit
                     return;
                 }
                 run_reload_hotkey_guard_disposal_probe();
+                // A release leaves the entries registered, and a later rebind under the name rebuilds from that
+                // released gate. A vetoed teardown skips the removal under [B-100].
+                const bool remove_bindings = DetourModKit::detail::blocking_teardown_permitted();
+                for (input::BindingGuard &guard : guards)
+                {
+                    const std::string_view name = guard.name();
+                    guard.release();
+                    if (remove_bindings && !name.empty())
+                    {
+                        input::Input::instance().remove_bindings_by_name(name);
+                    }
+                }
                 guards.clear();
             }
 
-            WatchRepoint detach_watcher_if_repointed(std::string_view loaded_resolved_path)
+            WatchRepoint detach_watcher_if_repointed(std::wstring_view loaded_resolved_path)
             {
                 WatchRepoint result;
                 DeferredDiagnostics diags = open_deferred_diagnostics();
@@ -620,6 +664,7 @@ namespace DetourModKit
                 DeferredDiagnostics diags = open_deferred_diagnostics();
                 DetourModKit::detail::ConfigWatcher::StartGate start_gate;
                 std::unique_ptr<DetourModKit::detail::ConfigWatcher> failed_watcher;
+                SharedReloadCallback failed_callback;
                 try
                 {
                     {
@@ -627,9 +672,15 @@ namespace DetourModKit
                         if (!repoint_filename.empty() && get_watcher_disable_generation() == generation_at_move)
                         {
                             const std::filesystem::path repoint_path = get_ini_file_path(repoint_filename, diags);
-                            (
-                                void
-                            )start_watcher_locked(repoint_path.string(), debounce, diags, start_gate, failed_watcher);
+                            (void)start_watcher_locked(
+                                repoint_path.native(),
+                                debounce,
+                                get_reload_user_callback(),
+                                diags,
+                                start_gate,
+                                failed_watcher,
+                                failed_callback
+                            );
                         }
                     }
                     emit_deferred_diagnostics(diags);
@@ -712,10 +763,7 @@ namespace DetourModKit
                 {
                     out.watcher = std::move(get_config_watcher());
                     out.servicer = std::move(get_reload_servicer());
-                    // std::function move assignment has no standard noexcept guarantee. Stage through the noexcept
-                    // move constructor, then commit with the noexcept member swap.
-                    std::function<void(bool)> detached_callback(std::move(get_reload_user_callback()));
-                    out.callback.swap(detached_callback);
+                    out.callback = std::move(get_reload_user_callback());
                     out.guards = std::move(get_reload_hotkey_guards());
                     ++get_watcher_disable_generation();
                     return WatchDrainState::Detached;
@@ -738,13 +786,21 @@ namespace DetourModKit
 
             // The path resolution runs before the watcher mutex, so it reaches the same absolute path load() uses.
             detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
-            std::filesystem::path ini_path = detail::get_ini_file_path(ini_filename, diags);
-            std::string resolved_path = ini_path.string();
+            const std::filesystem::path ini_path = detail::get_ini_file_path(ini_filename, diags);
+            // Build the node before the watcher mutex, so the consumer move runs unlocked (`[B-101]`).
+            SharedReloadCallback user_callback;
+            if (on_reload)
+            {
+                user_callback = std::make_shared<const std::function<void(bool)>>(std::move(on_reload));
+            }
+            // Declared outside the locked scope, so every node owner drops after unlock (`[B-101]`).
+            SharedReloadCallback displaced_callback;
+            SharedReloadCallback failed_callback;
             DetourModKit::detail::ConfigWatcher::StartGate start_gate;
             std::unique_ptr<DetourModKit::detail::ConfigWatcher> failed_watcher;
 
-            // Hold get_watcher_mutex() across publish-callback-then-start: a bounded start() stall is preferable to
-            // a use-after-free if disable_auto_reload() destroyed the watcher mid-start().
+            // Hold get_watcher_mutex() across start-then-publish: a bounded start() stall is preferable to a
+            // use-after-free if disable_auto_reload() destroyed the watcher mid-start().
             AutoReloadStatus status{AutoReloadStatus::StartFailed};
             try
             {
@@ -770,11 +826,21 @@ namespace DetourModKit
                         return AutoReloadStatus::AlreadyRunning;
                     }
 
-                    // Persist a copy of the user callback for load()'s re-point, published under the watcher mutex
-                    // before the construction helper reads it.
-                    get_reload_user_callback() = std::move(on_reload);
-
-                    return start_watcher_locked(resolved_path, debounce, diags, start_gate, failed_watcher);
+                    const AutoReloadStatus started = start_watcher_locked(
+                        ini_path.native(),
+                        debounce,
+                        user_callback,
+                        diags,
+                        start_gate,
+                        failed_watcher,
+                        failed_callback
+                    );
+                    if (started == AutoReloadStatus::Started)
+                    {
+                        displaced_callback = std::move(get_reload_user_callback());
+                        get_reload_user_callback() = std::move(user_callback);
+                    }
+                    return started;
                 }();
 
                 if (status == AutoReloadStatus::Started)
@@ -785,7 +851,7 @@ namespace DetourModKit
                             diags,
                             LogLevel::Info,
                             "Config: Auto-reload enabled for {} (debounce {} ms)",
-                            resolved_path,
+                            DetourModKit::detail::utf8_from_wide(ini_path.native()),
                             static_cast<long long>(debounce.count())
                         );
                     }
@@ -822,6 +888,7 @@ namespace DetourModKit
             }
 
             std::unique_ptr<DetourModKit::detail::ConfigWatcher> to_drop;
+            SharedReloadCallback dropped_callback;
             bool self_join_refused = false;
             {
                 std::lock_guard<std::mutex> wlock(get_watcher_mutex());
@@ -836,8 +903,8 @@ namespace DetourModKit
                 else
                 {
                     to_drop = std::move(watcher);
-                    // Drop the persisted re-point callback with its watcher so it cannot pin Logic DLL references.
-                    get_reload_user_callback() = nullptr;
+                    // The persisted node drops with its watcher after unlock (`[B-101]`).
+                    dropped_callback = std::move(get_reload_user_callback());
                     // Signal a load() re-point in its lost-disable window so it does not resurrect the watcher.
                     ++get_watcher_disable_generation();
                 }
@@ -882,6 +949,7 @@ namespace DetourModKit
             // Lazily spin up the reload servicer on the first hotkey registration, under get_watcher_mutex().
             std::shared_ptr<ReloadServicer> servicer;
             bool servicer_created = false;
+            bool registration_live = false;
             {
                 std::lock_guard<std::mutex> lock(get_watcher_mutex());
                 if (detail::background_reloads_disabled())
@@ -895,6 +963,14 @@ namespace DetourModKit
                     servicer_created = true;
                 }
                 servicer = slot;
+                for (const input::BindingGuard &stored : get_reload_hotkey_guards())
+                {
+                    if (stored.name() == binding_name)
+                    {
+                        registration_live = stored.is_active();
+                        break;
+                    }
+                }
             }
 
             if (servicer_created)
@@ -902,23 +978,51 @@ namespace DetourModKit
                 detail::emit_deferred_diagnostics(diags);
             }
 
+            // A second registration under the name shares its entries, and a rebind rebuilds them from the older
+            // registration's gate. A live registration therefore updates in place.
+            if (registration_live)
+            {
+                const Result<void> rebound = input::Input::instance().rebind(binding_name, parsed);
+                if (rebound)
+                {
+                    detail::bind_combo_rebind_item(
+                        "Input",
+                        ini_key,
+                        "Config reload hotkey",
+                        binding_name,
+                        default_combo
+                    );
+                    return true;
+                }
+                // InvalidArg reports that the input module no longer holds the name, so a fresh registration follows.
+                if (rebound.error().code != ErrorCode::InvalidArg)
+                {
+                    return false;
+                }
+            }
+
             input::BindingGuard guard = press_combo(
                 "Input",
                 ini_key,
                 "Config reload hotkey",
                 binding_name,
-                [servicer]() noexcept
+                [weak_servicer = std::weak_ptr<ReloadServicer>(servicer)]() noexcept
                 {
                     // Press callbacks run on the poll thread and must return promptly. Defer the reload to the
-                    // servicer thread. The shared_ptr capture keeps the servicer alive.
-                    if (servicer)
+                    // servicer thread. The weak capture keeps the servicer join off the poll thread.
+                    if (const std::shared_ptr<ReloadServicer> live_servicer = weak_servicer.lock())
                     {
-                        servicer->request_reload();
+                        live_servicer->request_reload();
                     }
                 },
                 default_combo,
                 std::nullopt
             );
+            // A refused registration returns an inert guard and leaves the stored guard in place.
+            if (!guard.is_active())
+            {
+                return false;
+            }
             input::BindingGuard replaced_guard;
             bool replaced_existing = false;
 
