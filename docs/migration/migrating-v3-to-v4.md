@@ -176,7 +176,7 @@ Store each returned `input::BindingGuard`, or add it to an `input::Scope`. [inpu
 
 | v3 | v4 |
 |---|---|
-| `Rtti::heal_offset(landmark)` | `rtti::heal_landmark(landmark)->healed_offset` |
+| `Rtti::heal_offset(landmark)` | `rtti::heal_landmark(landmark)`, which returns `Result<HealHit>`. After the check, `healed_offset` holds the value that `heal_offset` returned. On failure, `error().code` is `BadDescriptor`, `HealNoMatch`, or `HealAmbiguous`. [rtti-self-heal.md](../guides/rtti/rtti-self-heal.md) shows the checked call. |
 | `Rtti` queries over `std::uintptr_t` and `ModuleRange` | The same names in `rtti` over `Address` and `Region` |
 | `Anchor::quorum_a`, `Anchor::quorum_b` | `Anchor::quorum_members` and `Anchor::quorum_threshold`. A zero threshold requires every member. |
 
