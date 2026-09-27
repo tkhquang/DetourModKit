@@ -18,11 +18,9 @@ The performance list in `AGENTS.md` defines the protected scope. The proof sourc
 - The [input note](input.md) states the poll-path synchronization.
 - The [logging note](logging.md) states the queue and sink mechanisms.
 - The [memory note](memory-scanning.md) states the cache and guarded-memory mechanisms.
-- [`rtti.hpp`](../../include/DetourModKit/rtti.hpp) states the allocation and read bounds for `vtable_is_type`.
-- The same header states the pointer-table warm path and `TypeIdentity` cache contracts.
+- [`rtti.hpp`](../../include/DetourModKit/rtti.hpp) states the pointer-table warm path and `TypeIdentity` cache contracts.
 - `MemoryWalk.IntermediateHopsEachIssueOneGuardedRead` pins one guarded read for each intermediate hop.
 - `MemoryWalk.IdentityAndLeafOnlyWalksIssueNoGuardedRead` pins zero guarded reads for an identity or leaf-only walk.
-- `RttiReverseProof.VtableIsTypeIssuesThreeGuardedReadsNotOne` pins the `vtable_is_type` guarded-read count.
 - `RttiTest.FindInTable_WarmCacheRevalidatesGenerationTwicePerCall` pins the two generation probes on the `PointerTableCache` warm path.
 - `RttiReverseProof.TypeIdentityWarmMatchesRevalidatesGenerationEachCall` pins the one generation probe for each warm `TypeIdentity::matches`.
 - `RttiReverseProof.TypeIdentityWarmMatchesReadsPeHeaders` pins the guarded PE-header reads that probe costs.
@@ -155,6 +153,16 @@ A case that owns a thread joins it on every exit path. A fatal `ASSERT_` is an e
 ### White-box internal suites
 
 White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_input_intercept` over `src/internal/input_intercept.hpp`) add `src/` to their include path and call `DetourModKit::detail::` directly. `test_gate_race_probe` is a concurrency-stress white-box suite over the two header-only synchronization primitives ( `src/internal/hook_ledger.hpp` and `src/internal/input_binding_gate.hpp`). It drives real cross-thread contention on the install/teardown ledger and the input hold/press gates. It runs in the main suite (per the in-process rule above) but stays independent of the library's compiled surface. The same source therefore remains usable by standalone race-instrumented builds that cannot link the Windows-only library.
+
+### Contract shapes that need a dedicated case
+
+- When a header permits a read of a `std::atomic<std::shared_ptr>` member during teardown, race loads against its destruction. `HookConcurrency.CallRacesDestructorOnRetainedStorage` is the shape.
+- When code inserts a sticky manipulator such as `std::left` into a shared stream, assert a second record's format. `AsyncLoggerTest.MillisecondFieldIsZeroPaddedLeft` is the shape.
+- When a contract promises replacement in place, drive a second registration end to end. A return-value check does not prove the replacement. `ConfigTest.ReloadHotkeyReRegistrationFiresOnPress` is the shape.
+- When a setter is valid before `start()`, observe its effect on the engine that `start(Settings)` builds. `InputTest.SetRequireFocusBeforeStartIsHonored` is the shape.
+- When an operation reads the protection of an executable page, run it inside a backend trap window on that page. Assert that it waits for the window to close. `[B-18]` and `[B-66]` own the exclusion. `TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow` is the shape.
+- When code converts a path to or from a narrow string, test a component outside CP-1252 and an ill-formed component. `DriftManifestTest.FileRoundTripOutsideAnsiCodePage` and `DriftManifestTest.IllFormedUtf8PathFailsClosed` are the shape.
+- Rebind, removal, clear, and a guard release can deliver an input callback on the caller's thread, as the `Input::shutdown` contract states. From such a callback, call each verb whose contract permits a call from an input callback, under a deadline. A poll-thread callback proof does not cover this path. `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread` covers `shutdown`.
 
 ## Generation resource proof
 

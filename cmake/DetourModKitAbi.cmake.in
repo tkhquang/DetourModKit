@@ -1,8 +1,8 @@
 # DetourModKit installed-package ABI record (generated at configure time).
 #
-# Machine-readable facts about the toolchain that produced this prefix. The archives here are C++ static
-# libraries with no extern "C" boundary, so these axes determine whether a consumer is ABI-compatible. This
-# file only records the facts; compatibility policy belongs to the package-validation layer.
+# Machine-readable facts about the toolchain that produced this prefix. The DetourModKit archive is a static library
+# with a C++ API, so these axes determine whether a consumer is ABI-compatible. This file only records the facts. The
+# package-validation layer owns the compatibility policy.
 set(DetourModKit_ABI_COMPILER_ID "@CMAKE_CXX_COMPILER_ID@")
 set(DetourModKit_ABI_COMPILER_VERSION "@CMAKE_CXX_COMPILER_VERSION@")
 set(DetourModKit_ABI_SIMULATE_ID "@CMAKE_CXX_SIMULATE_ID@")

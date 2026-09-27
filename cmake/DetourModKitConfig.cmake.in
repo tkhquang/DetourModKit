@@ -9,8 +9,8 @@ set(DetourModKit_VERSION "@PROJECT_VERSION@")
 include("${CMAKE_CURRENT_LIST_DIR}/DetourModKitAbi.cmake")
 
 # ABI and toolchain compatibility validation.
-# This is a C++23 static archive with no extern "C" boundary, so the compiler's mangling, exception model, and the
-# layout of every std type crossing the API are baked in and are not interchangeable across toolchains. Rather than
+# DetourModKit is a C++23 static archive with a C++ API. The archive bakes in the compiler's mangling, exception model,
+# and the layout of every std type that crosses the API. None of these is interchangeable across toolchains. Rather than
 # document that and trust the consumer to comply, compare the consumer's toolchain against the recorded producer axes
 # and fail find_package early on an incompatible tuple. Compiler ABI family, standard library, target system, pointer
 # size, and target architecture are hard requirements. Compiler version is advisory because a difference alone does
@@ -223,5 +223,5 @@ endif()
 check_required_components(DetourModKit)
 
 message(STATUS "Found DetourModKit: ${DetourModKit_VERSION}")
-message(STATUS "DetourModKit ABI: C++23 static library, no extern \"C\" boundary. "
+message(STATUS "DetourModKit ABI: C++23 static library with a C++ API. "
   "Link only from the same target system and compiler/STL/CRT toolchain that built this prefix.")

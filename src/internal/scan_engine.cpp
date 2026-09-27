@@ -918,10 +918,10 @@ namespace DetourModKit
             return result;
         }
 
-        // No literal byte in segment 0 (all wildcard or nibble-only): fall back to trying every start position. Rare --
-        // a real signature almost always carries a literal byte in its leading run. This is the path the region-wide
-        // budget most protects: with no anchor to make candidates sparse, every byte is a start position, so an
-        // unbudgeted wide-gap wildcard pattern would visit O(region_size x per-position budget) nodes.
+        // Segment 0 has no literal byte (all wildcard or nibble-only), so every start position is a candidate. This
+        // path is rare, because a real signature almost always carries a literal byte in segment 0. The
+        // region-wide budget protects this path most: with no anchor to make candidates sparse, every byte is a start
+        // position. Without that budget, a wide-gap wildcard pattern visits O(region_size x per-position budget) nodes.
         for (const std::byte *candidate = start_address; candidate <= last_candidate; ++candidate)
         {
             // Per-candidate work budget (see the anchored sweep above): reset at each start position.

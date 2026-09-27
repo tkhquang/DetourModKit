@@ -27,7 +27,13 @@ using DetourModKit::Address;
 
 // Cheap, syscall-free structural guards. Capture the module range once so the
 // per-call check is a branch comparison, not a GetModuleHandleEx lookup.
-static const auto g_host = DetourModKit::Region::host();
+static DetourModKit::Region g_host{};
+
+// Before you enable the hook that calls probe_object, call this from setup, off the loader lock.
+void capture_host_range() noexcept
+{
+    g_host = DetourModKit::Region::host();
+}
 
 bool probe_object(uintptr_t obj, ObjectFields &out) noexcept
 {
@@ -38,8 +44,7 @@ bool probe_object(uintptr_t obj, ObjectFields &out) noexcept
     }
 
     // 2. Read every field under the engine's fault guard. On MSVC this is one
-    //    __try frame; on MinGW it uses the vectored fault guard. Either way a
-    //    fault returns a Result error instead of crashing.
+    //    __try frame. On MinGW it uses the vectored fault guard.
     const auto vtable = mem::read<uintptr_t>(Address{obj});
     if (!vtable || !g_host.contains(Address{*vtable}))
     {
@@ -123,9 +128,8 @@ namespace mem = DetourModKit::memory;
 using DetourModKit::Address;
 using DetourModKit::ErrorCode;
 
-// Write a camera transform every frame through a resolved chain. Fault-guarded: a stale chain fails closed
-// instead of faulting the host, and a slot that is not writable (the chain drifted onto a protected page) is
-// rejected rather than reprotected.
+// Write a camera transform every frame through a resolved chain. A stale chain fails closed. The guarded write
+// rejects a slot that is not writable (the chain drifted onto a protected page) and does not reprotect it.
 const Matrix4x4 next = compute_camera(...);
 if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 {
@@ -188,8 +192,8 @@ A top-level built-in array request returns the equivalent nested `std::array`, b
 | You have | You want | Use |
 |----------|----------|-----|
 | A pointer the hook was handed | To read or write it | Direct access. It is live for the current invocation. Use a guarded `memory::read` or `memory::write_in_place` only if it can be stale by the time you run. |
-| A single address that can be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
-| A single address, a raw byte range | One range read that cannot fault | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
+| A single address that can be stale or unmapped | One guarded typed read | `memory::read<T>(Address{addr})` |
+| A single address, a raw byte range | One guarded range read | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
 | A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})`. `InvalidRepresentation` for a byte other than 0/1 |
 | A multi-level pointer chain | The final address only | `memory::walk(Address{base}, {offsets...})` |
 | A multi-level pointer chain | A typed value at the end | `memory::walk(...)` then `memory::read<T>(*slot)` |
@@ -205,7 +209,9 @@ A top-level built-in array request returns the equivalent nested `std::array`, b
 
 ## Toolchain note
 
-The guarded primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once. Reads and writes run through a guarded access path with no `VirtualQuery` on the success path. It recovers a fault as a `Result` error instead of a crash. The Structured Exception Handling is confined entirely to the engine translation unit, so the installed `memory.hpp` pulls in no `<windows.h>` and no SEH. `init_cache` installs the MinGW vectored fault handler, so a guarded read never has to fall back to a per-call `VirtualQuery`. `memory::unchecked::read` is still the fastest choice when you can prove the pointer is live for the current frame. Otherwise prefer the guarded `memory::read` / `memory::walk` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
+The guarded primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once. Reads and writes run through a guarded access path with no `VirtualQuery` on the success path. The Structured Exception Handling is confined entirely to the engine translation unit, so the installed `memory.hpp` pulls in no `<windows.h>` and no SEH. `init_cache` or the first guarded access installs the MinGW vectored exception handler. If the install fails, or while Session teardown blocks it, a guarded read or write checks each region with `VirtualQuery` before the copy.
+
+`memory::unchecked::read` is still the fastest choice when you can prove the pointer is live for the current frame. Otherwise prefer the guarded `memory::read` / `memory::walk` for stale or unmapped pointers. Distributed mod builds target MSVC, so the zero-cost path is the normal case.
 
 ## Anti-patterns to remove
 
@@ -238,11 +244,11 @@ for (auto p : candidates)
 ```
 
 ```cpp
-// RIGHT: capture the range once, screen cheaply, read under one guard.
-static const auto host = DetourModKit::Region::host();
+// RIGHT: g_host from the pattern above holds the range that setup captured once.
+// A cheap screen against it gates each guarded read.
 for (auto p : candidates)
 {
-    if (mem::is_plausible_ptr(Address{p}) && host.contains(Address{p}))
+    if (mem::is_plausible_ptr(Address{p}) && g_host.contains(Address{p}))
     {
         const auto v = mem::read<uint64_t>(Address{p});
         if (v)

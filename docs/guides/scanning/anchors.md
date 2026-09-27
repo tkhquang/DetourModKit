@@ -23,7 +23,11 @@ A `StringXref` anchor is the most update-resilient kind that anchors on in-image
 - With `xref_return = scan::XrefReturn::EnclosingFunction`, the enclosing function's entry. It uses authoritative x64 `.pdata` bounds via `RtlLookupFunctionEntry`, with a heuristic prologue back-scan fallback.
 - With `xref_return = scan::XrefReturn::StringPointerSlot`, the global data slot that a `mov [rip+slot], reg` caches the loaded pointer into. See [String-reference anchors](../../misc/aob-signatures.md).
 
-Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = scan::StringEncoding::Utf16le` for `wchar_t` literals. The anchor text stays UTF-8 and is transcoded to UTF-16LE, including surrogate pairs for supplementary code points, so a non-ASCII literal resolves exactly rather than a search for widened bytes. Ill-formed UTF-8 (or an embedded NUL on either encoding) fails closed with `ErrorCode::MalformedQueryText` instead of a search for a different literal. The `Utf8` route stays byte-transparent, so a byte string that is not well-formed UTF-8 is still a usable anchor. `xref_require_terminator` (default true) keeps a prefix of a longer literal from a match ("Player" inside "PlayerController"). `xref_broad_match` (default false) selects the phase-2 reference scan. The default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`, while `xref_broad_match = true` keeps that scan and adds a Zydis-verified sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). Use broad mode when the default reports a miss for a string you know is referenced, or when uniqueness must account for those rarer shapes before it returns an enclosing function. See [String-reference anchors](../../misc/aob-signatures.md) for the full two-mode model.
+Strings survive game patches far better than the code bytes around them. A `StringXref` anchor fails closed on an absent, duplicated (linker-pooled), or unreferenced string. Pick a long, specific literal that occurs and is referenced exactly once. `xref_require_terminator` (default true) keeps a prefix of a longer literal from a match ("Player" inside "PlayerController").
+
+Set `xref_encoding = scan::StringEncoding::Utf16le` for `wchar_t` literals. The anchor text stays UTF-8 and is transcoded to UTF-16LE, with surrogate pairs for supplementary code points. A non-ASCII literal therefore resolves exactly, not as a search for widened bytes. Ill-formed UTF-8 (or an embedded NUL on either encoding) fails closed with `ErrorCode::MalformedQueryText` instead of a search for a different literal. The `Utf8` route stays byte-transparent, so a byte string that is not well-formed UTF-8 is still a usable anchor.
+
+`xref_broad_match` (default false) selects the phase-2 reference scan. The default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`. `xref_broad_match = true` keeps that scan and adds a Zydis decode sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). If the default reports a miss for a string that you know is referenced, use broad mode. See [String-reference anchors](../../misc/aob-signatures.md) for the full two-mode model.
 
 An `ExportName` anchor is the most update-resilient kind of all. It resolves a named export by a walk of the target module's PE Export Address Table (`scan::resolve_export`). An export name is a module's documented ABI, so it survives a game patch far better than the code bytes, string literals, or absolute addresses the other backends key on. An internal function can move or be rewritten every build, but an exported entry point keeps its name. Set `export_name` to the exact, case-sensitive symbol (no decoration). When the export lives in a module other than the one the anchor is resolved against, set `export_module` to the owning module's basename (`"engine.dll"`, for example). An empty `export_module` resolves the export within the resolve scope, so an anchor on the scanned module's own export needs no module name. The walk is deterministic and loader-free (it parses the mapped image directly, never a call to `GetProcAddress` and never a trigger of a `DllMain`) and fails closed at every step. A missing export directory, an absent or ordinal-only name, an out-of-image RVA, or an unloaded module all report `Failed` with no invented address. A *forwarded* export (one whose entry names another DLL's symbol as an ASCII string rather than code in this image) fails closed rather than a return of the address of a string. This is export ANCHORING (a read of the EAT to resolve an address). It is distinct from EAT HOOKING (a patch of the export table to redirect calls), which DetourModKit deliberately does not do.
 
@@ -39,17 +43,17 @@ For a target whose breakage is costly, a single signal can be too weak. One AOB 
 const an::Anchor stride_a = {
     .kind = an::AnchorKind::CodeOperand,
     .site = k_equip_stride_a,
-    .operand_index = 1,
+    .operand_index = 2,
 };
 const an::Anchor stride_b = {
     .kind = an::AnchorKind::CodeOperand,
     .site = k_equip_stride_b,
-    .operand_index = 1,
+    .operand_index = 2,
 };
 const an::Anchor stride_c = {
     .kind = an::AnchorKind::CodeOperand,
     .site = k_equip_stride_c,
-    .operand_index = 1,
+    .operand_index = 2,
 };
 const an::Anchor *stride_votes[] = {&stride_a, &stride_b, &stride_c};
 const an::Anchor stride = {
@@ -119,7 +123,7 @@ const an::Anchor k_anchors[] = {
         .kind = an::AnchorKind::CodeOperand,
         .site = k_equip_stride,
         .operand_kind = sc::OperandKind::Immediate,
-        .operand_index = 1,
+        .operand_index = 2,
     },
     {
         .label = "fallback_off",
@@ -235,7 +239,7 @@ A `ScanProfile` (also in `anchor.hpp`) bundles a few setup-only, per-game scan-t
 - `candidate_order` is a `scan::CandidateOrder` that reuses the scan module's ordering policy. `UniqueFirst` promotes the unique-only text tiers (RTTI and string xref) and anchored byte patterns ahead of looser byte fallbacks. `anchor::resolve_with_profile` applies it to `RipGlobal` (through the request's `order` field) and to `CodeOperand` (by a build of a local reordered ladder via `scan::order_candidates`), so the caller's static candidate table is never mutated.
 - `deny_backend` is a per-`AnchorKind` deny-list.
 
-Resolve a profile-aware table with `anchor::resolve_with_profile` / `resolve_all_with_profile`. Use `resolve_all_with_profile_parallel` when the profile-aware table is safe to dispatch concurrently. A denied backend fails *closed* (status `Failed`, value 0), never a silent replacement by a different, possibly-wrong backend. The profile threads into `Quorum` sub-anchors, so a denied sub-anchor kind fails the quorum closed, and candidate-order and broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to a resolve with an empty profile.
+Resolve a profile-aware table with `anchor::resolve_with_profile` / `resolve_all_with_profile`. Use `resolve_all_with_profile_parallel` when the profile-aware table is safe to dispatch concurrently. A denied backend fails *closed* (status `Failed`, value 0), never a silent replacement by a different, possibly-wrong backend. The profile threads into `Quorum` sub-anchors, so candidate-order and broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to a resolve with an empty profile.
 
 ## Re-heal on a validation miss
 

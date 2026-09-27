@@ -30,9 +30,9 @@ def resolve_probe(path):
     """Return an absolute, existing path for the compiled ledger probe.
 
     Windows `CreateProcess` refuses a relative program path spelled with forward slashes and no leading `./`, which
-    is exactly what `find build/mingw-release -name dmk_bench_gate_probe.exe` hands the release workflow. Resolving
-    here rather than at each call site keeps every caller -- CTest's generator expression, the workflow's find, an
-    operator's shell -- on the same spelling, and turns a wrong path into one diagnostic instead of an exec traceback.
+    is exactly what `find build/mingw-release -name dmk_bench_gate_probe.exe` hands the release workflow. Resolution
+    here, not at each call site, keeps every caller (CTest's generator expression, the workflow's find, an operator's
+    shell) on the same spelling. It also turns a wrong path into one diagnostic instead of an exec traceback.
     """
     resolved = os.path.abspath(path)
     if not os.path.isfile(resolved):

@@ -4,9 +4,9 @@
  *
  * MSVC uses frame-based __try / __except filters here. Scanner TUs also use __try and route their filters through
  * guarded_range_fault_filter. MinGW/GCC uses a process-wide vectored exception handler here. A fault within an armed
- * foreign range returns a clean failure through __builtin_longjmp. This boundary keeps memory.hpp free of <windows.h>
- * and structured-exception constructs. The page-protection transaction ledger and the patch path that changes
- * protection live in memory_protect_ledger.cpp.
+ * foreign range returns a clean failure through __builtin_longjmp, unless the guard-page re-arm in [B-20] fails. This
+ * boundary keeps memory.hpp free of <windows.h> and structured-exception constructs. The page-protection transaction
+ * ledger and the patch path that changes protection live in memory_protect_ledger.cpp.
  */
 
 #include "internal/memory_guarded.hpp"
@@ -209,8 +209,8 @@ namespace DetourModKit
 
 #ifndef _MSC_VER
     // MinGW/GCC has no __try / __except. One process-wide vectored exception handler provides the equivalent fault
-    // guard. Each guarded access records its foreign range in a thread slot. A fault in that range returns failure
-    // instead of host termination.
+    // guard. Each guarded access records its foreign range in a thread slot. A fault in that range returns failure,
+    // unless the guard-page re-arm in [B-20] fails.
     namespace
     {
         // This fallback applies whenever s_veh_handle is unavailable. ReadProcessMemory turns a page change after the

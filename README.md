@@ -20,7 +20,7 @@ Two integration methods exist. Method 1 builds from source as a submodule. Metho
 
 ### ABI compatibility
 
-Read this before you choose a method. DetourModKit is a C++23 **static** library whose entire public surface is C++. There is no `extern "C"` boundary anywhere. The archive bakes in the compiler's name mangling, its exception model, and the layout of every standard-library type that crosses the API. That set covers `std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside `Result<T>`. None of it is stable across toolchains.
+Read this before you choose a method. DetourModKit is a C++23 **static** library with a C++ API. Its only `extern "C"` block, in `DetourModKit/abi/wheel_host.h`, declares the C ABI of the opt-in resident wheel host. The archive bakes in the compiler's name mangling, its exception model, and the layout of every standard-library type that crosses the API. That set covers `std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside `Result<T>`. None of it is stable across toolchains.
 
 | Axis | Requirement | Failure mode |
 | --- | --- | --- |
@@ -370,7 +370,7 @@ Each header's Doxygen comments are the API source of truth. Task-oriented guides
 
 ## Guides
 
-Start with [The Minimal Core](docs/guides/minimal-core.md) for the five-header core set and the shortest path from process attach to reading, patching, and hooking game code. Every task-oriented guide, design note, and benchmark is indexed in the [documentation index](docs/README.md). Upgrading from v3.x? See [Migrating from v3.x to v4.0.0](docs/migration/migrating-v3-to-v4.md).
+Start with [The Minimal Core](docs/guides/minimal-core.md). It covers the five-header core set and the shortest path from process attach to the first read, patch, and hook. The [documentation index](docs/README.md) lists every task-oriented guide, design note, and benchmark. If you port a v3.x mod, read [Migration from v3.x to v4](docs/migration/migrating-v3-to-v4.md).
 
 ## Building DetourModKit (Static Library via CMake)
 

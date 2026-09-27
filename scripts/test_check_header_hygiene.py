@@ -2,10 +2,10 @@
 """Regression tests for check_header_hygiene.py's comment stripper.
 
 The legacy-token and backend-confinement gates only inspect real code because strip_comments blanks // and /* */
-comments before the token scans run. That contract silently breaks if the stripper mis-tracks a char literal: a C++14
-numeric digit separator (1'000'000, 0xFF'FF) is NOT a char-literal delimiter, and an odd number of separators in one
-literal must not leave the scanner stuck in char state -- which would pass every following comment through unstripped
-and let a legacy spelling that appears only in prose trip the gate. These tests pin that behavior so a later edit to
+comments before the token scans run. That contract silently breaks if the stripper mis-tracks a char literal. A C++14
+numeric digit separator (1'000'000, 0xFF'FF) is NOT a char-literal delimiter. An odd number of separators in one
+literal must not leave the scanner stuck in char state. A stuck scanner passes every later comment through unstripped
+and lets a legacy spelling that appears only in prose trip the gate. These tests pin that behavior so a later edit to
 the stripper cannot reintroduce the desync unnoticed, and confirm the guard does not over-suppress real code.
 """
 import importlib.util

@@ -2,7 +2,7 @@
 """ABI-tuple rejection gate for an installed DetourModKit package.
 
 DetourModKitConfig.cmake rejects a consumer toolchain that differs from the recorded producer ABI tuple. A C++23
-static archive with no extern "C" boundary cannot link across those axes. The library itself is Windows-only. This
+static archive with a C++ API cannot link across those axes. The library itself is Windows-only. This
 gate proves independent rejection for every recorded axis. It also proves these cases:
 
 - Architecture aliases resolve to the same value.

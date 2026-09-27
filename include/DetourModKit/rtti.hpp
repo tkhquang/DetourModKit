@@ -117,13 +117,12 @@ namespace DetourModKit
          *          @c col.pSelf cross-check rejects a forged or relocated COL, and any signature other than the x64
          *          value is rejected. Reads are page-bounded and guarded. The first NUL terminates the result.
          * @param vtable Runtime vtable pointer (the first qword of the object).
-         * @param max_len Maximum mangled-name length to copy; clamped to @ref MAX_TYPE_NAME_LEN. Zero is replaced with
+         * @param max_len Maximum mangled-name length to copy, clamped to @ref MAX_TYPE_NAME_LEN. Zero is replaced with
          *                @ref DEFAULT_TYPE_NAME_MAX.
          * @return The mangled name on success, std::nullopt on any failure (null vtable, unmapped page, missing COL,
          *         bad RVA, allocation failure).
-         * @note Performs one heap allocation for the returned std::string. For per-frame identity probes use @ref
-         *       vtable_is_type or @ref type_name_into to avoid the allocation.
-         * @note Setup/control-plane only: the read allocates and runs the loader-querying COL prelude.
+         * @note Performs one heap allocation for the returned std::string.
+         * @note Setup/control-plane only: the read allocates and runs the COL prelude, which queries the loader.
          */
         [[nodiscard]] std::optional<std::string>
         type_name_of(Address vtable, std::size_t max_len = DEFAULT_TYPE_NAME_MAX) noexcept;

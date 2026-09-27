@@ -606,7 +606,7 @@ namespace
         // Reachable only if the first throw did not unwind (and thereby destroy) the pump loop.
         write_ini("[S]\nK=3\n");
         EXPECT_TRUE(wait_until([&]() { return fires.load() >= 2; }, 2s))
-            << "watcher stopped pumping after a throwing callback -- the exception escaped the invocation site";
+            << "the pump loop stopped after a callback threw. The exception escaped the invocation site";
 
         // Still alive, and it tears down cleanly on scope exit (the drain runs; no crash from a skipped CancelIoEx).
         EXPECT_TRUE(watcher.is_running());
@@ -1049,7 +1049,7 @@ namespace
         EXPECT_LT(elapsed, 250ms)
             << "start() must return within 250 ms via the SettleGuard, not run the full 5 s handshake timeout";
         EXPECT_EQ(intentional_leak_count(LeakSubsystem::ConfigWatcher), leaks_before)
-            << "a pre-handshake failure must not leak the Impl -- it takes the benign reset path, not leak-on-timeout";
+            << "a pre-handshake failure must not leak the Impl. It takes the benign reset path, not leak-on-timeout";
 
         // Reusable: with the seam cleared, a subsequent start on the same watcher succeeds.
         DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;

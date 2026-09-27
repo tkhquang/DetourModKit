@@ -163,11 +163,15 @@ if (auto loaded = mf::load("MyMod.signatures.ini"))
 if (auto merged = mf::overlay(defaults, overrides))
 {
     const mf::GateResult gate = mf::resolve_and_gate(*merged);
-    // ... use gate.find(...) exactly as above ...
+    // ... use gate.find(...) as above, with the binding->kind check below ...
 }
 ```
 
 So if a game update broke two of a mod's twenty signatures, the shipped file needs only those two `[sig.<label>]` entries, and the other eighteen keep their in-code defaults. Adopt nothing and nothing changes. Adopt anchors and an optional repair file sits on top.
+
+An `anchor::Anchor` has no binding field, and `Signature::adopt` never sets `SignatureRecord::binding`. Each adopted default therefore carries `Binding{}`: `BindingKind::Address`, empty `offsets`, and `hook::Gpr::Rax` in `read_register`. The merged entry for an override that falls back to its in-code default carries `Binding{}` too. On such an entry, the mid-hook recipe above reads `rax`, and the chain recipe reads the float at the resolved address itself.
+
+Before a read of a `Binding` field, check that `binding->kind` is the kind that uses that field. If the kind differs, keep the in-code value, such as `hook::Gpr::Rcx` above.
 
 ## Author side: capture the fingerprints once
 

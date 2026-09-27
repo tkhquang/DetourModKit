@@ -311,7 +311,7 @@ class TopologyRefusals(unittest.TestCase):
         verdict, output = self.run_checker()
         self.assertEqual(verdict, 0, "expected acceptance, got a refusal:\n{0}".format(output))
 
-    # -- positive controls -------------------------------------------------------------------------
+    # Positive controls.
 
     def test_the_repository_topology_holds(self):
         self.holds()
@@ -431,7 +431,7 @@ class TopologyRefusals(unittest.TestCase):
             self.assertIsNone(checker.status_loss_reason(benign, "bash", False), benign)
         self.holds()
 
-    # -- unreviewed and missing routes -------------------------------------------------------------
+    # Unreviewed and deleted routes.
 
     def test_a_missing_workflow_is_refused(self):
         os.remove(os.path.join(self.workspace.root, QUALITY))
@@ -479,7 +479,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("declares jobs")
 
-    # -- triggers and required contexts ------------------------------------------------------------
+    # Triggers and required contexts.
 
     def test_a_path_filtered_pull_request_context_is_refused(self):
         for relative in (PR_CHECK, ARCH_GATE, QUALITY):
@@ -554,7 +554,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("has no 'expected_sha' input")
 
-    # -- job-level policy --------------------------------------------------------------------------
+    # Job-level policy.
 
     def test_an_advisory_quality_job_is_refused(self):
         self.workspace.add_job_key(QUALITY, "format-check", "    continue-on-error: true\n")
@@ -619,7 +619,7 @@ class TopologyRefusals(unittest.TestCase):
         self.workspace.add_job_key(RELEASE, "build-mingw", "    if : ${{ false }}\n")
         self.refuses("job 'build-mingw' is gated on")
 
-    # -- step inventory: deletion, replacement, reordering -----------------------------------------
+    # Step inventory: deleted, replaced, and reordered steps.
 
     def test_every_load_bearing_step_refuses_being_deleted(self):
         for relative, step in LOAD_BEARING_STEPS:
@@ -668,7 +668,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("is not the reviewed program")
 
-    # -- step conditions ---------------------------------------------------------------------------
+    # Step conditions.
 
     def test_every_load_bearing_step_refuses_a_false_condition(self):
         for relative, step in LOAD_BEARING_STEPS:
@@ -710,7 +710,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("not its reviewed condition")
 
-    # -- publication programs: shadowing, relocation, reduction ------------------------------------
+    # Publication programs: shadowed variables, relocation, and reduction.
 
     def test_a_shadowing_assignment_in_the_tag_program_is_refused(self):
         self.workspace.mutate(
@@ -895,7 +895,7 @@ class TopologyRefusals(unittest.TestCase):
         self.workspace.write(RELEASE, text[:begin] + block.replace(run_line, replacement, 1) + text[finish:])
         self.refuses("is not the reviewed program")
 
-    # -- focused status-loss diagnostics ------------------------------------------------------------
+    # Focused status-loss diagnostics.
 
     def test_every_critical_command_refuses_a_nonliteral_successful_fallback(self):
         for relative, command, fallback in CRITICAL_COMMAND_FALLBACKS:
@@ -1076,7 +1076,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("'Write-Warning'")
 
-    # -- shells ------------------------------------------------------------------------------------
+    # Shells.
 
     def test_a_custom_shell_template_is_refused(self):
         for template in ("bash {0} || true", "bash --noprofile {0}", "bash -c {0}"):
@@ -1117,7 +1117,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("reviewed as an action step but carries a run body")
 
-    # -- dependency graph --------------------------------------------------------------------------
+    # Dependency graph.
 
     def test_each_producer_must_depend_on_candidate_validation(self):
         for name in ("build-mingw", "build-msvc", "benchmark-evidence"):
@@ -1168,7 +1168,7 @@ class TopologyRefusals(unittest.TestCase):
         self.workspace.write(RELEASE, text[:start] + body + text[end:])
         self.refuses("job 'build-mingw' needs []")
 
-    # -- release mode and credentials --------------------------------------------------------------
+    # Release mode and credentials.
 
     def test_a_release_without_a_mode_input_is_refused(self):
         self.workspace.mutate(RELEASE, "      mode:\n", "      mode_disabled:\n")
@@ -1250,7 +1250,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("exactly the two reviewed RELEASE_TOKEN uses")
 
-    # -- content pins that survive from the previous boundary ---------------------------------------
+    # Content pins.
 
     def test_tidy_without_the_warnings_as_errors_override_is_refused(self):
         self.workspace.mutate(QUALITY, "--warnings-as-errors='*'", "--checks='*'")
@@ -1370,7 +1370,7 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("is not the reviewed program")
 
-    # -- helpers -----------------------------------------------------------------------------------
+    # Helpers.
 
     def job_of(self, relative, step_name):
         """Return the one job that owns a reviewed step name, refusing an ambiguous name.

@@ -635,8 +635,8 @@ namespace DetourModKit
          * @brief Resolves one anchor with a profile's defaults applied (deny-list, candidate order, broad-string
          * widen).
          * @param anchor The anchor to resolve.
-         * @param profile The per-game defaults. A denied backend fails closed; the profile threads into Quorum
-         *                 sub-anchors, so a denied sub-anchor kind fails the quorum closed.
+         * @param profile The per-game defaults. A denied backend fails closed. The profile threads into Quorum
+         *                sub-anchors.
          * @param scope The module image to resolve within.
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
          * @note Setup/control-plane only (see @ref resolve).

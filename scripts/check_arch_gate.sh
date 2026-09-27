@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# check_arch_gate.sh -- prove the native x86-64 Windows platform gate.
+# check_arch_gate.sh proves the native x86-64 Windows platform gate.
 #
 # Macro probes cover these unsupported targets:
 #

@@ -93,7 +93,7 @@ Some subsystems take counted module references on the module that links the arch
 
 The permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A teardown delta therefore reads zero for a current wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`.
 
-`MessageHookKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason can identify live code.
+`MessageHookKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. The Steam overlay layers on the XInput hooks by default, so XInput retention is the common case under Steam. Every other nonzero reason can identify live code.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
@@ -275,7 +275,7 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 | `config::press_combo` / `hold_combo`       | Replaces the config item, appends the input binding   | `input::Input::remove_bindings_by_name` |
 | `input::register_combo`                    | Appends a second binding under the same name          | `input::Input::remove_bindings_by_name` |
 | `input::Input::start`                      | No-op, and the new `poll_interval` is ignored         | `shutdown()`, to change the interval    |
-| `bootstrap_attach` / `bootstrap`           | Returns a failed `Result` while a session is attached | `bootstrap_detach`                      |
+| `bootstrap_attach` / `bootstrap`           | Returns a failed `Result` while a session is attached | `shutdown_and_wait()`                   |
 
 `input::register_combo` is append-only. The engine treats `name` as a label, not a key. That is the most common surprise across reloads. Under staged generations, re-registration from each generation's `Init()` is the supported path. `config::bind_*` replaces the item in place, and the previous generation's `Shutdown()` retired its bindings.
 
@@ -305,4 +305,4 @@ A retained mid continuation keeps its backend and module references. The `mid_at
 - [The lifecycle note](../../design/lifecycle.md) contains `[B-44]`, `[B-73]`, and `[B-74]`.
 - [The config note](../../design/config.md) contains the combo string syntax, and the opt-out sentinel.
 - [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) contains `dmk::StoppableWorker`.
-- [Migrating v3 to v4](../../migration/migrating-v3-to-v4.md) states the reload behavior change for consume and wheel users.
+- [Migration from v3.x to v4](../../migration/migrating-v3-to-v4.md) states the reload behavior change for consume and wheel users.
