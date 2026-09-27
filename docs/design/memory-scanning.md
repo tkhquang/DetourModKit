@@ -10,7 +10,7 @@ Rules owned here: `[B-05]`, `[B-17]`, `[B-18]`, `[B-19]`, `[B-20]`, `[B-21]`.
 
 One `Stopped/Starting/Running/Stopping` state machine serializes normal init and shutdown. It publishes `Running` last. Reader admission uses 64 striped closed-bit words under `[B-73]`. One compare-exchange checks the closed bit and adds one reader. Teardown closes every stripe before it drains. A rejected reader takes the uncached `VirtualQuery` route. Every drain has a fixed deadline. The cache takes a module reference before it opens admission. A timeout retains that reference and the shard storage. It also records one `LeakSubsystem::MemoryCache` event. `Lifecycle.ShutdownTimeoutRetainsShardsForStalledAdmittedReader` proves this contract. Loader-lock teardown unpublishes the cache, closes admission, and retains reachable state without a wait. A later authorized setup or shutdown drains that state. Shards use inline `SrwSharedMutex`, leader coalescence, per-shard statistics, and a content generation. Clear and invalidation advance that generation when a leader or lock contention prevents physical eviction. Stale entries cannot become later hits. Eviction uses insertion and refresh order, not hit order.
 
-`memory::is_readable_nonblocking` uses a shared try-lock and cache lookup. It returns `Unknown` after contention, a cache miss, or the init publication window. Before `init_cache()`, it uses the synchronous `VirtualQuery` range walk.
+`memory::is_readable_nonblocking` uses a shared try-lock and cache lookup. It returns `Unknown` after contention, a cache miss, or a concurrent shutdown that unpublished the shards. Outside the `Running` state, it uses the synchronous `VirtualQuery` range walk and returns a definite answer.
 
 `memory::walk` resolves a pointer chain in one walk. It issues one guarded read for each intermediate hop. It screens each dereferenced link against that hop's `min_valid` floor and the user-mode ceiling. A failed link reports its hop index in `Error::detail`. The MinGW path guards every link through the vectored handler.
 
@@ -47,7 +47,9 @@ The raw `scan::unchecked::find_pattern(region, pattern, occurrence)` does no pag
 
 To scan arbitrary process or module memory, prefer the page-filtered `scan::scan(pattern, scope, occurrence, pages)`. Its engine sweep is `detail::scan_module_pages`, which selects `scan_module_readable` or `scan_module_executable` by `Pages`. The sweep walks `VirtualQuery` and skips guard, no-access, and non-readable pages.
 
-The per-region `VirtualQuery` gate proves readability only at gate time. On MSVC, each region read additionally runs inside a structured-exception guard. A region decommitted or reprotected concurrently between the gate and the read is skipped and counted at `Debug`, not a host fault. On MinGW x64, the bulk `detail::find_pattern_raw` reads run through the same process-wide vectored fault guard that the `memory::read` copy primitives use. `scan_region_guarded` routes the per-region sweep through `detail::run_guarded_region`. A region reprotected or decommitted in that TOCTOU window is skipped and counted, which matches the MSVC behavior. The same guard wraps the per-window reads behind `find_string_xref`. The global architecture gate in `defines.hpp` rejects a 32-bit build, so guarded scanner code carries only the MSVC SEH and MinGW x64 VEH arms.
+The per-region `VirtualQuery` gate proves readability only at gate time. On MSVC, each region read additionally runs inside a structured-exception guard. A region decommitted or reprotected concurrently between the gate and the read is skipped and counted at `Debug`, unless the guard-page re-arm in `[B-20]` fails.
+
+On MinGW x64, the bulk `detail::find_pattern_raw` reads run through the same process-wide vectored fault guard that the `memory::read` copy primitives use. `scan_region_guarded` routes the per-region sweep through `detail::run_guarded_region`. A region reprotected or decommitted in that TOCTOU window is skipped and counted, which matches the MSVC behavior. The same guard wraps the per-window reads behind `find_string_xref`. The global architecture gate in `defines.hpp` rejects a 32-bit build, so guarded scanner code carries only the MSVC SEH and MinGW x64 VEH arms.
 
 ## ASan and foreign reads
 
@@ -73,7 +75,9 @@ The AOB scanner and the fault-guarded probe deliberately read arbitrary mapped p
 
 ### memory::write_in_place / write / patch_code
 
-`memory::write_in_place<T>()` is the guarded per-frame WRITE to game memory (a camera transform, a player field). It changes no protection and fails closed (`WriteFaulted`) if the target is not already writable. `memory::write<T>()` and `write_bytes()` are the escalating counterpart: they auto-unprotect on a fault, so a write to a read-only page succeeds. That serves a one-shot code patch. Hold a `memory::ProtectGuard` for repeated writes to a protected page. MSVC guards with one `__try` frame, and MinGW x64 guards with the vectored-handler copy path plus a fallback through `VirtualQuery` and `WriteProcessMemory`. Both return `Result<void>`, so a stale address fails closed instead of a host fault.
+`memory::write_in_place<T>()` is the guarded per-frame WRITE to game memory (a camera transform, a player field). It changes no protection and fails closed (`WriteFaulted`) if the target is not already writable. `memory::write<T>()` and `write_bytes()` are the non-strict counterpart: they auto-unprotect on a fault, so a write to a read-only page succeeds. That serves a one-shot code patch. Hold a `memory::ProtectGuard` for repeated writes to a protected page.
+
+On MSVC, each write runs inside one `__try` frame. On MinGW x64, each write uses the vectored-handler copy path plus a fallback through `VirtualQuery` and `WriteProcessMemory`. Every write returns `Result<void>`, so a stale address fails closed instead of a host fault, unless the guard-page re-arm in `[B-20]` fails.
 
 ## Rules
 
@@ -106,7 +110,7 @@ Walk every region that the range touches. Require each to be committed and to sa
 
 ### [B-20]
 
-The OS clears `PAGE_GUARD` before it dispatches `STATUS_GUARD_PAGE_VIOLATION`. A guarded read of a foreign guard page (another thread's stack guard) that merely fails closed therefore permanently disarms the host's fence. An immediate retry then reads straight through it. Re-arm the guard (`VirtualProtect(page, prot | PAGE_GUARD, ...)`) on a claimed guard-page fault before the failure report.
+The OS clears `PAGE_GUARD` before it dispatches `STATUS_GUARD_PAGE_VIOLATION`. A guarded read of a foreign guard page (another thread's stack guard) that merely fails closed therefore permanently disarms the host's fence. An immediate retry then reads straight through it. Re-arm the guard (`VirtualProtect(page, prot | PAGE_GUARD, ...)`) on a claimed guard-page fault before the failure report. If the re-arm fails, the fault guard does not claim the fault, and the handler search continues.
 
 This must hold for EVERY frame-based guarded foreign read. Both the memory engine's read/write/chain paths and the scanner's region/window sweeps route their MSVC `__except` through the shared `detail::guarded_range_fault_filter` with the exact declared foreign span. The filter is declared in `memory_fault.hpp` beside the `is_guarded_read_fault` fault set, and the MinGW vectored handler calls `rearm_guard_page_if_consumed` on the same path. A bare `is_guarded_read_fault(GetExceptionCode())` predicate at a `__except` swallows the fault WITHOUT the re-arm. That is the fail-open to avoid. The read still fails closed. The fence survives, so the host's next access re-faults as intended.
 

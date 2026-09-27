@@ -58,7 +58,7 @@ These notes document subsystem designs. Each note supports the `AGENTS.md` bound
 
 ## Migration
 
-- [Migrating from v3.x to v4.0.0](migration/migrating-v3-to-v4.md). Maps the old surface onto the clean-break v4 API (errors-as-values, RAII hooks, the `scan::resolve` surface, and the ABI contract).
+- [Migration from v3.x to v4](migration/migrating-v3-to-v4.md). Maps each v3.9.0 name to its v4 replacement and lists the behavior and build breaks.
 
 ## Testing
 
@@ -73,9 +73,9 @@ Archived benchmark snapshots. Record new measurements in a new folder rather tha
 - [Memory (MinGW VEH)](analysis/memory_veh_bench_v3.x/README.md). Vectored-handler fault guard.
 - [EventDispatcher](analysis/event_dispatcher_bench_v3.1.0/README.md). Emit and subscribe throughput.
 - [AVX-512 verify tier](analysis/avx512_verify_icount/README.md). Instruction-count proxy for the verify throughput gate.
-- [Protection-cache comparison](analysis/memory_cache_comparison_v4/README.md). Cache vs uncached decision record (A3).
-- [Protection-cache reader admission](analysis/memory_cache_admission_v5/README.md). Closed-bit admission word decision record (P1).
-- [Runtime footprint](analysis/runtime_footprint_v4/README.md). Logger and profiler resident bytes and high-water (P2-4).
-- [Signature-health corpus](analysis/sighealth_corpus_v4/README.md). Estimate vs ground truth over real x64 code (P1-9).
-- [Hot-path costs](analysis/hot_path_bench_v4/README.md). Type identity, guarded hook dispatch, and the asynchronous log producer (B1).
-- [Input token query](analysis/input_token_bench_v4/README.md). Per-frame `is_active` cost and the poller-acquire floor (C17).
+- [Protection-cache comparison](analysis/memory_cache_comparison_v4/README.md). Cache vs uncached decision record.
+- [Protection-cache reader admission](analysis/memory_cache_admission_v5/README.md). Closed-bit admission word decision record.
+- [Runtime footprint](analysis/runtime_footprint_v4/README.md). Logger and profiler resident bytes and high-water.
+- [Signature-health corpus](analysis/sighealth_corpus_v4/README.md). Estimate vs ground truth over real x64 code.
+- [Hot-path costs](analysis/hot_path_bench_v4/README.md). Type identity, guarded hook dispatch, and the asynchronous log producer.
+- [Input token query](analysis/input_token_bench_v4/README.md). Per-frame `is_active` cost and the poller-acquire floor.

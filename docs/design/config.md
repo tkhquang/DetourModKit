@@ -49,7 +49,7 @@ Watcher mechanism, one `StoppableWorker`:
 - Debounce uses `steady_clock`. The filename match is case-insensitive. `enable_auto_reload()` and `disable_auto_reload()` are idempotent and serialized by an internal `std::mutex`.
 - Under the loader lock, the watcher destructor publishes its own lock-free `stop_requested` flag rather than a stop request. `StoppableWorker`'s vetoed branch detaches without stop callbacks. The worker's own module reference, taken before thread creation and left outstanding on that detach, keeps the code mapped.
 - `stop()` publishes the same flag before `shutdown()` re-queries the process-global veto for itself. A predicate that flips mid-teardown therefore cannot abandon the pump unsignalled.
-- The destructor then moves `Impl` into a per-call heap cell allocated with `new (std::nothrow)`. On OOM, a `release()` fallback leaks the raw pointer instead of a run of `~Impl`. The noexcept destructor stays honest, and the discipline mirrors `Logger::shutdown_internal`.
+- The destructor then moves `Impl` into a per-call heap cell allocated with `new (std::nothrow)`. On OOM, a `release()` fallback leaks the raw pointer instead of a run of `~Impl`. The noexcept destructor stays honest.
 
 Hot-path mechanism: None. The subsystem is control-plane only, and the watcher pump polls `GetOverlappedResultEx` at 100 ms with idle CPU near zero.
 

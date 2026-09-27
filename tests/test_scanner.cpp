@@ -3295,9 +3295,9 @@ TEST(ScannerTest, FindPattern_AllWildcards_ReturnsStartWithWarning)
     EXPECT_EQ(second, buffer.data());
 }
 
-// Negative disp32 must land before the instruction. This guards the signed-arithmetic path in resolve_rip_relative --
-// an unsigned-only cast chain would still produce the correct bit pattern modulo 2^64, but the signed form is the one
-// humans can read, so a direct signed comparison is the contract.
+// Negative disp32 must land before the instruction. This guards the signed-arithmetic path in resolve_rip_relative.
+// An unsigned-only cast chain also produces the correct bit pattern modulo 2^64. The signed form is the one humans can
+// read, so a direct signed comparison is the contract.
 TEST(ScannerTest, ResolveRipRelative_NegativeDisplacement_ComputesCorrectTarget)
 {
     // CALL rel32 with disp32 = -0x20. Encoded little-endian: E0 FF FF FF.

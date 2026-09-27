@@ -2739,10 +2739,8 @@ TEST_F(MemoryTest, ReadPtrUnsafeReadsMisalignedPointer)
     VirtualFree(region, 0, MEM_RELEASE);
 }
 
-// is_readable / is_writable must fall back to a direct VirtualQuery whenever the cache reports zero shards. The
-// externally reachable zero-shard state is "cache not initialized"; the same code path also serves the brief init
-// publication window where the cache flag is true but the shard count is still 0. Returning false there would wrongly
-// report a readable region as non-readable, so the fallback must produce correct answers without the cache.
+// is_readable and is_writable fall back to a direct VirtualQuery walk while the cache is stopped. The walk
+// answers from the live page protection.
 TEST(MemoryUninitializedCache, PermissionChecksFallBackToDirectQuery)
 {
     // Force the zero-shard state regardless of prior tests' cache lifecycle.

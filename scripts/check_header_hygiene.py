@@ -93,7 +93,7 @@ ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|D
 STRING_POOL_DESTRUCTOR = re.compile(r'~\s*StringPool\s*\(\s*(?:void\s*)?\)')
 STRING_POOL_DELETED_SENTINEL = re.compile(r'~\s*StringPool\s*\(\s*(?:void\s*)?\)\s*=\s*delete\s*;')
 
-# --- v4 clean-break gates ---
+# v4 clean-break gates.
 # Legacy public headers deleted by a clean-break reshape; none may reappear. bootstrap.hpp was folded into the
 # Session / bootstrap / ModInfo lifecycle surface, now declared in session.hpp and aggregated by the root-level
 # DetourModKit.hpp umbrella. dmk.hpp was the interim in-directory umbrella spelling; the abbreviated in-directory name
@@ -109,7 +109,7 @@ LEGACY_HEADERS = (
     "include/DetourModKit/diagnostics_dump.hpp",
 )
 # Public headers DEMOTED (moved, not deleted): each keeps its capability but leaves the top-level public include set
-# for its new home. It must not reappear at the OLD public path -- that would re-expand the first-class public surface
+# for its new home. It must not reappear at the OLD public path. A copy there re-expands the first-class public surface
 # the demotion trimmed. A detail/ home keeps the header installed (a public header or the umbrella still includes it);
 # a src/internal/ home makes it truly private (no public includer).
 DEMOTED_HEADERS = {
@@ -127,7 +127,7 @@ DEMOTED_HEADERS = {
 LEGACY_SCAN_TOKEN = re.compile(
     r'(\bScanner::|\bresolve_cascade|\bRipResolveError\b|\bResolveError\b|\bStringXrefError\b'
     r'|\bAddrCandidate\b|\bResolveMode\b|\bResolveHit\b|\bCascadeRequest\b|\bCompiledPattern\b)')
-# --- v4 memory clean-break gate ---
+# v4 memory clean-break gate.
 # The legacy memory surface (namespace Memory, MemoryError, the seh_*/read_ptr_* primitives, the
 # ModuleRange family, plausible_userspace_ptr) was reshaped into namespace memory + the unified ErrorCode
 # + the src/internal/ guarded engine. None of these spellings may reappear in this repo's own sources.
@@ -139,21 +139,22 @@ LEGACY_MEMORY_TOKEN = re.compile(
     r'|\bseh_read|\bseh_write|\bseh_resolve'
     r'|\bread_ptr_unsafe\b|\bread_ptr_unchecked\b|\bplausible_userspace_ptr\b'
     r'|\bModuleRange\b|\bmodule_range_for\b|\bown_module_range\b|\bhost_module_range\b)')
-# --- v4 hook clean-break gate ---
+# v4 hook clean-break gate.
 # The legacy hook public surface (the HookManager singleton + name registry, HookError / HookConfig / VmtHookConfig,
 # InlineProloguePolicy, HookStatus / HookType, and the create_*_hook / hook_vmt_method / with_vmt_method entry points)
 # was reshaped into the free-function hook:: surface (inline_at / mid_at / install_all / Hook / VmtHook) over the
-# unified ErrorCode. None of these spellings may reappear. Matched after comment stripping. HookManager:: is gated
-# with the scope operator, not a bare \bHookManager\b, on purpose -- broadening to the bare token is both unnecessary
-# and wrong: the HookManager class is deleted, so any standalone-type spelling (HookManager x;, HookManager *, or
-# using X = HookManager) is already a hard compile error that needs no gate; and a bare token would false-positive on
-# the surviving diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
+# unified ErrorCode. None of these spellings may reappear. Matched after comment stripping.
+#
+# HookManager:: is gated with the scope operator, not a bare \bHookManager\b, on purpose. A bare token is both
+# unnecessary and wrong. The HookManager class is deleted. Any standalone-type spelling (HookManager x;,
+# HookManager *, or using X = HookManager) is already a hard compile error that needs no gate. A bare token also
+# matches the diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
 # The scope-only form targets exactly the legacy static-call spelling, the one that could otherwise read as plausible.
 LEGACY_HOOK_TOKEN = re.compile(
     r'(\bHookManager::|\bHookError\b|\bHookConfig\b|\bVmtHookConfig\b|\bInlineProloguePolicy\b'
     r'|\bHookStatus\b|\bHookType\b|\bcreate_inline_hook\b|\bcreate_mid_hook\b'
     r'|\bhook_vmt_method\b|\bwith_vmt_method\b)')
-# --- v4 config clean-break gate ---
+# v4 config clean-break gate.
 # The legacy config surface (namespace Config, the register_* free functions, clear_registered_items) was reshaped into
 # namespace config (bind / bind_int / bind_parsed / press_combo / load / clear) and the watcher was folded into a
 # src/internal/ engine. None of these spellings may reappear in this repo's own sources. Config:: is gated with the
@@ -164,7 +165,7 @@ LEGACY_CONFIG_TOKEN = re.compile(
     r'|\bregister_int\b|\bregister_float\b|\bregister_bool\b|\bregister_string\b|\bregister_log_level\b'
     r'|\bregister_atomic\b|\bregister_key_combo\b|\bregister_press_combo\b|\bregister_hold_combo\b'
     r'|\bregister_consume_flag\b|\bregister_reload_hotkey\b)')
-# --- v4 input clean-break gate ---
+# v4 input clean-break gate.
 # The legacy input surface (the InputManager singleton + InputPoller as a PUBLIC class, InputMode, the InputBindingGuard
 # guard, update_binding_combos, input_mode_to_string) was reshaped into the namespace input facade (Input /
 # register_combo / BindingGuard / Scope / Trigger / rebind) over the private engine. None of these spellings may
@@ -174,17 +175,18 @@ LEGACY_CONFIG_TOKEN = re.compile(
 LEGACY_INPUT_TOKEN = re.compile(
     r'(\bInputManager\b|\bInputMode\b|\bInputBindingGuard\b|\bupdate_binding_combos\b|\binput_mode_to_string\b'
     r'|\bregister_press\b|\bregister_hold\b)')
-# --- v4 logger clean-break gate ---
+# v4 logger clean-break gate.
 # The legacy logger surface (the Logger::get_instance() singleton accessor, the log_level_to_string free function, and
 # the Logger::string_to_log_level static) was reshaped into the free log() value-facade accessor, the to_string(LogLevel)
-# overload, and a free string_to_log_level. None of these spellings may reappear in this repo's own sources. The Logger
-# class name itself SURVIVES as the v4 value facade (class Logger, the log() return type, "construct your own"), so it is
-# gated only with the scope operator on the two deleted statics -- a bare \bLogger\b would false-positive on every
-# legitimate v4 site (and on AsyncLogger). log_level_to_string is a distinct deleted free-function name. Matched after
+# overload, and a free string_to_log_level. None of these spellings may reappear in this repo's own sources.
+#
+# The Logger class name itself SURVIVES as the v4 value facade (class Logger, the log() return type, "construct your
+# own"). The gate matches only the scope-operator spelling of the two deleted statics. A bare \bLogger\b token
+# matches every legitimate v4 site. log_level_to_string is a distinct deleted free-function name. Matched after
 # comment stripping, so v3-migration prose does not trip the gate.
 LEGACY_LOGGER_TOKEN = re.compile(
     r'(\bLogger::get_instance\b|\bLogger::string_to_log_level\b|\blog_level_to_string\b)')
-# --- v4 lifecycle clean-break gate ---
+# v4 lifecycle clean-break gate.
 # The legacy lifecycle surface (the standalone DMK_Shutdown() ordered-teardown free function, the namespace Bootstrap
 # scaffolding, and its on_dll_attach / on_dll_detach entry points) was reshaped into the RAII Session (whose destructor
 # runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in session.hpp.
@@ -194,7 +196,7 @@ LEGACY_LOGGER_TOKEN = re.compile(
 # does not trip the gate.
 LEGACY_LIFECYCLE_TOKEN = re.compile(
     r'(\bDMK_Shutdown\b|\bBootstrap::|\bon_dll_attach\b|\bon_dll_detach\b)')
-# --- v4 rtti clean-break gate ---
+# v4 rtti clean-break gate.
 # The legacy rtti surface (the PascalCase namespace Rtti, the per-domain IdentifyError / HealError enums, their
 # identify_error_to_string / heal_error_to_string mappers, and the lossy heal_offset wrapper) was reshaped into the
 # lowercase namespace rtti over the Address / Result vocabulary; the two enums folded into the unified ErrorCode's
@@ -208,7 +210,7 @@ LEGACY_LIFECYCLE_TOKEN = re.compile(
 LEGACY_RTTI_TOKEN = re.compile(
     r'(\bRtti::|\bIdentifyError\b|\bHealError\b'
     r'|\bidentify_error_to_string\b|\bheal_error_to_string\b|\bheal_offset\b)')
-# --- v4 manifest clean-break gate ---
+# v4 manifest clean-break gate.
 # The drift-manifest file-level ManifestError enum and its manifest_error_to_string mapper folded into the unified
 # ErrorCode's ErrorCategory::Manifest block (MissingHeader / MalformedLine / FileOpenFailed) and the Result idiom.
 # Neither spelling may reappear in this repo's own sources. ErrorCategory::Manifest and the "manifest" category label
@@ -465,9 +467,9 @@ def main():
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = strip_comments(raw)
         lines = text.splitlines()
-        # The root-level umbrella include/DetourModKit.hpp is a public header too -- the FIRST one most consumers include
-        # -- but it lives one directory above include/DetourModKit/ (the Boost.Asio umbrella-beside-the-parts shape), so a
-        # bare startswith("include/DetourModKit/") prefix test misses it and would exempt it from the public-surface
+        # The root-level umbrella include/DetourModKit.hpp is a public header too, and the FIRST one most consumers
+        # include. It lives one directory above include/DetourModKit/ (the Boost.Asio umbrella-beside-the-parts shape).
+        # A bare startswith("include/DetourModKit/") prefix test misses it and exempts it from the public-surface
         # backend-confinement rule and the private-engine-include check below. Match it explicitly so a regression that
         # made the umbrella pull in the SafetyHook backend, <psapi.h>, Zydis/Zycore, or a src/internal/ header fails the
         # gate exactly as it would for any header under include/DetourModKit/.

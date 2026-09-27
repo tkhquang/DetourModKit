@@ -6,8 +6,8 @@ machine can decide by reading a line, with no brace matching, ownership
 inference, or aesthetic judgement:
 
   - No em dash (U+2014) or en dash (U+2013). AGENTS.md ("Formatting and tooling")
-    mandates a single ``-`` in their place. The superseded ``--`` pair is a
-    review concern, not a gate.
+    mandates a single ``-`` in their place. The superseded double-hyphen pair is
+    a review concern, not a gate.
   - Object- and function-like macro names are ``UPPER_SNAKE_CASE``. AGENTS.md
     ("Naming") keeps macros and namespace/class protocol constants in that case;
     the macro half is decidable from the ``#define`` line alone. Local

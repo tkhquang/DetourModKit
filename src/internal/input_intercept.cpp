@@ -1558,12 +1558,12 @@ namespace DetourModKit::detail
             return result;
         }
 
-        // Local wheel source. A thread-scoped WH_GETMESSAGE hook on the selected game UI thread. It folds and counts
-        // on PM_REMOVE only. The Stage 0 spike (docs/analysis/wheel_hook_spike_v4) froze the retrieval semantics:
-        // NOREMOVE observes nothing and retrieval is counted once. Order contract (4.1): count admission runs before
-        // CallNextHookEx with no message mutation, so older hooks see the original record; CallNextHookEx runs
-        // exactly once; consume finalization writes WM_NULL after it returns, only while every admission condition
-        // still holds. A newer hook can rewrite the message after this returns; the consume stays best effort.
+        // The local wheel source is a thread-scoped WH_GETMESSAGE hook on the selected game UI thread. It folds and
+        // counts on PM_REMOVE only, at most once per retrieval, and a PM_NOREMOVE peek passes through uncounted. Count
+        // admission runs before CallNextHookEx with no message mutation, so older hooks see the original record.
+        // CallNextHookEx runs exactly once, and consume finalization writes WM_NULL after it returns, only while every
+        // admission condition still holds. A newer hook can rewrite the message after this hook returns. The consume
+        // stays best effort.
         LRESULT CALLBACK message_hook_proc(int code, WPARAM wparam, LPARAM lparam) noexcept
         {
             if (code != HC_ACTION)

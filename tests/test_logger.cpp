@@ -3066,7 +3066,7 @@ TEST_F(LoggerTest, LoaderLockDetachLeaksHandleAndKeepsSinkForTheRetainedWriter)
 
         logger.shutdown();
         EXPECT_GE(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leak_count_before + 1)
-            << "loader-lock shutdown must leak the AsyncLogger handle rather than dropping it";
+            << "loader-lock shutdown must record the detached AsyncLogger writer as an intentional leak";
 
         writer_gate.store(false, std::memory_order_release);
 

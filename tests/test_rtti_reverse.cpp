@@ -714,8 +714,8 @@ TEST_F(RttiReverseProof, IncompleteSectionOrPageTraversalCannotAuthorizeVerdict)
 
     const Region scope = pool_range();
 
-    // Control: every page readable. The sweep is Complete, sees BOTH primaries, and fails closed on AMBIGUITY --
-    // proving B is a real, resolvable duplicate primary that a complete sweep catches.
+    // Control: every page readable. The sweep is Complete, sees BOTH primaries, and fails closed on AMBIGUITY.
+    // This proves that B is a real, resolvable duplicate primary that a complete sweep catches.
     {
         Address out[4] = {};
         const rtti::VtablesResult complete = rtti::vtables_for_type_checked(".?AVRevIncomplete@@", out, 4, scope);

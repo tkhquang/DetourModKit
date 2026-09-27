@@ -17,8 +17,9 @@ git ls-files lists only this repo's files) it flags:
     run of three or more dashes, whether a bare ruler or a boxed ``// --- Label
     --- `` header). Namespaces, functions, and doc-blocks already delimit a file;
     replace a labeled ruler with a plain descriptive ``//`` sentence above the
-    group, and drop a bare one. A ``--`` pair stays legal here only because the
-    rule trips on three or more consecutive dashes. It is not the house form.
+    group, and drop a bare one. This rule does not flag a double-hyphen pair,
+    because it trips only on three or more consecutive dashes. The pair is not
+    the house form.
 
 Exit status is 1 with the offenders printed when any rule is violated, else 0.
 """
@@ -34,10 +35,11 @@ BLOCK_TAG = re.compile(
 # A /// documentation line, excluding the trailing-doc ///< form and ////
 # banner/separator lines (four or more slashes are not documentation).
 DOC_LINE = re.compile(r"^\s*///(?![</])")
-# A decorative separator: a full-line // comment holding a run of three or more
-# dashes. Anchored to the start of the comment line so a string literal or a
-# trailing code comment cannot trip it, and set at three dashes so a legacy `--`
-# pair in existing prose is untouched (the house dash is a single `-`).
+# A decorative separator: a full-line // comment with a run of three or more
+# dashes. The pattern anchors at the start of the comment line, so a string
+# literal or an end-of-line code comment cannot trip it. The three-dash floor
+# leaves a legacy double-hyphen pair in comment prose untouched (the house dash
+# is a single `-`).
 SEPARATOR_RULE = re.compile(r"^\s*//.*-{3,}")
 
 

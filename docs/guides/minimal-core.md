@@ -19,7 +19,7 @@ The core is five headers. Everything else is optional and layers on top: config 
 #include <optional>
 #include <utility>
 
-#include <DetourModKit/session.hpp>   // Session / ModInfo / bootstrap_attach -- the process-lifecycle surface
+#include <DetourModKit/session.hpp>   // Session / ModInfo / bootstrap_attach: the process-lifecycle surface
 #include <DetourModKit/scan.hpp>      // pattern scanning and candidate ladders
 #include <DetourModKit/memory.hpp>    // guarded read / write / pointer-chain walk
 #include <DetourModKit/hook.hpp>      // inline / mid hooks (move-only RAII Hook handle)
@@ -56,7 +56,7 @@ See the [root README example](../../README.md#code-example) for the `DllMain` bo
 
 ## Find, read, and patch
 
-`scan::scan` resolves an AOB pattern to an `Address` inside a `Region`. When the match is an x86-64 RIP-relative instruction, `scan::resolve_rip_relative` decodes its signed `disp32` into the referenced address. `memory::read<T>` and `memory::write_in_place<T>` then access that address without a change to page protection. A faulting read or non-writable target fails closed with an `ErrorCode` rather than a crash of the game.
+`scan::scan` resolves an AOB pattern to an `Address` inside a `Region`. When the match is an x86-64 RIP-relative instruction, `scan::resolve_rip_relative` decodes its signed `disp32` into the referenced address. `memory::read<T>` and `memory::write_in_place<T>` then access that address without a change to page protection. A read that faults, or a target that is not writable, fails closed with an `ErrorCode`, unless the guard-page re-arm in [`[B-20]`](../design/memory-scanning.md) fails.
 
 ```cpp
 // Locate a signature in the host executable.

@@ -35,21 +35,21 @@ Three labels classify a function's call-site safety. A public docblock must carr
 
 - *Callback-safe*: non-blocking, no unbounded allocation, no blocking I/O, no lock escalation. Safe to call from a hook or input callback on a game thread. This tier holds the hot-path reads and status queries.
 - *Setup/control-plane only*: the call can block, allocate, take exclusive locks, or do I/O. Call it from init, shutdown, or a worker thread, never from a hook or input callback. This tier holds create/remove, enable/disable, start/stop/shutdown, config load/reload, and cache init.
-- *Best-effort*: on failure the call fails closed (no-op, false, or dropped) and never throws or terminates the host. This tier holds logging, diagnostics counters, `emit_safe`, and the noexcept fail-closed paths.
+- *Best-effort*: on failure the call fails closed (no-op, false, or dropped) and never throws or terminates the host. This tier holds `try_log`, `emit_safe`, and the noexcept fail-closed paths.
 
 ## Error returns
 
 The error model is two-tier, not uniform.
 
-Fallible mutating operations on the memory, scanner, resolver, anchor, manifest, and hook-core surfaces return `Result<T>`. That is the single library-wide error-as-value alias `std::expected<T, Error>`, with `Result<void>` when there is no value. A nested failure propagates through the `DMK_TRY` / `DMK_TRY_VOID` pair rather than a hand-unwrap of the `std::expected`.
+Fallible operations on the memory, scanner, resolver, manifest, and hook-core surfaces return `Result<T>`. That is the single library-wide error-as-value alias `std::expected<T, Error>`, with `Result<void>` when there is no value. A nested failure propagates through the `DMK_TRY` / `DMK_TRY_VOID` pair rather than a hand-unwrap of the `std::expected`.
 
 By contrast, deliberately best-effort and query surfaces return `bool`, `std::optional`, or `void` by design and never surface an `Error`. Those surfaces are:
 
 - the RTTI query API (`type_name_of`, `vtable_is_type`, `region_has_rtti`),
-- config load/reload/bind (fail-soft to registered defaults, see `config.hpp`),
-- `EventDispatcher` emit/subscribe.
+- config load/reload/bind (an absent or malformed key falls back to its registered default, see `config.hpp`),
+- `EventDispatcher::emit_safe` (`emit` lets handler exceptions propagate).
 
-Those belong to the *Best-effort* tier of the API-discipline labels above. A surface in that tier MUST document its non- `Result` return rather than let the reader assume uniformity.
+A best-effort or query surface MUST document its non-`Result` return rather than let the reader assume uniformity.
 
 Reserve exceptions for construction failures and truly exceptional conditions.
 

@@ -2475,18 +2475,19 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 }
 
 #if defined(_MSC_VER) || defined(_WIN64)
-// Mirror of the scanner region guard for the string-xref window scans. find_string_xref reads each execute-readable
-// window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and Zydis decoding (broad
-// scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit / reprotect that the
-// per-window VirtualQuery gate cannot close. This test resolves a planted anchor in the first executable window while a
-// second thread decommits and recommits a separate trailing executable window. Every iteration returns either the
-// stable site (no fault landed) or a fail-closed ambiguity verdict (a faulted trailing window is skipped, which taints
-// uniqueness); references collected before a swallowed fault are discarded by the guarded wrappers, so the result is
-// never a wrong address and never a crash. A run where the decommit never lands inside the read window is a valid pass
-// for the fault path; the __except / VEH skip-the-window mechanism is pinned deterministically by
-// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. Supported builds enter
-// this block through MSVC SEH or the MinGW x64 vectored guard; 32-bit is rejected by the global architecture gate in
-// defines.hpp.
+// This test mirrors the scanner region guard for the string-xref window scans. find_string_xref reads each
+// execute-readable window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and
+// Zydis decoding (broad scan). scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit /
+// reprotect that the per-window VirtualQuery gate cannot close. Supported builds enter this block through MSVC SEH or
+// the MinGW x64 vectored guard. The global architecture gate in defines.hpp rejects 32-bit builds.
+//
+// The test resolves a planted anchor in the first executable window while a second thread decommits and recommits a
+// separate trailing executable window. Every iteration returns either the stable site (no fault landed) or a
+// fail-closed IncompleteScan (a faulted trailing window is skipped, which taints uniqueness). The guarded wrappers
+// discard references collected before a swallowed fault, so the result is never a wrong address and never a crash. A
+// run where the decommit never lands inside the read window is a valid pass for the fault path. MemoryGuardedReadFault
+// and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp pin the __except / VEH skip-the-window
+// mechanism deterministically.
 TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 {
     SYSTEM_INFO si{};
@@ -2622,8 +2623,8 @@ TEST(StringXrefIncompleteGate, FaultedWindowForcesIncompleteNeverFalselyUnique)
     EXPECT_EQ(control->raw(), reference_site);
 
     // Flip the trailing window between readable and no-access. VirtualProtect (not decommit) keeps the page committed
-    // throughout, so it is always a gate candidate when readable and faults on read exactly when flipped mid-scan --
-    // maximizing the chance a scan reads it while it faults.
+    // throughout, so it is always a gate candidate when readable and faults on read exactly when flipped mid-scan.
+    // This choice maximizes the chance that a scan reads the page while it faults.
     std::jthread toggler(
         [toggled_window, page](std::stop_token stop_token)
         {

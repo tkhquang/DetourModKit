@@ -340,7 +340,7 @@ Handle these formatter exclusions by hand:
 - Return `Result<T>` (`std::expected<T, Error>`) from fallible operations that mutate state.
 - Propagate the result through `DMK_TRY` or `DMK_TRY_VOID`.
 - Best-effort and query surfaces can return a simple status type: `bool`, `std::optional`, or `void`.
-- Document each non- `Result` return. See [docs/design/public-api.md](docs/design/public-api.md).
+- Document each non-`Result` return. See [docs/design/public-api.md](docs/design/public-api.md).
 - Preserve consumer security flags: ASLR, DEP, CFG on MSVC, and the equivalent MinGW flags. Propagate the flags to consumers.
 
 ### Lambda conventions
@@ -465,13 +465,11 @@ These paths run at 60 fps or more from game callbacks. `[B-02]` governs allocati
 - The `Logger::log()` level check and `is_enabled()` use one atomic load.
 - The formatted `Logger::log()` stamp check uses one relaxed atomic load after the level check.
 - The `Logger::log()` asynchronous enqueue uses an atomic shared-pointer snapshot and a lock-free queue push. The snapshot uses a bounded internal lock.
-- `memory::is_readable(Region)` uses a sharded SRWLOCK reader and a cache lookup.
-- `memory::is_readable_nonblocking(Region)` uses a shared try-lock and a cache lookup. It returns `Unknown` after contention or an unpublished cache result.
+- `memory::is_readable_nonblocking(Region)` uses a shared try-lock and a cache lookup. It returns `Unknown` after contention, a cache miss, or a concurrent shutdown that unpublished the shards.
 - `memory::walk(base, {offsets})` uses one walk and one out-of-line call. It issues one `guarded_read_bytes` for each intermediate hop and screens the leaf without a copy. `min_valid` gates the dereferenced link at each hop. The never-dereferenced leaf receives the canonical-range screen instead, `USERSPACE_PTR_MIN` to `USERSPACE_PTR_MAX`. The bare-offset overload uses a 32-entry stack buffer and returns `SizeTooLarge` past it.
 - `memory::read<T>()`, `memory::read_into()`, `memory::write_in_place<T>()`, and each `memory::walk()` hop are guarded paths. They use SEH under MSVC and a vectored handler under MinGW x64. The normal path does not call `VirtualQuery` for each operation. If MinGW cannot install the vectored handler, byte copies use `VirtualQuery` and process-memory APIs.
 - `memory::unchecked::read<T>()` uses a raw copy without validation. The caller must prove that the range is committed and readable.
 - `memory::is_plausible_ptr(Address)` and `Region::contains(Address)` use constant expression arithmetic without a system call.
-- `rtti::vtable_is_type(vt, expected)` uses a module-region lookup and three guarded reads. The reads are the `[-1]` meta-slot qword, the 24-byte COL, and `expected.size() + 1` name bytes. It does not allocate.
 - The `find_in_pointer_table` warm path reads each slot's object and vtable qwords, then compares against the cached vtable. It runs no RTTI walk. The generation-checked `PointerTableCache` overload also reads the image-generation token twice for each call.
 - The `TypeIdentity::matches` warm path reads the image-generation token once, then compares the cached vtable qword. It runs no RTTI walk. A changed token drops the cache and forces a cold resolve.
 
@@ -527,7 +525,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-36]` `[SAFETY]` **Each invocation site must contain exceptions from a user callback with a no-throw contract.** An escaped exception can free a resource that a live kernel IRP references. [docs/design/config.md](docs/design/config.md) `[B-36]` owns the rationale for `ConfigWatcher::fire_reload`.
 - `[B-37]` `[CORRECTNESS]` **Config and input resolution paths must use locale-independent parses.** They must use `std::from_chars` and an ASCII case-fold. An invalid value must fall back with a `Warning`, never silently. [docs/design/config.md](docs/design/config.md) `[B-37]` owns the rationale.
 - `[B-38]` `[CORRECTNESS]` **After a config read failure, the load path must clear the cached hash and return before the setter pass.** It must remember the target path after every outcome. [docs/design/config.md](docs/design/config.md) `[B-38]` owns the rationale.
-- `[B-39]` `[CORRECTNESS]` **An incomplete guarded sweep or bounded matcher must produce an ambiguous uniqueness result.** The implementation must honor the `incomplete` signal. [docs/design/resolution.md](docs/design/resolution.md) `[B-39]` owns the rationale.
+- `[B-39]` `[CORRECTNESS]` **An incomplete guarded sweep or bounded matcher must never certify a unique result.** The implementation must honor the `incomplete` signal. [docs/design/resolution.md](docs/design/resolution.md) `[B-39]` owns the rationale.
 - `[B-40]` `[CONVENTION]` **Each architecture-dependent engine must use the single x86-64 gate in `defines.hpp`.** It must not add a 32-bit fallback or another architecture guard. [docs/design/build-ci.md](docs/design/build-ci.md) `[B-40]` owns the rationale.
 - `[B-41]` `[CONVENTION]` **The hook surface must remain limited to SafetyHook-backed hooks and VMT hooks.** The backend family includes inline and mid-function hooks. Excluded families remain outside project scope. [docs/design/hooking.md](docs/design/hooking.md) `[B-41]` owns the rationale. [The hook type guide](docs/guides/hooking/hook-type-coverage.md) supplies context.
 - `[B-42]` `[SAFETY]` **A live detour must retain its inline-hook object until no game thread can execute the detour body.** Teardown must retire the trampoline pointer and drain the bounded in-flight counter after the install thread joins. It must then witness target bytes. [docs/design/hooking.md](docs/design/hooking.md) `[B-42]` owns the rationale.
