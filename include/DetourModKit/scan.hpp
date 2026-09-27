@@ -410,7 +410,9 @@ namespace DetourModKit::scan
      * @return The absolute address of the exported symbol, or an Error.
      * @details The walk parses the mapped image's own IMAGE_EXPORT_DIRECTORY. It never calls GetProcAddress, so it
      *          never enters the loader and never runs a DllMain. Every RVA is bound-checked against the image and
-     *          every read is guarded, so a truncated or hostile export section returns an Error, never a host fault.
+     *          every read is guarded. A truncated or hostile export section returns an Error, unless the guard-page
+     *          re-arm in `[B-20]` fails.
+     *
      *          A missing export directory, an absent name, an ordinal-only export, an out-of-image RVA, and an empty
      *          @p export_name all return @ref ErrorCode::ExportNotFound. A null or invalid module image returns
      *          @ref ErrorCode::InvalidRange. A forwarded export returns @ref ErrorCode::ExportForwarded instead of
@@ -1202,8 +1204,9 @@ namespace DetourModKit::scan
      *          pointer slot, not the final target. The same ImplausibleTarget gate applies. For an ambiguous
      *          signature, anchor through @ref resolve, which enforces per-candidate uniqueness. A malformed field
      *          layout returns @ref ErrorCode::InvalidArg before the sweep starts.
-     * @note The prefix scan reads @p search unguarded (caller-guaranteed readable); the displacement read is guarded.
-     *       No allocation.
+     * @note The prefix scan reads @p search unguarded (caller-guaranteed readable). The displacement read is guarded.
+     *       A one-byte @ref memory::is_readable check screens each resolved target. While the memory cache runs, a
+     *       cache miss in that check can allocate an entry. A failed allocation leaves the result unchanged.
      * @note Setup/control-plane only: the sweep cost scales with @p search, so resolve at init, not per frame.
      */
     [[nodiscard]] Result<Address> find_and_resolve_rip_relative(

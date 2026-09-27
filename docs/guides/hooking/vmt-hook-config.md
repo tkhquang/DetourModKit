@@ -67,15 +67,15 @@ When `true`, the create or apply path pre-flight-decodes the first byte of the o
 - `0x00` (uninitialised page / zero-fill BSS / null page sentinel)
 - `0xCC` (int3 breakpoint / alignment pad / debugger trap)
 - `0xCD` (int)
-- `0xC2`, `0xC3` (bare RET, a stub rather than a callable body)
+- `0xC2`, `0xC3` (bare RET)
 
-If the first byte is `0xEB` (jmp rel8) or `0xE9` (jmp rel32), the decoder resolves the jump target and rejects the slot when the target is in the same module as the slot. A slot whose first instruction is a same-module jump is a jump stub (an incremental-link ILT entry or a patched slot, for example), not a function body. MSVC adjustor thunks for multiple-inheritance vtables start with the this-adjust instruction and pass. Known false positive: consumer binaries built with `/INCREMENTAL` route every function through an ILT jump stub, which this check rejects. Real functions and tail-calls to a foreign module (`mov reg,reg; jmp <external>`) pass.
+If the first byte is `0xEB` (jmp rel8) or `0xE9` (jmp rel32), the decoder resolves the jump target. It rejects the slot when that target is in the slot's module, or when the slot or the target lies in no module. A same-module jump as the first instruction marks a jump stub (an incremental-link ILT entry or a patched slot), not a function body. MSVC adjustor thunks for multiple-inheritance vtables start with the this-adjust instruction and pass. Known false positives: an `/INCREMENTAL` consumer routes every function through an ILT jump stub, and an empty virtual body can compile to a bare RET. Tail calls to a foreign module (`mov reg,reg; jmp <external>`) pass.
 
 The decoder is allocation-free and no-throw, and every read goes through the guarded memory read. The classification reads one byte. Resolution of an `0xEB` or `0xE9` jump target reads the opcode plus its full displacement (two or five bytes). A slot whose bytes are unreadable fails the check (no proof of function).
 
 The pre-flight decodes slot 0 only.
 
-The pre-flight is intentionally conservative. A real function whose first byte is `0x90` (NOP padding before a real prologue) passes the byte check. A same-module thunk that happens to be a valid function (rare) is also accepted, because the byte check passes the decoder.
+The pre-flight is intentionally conservative. A real function whose first byte is `0x90` (NOP padding before a real prologue) passes the byte check.
 
 ## 5. Removal: dropping the handle vs `remove_from`
 
@@ -99,7 +99,7 @@ Destruction oldest-first cannot. The older hook's table is still the newer hook'
 `vh.apply_to(object, opts)` installs the existing clone on an additional object and re-runs both checks against the vptr currently on that object:
 
 - `fail_if_already_hooked` fails when the object is on a clone owned by a different VMT hook of this kit. It does not decide the already-applied case: an object this hook applied and left on the clone is a no-op success under every option value.
-- `fail_on_non_function_pointer` decodes the first slot of the vtable currently on the object (the one about to be replaced). It refuses to install the cloned vptr when the slot is not a real function pointer.
+- `fail_on_non_function_pointer` decodes the first slot of the vtable currently on the object (the one about to be replaced). It refuses to install the cloned vptr when that slot fails the section 4 pre-flight.
 
 The `apply_to` "no-op when already applied" rule is a deliberate difference from the `vmt_for` "refuse with HookAlreadyExists" rule. `vmt_for` is the path that establishes a clone, and a re-create on the same vptr is always wrong. `apply_to` is the path that installs an existing clone on additional objects, and a second call on the same object is a no-op the caller can legitimately want to express.
 
@@ -153,7 +153,7 @@ g_vmt = nullptr;
 ### Default policy
 
 ```cpp
-auto r = DetourModKit::hook::vmt_for("MyVmt", object); // VmtOptions{} -- both knobs off
+auto r = DetourModKit::hook::vmt_for("MyVmt", object); // VmtOptions{} - both knobs off
 ```
 
 ### Strict policy (refuse double-create, refuse non-function first slot)

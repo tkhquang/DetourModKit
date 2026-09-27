@@ -825,7 +825,7 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Debug,
-                    "EventDispatcher: {} rejected -- called from within a handler on a same-type dispatcher "
+                    "EventDispatcher: {} rejected: the call came from within a handler on a same-type dispatcher "
                     "(per-instantiation reentrancy guard). Defer the mutation until the emit returns.",
                     op
                 );
@@ -842,7 +842,7 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Debug,
-                    "EventDispatcher: subscribe rejected -- tombstone_and_wait has closed this "
+                    "EventDispatcher: subscribe rejected: tombstone_and_wait closed this "
                     "dispatcher. The returned Subscription is inactive."
                 );
             }
@@ -858,8 +858,8 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Debug,
-                    "EventDispatcher: subscribe rejected -- an emit frame could not be recorded, so "
-                    "same-type reentrancy cannot be ruled out. The returned Subscription is inactive."
+                    "EventDispatcher: subscribe rejected: an emit did not record its frame, so the dispatcher "
+                    "cannot rule out same-type reentrancy. The returned Subscription is inactive."
                 );
             }
             catch (...)
@@ -874,7 +874,7 @@ namespace DetourModKit
             {
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "EventDispatcher: subscribe rejected an empty handler -- the returned Subscription "
+                    "EventDispatcher: subscribe rejected an empty handler. The returned Subscription "
                     "is inactive. Pass a callable target."
                 );
             }

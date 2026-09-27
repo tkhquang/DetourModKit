@@ -50,8 +50,7 @@ namespace
     constexpr DWORD PROTECTIONS[] = {PAGE_NOACCESS, PAGE_READONLY};
 
     // The allowance is a permission, not a schedule, so one pass can miss a reordering a later pass performs. Four
-    // passes per layout keeps the matrix a cheap permanent gate. The exhaustive hundred-iteration sweep that first
-    // established the invariant is recorded in the roadmap and is not re-run here.
+    // passes per layout keeps the matrix a cheap permanent gate.
     constexpr int PASSES = 4;
 
     constexpr std::uint8_t SENTINEL = 0xA5;

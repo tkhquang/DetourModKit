@@ -298,7 +298,7 @@ namespace DetourModKit
              *          A route that the backend retains at reset keeps the same references and logs its reason.
              *          The loader lock, a newer layer, or an unproved restore also retain the backend.
              *          A retained patch keeps the target tracked as hooked.
-             *          `[B-73]` attributes each retention to HookManager with a warning.
+             *          `[B-73]` attributes each retention to HookManager.
              *
              *          A MID hook tombstones its callback before `[B-85]` rundown.
              *          No new callback begins after destruction returns.
@@ -873,11 +873,13 @@ namespace DetourModKit
          * @param table The spec rows. Taken as a const span so a `const k_hook_table` binds; install_all copies each
          *        OwnedScanRequest it needs and never moves out of the caller's table.
          * @return The per-row outcomes on success, with every successful row unpatched. LoaderLockActive fails before
-         *         all rows. The first @ref Severity::Mandatory miss also fails the outer Result.
-         * @details Every row is installed disabled (see @ref inline_at), so a table lands as one unarmed unit: take
-         *          ownership of the outcomes, then arm the rows you want by calling @ref Hook::enable on each. Rolling
-         *          back a partial table therefore never has to disarm a live hook. The call reports an allocation or
-         *          backend failure in its row and does not throw.
+         *         all rows. The first @ref Severity::Mandatory miss also fails the outer Result. An allocation failure
+         *         that no row reports fails the outer Result with OutOfMemory. Any other escaped exception fails it
+         *         with UnknownError.
+         * @details Every row is installed disabled (see @ref inline_at), so a table lands as one unarmed unit. A
+         *          rollback of a partial table therefore never has to disarm a live hook. Every outer failure removes
+         *          the installed rows newest-first. After you take ownership of the outcomes, call @ref Hook::enable
+         *          on each row that you want to arm.
          * @warning The returned vector has unspecified element destruction order. See the @ref InstallOutcome
          *          warning. Move successful hooks into a @ref HookStack in table order for newest-first teardown.
          * @note Setup/control-plane only: a batch install that resolves scans and allocates per row.
@@ -912,10 +914,11 @@ namespace DetourModKit
 
             /**
              * @brief Pre-flight-decode the first byte of the original vtable slot and refuse a breakpoint/jump-stub.
-             * @details A 0xCC/0xCD first byte is a breakpoint pad, not a function; a same-module `jmp rel8/rel32` is a
-             *          jump stub (e.g. an incremental-link ILT entry). Both are rejected; MSVC adjustor thunks and
-             *          real functions pass. Default false. Known false positive: a /INCREMENTAL consumer routes every
-             *          function through an ILT stub, which this rejects.
+             * @details The pre-flight rejects a 0xCC/0xCD breakpoint pad and a same-module `jmp rel8/rel32` jump stub,
+             *          such as an incremental-link ILT entry. It also rejects a 0x00 or bare RET (0xC2/0xC3) first
+             *          byte, and a jump whose slot or target lies in no module. MSVC adjustor thunks pass. Default
+             *          false. Known false positives: a /INCREMENTAL consumer routes every function through an ILT stub,
+             *          and an empty virtual body can compile to a bare RET.
              */
             bool fail_on_non_function_pointer = false;
         };

@@ -4,13 +4,13 @@
 /**
  * @file memory.hpp
  * @brief The guarded-memory surface: fault-tolerant reads, writes, pointer-chain walks, and a protection guard.
- * @details A guarded access turns a fault into a `Result` error instead of a host termination. The fault guard (MSVC
- *          `__try`, MinGW vectored handler) lives entirely in the engine translation unit, so this header pulls in no
- *          `<windows.h>` and no SEH.
+ * @details The fault guard (MSVC `__try`, MinGW vectored handler) lives entirely in the engine translation unit, so
+ *          this header pulls in no `<windows.h>` and no SEH.
  *
  *          The surface is layered by safety:
  *          - `read`, `read_into`, `write`, `write_bytes`, and `walk` are GUARDED. They validate, fault-protect, and
- *            report failure as an `Error`. Use them whenever the address can be stale.
+ *            report failure as an `Error`, unless the guard-page re-arm in `[B-20]` fails. Use them whenever the
+ *            address can be stale.
  *          - `is_plausible_ptr` is a pure arithmetic pre-screen with no syscall and no access.
  *          - The cache and the `is_readable` and `is_writable` predicates answer protection questions for one-shot
  *            setup validation and diagnostics, not for per-frame hot paths. Each consults a lock and, on a miss, can
@@ -255,20 +255,20 @@ namespace DetourModKit
          * @brief Guarded copy of @p out.size() bytes from @p address into @p out.
          * @param address Source address.
          * @param out Destination byte span. An empty span is a successful no-op.
-         * @return An empty `Result` on full success; `ErrorCode::OverlappingRanges` when @p out intersects the source
-         *         range (see @ref ErrorCode::OverlappingRanges; nothing is read); otherwise `ErrorCode::ReadFaulted` on
-         *         any fault or rejected argument, with the faulting byte's address in `Error::detail` - a byte inside
-         *         the requested source span `[address, address + out.size())`, not inside the destination @p out. It is
+         * @return An empty `Result` on full success. `ErrorCode::OverlappingRanges` when @p out intersects the source
+         *         range, and nothing is read (see @ref ErrorCode::OverlappingRanges). Otherwise
+         *         `ErrorCode::ReadFaulted` on a rejected argument or an unreadable source byte, unless the guard-page
+         *         re-arm in `[B-20]` fails. `Error::detail` then holds the address of an unreadable byte inside the
+         *         requested source span `[address, address + out.size())`, not inside the destination @p out. It is
          *         the first unreadable byte for the small spans a typed @ref read issues; for a span wide enough that
          *         the platform's `memcpy` touches bytes out of order it can be a later byte of the same unreadable
          *         region. A span rejected before any access, and the MinGW fallback that validates through
          *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
-         * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
-         *          fault guard, so it reports a fault anywhere in the span without host termination. The pre-screen
-         *          rejects only out-of-range spans: addresses below @ref USERSPACE_PTR_MIN, wrapped ends, or ends above
-         *          @ref USERSPACE_PTR_MAX. It does not prove pointer validity. An in-range pointer can remain unmapped
-         *          or stale, and the fault guard reports that access failure. On failure the contents of @p out are
-         *          unspecified.
+         * @details Every typed @ref read forwards to this byte-level read primitive. The copy runs under the engine's
+         *          fault guard. The pre-screen rejects only out-of-range spans: addresses below @ref USERSPACE_PTR_MIN,
+         *          wrapped ends, or ends above @ref USERSPACE_PTR_MAX. It does not prove pointer validity. An in-range
+         *          pointer can remain unmapped or stale, and the fault guard reports that access failure, unless the
+         *          guard-page re-arm in `[B-20]` fails. On failure the contents of @p out are unspecified.
          * @note Callback-safe: allocates nothing, takes no lock, and on the established hot path issues no syscall.
          */
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;

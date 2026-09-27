@@ -1268,9 +1268,9 @@ namespace
 
 TEST_F(InterceptMessageHookTest, OlderHookSeesTheOriginalRecordBeforeConsumeFinalization)
 {
-    // Order contract (4.1): count admission runs before CallNextHookEx with no message mutation, and the WM_NULL
-    // consume rewrite happens only after CallNextHookEx returns. An older hook must therefore observe the original
-    // record even for a direction DMK swallows from the retrieving application.
+    // Count admission runs before CallNextHookEx with no message mutation, and the WM_NULL consume rewrite happens only
+    // after CallNextHookEx returns. An older hook must therefore observe the original record even for a direction that
+    // DMK swallows from the application that retrieves the record.
     s_older_hook_wheel_records.store(0, std::memory_order_relaxed);
     s_older_hook_null_records.store(0, std::memory_order_relaxed);
     const HHOOK older = SetWindowsHookExW(WH_GETMESSAGE, &older_recording_hook, nullptr, GetCurrentThreadId());

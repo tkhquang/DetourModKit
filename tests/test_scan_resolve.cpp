@@ -1605,9 +1605,9 @@ TEST(ScanResolve, PrologueFallbackRejectsAmbiguousRebuiltPattern)
 }
 
 // A jump patch that splits an instruction steals the whole straddling instruction, so the overwritten span rounds up
-// past the patch minimum and the installer NOP-pads (or orphans) the excess. Recovery must decode the original leading
-// instructions to that rounded boundary and match the excess don't-care, rather than assume a fixed patch width --
-// otherwise a prologue whose instructions do not sum to exactly five bytes never recovers.
+// past the patch minimum and the installer NOP-pads (or orphans) the excess. Recovery must decode the original prologue
+// instructions to that rounded boundary and match the excess as wildcards, rather than assume a fixed patch width.
+// Otherwise, a prologue whose instructions do not sum to exactly five bytes never recovers.
 TEST(ScanResolve, PrologueFallbackUsesInstructionRoundedStolenSpan)
 {
     ExecutableBuffer buffer(0x1000);

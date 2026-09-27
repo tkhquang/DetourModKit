@@ -3,8 +3,8 @@
 # The authoritative, reviewable list of every translation unit compiled into the DetourModKit static library. The
 # CMakeLists.txt build globs src/*.cpp and src/internal/*.cpp with file(GLOB CONFIGURE_DEPENDS), then cross-checks the
 # glob result against this file and fails the configure closed on any mismatch. The point is reviewability and
-# fail-closed completeness: a bare glob is invisible in review (a new .cpp changes no tracked CMake text) and a stale
-# CONFIGURE_DEPENDS cache -- or a generator that ignores it -- can silently drop a new unit, which then surfaces only
+# fail-closed completeness. A bare glob is invisible in review (a new .cpp changes no tracked CMake text). A stale
+# CONFIGURE_DEPENDS cache (or a generator that ignores it) can silently drop a new unit. The unit then surfaces only
 # as a consumer-side LNK2019 against the missing symbol. Pinning the set here makes every add/remove a reviewable diff.
 #
 # Format: one repo-relative path per line, forward slashes. Blank lines and lines beginning with '#' are ignored.

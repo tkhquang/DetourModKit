@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Regression fixtures for the vendored backend-patch model probe.
 
-Exercises the pure helpers -- patch discovery/order, added-line extraction, fix-marker detection,
-patch-set hashing, and .gitmodules URL matching -- and the working-tree state rule over a real
-throwaway git checkout, because that rule's whole job is to refuse states a repository can be in.
+The fixtures exercise the pure helpers: patch discovery/order, added-line extraction, fix-marker
+detection, patch-set hashing, and .gitmodules URL matching. They also exercise the working-tree
+state rule over a real throwaway git checkout, because that rule refuses states that a repository can be in.
 The configure-time CMake entry point is also exercised against both accepted and contaminated trees.
 
 Every fixture writes into a TemporaryDirectory context so nothing is left on disk, even when

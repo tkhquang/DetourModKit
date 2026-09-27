@@ -13,7 +13,6 @@ Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded i
 `shutdown_internal` and `disable_async_mode` stay safe across repeated shutdown and `enable_async_mode` cycles:
 
 - When the writer thread detaches under loader lock, the writer's counted module reference stays outstanding.
-- The `shared_ptr<AsyncLogger>` moves into a per-call permanent cell. The normal path uses `new (std::nothrow)`. The fallback path uses non-CRT permanent storage. A heap allocation failure therefore cannot drop the last handle while the writer still runs.
 - If first-use construction fails under OOM, the process-default `log()` publishes an inert drop/count logger with no sink, shared sink mutex, or writer. The noexcept accessor never terminates.
 - `shutdown_internal` retires a writer that a `configure` and `enable_async_mode` pair publishes inside its dropped-mutex window. It never closes a sink that a detached writer still owns (`LoggerTest.ShutdownKeepsTheSinkForAWriterDetachedInsideTheGap`). `[B-48]` in [lifecycle.md](lifecycle.md) owns the rule.
 - `enable_async_mode` is noexcept and fail-soft. A refused activation leaves synchronous delivery and releases the unpublished writer's retention root. A committed activation stays published. `LoggerTest.PostPublicationThrowIsContainedAndKeepsThePublishedWriter` and `LoggerTest.NonStandardThrowBeforePublicationIsContainedAndBreaksTheRoot` prove the boundary.

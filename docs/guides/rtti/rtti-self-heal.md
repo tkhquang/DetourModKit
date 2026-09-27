@@ -94,7 +94,7 @@ lm.base = resolved_player_struct;          // an Address from a scan::resolve la
 if (const auto hit = rtti::heal_landmark(lm))
     player_health_offset = hit->healed_offset; // healed; feed into the pointer chain
 else
-    log().warning("health landmark lost ({}); binary changed too much -- re-author it",
+    log().warning("health landmark lost ({}); binary changed too much - re-author it",
                   hit.error().message());
 ```
 
@@ -158,14 +158,14 @@ const std::array<rtti::Landmark, 3> k_player_fp{{
 
 if (const auto fit = rtti::solve_fingerprint(player_base, k_player_fp, 0x40))
 {
-    // fit->delta -- the uniform byte shift; add it to each nominal offset.
+    // fit->delta is the uniform byte shift. Add it to each nominal offset.
     health_offset    = 0x2A0 + fit->delta;
     inventory_offset = 0x2C0 + fit->delta;
     stats_offset     = 0x300 + fit->delta;
 }
 ```
 
-It searches deltas in `[-window, +window]` and steps by pointer size. It requires **every** landmark whose `required` flag is set (the default) to match at the shifted offset, and uses optional landmarks only to break ties. It fails closed: `HealNoMatch` when no delta fits, `HealAmbiguous` when two deltas tie for the most optional matches. `delta` is the drift to add to each landmark's `nominal_offset`. Given a single landmark it degenerates to a single-field solve that is stricter than `heal_landmark`. There is no nominal short-circuit, and any second matching delta in the window (not only an equidistant `+d` / `-d` pair) fails `HealAmbiguous`.
+It searches deltas in `[-window, +window]` and steps by pointer size. It requires **every** landmark whose `required` flag is set (the default) to match at the shifted offset, and uses optional landmarks only to break ties. It fails closed: `HealNoMatch` when no delta fits, and `HealAmbiguous` when two non-zero deltas tie for the most optional matches. A zero delta that fits wins a tie. `delta` is the drift to add to each landmark's `nominal_offset`. Given a single landmark it degenerates to a single-field solve that is stricter than `heal_landmark`.
 
 ## L5 - `HealScheduler` (the render-loop driver)
 

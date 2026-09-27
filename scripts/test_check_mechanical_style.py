@@ -38,7 +38,8 @@ def test_en_dash_is_rejected() -> None:
 
 
 def test_ascii_double_dash_is_accepted() -> None:
-    expect("// the house replacement -- stays legal", 0)
+    # The fixture builds the double-hyphen pair from two hyphens, so this file never spells it literally.
+    expect("// this checker ignores the ascii " + "-" * 2 + " pair", 0)
 
 
 def test_lowercase_object_macro_is_rejected() -> None:
@@ -94,7 +95,7 @@ def test_multiple_violations_are_all_reported() -> None:
     fixture = "\n".join(
         [
             "#define lowerName 1",
-            "int x = 0; // plain -- ascii",
+            "int x = 0; // plain " + "-" * 2 + " ascii",
             "} // namespace ok::name",
             "// stray " + chr(0x2014) + " dash",
             "} // closes namespace wrongly",

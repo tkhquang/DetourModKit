@@ -2488,7 +2488,7 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
         std::this_thread::sleep_for(std::chrono::milliseconds{2});
     }
     EXPECT_FALSE(t2_applied.load(std::memory_order_acquire))
-        << "the fresher pass must not apply while the older pass is mid-apply -- reload passes must serialize";
+        << "the fresher pass must not apply while the older pass is mid-apply. Reload passes must serialize";
 
     // Release T1; the older pass stores value 1, then the blocked fresher pass applies value 2 last.
     release_t1.store(true, std::memory_order_release);

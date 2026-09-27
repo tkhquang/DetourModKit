@@ -56,10 +56,11 @@ namespace DetourModKit
                 // the same instruction abut the span instead of overlapping it.
                 std::uintptr_t site_end = 0;
                 std::size_t count = 0;
-                // True when any execute-readable window faulted mid-sweep and was skipped under the TOCTOU guard, so
-                // the reference count is only a lower bound: a second reference to the string could hide in the skipped
-                // window. A uniqueness verdict must then fail closed to ambiguous rather than report the lone surviving
-                // reference as the unique site. Accumulated across the narrow and broad merges.
+                // This flag is true when the TOCTOU guard skipped an execute-readable window that faulted mid-sweep.
+                // The reference count is then only a lower bound, because a second reference to the string can hide
+                // in that window. A uniqueness verdict must then fail closed rather than report the lone observed
+                // reference as the unique site. merge_reference_scan accumulates the flag across the narrow and broad
+                // sweeps.
                 bool incomplete = false;
             };
 

@@ -4,13 +4,13 @@ DetourModKit uses a two-tier error model, not a uniform one. This guide shows ho
 
 ## The two tiers
 
-**Result tier.** Fallible operations on the memory, scanner, resolver, anchor, manifest, and hook-core surfaces return `Result<T>`, the single library-wide alias for `std::expected<T, Error>`. An operation with no value returns `Result<void>`. On success the value is present. On failure the `Error` is present.
+**Result tier.** Fallible operations on the memory, scanner, resolver, manifest, and hook-core surfaces return `Result<T>`, the single library-wide alias for `std::expected<T, Error>`. An operation with no value returns `Result<void>`. On success the value is present. On failure the `Error` is present.
 
 **Best-effort tier.** Deliberately best-effort and query surfaces return `bool`, `std::optional`, or `void` by design and never surface an `Error`:
 
 - the RTTI query API (`type_name_of`, `vtable_is_type`, `region_has_rtti`),
-- config load, reload, and bind (fail-soft to registered defaults, see `config.hpp`),
-- `EventDispatcher` emit and subscribe.
+- config load, reload, and bind (an absent or malformed key falls back to its registered default, see `config.hpp`),
+- `EventDispatcher::emit_safe` (`emit` lets handler exceptions propagate).
 
 A best-effort surface documents its non-`Result` return in its header. Do not assume uniformity across the two tiers. [Public API](../design/public-api.md) owns the exception-use rule.
 

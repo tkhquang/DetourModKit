@@ -7,10 +7,11 @@
  *
  * MSVC uses frame-based __try / __except filters in memory_guarded.cpp. Scanner TUs route their __try filters through
  * detail::guarded_range_fault_filter. MinGW uses its process-wide vectored handler in memory_guarded.cpp. An armed
- * foreign-range fault returns a clean failure through __builtin_longjmp. The page-protection ledger and patch path live
- * in memory_protect_ledger.cpp. Public memory TUs call only this private seam. This keeps installed headers free of
- * Win32 and structured-exception constructs. The chain resolver accepts public memory::ChainStep values by pointer.
- * This passes each offset and plausibility floor without a parallel-array copy.
+ * foreign-range fault returns a clean failure through __builtin_longjmp, unless the guard-page re-arm in [B-20] fails.
+ * The page-protection ledger and patch path live in memory_protect_ledger.cpp. Public memory TUs call only this
+ * private seam. This keeps installed headers free of Win32 and structured-exception constructs. The chain resolver
+ * accepts public memory::ChainStep values by pointer. This passes each offset and plausibility floor without a
+ * parallel-array copy.
  */
 
 #include "DetourModKit/address.hpp"
@@ -96,7 +97,8 @@ namespace DetourModKit
          *                          report which byte of the span was unreadable rather than only that some byte was.
          *                          Left untouched when the span is rejected without a read, and on the MinGW fallback
          *                          path that validates through VirtualQuery instead of faulting.
-         * @return true on full success; false on any fault or rejected argument (then @p out is unspecified).
+         * @return true on full success. Otherwise false on a rejected argument or a fault, unless the guard-page re-arm
+         *         in [B-20] fails. On failure the contents of @p out are unspecified.
          */
         [[nodiscard]] bool guarded_read_bytes(
             std::uintptr_t address,

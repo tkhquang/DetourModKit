@@ -9,7 +9,7 @@ defect this gate catches and the source gate cannot.
 
 Invariants enforced against the prefix (argv[1]):
 
-  FORBIDDEN (must be absent) -- the backend must stay hidden and no legacy or private surface may ship:
+  FORBIDDEN (must be absent). The backend must stay hidden, and legacy or private surfaces must not ship:
     * include/safetyhook.hpp and any include/safetyhook/, include/Zydis/, include/Zycore/ header tree (backend headers)
     * lib*/cmake/safetyhook, lib*/cmake/Zydis, lib*/cmake/Zycore (backend package configs; a find_package(safetyhook)
       must NOT be satisfiable from a DetourModKit prefix)
@@ -18,7 +18,7 @@ Invariants enforced against the prefix (argv[1]):
       and old top-level paths for headers that were demoted to detail/ or src/internal/
     * include/DetourModKit/internal/ (the true-private engine is never installed)
 
-  REQUIRED (must be present) -- the package must actually be usable by a find_package consumer:
+  REQUIRED (must be present). The package must be usable by a find_package consumer:
     * the DetourModKit archive (lib*/libDetourModKit[<debug-postfix>].a or
       lib*/libDetourModKit[<debug-postfix>].lib)
     * the three dependency archives shipped for DetourModKit::deps (safetyhook, Zydis, Zycore), in either the MinGW
@@ -111,7 +111,7 @@ def main():
 
     violations = []
 
-    # --- FORBIDDEN: the backend must not be advertised by the prefix, at the header tree OR the package-config level. ---
+    # FORBIDDEN: the backend must not be advertised by the prefix, at the header tree OR the package-config level.
     if (include / "safetyhook.hpp").is_file():
         violations.append("include/safetyhook.hpp ships: the backend header leaked into the prefix")
     # SafetyHook and its Zydis/Zycore transitive deps each install(DIRECTORY include/ ...) their own header tree, all
@@ -126,7 +126,7 @@ def main():
                 f"{libdir.name}/cmake/{backend_pkg} ships: find_package({backend_pkg}) would be satisfiable from a "
                 "DetourModKit prefix, defeating backend confinement")
 
-    # --- FORBIDDEN: deleted legacy public headers and the private engine must not ship. ---
+    # FORBIDDEN: deleted legacy public headers and the private engine must not ship.
     for legacy in LEGACY_INSTALLED_HEADERS:
         if (prefix / legacy).is_file():
             violations.append(f"{legacy} ships: a v4-deleted legacy public header is present in the prefix")
@@ -136,7 +136,7 @@ def main():
     if (include / "DetourModKit" / "internal").is_dir():
         violations.append("include/DetourModKit/internal/ ships: the true-private engine must never be installed")
 
-    # --- REQUIRED: the package must be complete enough to consume via find_package. ---
+    # REQUIRED: the package must be complete enough to consume via find_package.
     if not archive_present(libdir, "DetourModKit"):
         violations.append(
             f"missing the DetourModKit archive in {libdir.name}/ "

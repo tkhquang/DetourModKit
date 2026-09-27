@@ -125,12 +125,20 @@ Multiple inheritance and `/OPT:ICF`:
 For a cached per-frame identity check, wrap it in `rtti::TypeIdentity`. `TypeIdentity` owns its mangled name (it copies the `std::string_view` into an internal `std::string`), so the handle is self-contained and any string source, a temporary included, is safe to pass:
 
 ```cpp
-namespace { dmk::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
+namespace { std::optional<dmk::rtti::TypeIdentity> g_camera_id; }
+
+// Before you enable a hook that calls is_combat_camera, call this from init, off the loader lock.
+void construct_camera_identity()
+{
+    g_camera_id.emplace(".?AVCameraCombat@engine@@");
+    // The first resolve sweeps the module, so run it here and not in the hook.
+    (void)g_camera_id->vtable();
+}
 
 bool is_combat_camera(dmk::Address obj) noexcept
 {
     const auto vt = dmk::memory::read<dmk::Address>(obj);
-    return vt && g_camera_id.matches(*vt);
+    return vt && g_camera_id && g_camera_id->matches(*vt);
 }
 ```
 
@@ -142,7 +150,7 @@ A successful resolve is cached and stamped with the resolving module's image gen
 
 ## Performance notes
 
-- The walker issues two guarded reads per call on the cold path: the COL pointer at `vtable - 8` and one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall. The batched ColHead read still matters, because it keeps the walker to two guarded calls instead of four.
+- Each walker call runs the COL prelude. Its module lookup calls the loader and then reads the DOS and NT headers through the guarded engine. The COL walk then issues two guarded reads: the COL pointer at `vtable - 8` and one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall. The batched `ColHead` read still matters, because it replaces six separate field reads with one guarded call.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in one guarded read and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters. On genuinely hot paths cache a `rtti::TypeIdentity`, because every walker call still runs the loader-querying COL prelude.
 - `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it reads each slot's object and vtable qwords, then compares against the cached vtable.

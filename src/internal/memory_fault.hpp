@@ -86,11 +86,11 @@ namespace DetourModKit
          *          a read through the same vectored exception handler, thread-local guard slot, and drain epoch the
          *          guarded byte-copy path uses: the guard is armed for [lo, hi), @p fn performs the read, and a guarded
          *          read fault (is_guarded_read_fault) inside that range is turned into a clean failure (the handler
-         *          longjmps back) instead of terminating the host. @p fn must be a self-contained read with no
-         *          resources that need unwinding, because a guarded fault abandons its frame via __builtin_longjmp
-         *          without running destructors. That is exactly the contract the copy-based guard relies on. When the
-         *          handler cannot be installed @p fn is not run. Callers treat false as a skipped/faulted range and
-         *          fail uniqueness-sensitive work closed.
+         *          longjmps back), unless the guard-page re-arm in [B-20] fails. @p fn must be a self-contained read
+         *          with no resources that need unwinding, because a guarded fault abandons its frame via
+         *          __builtin_longjmp without running destructors. That is exactly the contract the copy-based guard
+         *          relies on. When the handler cannot be installed @p fn is not run. Callers treat false as a
+         *          skipped/faulted range and fail uniqueness-sensitive work closed.
          * @param lo First byte of the foreign range @p fn will read.
          * @param hi One past the last byte of that range. An empty or wrapping range (hi <= lo) runs @p fn directly
          *           because there is no foreign byte span to guard.

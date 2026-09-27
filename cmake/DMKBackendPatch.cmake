@@ -1,11 +1,12 @@
 # The external/safetyhook submodule is pinned to a commit the configured upstream remote serves (cursey/safetyhook main,
-# f44cc07), so `git submodule update --init` resolves it on a fresh clone. DMK's backend fixes -- trap-transaction
-# status reporting, post-static-destruction teardown, and commit-truthful and witness-reconciled enabled state with
-# emitted-patch provenance and test-only transaction seams -- exist on no upstream ref, so they are carried in-tree as
-# reviewable patch files under cmake/safetyhook_patches/ and re-applied to the submodule working tree at configure time.
-# Applying the pinned base plus these patches reproduces the reviewed backend tree byte for byte. When the fixes land
-# upstream the pin moves to that commit and this module plus the patch directory are deleted. See AGENTS.md [B-01] and
-# the rollout plan's "Backend submodule sourcing" release gate.
+# f44cc07), so `git submodule update --init` resolves it on a fresh clone. DMK's backend fixes exist on no upstream ref.
+# They cover trap-transaction status reporting, post-static-destruction teardown, and commit-truthful and
+# witness-reconciled enabled state with emitted-patch provenance and test-only transaction seams. The repository carries
+# them as one reviewable patch under cmake/safetyhook_patches/, and configure re-applies it to the submodule checkout.
+# The pinned base plus this patch reproduces the reviewed backend tree byte for byte.
+#
+# When the fixes land upstream, the pin moves to that commit and this module plus the patch directory are deleted.
+# See AGENTS.md [B-01].
 
 # Apply each patch in cmake/safetyhook_patches/ to the SafetyHook submodule, in filename order.
 # Idempotent: a patch already present is detected by a clean reverse-apply and skipped, so repeated
@@ -45,9 +46,9 @@ function(dmk_backend_ignored_output_allowed path result)
   endif()
 endfunction()
 
-# Rebuild the reviewed output for `targets` -- pinned base blob plus the vendored patch -- in a scratch tree that is
-# never the live checkout, then compare each target's bytes against what the build is about to compile. Appends one
-# entry to `problems` per drifted target.
+# Rebuild the reviewed output for `targets` in a scratch tree that is never the live checkout. The reviewed output is
+# the pinned base blob plus the vendored patch. Compare each target's bytes against what the build is about to compile.
+# For each drifted target, append one entry to the list that `problems_var` names.
 #
 # The changed-path set alone cannot decide this. An extra edit INSIDE an already patched target leaves the set
 # identical, and once the patch's own lines are present the idempotence reverse-apply stays clean too, so both earlier

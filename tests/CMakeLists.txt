@@ -207,9 +207,9 @@ if(DMK_BUILD_TESTS)
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_run_lifecycle_soak.py")
   set_tests_properties(LifecycleSoakRestorationSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
-  # The benchmark result parser decides whether a benchmark run counts as evidence, so its refusals -- truncated
-  # suite, spliced capture, self-contradicting record, vanished required gate -- are pinned here. Without this a
-  # parser that silently accepted everything would make the release benchmark route green by construction.
+  # The benchmark result parser decides whether a benchmark run counts as evidence. This test pins its refusals: a
+  # truncated suite, a spliced capture, a record that contradicts itself, and a vanished required gate. Without this
+  # test, a parser that silently accepts everything makes the release benchmark route green by construction.
   add_test(NAME BenchmarkResultsCheckerSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_benchmark_results.py"
             --ledger-probe "$<TARGET_FILE:dmk_bench_gate_probe>")
@@ -251,9 +251,9 @@ if(DMK_BUILD_TESTS)
 
   # The same-base replacement case is host-conditional: it skips when the loader will not place both fixture variants
   # at the reserved base, and a skip counts as green. These two tests turn "it ran" into evidence rather than an
-  # assumption -- the first writes the GoogleTest XML record, the second reads back the property the case publishes
-  # only after observing the replacement extent. SKIP_RETURN_CODE keeps an unqualified developer host honest (Skipped,
-  # not passed); release preflight runs the same checker WITHOUT --skip-exit-code, where a skip is a red candidate.
+  # assumption. The first writes the GoogleTest XML record. The second reads back the property that the case publishes
+  # only after it observes the replacement extent. SKIP_RETURN_CODE keeps an unqualified developer host honest (Skipped,
+  # not passed). Release preflight runs the same checker WITHOUT --skip-exit-code, where a skip is a red candidate.
   set(_dmk_same_base_case
     "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent")
   set(_dmk_same_base_report "${CMAKE_BINARY_DIR}/dmk_same_base_replacement.xml")
@@ -588,10 +588,10 @@ if(DMK_BUILD_TESTS)
     LABELS "lifecycle-proof")
 
   # Declared here rather than in tests/fault/ on purpose: a gate that a skipped subdirectory can also skip proves
-  # nothing about that subdirectory. `ctest -L fault-proof` reports success on an empty selection, so without this the
-  # states that remove the fault coverage entirely -- a toolchain gate around the subdirectory, a renamed case, a proof
-  # host that was never registered -- all read as green. The names are spelled out so the expectation is greppable and
-  # a rename is a reviewable diff on both sides.
+  # nothing about that subdirectory. `ctest -L fault-proof` reports success on an empty selection. Without this test,
+  # each state that removes the fault coverage entirely reads as green. Such states include a toolchain gate around the
+  # subdirectory, a renamed case, and a proof host that was never registered. The names are spelled out so the
+  # expectation is greppable and a rename is a reviewable diff on both sides.
   add_test(NAME FaultProof.LabelInventoryIsComplete
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
             --build-directory "${CMAKE_BINARY_DIR}"
@@ -616,8 +616,8 @@ if(DMK_BUILD_TESTS)
 endif()
 
 if(DMK_BUILD_BENCHMARKS)
-  # Standalone microbench executables. Deliberately do NOT link gtest --
-  # the benchmarks are raw main()s that print a TSV table to stdout, so
+  # Standalone microbench executables. Deliberately do NOT link gtest.
+  # The benchmarks are raw main()s that print a TSV table to stdout, so
   # they can run under any build configuration without the gtest runtime.
   add_executable(DetourModKit_bench
     "${CMAKE_CURRENT_SOURCE_DIR}/bench_event_dispatcher.cpp"
@@ -743,13 +743,15 @@ if(DMK_BUILD_BENCHMARKS)
     target_link_libraries(${_bench} PRIVATE dmk_coverage)
   endforeach()
 
-  # Match each bench's LTO state to the library's so a bench and the archive it links form ONE LTO unit -- never a mixed
-  # link. A mixed link fails both ways: a non-LTO bench object against an LTO-only archive makes GCC's linker plugin
-  # re-emit libstdc++'s C++20-constrained std::thread/std::tuple linkonce symbol twice (spurious multiple-definition),
-  # and an LTO bench against a non-LTO archive is the symmetric hazard. Read the library's single LTO decision
-  # (_dmk_apply_lto, resolved once in the top-level CMakeLists.txt before this subdirectory is added) rather than
-  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any toolchain
-  # -- including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
+  # Match each bench's LTO state to the library's, so a bench and its archive form ONE LTO unit. A mixed link fails
+  # both ways. With a non-LTO bench object and an LTO-only archive, GCC's linker plugin re-emits libstdc++'s
+  # C++20-constrained std::thread/std::tuple linkonce symbol twice, a spurious multiple-definition error. An LTO bench
+  # against a non-LTO archive is the symmetric hazard.
+  #
+  # Read the library's single LTO decision (_dmk_apply_lto, resolved once in the top-level CMakeLists.txt before this
+  # subdirectory is added). Do not re-derive the condition here. The bench and the archive then cannot drift out of
+  # one LTO state on any toolchain. This also holds for the GCC major where the library forces LTO off, because that
+  # lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
       DetourModKit_bench_logger DetourModKit_bench_rtti DetourModKit_bench_hook DetourModKit_bench_input

@@ -6,8 +6,8 @@
  * @brief Single home for every cross-compiler portability primitive in DetourModKit.
  * @details Routes all toolchain- and architecture-conditional spellings through this one header, so no other public
  *          header carries its own `#if defined(_MSC_VER)` ladder. It provides the architecture gate, the flag-enum
- *          operator generator, the lifetime-bound annotation, the library-visibility marker, and the short
- *          `dmk` / `DMK` namespace aliases (suppressed by defining `DMK_NO_NAMESPACE_ALIASES`).
+ *          operator generator, the lifetime-bound annotation, and the short `dmk` / `DMK` namespace aliases.
+ *          A `DMK_NO_NAMESPACE_ALIASES` definition suppresses the aliases.
  *
  *          Runtime SIMD tier selection is deliberately NOT here: it is chosen at run time inside the scan engine, and
  *          the per-function `target` attributes live beside that engine.
@@ -98,10 +98,5 @@ namespace DMK = DetourModKit;
 #else
 #define DMK_LIFETIMEBOUND
 #endif
-
-// Library visibility marker
-// DetourModKit ships as a static archive: the consumer performs the final link, so DMK_API expands to nothing. It is
-// the single attachment point for visibility control if a shared-library build is ever introduced.
-#define DMK_API
 
 #endif // DETOURMODKIT_DEFINES_HPP
