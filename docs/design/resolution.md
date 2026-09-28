@@ -22,7 +22,9 @@ The resolver's RttiVtable rung reads the completeness of its reverse-RTTI sweep 
 
 ### [B-51]
 
-`anchor::evaluate_gate` rolls a resolved-anchor report (or its `AnchorQuality` summary) into a `GateVerdict` (Pass / Degraded / Fail) under a `GatePolicy` that defaults to fail-closed. The default requires that every resolvable anchor heals, with zero failures. Safe-disable a feature on `Fail` rather than patch the game on addresses that the manifest failed to verify. Treat `Degraded` (a resolved-but-pinned `Manual` literal, or nothing assessable) as enable-with-caution. Per-feature gating falls out when only that feature's anchors resolve into their own report. One primitive therefore serves both a whole-manifest health check and a per-feature kill switch. The unsupported `CallArgHome` kind is excluded from the ratio denominator, so a declared forward-compatible kind never drags a healthy manifest below threshold. A `QuorumNotIndependent` outcome counts as a hard failure: it committed no value.
+`anchor::evaluate_gate` rolls a resolved-anchor report (or its `AnchorQuality` summary) into a `GateVerdict` (Pass / Degraded / Fail) under a `GatePolicy` that defaults to fail-closed. The default requires that every resolvable anchor heals, with zero failures. Safe-disable a feature on `Fail` rather than patch the game on addresses that the manifest failed to verify. Treat `Degraded` as enable-with-caution. The gate returns it when nothing is assessable, or when the thresholds pass, `manual_at_risk_degrades` is true (the default), and the report holds a `Manual` entry.
+
+Per-feature gating falls out when only that feature's anchors resolve into their own report. One primitive therefore serves both a whole-manifest health check and a per-feature kill switch. The unsupported `CallArgHome` kind is excluded from the ratio denominator, so a declared forward-compatible kind never drags a healthy manifest below threshold. A `QuorumAmbiguous` or `QuorumNotIndependent` outcome counts against the `max_failed` cap, because the resolve commits no value.
 
 ### [B-52]
 

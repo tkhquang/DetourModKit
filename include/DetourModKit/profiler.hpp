@@ -3,11 +3,9 @@
 
 /**
  * @file profiler.hpp
- * @brief Opt-in profiling instrumentation for measuring hook and subsystem timing.
- *
- * @details Compiles to nothing unless DMK_ENABLE_PROFILING is defined (directly, or through -DDMK_ENABLE_PROFILING=ON).
- *          When enabled, scoped measurements land in a fixed-capacity lock-free ring and export as Chrome Tracing JSON
- *          (chrome://tracing, https://ui.perfetto.dev).
+ * @brief Opt-in timing instrumentation with a lock-free ring and Chrome Tracing JSON export.
+ * @details DMK_PROFILE_SCOPE and DMK_PROFILE_FUNCTION expand to a no-op unless DMK_ENABLE_PROFILING is defined. The
+ *          CMake option DMK_ENABLE_PROFILING=ON defines it for every target that links DetourModKit.
  * @warning `[B-100]` Run first use of Profiler::get_instance() and the export routes outside the loader lock. First
  *          use allocates the ring. The export routes can allocate, and export_to_file() writes a file. A warm record()
  *          is allocation-free from any thread. `ProfilerLoaderBoundary.*` pins the boundary.
@@ -51,25 +49,15 @@ namespace DetourModKit
 {
     /**
      * @brief Lock-free ring buffer profiler with Chrome Tracing JSON export.
-     *
-     * @details Recording claims one slot of a fixed power-of-two ring and publishes into it; when the ring wraps, the
-     *          oldest samples are overwritten. A claim whose slot another writer still owns is refused and counted by
-     *          @ref dropped_samples rather than overwriting it, so the exporter never observes a torn sample. No
-     *          allocation, lock, or system call occurs on the recording path.
-     *
-     *          The instance is process-lifetime and is never destroyed, so a ScopedProfile that outlives ordinary
-     *          static teardown still records safely. It is per linked DMK instance, not per process: two modules that
-     *          each link the static library each get their own profiler.
-     *
-     * **Thread safety:**
-     * - `record()`: lock-free, callable from any thread
-     * - `reset()`: safe only when no `record()` call is in flight
-     * - `export_chrome_json()` / `export_to_file()`: safe concurrently with `record()`
+     * @details Each record() call claims one slot of a fixed ring, and new samples overwrite the oldest. A claim on a
+     *          slot that another writer still owns is refused, so export never sees a torn sample. Export is safe
+     *          concurrently with record(). The instance is never destroyed, so a ScopedProfile that outlives static
+     *          teardown still records safely. Each linked DMK instance has its own profiler.
      */
     class Profiler
     {
     public:
-        /// Default ring buffer capacity (must be a power of 2).
+        /// Default ring buffer capacity, a power of two.
         static constexpr size_t DEFAULT_CAPACITY{65536};
 
         Profiler(const Profiler &) = delete;
@@ -79,45 +67,31 @@ namespace DetourModKit
 
         /**
          * @brief Returns the profiler singleton.
-         * @details First use publishes either a complete profiler or, if its ring cannot be allocated, a disabled one
-         *          whose @ref capacity is 0. Recording then fails closed and increments @ref dropped_samples, export
-         *          returns an empty trace, and reset remains safe. It never terminates or publishes a partially
-         *          constructed profiler; a first-use failure latches for the lifetime of this linked instance.
+         * @details If first use cannot allocate the ring, it publishes a disabled profiler for the life of this DMK
+         *          instance. A disabled profiler exports an empty trace and resets safely. First use never terminates.
          */
         [[nodiscard]] static Profiler &get_instance() noexcept;
 
         /**
          * @brief Records a completed profile sample whose label is null-terminated.
-         * @param name Pointer to storage that must outlive the process.
-         *             The ring stores it as-is, and export reads it later. A pointer whose storage is released before
-         *             process exit is undefined behavior. A non-null @p name must be null-terminated because this
-         *             overload measures the label here. A null @p name records a sample that export skips. Safe
-         *             sources include string literals, namespace-scope `static constexpr char` arrays with a
-         *             terminator, and `__func__`.
+         * @param name A label that export reads later. Its storage must stay readable until process exit, or the
+         *             behavior is undefined. A non-null @p name must be null-terminated. A null @p name records a
+         *             sample that export skips. @ref ScopedProfile lists safe label sources.
          * @param start_ticks QPC tick count at scope entry.
-         * @param end_ticks QPC tick count at scope exit.
-         *                  Any order and magnitude is accepted. An interval with `end_ticks <= start_ticks` records
-         *                  zero. A long interval saturates. Neither case overflows.
-         * @param thread_id Win32 thread ID for the source thread.
-         * @note Lock-free. Safe to call from any thread at any time.
+         * @param end_ticks QPC tick count at scope exit. An interval with `end_ticks <= start_ticks` records zero. A
+         *                  long interval saturates and never overflows.
+         * @param thread_id Win32 thread ID of the source thread.
+         * @note Lock-free, with no allocation or system call. Safe to call from any thread, but not during reset().
          */
         void record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept;
 
         /**
-         * @brief Records a completed profile sample whose label extent the caller supplies.
-         * @param name Pointer to label storage.
-         *             For a non-null pointer, at least @p name_length bytes must remain readable until process exit.
-         *             No terminator is required. A null pointer records a sample that export skips.
-         * @param name_length Label byte count.
-         *                    Export reads exactly this many bytes. A value above `UINT32_MAX` saturates.
-         * @param start_ticks QPC tick count at scope entry.
-         * @param end_ticks QPC tick count at scope exit.
-         *                  The null-terminated overload defines its range behavior.
-         * @param thread_id Win32 thread ID for the source thread.
-         * @details This is the bounded route.
-         *          @ref ScopedProfile uses it for every array label. A `static constexpr char label[3]{'f','p','s'}`
-         *          therefore exports as `fps`. Publication stores the pointer and extent together without allocation.
-         * @note Lock-free. Safe to call from any thread at any time.
+         * @brief Records a completed profile sample whose label extent the caller supplies. The other parameters
+         *        follow the null-terminated overload.
+         * @param name If @p name is not null, @p name_length bytes must stay readable until process exit. No terminator
+         *             is required. A null @p name records a sample that export skips.
+         * @param name_length Export reads exactly this many bytes. A value above `UINT32_MAX` saturates.
+         * @note Lock-free, with no allocation or system call. Safe to call from any thread, but not during reset().
          */
         void record(
             const char *name,
@@ -127,32 +101,25 @@ namespace DetourModKit
             uint32_t thread_id
         ) noexcept;
 
-        /**
-         * @brief Resets the profiler, discarding all recorded samples and counters.
-         * @note Not safe to call while other threads are calling record(). Intended for use between profiling sessions.
-         */
+        /** @brief Discards all samples and counters. Requires that no record() call and no export is in flight. */
         void reset() noexcept;
 
-        /**
-         * @brief Exports recorded samples as a Chrome Tracing JSON string (array form).
-         * @return JSON string containing all recorded samples, or "[]" when none are resident.
-         */
+        /** @brief Exports the resident samples as a Chrome Tracing JSON array, or "[]" if none are resident. */
         [[nodiscard]] std::string export_chrome_json() const;
 
         /**
-         * @brief Exports recorded samples to a JSON file on disk.
-         * @param path UTF-8 file path to write (created or overwritten).
-         * @return true on success, false on ill-formed UTF-8, an embedded NUL, or I/O failure.
+         * @brief Writes the Chrome Tracing JSON to the UTF-8 @p path, which it creates or overwrites.
+         * @return true on success, or false on ill-formed UTF-8, an embedded NUL, or an I/O failure.
          */
         [[nodiscard]] bool export_to_file(std::string_view path) const;
 
-        /// Returns the number of record() calls made (may exceed capacity due to wrapping).
+        /// Returns the number of record() calls. The count can exceed the capacity after the ring wraps.
         [[nodiscard]] size_t total_samples_recorded() const noexcept;
 
-        /// Returns the number of committed samples available for export.
+        /// Returns the number of resident samples. Export skips the null-label samples among them.
         [[nodiscard]] size_t available_samples() const noexcept;
 
-        /// Returns the number of record() calls refused because their slot was still owned, or the ring is disabled.
+        /// Returns the number of record() calls refused because the ring is disabled or another writer took their slot.
         [[nodiscard]] size_t dropped_samples() const noexcept;
 
         /// Returns the ring buffer capacity, or 0 for a disabled profiler.
@@ -170,28 +137,17 @@ namespace DetourModKit
     };
 
     /**
-     * @brief RAII scoped profiler that records timing on destruction.
-     *
-     * @details Captures the QPC tick count and thread ID on construction and records the completed sample on
-     *          destruction. The profiling macros instantiate this class only when DMK_ENABLE_PROFILING is defined;
-     *          direct construction always records and is intended for specialized instrumentation.
+     * @brief Captures the start tick and thread ID at construction and records one sample at destruction. The profiling
+     *        macros create one only when DMK_ENABLE_PROFILING is defined, but direct construction always records.
      */
     class ScopedProfile
     {
     public:
         /**
          * @brief Begins a profiling scope.
-         * @tparam N Deduced extent of the bound array.
-         *           For a string literal, this includes the final null.
-         * @param name Reference to a `const char` array. The array-reference parameter rejects decayed pointer sources
-         *        (`std::string::c_str()`, `const char *` function arguments, `char *` buffers) at compile time.
-         *        Reference binding still accepts an array with automatic storage, which dangles once its scope exits,
-         *        so this does NOT prove static storage; callers must ensure the bound array outlives the process. Safe
-         *        sources: string literals, namespace-scope `static constexpr char` arrays, and `__func__`
-         *        (static-storage per [dcl.fct.def.general]/8).
-         * @details The label extent is `N` less one final null.
-         *          The bounded @ref Profiler::record overload receives that extent and the pointer. An array with no
-         *          terminator exports its own bytes. For a null-padded array, only the final null is removed.
+         * @param name An array that must stay readable until process exit. An automatic array compiles but dangles.
+         *             Safe sources are string literals, namespace-scope `static constexpr char` arrays, and `__func__`.
+         * @details The label extent is `N` without one final null. An array with no terminator exports all its bytes.
          */
         template <size_t N>
         explicit ScopedProfile(const char (&name)[N]) noexcept

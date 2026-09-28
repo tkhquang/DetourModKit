@@ -3,15 +3,10 @@
 
 /**
  * @file scan.hpp
- * @brief The public scan surface: pattern matching, candidate-ladder resolution, and the
- *        standalone RIP-relative, string-xref, code-constant, and export resolvers.
- * @details `Pattern` compiles an AOB mini-DSL string and holds its bytes and mask inline.
- *          @ref scan locates one `Pattern` in a `Region`. @ref resolve runs an ordered
- *          @ref Candidate ladder until one strategy produces a confident address. The free
- *          resolvers expose a single backend for a caller that holds one piece of evidence.
- *          The resolution note in docs/design/resolution.md owns the mechanism.
- * @warning `[B-100]` Under the loader lock, call only Callback-safe entry points and supply each required Region from
- *          setup. Ladder construction and resolution can allocate, scan memory, or create threads.
+ * @brief Pattern matching, candidate-ladder resolution, and the RIP-relative, string-xref, code-constant, and export
+ *        resolvers. docs/design/resolution.md owns the mechanism.
+ * @warning `[B-100]` Under the loader lock, call only Callback-safe entry points, with any Region argument built
+ *          during setup. Ladder construction and resolution can allocate, scan memory, or create threads.
  */
 
 #include "DetourModKit/address.hpp"
@@ -44,25 +39,16 @@ namespace DetourModKit::detail
 namespace DetourModKit::scan
 {
     /**
-     * @class Pattern
      * @brief A value-semantic compiled AOB pattern that owns its bytes and mask inline.
-     * @details Construct with compile() (runtime, returns Result) or literal() (compile-time, returns by value). The
-     *          compiled form exposes its bytes, mask, result offset, and the cached compile-time anchor so the scan
-     *          engine can prefilter and verify without re-parsing, and matches_at() applies the same masked compare
-     *          the engine uses for a single position. Copyable and trivially comparable in cost to its inline arrays.
-     * @note The compile() / literal() factories are setup/control-plane; size(), the byte/mask/anchor accessors, and
-     *       matches_at() are callback-safe (pure value reads with no allocation, I/O, or locking).
+     * @note Setup/control-plane only: compile(). Callback-safe: size(), the accessors, and matches_at().
      */
     class Pattern
     {
     public:
         /**
-         * @brief Compiles a runtime AOB DSL string.
-         * @param dsl The whitespace-separated pattern, e.g. "48 8B 05 ?? ?? ?? ??".
-         * @return A Pattern on success, or Error{ErrorCode::BadPattern} when the string is malformed/empty/over-cap.
-         * @details Never undefined behaviour on bad input: a parse failure becomes a recoverable Error, with the
-         *          specific parse status in the Error's extra slot.
-         * @note Setup/control-plane only: compile patterns at init, not inside a hot callback.
+         * @brief Compiles a runtime AOB DSL string, for example "48 8B 05 ?? ?? ?? ??".
+         * @return The Pattern, or BadPattern (parse status in `extra`) for a malformed, empty, or oversized @p dsl.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] static Result<Pattern> compile(std::string_view dsl)
         {
@@ -76,14 +62,7 @@ namespace DetourModKit::scan
             return Pattern{parsed.buffer};
         }
 
-        /**
-         * @brief Compiles an in-source AOB DSL literal at compile time.
-         * @param dsl A constant-expression pattern string.
-         * @return The compiled Pattern by value.
-         * @details consteval, so a malformed literal causes a compile error at that literal. The throw below becomes a
-         *          non-constant expression during constant evaluation, instead of a runtime Result to deref.
-         * @note Compile-time only: consteval, so it runs during compilation and has no runtime call site to classify.
-         */
+        /** @brief Compiles an in-source AOB DSL literal at compile time. A malformed literal is a compile error. */
         [[nodiscard]] static consteval Pattern literal(std::string_view dsl)
         {
             const detail::PatternParse parsed = detail::parse_pattern(dsl);
@@ -94,35 +73,28 @@ namespace DetourModKit::scan
             return Pattern{parsed.buffer};
         }
 
-        /// Number of bytes in the compiled pattern.
+        /// The fixed byte count, without gap bytes.
         [[nodiscard]] constexpr std::size_t size() const noexcept { return m_data.length; }
 
-        /**
-         * @brief The `|` result offset as an index into the fixed byte stream (0 when there is no offset marker).
-         * @details For a pattern with bounded jumps the resolver adds the actual gap bytes at match time, so the
-         *          returned address still points at the intended run; this reports only the fixed-byte portion.
-         */
+        /** @brief The `|` offset in fixed bytes, or 0 without a marker. A match result also adds skipped gap bytes. */
         [[nodiscard]] constexpr std::size_t offset() const noexcept { return m_data.offset; }
 
-        /**
-         * @brief View over the compiled fixed pattern bytes, all segments concatenated (length == size()).
-         * @details Gap bytes are not stored, so for a jump-bearing pattern this is the fixed bytes only, not the span.
-         */
+        /// The fixed bytes of all segments, concatenated without gap bytes (length == size()).
         [[nodiscard]] constexpr std::span<const std::byte> bytes() const noexcept
         {
             return std::span<const std::byte>(m_data.bytes.data(), m_data.length);
         }
 
-        /// View over the per-byte match mask paralleling bytes() (length == size()).
+        /// The per-byte match mask, parallel to bytes() (length == size()).
         [[nodiscard]] constexpr std::span<const std::byte> mask() const noexcept
         {
             return std::span<const std::byte>(m_data.mask.data(), m_data.length);
         }
 
-        /// True when the pattern carries at least one bounded jump (and therefore more than one segment).
+        /// True when the pattern carries at least one bounded jump.
         [[nodiscard]] constexpr bool has_jumps() const noexcept { return m_data.jump_count > 0; }
 
-        /// Number of fixed segments the pattern splits into (1 for a plain pattern; one more than the jump count).
+        /// Number of fixed segments.
         [[nodiscard]] constexpr std::size_t segment_count() const noexcept { return m_data.jump_count + 1; }
 
         /// Fewest bytes any match can occupy: the fixed byte count plus every gap's minimum skip.
@@ -137,10 +109,10 @@ namespace DetourModKit::scan
             return detail::max_match_length(m_data);
         }
 
-        /// True when the pattern has at least one fully-known byte the prefilter can anchor on.
+        /// True when the run before the first bounded jump has a fully-known byte for the prefilter anchor.
         [[nodiscard]] constexpr bool has_anchor() const noexcept { return m_data.anchor < m_data.length; }
 
-        /// Index of the rarest fully-known byte; only meaningful when has_anchor() is true.
+        /// Index of the rarest fully-known byte before the first bounded jump, valid only when has_anchor() is true.
         [[nodiscard]] constexpr std::size_t anchor_index() const noexcept { return m_data.anchor; }
 
         /// The anchor byte value, or a zero byte when has_anchor() is false.
@@ -150,14 +122,10 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief Tests whether the pattern matches at the start of @p window and honors each bounded jump.
-         * @param window The candidate byte window. A match requires at least min_match_length() bytes.
-         * @return True only when the bounded search finds a complete placement at the window start.
-         *         It returns false when the search finds no placement or exhausts its per-position budget before it
-         *         checks every candidate placement. A false result is not proof of absence.
-         * @details A byte agrees when (memory ^ pattern) & mask is zero. A mask of 0x00 accepts every byte.
-         *          Masks 0xF0 and 0x0F compare only the fixed nibble. The search tries gaps from smallest to largest.
-         * @note Callback-safe: the bounded search allocates no memory, performs no I/O, and takes no lock.
+         * @brief Tests for a match at the start of @p window. A byte agrees when (memory ^ pattern) & mask is zero.
+         * @return True when the bounded search, shortest gaps first, places every segment. False also covers an
+         *         exhausted per-position budget, so it is not proof of absence. A match needs min_match_length() bytes.
+         * @note Callback-safe: no allocation, I/O, or lock.
          */
         [[nodiscard]] constexpr bool matches_at(std::span<const std::byte> window) const noexcept
         {
@@ -167,8 +135,7 @@ namespace DetourModKit::scan
     private:
         friend constexpr const detail::PatternBuffer &detail::pattern_buffer(const Pattern &pattern) noexcept;
 
-        // Private so the only ways to obtain a Pattern are the validating factories; a default-constructed or
-        // arbitrary-buffer Pattern can never exist.
+        // Private: every Pattern comes from a successful compile() or literal() parse.
         constexpr explicit Pattern(const detail::PatternBuffer &data) noexcept : m_data{data} {}
 
         detail::PatternBuffer m_data{};
@@ -189,46 +156,30 @@ namespace DetourModKit::scan
 {
 
     /**
-     * @enum Pages
      * @brief Which page-protection class a page-gated scan accepts.
-     * @details Readable accepts every committed readable page, so one pass covers both code and data candidates.
-     *          Executable narrows to committed execute-readable code pages only, the lower-false-positive choice when
-     *          a signature must land on code.
-     *
-     *          Readable authority rule: a Readable scan returns @ref ErrorCode::NotAuthoritative when its scope
+     * @details Readable authority rule: a Readable scan returns @ref ErrorCode::NotAuthoritative when its scope
      *          declares no exclusions and lies inside neither one mapped image nor one reserved allocation. Outside a
-     *          mapped image, a scope in one allocation that crosses more than 64 `VirtualQuery` regions counts as
-     *          unconfined. Such a scope also covers caller copies of the query bytes that DMK cannot enumerate, so a
-     *          match can be the query storage itself. DMK always excludes the query storage that it owns.
+     *          mapped image, a scope in one allocation that crosses more than 64 `VirtualQuery` regions is unconfined.
+     *          Such a scope also covers caller copies of the query bytes that DMK cannot enumerate, so a match can be
+     *          the query storage itself. DMK always excludes the query storage that it owns.
      *
-     *          The remedies are a confined scope, an Executable scan, or a declaration of every live caller copy
-     *          through @ref ScanRequest::exclusions or the scan() overload with exclusions. Query bytes are data, so an
-     *          Executable scan stays authoritative on any scope.
+     *          The remedies are a confined scope, an Executable scan, or exclusions that name every live caller copy.
      *          Proof: `ScannerTrustProof.WholeProcessReadableScanCannotAuthorizeQueryOwnedMatch`.
      */
     enum class Pages : std::uint8_t
     {
-        /// Every committed readable page (a superset of Executable); the default for a data-capable sweep.
+        /// Every committed readable page, a superset of Executable.
         Readable,
-        /// Committed execute-readable code pages only.
+        /// Committed execute-readable pages only, for a pattern that must land on code.
         Executable
     };
 
-    /**
-     * @brief Largest architectural x86-64 instruction length, in bytes.
-     * @details x86-64 instructions are at most 15 bytes long. RIP-relative helpers validate their disp32 layout against
-     *          this bound before using the instruction length as the next-instruction base.
-     */
+    /** @brief Largest x86-64 instruction length, in bytes. The RIP-relative helpers reject a longer instruction. */
     inline constexpr std::size_t MAX_X86_INSTRUCTION_LENGTH = 15;
 
     /**
-     * @brief Tests whether a disp32 field fits within an x86-64 instruction of the given length.
-     * @param displacement_offset Byte offset of the signed 4-byte displacement field.
-     * @param instruction_length Total instruction length in bytes.
-     * @return True when the field lies entirely within a non-empty instruction no longer than
-     *         @ref MAX_X86_INSTRUCTION_LENGTH.
-     * @details This checks structural bounds only; the caller remains responsible for supplying an opcode whose operand
-     *          is actually RIP-relative. Subtraction after the offset comparison avoids unsigned-overflow arithmetic.
+     * @brief Tests whether a disp32 at @p displacement_offset lies within @p instruction_length. A length above
+     *        @ref MAX_X86_INSTRUCTION_LENGTH returns false. It checks bounds only, not the RIP-relative operand.
      * @note Callback-safe: pure constexpr arithmetic.
      */
     [[nodiscard]] constexpr bool
@@ -238,26 +189,21 @@ namespace DetourModKit::scan
                instruction_length - displacement_offset >= sizeof(std::int32_t);
     }
 
-    /**
-     * @enum SimdLevel
-     * @brief The highest SIMD verification tier the engine selects at runtime.
-     */
+    /** @brief The highest SIMD verification tier the engine selects at runtime. */
     enum class SimdLevel : std::uint8_t
     {
         /// Byte-by-byte verification (no SIMD).
         Scalar,
-        /// SSE2 (16 bytes per iteration).
+        /// SSE2.
         Sse2,
-        /// AVX2 (32 bytes per iteration, with an SSE2 + scalar tail).
+        /// AVX2.
         Avx2,
-        /// AVX-512F + AVX-512BW (64 bytes per iteration). Opt-in: a DMK_ENABLE_AVX512 build on an AVX-512 host.
+        /// AVX-512F and AVX-512BW, only in a DMK_ENABLE_AVX512 build on an AVX-512 host.
         Avx512
     };
 
     /**
-     * @brief Returns the enumerator name for a SimdLevel.
-     * @param level The tier.
-     * @return A static string view; "Unknown" for an out-of-range value.
+     * @brief Returns the static enumerator name for a SimdLevel, or "Unknown" for an out-of-range value.
      * @note Callback-safe: a pure constexpr value map.
      */
     [[nodiscard]] constexpr std::string_view to_string(SimdLevel level) noexcept
@@ -277,174 +223,98 @@ namespace DetourModKit::scan
     }
 
     /**
-     * @brief Reports the SIMD tier find-pattern matching uses at runtime.
-     * @details Reflects both compile-time support (which intrinsics were built) and runtime CPU detection (CPUID plus
-     *          OS XGETBV). Reports Avx512 only when the library was built with the opt-in DMK_ENABLE_AVX512 option and
-     *          the host has AVX-512F + AVX-512BW; otherwise it reports the highest available lower tier.
-     * @note Callback-safe: pure CPU-feature read, no allocation or locking.
+     * @brief Reports the SIMD tier that pattern matching uses, the highest that both the build and the host support.
+     * @note Callback-safe: a CPU-feature read with no allocation or lock.
      */
     [[nodiscard]] SimdLevel active_simd_level() noexcept;
 
-    /**
-     * @enum StringEncoding
-     * @brief Byte encoding of an anchor string as it is stored in the image.
-     */
+    /** @brief Byte encoding of an anchor string as it is stored in the image. */
     enum class StringEncoding : std::uint8_t
     {
-        /**
-         * @brief The literal is stored as the query's bytes verbatim (char / std::string literals).
-         * @details Byte-transparent: the query text is searched for exactly as given, so a caller may anchor on a byte
-         *          sequence that is not well-formed UTF-8.
-         */
+        /** @brief The query bytes verbatim, as a char literal stores them. Ill-formed UTF-8 is searched as given. */
         Utf8,
-        /**
-         * @brief The literal is stored as UTF-16LE (wchar_t / L"" on Windows).
-         * @details The query text is UTF-8 and is transcoded, so it must be well-formed: a supplementary code point
-         *          becomes a surrogate pair, and ill-formed input returns @ref ErrorCode::MalformedQueryText rather
-         *          than searching for something else.
-         */
+        /** @brief UTF-16LE (wchar_t), transcoded from the UTF-8 query. Ill-formed UTF-8 returns MalformedQueryText. */
         Utf16le
     };
 
-    /**
-     * @enum XrefReturn
-     * @brief What a resolved string cross-reference returns.
-     */
+    /** @brief What a resolved string cross-reference returns. */
     enum class XrefReturn : std::uint8_t
     {
         /// Exact address of the instruction that loads the string.
         ReferencingInstruction,
-        /**
-         * @brief Enclosing-function entry of the referencing instruction.
-         * @details Authoritative x64 `.pdata` bounds via RtlLookupFunctionEntry (following chained fragments to the
-         *          primary function), with a bounded RET/INT3 prologue back-scan as the fallback for leaf functions and
-         *          code regions with no registered exception table.
-         */
+        /** @brief Enclosing-function entry from `.pdata` (chains to the primary), else a bounded RET/INT3 back-scan. */
         EnclosingFunction,
         /**
-         * @brief Address of the global data slot a `mov [rip+slot], reg` stores the loaded string pointer into.
-         * @details Applies when the unique reference is a `lea reg, [rip+string]` shortly followed by that store; it
-         *          resolves a cached global string pointer rather than the load site. Reports
-         *          ErrorCode::StoreNotFound when no such store follows the reference.
+         * @brief The global slot that a `mov [rip+slot], reg` fills shortly after the unique `lea reg, [rip+string]`.
+         *        A `mov` load, a rarer shape that broad_match finds, or no such store returns StoreNotFound.
          */
         StringPointerSlot
     };
 
-    /**
-     * @struct StringRefQuery
-     * @brief A string-reference anchor query, with the string text borrowed for the duration of the call.
-     * @details Anchors a target on an immutable string literal in the image's read-only data, then resolves the unique
-     *          RIP-relative reference to it. @ref text is a non-owning view into caller storage. This query is for the
-     *          immediate find_string_xref() call. A stored string-xref Candidate owns its literal independently (see
-     *          Candidate::string_xref).
-     */
+    /** @brief A string-reference query that borrows @ref text for one call. A Candidate::string_xref owns its copy. */
     struct StringRefQuery
     {
-        /**
-         * @brief Literal content (no quotes); borrowed for the call.
-         * @details Must not contain an embedded NUL on either encoding: it would contradict @ref require_terminator and
-         *          cannot occur in the C string literals these anchors name, so it returns
-         *          @ref ErrorCode::MalformedQueryText.
-         */
+        /** @brief Literal content without quotes. An embedded NUL returns @ref ErrorCode::MalformedQueryText. */
         std::string_view text;
-        /// How it is stored in the image, and therefore how @ref text is interpreted (see @ref StringEncoding).
+        /// How the image stores the literal, and therefore how @ref text is read (see @ref StringEncoding).
         StringEncoding encoding = StringEncoding::Utf8;
-        /**
-         * @brief Match a trailing NUL so a prefix of a longer literal is not matched (e.g. "Player" inside
-         *        "PlayerController").
-         */
+        /// Match a trailing NUL, so "Player" does not match the prefix of "PlayerController".
         bool require_terminator = true;
         /// Selects the exact instruction site, the enclosing-function heuristic, or the cached global pointer slot.
         XrefReturn return_mode = XrefReturn::ReferencingInstruction;
         /**
-         * @brief Selects the phase-2 reference scan breadth.
-         * @details false (default) runs the fast, desync-immune all-offset shape scan that recognizes the REX.W
-         *          `lea`/`mov reg, [rip+disp32]` forms. true keeps that scan and also runs a Zydis-verified linear
-         *          sweep that recognizes the rarer RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX
-         *          `lea`/`mov`, ...), at the cost of a full decode per instruction. Derived return modes may still run
-         *          that broad sweep as a confirmation pass when this flag is false, so a shape-local narrow hit is not
-         *          certified while a rarer second reference exists.
+         * @brief With false, phase 2 finds only the REX.W `lea`/`mov reg, [rip+disp32]` shapes. With true, a Zydis
+         *        sweep also finds rarer shapes such as `cmp [rip+d], imm`. That sweep decodes only for a displacement
+         *        field whose arithmetic can reach the string. See find_string_xref() for the broad confirmation sweep.
          */
         bool broad_match = false;
     };
 
     /**
      * @brief Resolves a string-reference anchor inside one mapped image.
-     * @param query The string and how to interpret its reference.
-     * @param scope Module image to search, by default the host executable. Phase 1 follows the Readable authority rule
-     *        of @ref Pages. This entry point takes no exclusion span and no page selector, so a confined scope is the
-     *        only remedy.
-     * @return The referencing-instruction (or enclosing-function, or pointer-slot) address, or an Error.
-     * @details Two fail-closed phases. Phase 1 locates the single occurrence of @p query.text in the scope's readable
-     *          pages. Zero returns @ref ErrorCode::StringNotFound, and more than one returns
-     *          @ref ErrorCode::StringAmbiguous. Phase 2 finds the single RIP-relative reference whose resolved target
-     *          equals that string address. Zero returns @ref ErrorCode::NoReference, and more than one returns
-     *          @ref ErrorCode::AmbiguousReference. An observed second copy or second reference stays ambiguous even
-     *          when the sweep was also truncated. A truncated sweep that observed no multiplicity certifies neither
-     *          absence nor uniqueness and returns @ref ErrorCode::IncompleteScan. Text that cannot be encoded as
-     *          asked returns
-     *          @ref ErrorCode::MalformedQueryText. An out-of-range @ref StringRefQuery::encoding or
-     *          @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg before phase 1 starts. The result
-     *          is ASLR-correct because the reference is RIP-relative.
-     * @note Phase 1 excludes @p query.text's own storage when that storage lies inside @p scope. If the caller's
-     *       buffer is the only copy in scope, the result is @ref ErrorCode::StringNotFound. Anchor on a literal that
-     *       the scanned image owns.
-     * @note With @ref StringRefQuery::broad_match false, @ref XrefReturn::ReferencingInstruction reports uniqueness
-     *       among the fast REX.W `lea`/`mov reg, [rip+disp32]` shapes only. A derived return
-     *       (@ref XrefReturn::EnclosingFunction or @ref XrefReturn::StringPointerSlot) runs a broad confirmation
-     *       sweep after a single narrow hit, so a rarer second reference fails closed as
-     *       @ref ErrorCode::AmbiguousReference. That sweep does not promote a broad-only reference into a hit. Set
-     *       @ref StringRefQuery::broad_match to accept the rarer shapes. @ref anchor::Anchor::xref_broad_match and
-     *       @ref anchor::ScanProfile::default_broad_string_xref expose the same knob.
-     * @note Not noexcept: an allocation failure in either phase throws `std::bad_alloc` and is never reported as a
-     *       miss. Setup/control-plane only.
+     * @param scope Module image to search, which must pass the Readable authority rule of @ref Pages.
+     * @return The address that @ref StringRefQuery::return_mode selects, or an Error.
+     * @details Phase 1 finds the one copy of @p query.text in readable pages, or returns @ref ErrorCode::StringNotFound
+     *          or @ref ErrorCode::StringAmbiguous. Phase 2 finds the one RIP-relative reference to that copy, or
+     *          returns @ref ErrorCode::NoReference or @ref ErrorCode::AmbiguousReference. An observed second copy or
+     *          reference stays ambiguous in a truncated sweep. Any other truncated sweep returns
+     *          @ref ErrorCode::IncompleteScan. Unencodable text returns @ref ErrorCode::MalformedQueryText, and an
+     *          out-of-range encoding or return mode returns @ref ErrorCode::InvalidArg before phase 1 starts.
+     * @note Phase 1 excludes the storage of @p query.text. If that buffer is the only copy in scope, the result is
+     *       @ref ErrorCode::StringNotFound. Anchor on a literal that the scanned image owns.
+     * @note With broad_match false, an EnclosingFunction or StringPointerSlot return confirms a single narrow hit with
+     *       a broad sweep. A rarer second reference then returns @ref ErrorCode::AmbiguousReference, and a broad-only
+     *       reference never becomes a hit.
+     * @note Setup/control-plane only. An allocation failure in either phase throws `std::bad_alloc`, never a miss.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
 
     /**
      * @brief Resolves a named export to its address through one module's PE Export Address Table.
-     * @param export_name The exact export symbol, for example "Sleep". PE export names are case-sensitive.
-     * @param module The mapped image whose export directory to search; defaults to the host executable. An export
-     *               usually lives in a different module from the code a mod scans, so pass the export's own module,
-     *               for example @ref Region::module_named("kernel32.dll").
-     * @return The absolute address of the exported symbol, or an Error.
-     * @details The walk parses the mapped image's own IMAGE_EXPORT_DIRECTORY. It never calls GetProcAddress, so it
-     *          never enters the loader and never runs a DllMain. Every RVA is bound-checked against the image and
-     *          every read is guarded. A truncated or hostile export section returns an Error, unless the guard-page
-     *          re-arm in `[B-20]` fails.
-     *
-     *          A missing export directory, an absent name, an ordinal-only export, an out-of-image RVA, and an empty
-     *          @p export_name all return @ref ErrorCode::ExportNotFound. A null or invalid module image returns
-     *          @ref ErrorCode::InvalidRange. A forwarded export returns @ref ErrorCode::ExportForwarded instead of
-     *          the address of the forwarder string, because only the loader can follow a forwarder.
-     * @note Setup/control-plane only by convention, because it queries a module image, not a per-frame quantity.
-     *       Allocation-free and noexcept: the name compare runs against a fixed-length window.
+     * @param export_name The exact, case-sensitive export name, for example "Sleep".
+     * @param module The image that exports the name, for example @ref Region::module_named("kernel32.dll").
+     * @details The walk parses the mapped IMAGE_EXPORT_DIRECTORY and never calls GetProcAddress, so it never enters the
+     *          loader or runs a DllMain. A truncated or hostile export section returns an Error, unless the guard-page
+     *          re-arm in `[B-20]` fails. A missing export directory, an absent or duplicate name, an ordinal-only
+     *          export, an out-of-image RVA, or an empty @p export_name returns ExportNotFound. A null or invalid module
+     *          image returns InvalidRange. A forwarded export returns ExportForwarded.
+     * @note Setup/control-plane only by convention. It does not allocate.
      */
     [[nodiscard]] Result<Address> resolve_export(std::string_view export_name, Region module = Region::host()) noexcept;
 
-    /**
-     * @enum OperandKind
-     * @brief Which operand field @ref read_code_constant extracts.
-     */
+    /** @brief Which operand field @ref read_code_constant extracts. */
     enum class OperandKind : std::uint8_t
     {
-        /// An immediate operand (e.g. the imm of `add reg, imm`).
+        /// An immediate operand, for example the imm of `add reg, imm`.
         Immediate,
-        /// A memory operand's displacement (e.g. the disp of `[reg + disp]`).
+        /// A memory operand's displacement, for example the disp of `[reg + disp]`.
         MemoryDisplacement
     };
 
-    /**
-     * @enum Mode
-     * @brief The resolution strategy a Candidate uses to turn a signature into an address.
-     * @details The mode is data on the Candidate (the active std::variant alternative), so a ladder can interleave
-     *          the tiers freely. The two byte tiers (Direct, RipRelative) scan a compiled Pattern. The two text tiers
-     *          (RttiVtable, StringXref) resolve a name or literal through a dedicated backend. They are unique-only by
-     *          construction and fail closed on ambiguity regardless of the request's require_unique.
-     */
+    /** @brief The resolution strategy of a Candidate. RttiVtable and StringXref are unique-only text tiers. */
     enum class Mode : std::uint8_t
     {
-        /// Scan for the Pattern, then add a fixed signed walk-back to the hit (the address IS at the match site).
+        /// Scan for the Pattern, then add a fixed signed walk-back to the match.
         Direct,
         /// Scan for the Pattern, then read the RIP-relative disp32 it spans and compute the absolute target.
         RipRelative,
@@ -454,27 +324,18 @@ namespace DetourModKit::scan
         StringXref
     };
 
-    /**
-     * @enum CandidateOrder
-     * @brief How a ScanRequest's ladder is ordered before the resolver tries it.
-     * @details AsDeclared preserves the caller's array order. UniqueFirst promotes the unique-only text tiers, then
-     *          anchored byte patterns, then the other byte patterns. @ref resolve returns the first candidate that
-     *          resolves successfully. The changed order can alter the returned @ref Hit when valid candidates resolve
-     *          to different addresses. Every candidate retains the same verification and validity rules.
-     */
+    /** @brief The ladder order before resolution. It can change which @ref Hit wins, never the verification rules. */
     enum class CandidateOrder : std::uint8_t
     {
         /// Try candidates in the order the caller wrote them.
         AsDeclared,
-        /// Try unique-only text tiers, then anchored byte patterns, then the rest; declared order kept within a group.
+        /// Try unique-only text tiers, then anchored byte patterns, then the rest, each group in declared order.
         UniqueFirst
     };
 
     /**
-     * @brief Returns the enumerator name for a CandidateOrder.
-     * @param order The ordering policy.
-     * @return A static string view; "Unknown" for an out-of-range value.
-     * @note Callback-safe: a pure constexpr value map with no allocation, I/O, or locking.
+     * @brief Returns the static enumerator name for a CandidateOrder, or "Unknown" for an out-of-range value.
+     * @note Callback-safe: a pure constexpr value map.
      */
     [[nodiscard]] constexpr std::string_view candidate_order_to_string(CandidateOrder order) noexcept
     {
@@ -488,27 +349,19 @@ namespace DetourModKit::scan
         return "Unknown";
     }
 
-    /**
-     * @struct DirectPattern
-     * @brief The Direct-tier payload: a compiled Pattern plus the signed walk-back applied to the match.
-     */
+    /** @brief The Direct-tier payload: a compiled Pattern plus the signed walk-back applied to the match. */
     struct DirectPattern
     {
-        /// The compiled signature to scan for.
+        /// The compiled pattern to scan for.
         Pattern pattern;
-        /// Signed byte delta added to the match (negative walks backward); 0 returns the match itself.
+        /// Signed byte delta added to the match, where a negative value walks backward.
         std::ptrdiff_t walk_back{0};
     };
 
-    /**
-     * @struct RipRelativePattern
-     * @brief The RipRelative-tier payload: a compiled Pattern plus the disp32 location and instruction length.
-     * @details The resolved target is `(match + instruction_length) + sign_extend(disp32 @ (match + displacement_at))`,
-     *          read under a fault guard, so a corrupt displacement is a miss rather than a host fault.
-     */
+    /** @brief The RipRelative-tier payload. It targets `match + instruction_length + disp32`. A bad disp32 misses. */
     struct RipRelativePattern
     {
-        /// The compiled signature to scan for.
+        /// The compiled pattern to scan for.
         Pattern pattern;
         /// Byte offset from the match to the signed 4-byte displacement field.
         std::ptrdiff_t displacement_at{0};
@@ -516,56 +369,38 @@ namespace DetourModKit::scan
         std::size_t instruction_length{0};
     };
 
-    /**
-     * @struct RttiVtable
-     * @brief The RttiVtable-tier payload: the MSVC-mangled type name to resolve through the reverse-RTTI walk. Owned.
-     * @details Unique-only: an ambiguous name (two primaries) fails closed and the ladder falls through.
-     */
+    /** @brief The RttiVtable-tier payload: an owned mangled type name. An ambiguous name fails closed. */
     struct RttiVtable
     {
-        /// The MSVC decorated type name, e.g. ".?AVCameraManager@@". Owned.
+        /// The MSVC decorated type name, for example ".?AVCameraManager@@".
         std::string mangled;
     };
 
-    /**
-     * @struct StringXref
-     * @brief The StringXref-tier payload: an OWNED string literal plus the reference-resolution facets.
-     * @details The literal is held as an owned std::string (not the borrowed std::string_view of StringRefQuery)
-     *          because a Candidate is stored and resolved later, long after the expression that built it; the resolver
-     *          rebuilds a StringRefQuery view over this owned text at resolve time. Unique-only: a pooled literal or a
-     *          second reference fails closed.
-     */
+    /** @brief The StringXref-tier payload: owned literal and facets. A second copy or reference fails closed. */
     struct StringXref
     {
-        /// The exact string content to anchor on (no quotes). Owned.
+        /// The exact string content to anchor on, without quotes.
         std::string text;
         /// How the literal is stored in the image.
         StringEncoding encoding{StringEncoding::Utf8};
         /// Match a trailing NUL so a prefix of a longer literal is not matched.
         bool require_terminator{true};
-        /// Instruction site, enclosing function, or cached global pointer slot.
+        /// What the resolution returns (see @ref XrefReturn).
         XrefReturn return_mode{XrefReturn::ReferencingInstruction};
-        /// Keep the lea/mov shape scan and add the Zydis broad sweep for rarer reference shapes.
+        /// Add the Zydis broad sweep (see @ref StringRefQuery::broad_match).
         bool broad_match{false};
     };
 
-    /**
-     * @class Candidate
-     * @brief One resilience tier in a resolution ladder: a strategy plus the signature it resolves, owning its strings.
-     * @details The payload is a std::variant over the four typed tiers, so the (mode, payload) pairing is coherent by
-     *          construction. The four factories are the only way to build one, so a Candidate can only exist with a
-     *          valid alternative. The candidate copies every owned string: the name, the RttiVtable mangled name, and
-     *          the StringXref literal. A returned Hit or a stored ladder therefore never aliases caller storage.
-     */
+    /** @brief One ladder tier, built only by the factories. It copies its strings, so it never aliases the caller. */
     class Candidate
     {
     public:
-        /// The active variant payload type. The alternative order matches the Mode enumerator order.
+        /// The variant payload, whose alternative order matches the Mode enumerator order.
         using Payload = std::variant<DirectPattern, RipRelativePattern, RttiVtable, StringXref>;
 
         /**
-         * @brief A Direct byte-scan candidate: the resolved address is at the match site plus a fixed walk-back.
-         * @note Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at init.
+         * @brief A Direct byte-scan candidate: the resolved address is the match plus a fixed walk-back.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] static Candidate direct(std::string name, Pattern pattern, std::ptrdiff_t walk_back = 0)
         {
@@ -573,18 +408,15 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief A RIP-relative byte-scan candidate: the resolved address is read from a disp32 the match spans.
-         * @param displacement_at Byte offset from the match to the signed 4-byte displacement field; must be >= 0.
-         * @param instruction_length Total length of the referencing instruction; must be no more than 15 bytes and
-         *        contain the disp32 field.
-         * @throws std::invalid_argument when the declared layout is invalid or the matched suffix does not span the
-         *         complete disp32 field.
-         * @details Setup/control-plane only: it builds an owned Candidate. Assemble each ladder at init. The matched
-         *          evidence must cover the disp32 it authorizes. The resolver computes
-         *          match + instruction_length + disp from one immutable sweep snapshot, never from a post-sweep
-         *          reread.
-         * @note The manifest loader validates the same bound through @ref is_valid_rip_relative_layout, so a bad
-         *       manifest fails closed with an error value instead of a throw.
+         * @brief A RIP-relative byte-scan candidate: the address is the target of the disp32 that the match spans.
+         * @throws std::invalid_argument for an invalid layout: a negative @p displacement_at, a disp32 that ends past
+         *         @p instruction_length, or a length above 15. It also throws for a pattern suffix from `|` that does
+         *         not span the disp32.
+         * @details The matched instruction must decode to @p instruction_length bytes, with a RIP-relative memory
+         *          disp32 at @p displacement_at, or the candidate never resolves. A rel32 branch (`E8` call, `E9` jmp)
+         *          has none. For a branch target, use scan() plus resolve_rip_relative(). The resolver computes the
+         *          target from one immutable sweep snapshot, never from a reread after the sweep.
+         * @note Setup/control-plane only. The manifest loader checks the same layout and returns an error, not a throw.
          */
         [[nodiscard]] static Candidate
         rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at, std::size_t instruction_length)
@@ -608,7 +440,7 @@ namespace DetourModKit::scan
 
         /**
          * @brief An RTTI-vtable candidate: resolves the primary vtable of an MSVC-mangled type name.
-         * @note Setup/control-plane only: copies the name and mangled query strings.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] static Candidate rtti_vtable(std::string name, std::string mangled)
         {
@@ -616,8 +448,8 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief A string-xref candidate with default facets (UTF-8, referencing-instruction, terminator-required).
-         * @note Setup/control-plane only: copies the name and literal query strings.
+         * @brief A string-xref candidate with the default @ref StringXref facets.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] static Candidate string_xref(std::string name, std::string literal)
         {
@@ -625,10 +457,8 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief A string-xref candidate carrying explicit facets (encoding, return mode, terminator, broad match).
-         * @details The query's borrowed text is copied into the Candidate's owned StringXref payload, so the Candidate
-         *          outlives the StringRefQuery and its backing storage. The remaining facets are taken verbatim.
-         * @note Setup/control-plane only: copies the name and the query literal.
+         * @brief A string-xref candidate with the facets of @p query. It owns a copy of @p query.text.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] static Candidate string_xref(std::string name, StringRefQuery query)
         {
@@ -644,13 +474,13 @@ namespace DetourModKit::scan
             };
         }
 
-        /// Human-readable label; carried verbatim into the winning Hit.
+        /// Human-readable label, copied into the winning Hit.
         [[nodiscard]] const std::string &name() const noexcept { return m_name; }
 
-        /// The resolution strategy this tier uses (a cast of the active variant alternative index).
+        /// The resolution strategy of this tier.
         [[nodiscard]] Mode mode() const noexcept { return static_cast<Mode>(m_payload.index()); }
 
-        /// The full variant payload, for the resolver's std::visit dispatch.
+        /// The full variant payload.
         [[nodiscard]] const Payload &payload() const noexcept { return m_payload; }
 
         /// Returns the Direct payload, or nullptr when this is not a Direct candidate.
@@ -669,17 +499,14 @@ namespace DetourModKit::scan
         [[nodiscard]] const StringXref *as_string_xref() const noexcept { return std::get_if<StringXref>(&m_payload); }
 
     private:
-        // Private so the four validating factories are the only construction path; a stray `Candidate{...}` does not
-        // compile, and the (name, payload) coherence is established at the factory.
+        // Private: every Candidate comes from a factory, so its name and payload stay coherent.
         Candidate(std::string name, Payload payload) : m_name{std::move(name)}, m_payload{std::move(payload)} {}
 
         std::string m_name;
         Payload m_payload;
     };
 
-    // The resolver derives Mode from the active variant index, so the alternative order MUST track the Mode order. Pin
-    // it here: a future reorder of either list that breaks the mapping fails the build rather than silently misrouting
-    // a candidate to the wrong backend.
+    // mode() casts the variant index, so the alternative order must match the Mode order.
     static_assert(std::is_same_v<
                   std::variant_alternative_t<static_cast<std::size_t>(Mode::Direct), Candidate::Payload>,
                   DirectPattern>);
@@ -693,83 +520,55 @@ namespace DetourModKit::scan
                   std::variant_alternative_t<static_cast<std::size_t>(Mode::StringXref), Candidate::Payload>,
                   StringXref>);
 
-    /**
-     * @struct CodeConstant
-     * @brief Declares a constant encoded in the engine's machine code so DMK can re-derive it after a patch.
-     * @details The code-side twin of the RTTI self-heal: where a struct stride or field displacement is an immediate or
-     *          `[reg + disp]` in a dispatch loop, declare the candidate ladder that lands ON the instruction plus which
-     *          operand to read, and read_code_constant() decodes the live instruction and returns the current value, so
-     *          a consumer stops hand-reading the immediate every patch.
-     */
+    /** @brief Declares a constant encoded in machine code, so read_code_constant() can re-derive it after a patch. */
     struct CodeConstant
     {
-        /// Candidate ladder that resolves to an execute-readable instruction site. Borrowed.
+        /// Borrowed candidate ladder that resolves to an execute-readable instruction site.
         std::span<const Candidate> site;
         /// Which operand field to read: an immediate or a memory displacement.
         OperandKind kind = OperandKind::Immediate;
-        /// Index into the instruction's VISIBLE operands, as counted in a disassembler.
+        /// Index into the instruction's visible operands, as a disassembler counts them.
         std::uint8_t operand_index = 0;
-        /// 0 preserves the decoded value; 1 through 8 narrows a non-RIP constant to low bytes and sign-extends.
+        /// 0 keeps the decoded value, and 1 through 8 narrows a non-RIP constant to its low bytes and sign-extends it.
         std::uint8_t byte_width = 0;
-        /// Last-known value, for telemetry/baseline ONLY; never returned in place of a live decode.
+        /// Last-known value for telemetry or a baseline, never returned in place of a live decode.
         std::int64_t nominal = 0;
-        /// Set true to make @ref nominal meaningful (do not overload nominal == 0 as "unset").
+        /// True when @ref nominal holds a value, so nominal == 0 does not mean "unset".
         bool has_nominal = false;
     };
 
     /**
      * @brief Resolves @p code_constant.site, decodes the instruction there, and returns the requested operand's value.
-     * @param code_constant The code-constant declaration.
-     * @param scope Module image to resolve the site in; defaults to the host executable.
-     * @return The decoded value (sign-extended), or an Error.
-     * @details Always decodes and returns the LIVE operand; @c nominal is never a short-circuit, so a same-shape
-     *          different-value drift (e.g. a stride 232 -> 240) is reported as the new value, which is the point.
-     *          Fail-closed: a candidate whose final site is not execute-readable is skipped so a later ladder rung can
-     *          resolve; if the selected site loses executable protection before decoding, or its decoded instruction
-     *          crosses into a non-executable page, it returns DecodeFailed. A site that no longer decodes
-     *          (DecodeFailed), whose operand is the wrong kind (UnexpectedShape), or whose operand index is out of
-     *          range (OperandOutOfRange) also returns a typed error rather than a guess. An out-of-range
-     *          @ref CodeConstant::kind or @ref CodeConstant::byte_width returns @ref ErrorCode::InvalidArg before site
-     *          resolution. A RIP-relative memory operand is resolved to its absolute target without narrowing.
-     *          The value decodes from a fresh snapshot after site resolution.
-     *          A byte rung must still match its physical span and resolve the decoded site at that epoch (`[B-75]`).
-     *          Otherwise, the function returns @ref ErrorCode::EvidenceMismatch.
-     *          A wildcarded operand byte at the selected site may drift. The function returns its current value.
-     * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
+     * @return The sign-extended live value, or an Error. A RIP-relative memory operand returns its absolute target.
+     * @details A candidate whose final site is not execute-readable is skipped, and the next candidate runs. A selected
+     *          site that loses execute protection, crosses into a non-executable page, or no longer decodes returns
+     *          DecodeFailed. A wrong operand kind returns UnexpectedShape, and an operand index out of range returns
+     *          OperandOutOfRange. An out-of-range kind or byte_width returns @ref ErrorCode::InvalidArg first.
+     * @note `[B-75]` The value decodes from a fresh snapshot after site resolution. A byte tier must still match its
+     *       physical span and resolve the decoded site at that epoch, or the result is EvidenceMismatch. A wildcarded
+     *       operand byte can drift, and the result is its current value.
+     * @note Setup/control-plane only. Site resolution allocates.
      */
     [[nodiscard]] Result<std::int64_t>
     read_code_constant(const CodeConstant &code_constant, Region scope = Region::host());
 
     /**
-     * @brief Ceiling on the winning-span bytes a @ref WinningEvidence can carry.
-     * @details A mutation baseline is compared byte for byte, so it must hold the WHOLE winning span or it would
-     *          authorize a write on partial evidence. Evidence longer than this is reported truncated: still valid for
-     *          read-only resolution, never usable to authorize a mutation or to seed a strict baseline.
+     * @brief Ceiling on the bytes a @ref WinningEvidence carries. A longer span still resolves, but its truncated
+     *        evidence never authorizes a mutation or seeds a strict baseline.
      */
     inline constexpr std::size_t MAX_MUTATION_WITNESS_BYTES = 256;
 
     /**
-     * @struct WinningEvidence
-     * @brief The literal bytes present at the winning match span, captured during the match that produced them.
-     * @details Content evidence, as opposed to the layout evidence in @ref ImageIdentity: it records what the target
-     *          actually contained, including the concrete values that matched wildcard positions and the bytes a
-     *          variable-length gap skipped over. That is what lets a caller distinguish a same-layout image whose code
-     *          was changed under it from one that is genuinely unchanged, which no PE-header identity can do.
-     *
-     *          Captured from the same traversal that matched, never a re-read, so it witnesses the span the resolver
-     *          actually accepted rather than whatever occupies that address later.
+     * @brief The literal bytes at the winning match span, captured by the match and never re-read. They include the
+     *        wildcard and gap bytes, so they detect a same-layout code change that @ref ImageIdentity cannot see.
      */
     struct WinningEvidence
     {
-        /// The captured span, valid over the first @ref length elements; trailing elements are zero.
+        /// The captured span in the first @ref length elements, with zero in the trailing elements.
         std::array<std::byte, MAX_MUTATION_WITNESS_BYTES> bytes{};
-        /// How many leading elements of @ref bytes are meaningful; 0 when nothing was captured.
+        /// The count of valid leading elements in @ref bytes, or 0 when nothing was captured.
         std::uint16_t length = 0;
-        /**
-         * @brief True when the winning span exceeded @ref MAX_MUTATION_WITNESS_BYTES and was not captured.
-         * @details Set with @ref length 0: a partial prefix would compare equal against a prefix baseline and silently
-         *          weaken the gate, so an over-long span carries no evidence at all rather than misleading evidence.
-         */
+        /** @brief True when the winning span exceeded @ref MAX_MUTATION_WITNESS_BYTES. @ref length is then 0. */
         bool truncated = false;
 
         /// True when a complete, internally valid winning span was captured.
@@ -778,7 +577,7 @@ namespace DetourModKit::scan
             return length != 0 && length <= MAX_MUTATION_WITNESS_BYTES && !truncated;
         }
 
-        /// The captured bytes as a span; empty unless @ref present.
+        /// The captured bytes as a span, empty unless @ref present.
         [[nodiscard]] constexpr std::span<const std::byte> span() const noexcept
         {
             if (!present())
@@ -788,14 +587,7 @@ namespace DetourModKit::scan
             return std::span<const std::byte>{bytes.data(), length};
         }
 
-        /**
-         * @brief Value equality over the captured prefix and the truncation flag.
-         * @details Fails closed on a malformed value rather than walking it: @ref length is public and is not
-         *          clamped on assignment, so a hand-built evidence whose length exceeds
-         *          @ref MAX_MUTATION_WITNESS_BYTES, or which claims bytes while @ref truncated, would otherwise read
-         *          past @ref bytes. Such a value compares equal to nothing, including a copy of itself, so it can
-         *          never satisfy a baseline comparison.
-         */
+        /** @brief Value equality. A malformed value (bad @ref length, or bytes while @ref truncated) equals nothing. */
         [[nodiscard]] constexpr bool operator==(const WinningEvidence &other) const noexcept
         {
             const bool malformed = length > MAX_MUTATION_WITNESS_BYTES || (truncated && length != 0);
@@ -820,11 +612,7 @@ namespace DetourModKit::scan
         }
     };
 
-    /**
-     * @struct Hit
-     * @brief A resolved address paired with the owning name and mode of the candidate that produced it.
-     * @details @ref winning_name remains valid for the lifetime of the Hit.
-     */
+    /** @brief A resolved address with the owned name and the mode of the candidate that produced it. */
     struct Hit
     {
         /// The resolved absolute address.
@@ -833,106 +621,67 @@ namespace DetourModKit::scan
         std::string winning_name;
         /// The resolution mode of the winning candidate.
         Mode winning_mode = Mode::Direct;
-        /**
-         * @brief The literal bytes at the span this candidate matched; absent for a backend that matches no span.
-         * @details Only a byte-pattern tier witnesses a span. An RTTI, export, or string-xref rung resolves through a
-         *          structure rather than a literal run, so it leaves this absent and cannot seed a mutation baseline.
-         */
+        /** @brief Matched-span bytes. Only a byte-pattern tier fills them, so no other tier can seed a baseline. */
         WinningEvidence evidence{};
     };
 
-    /**
-     * @enum FallbackPolicy
-     * @brief How strictly hooked-prologue recovery confirms the identity of a recovered target.
-     * @details `[B-53]` Hooked-prologue recovery rebuilds a Direct candidate's prologue as an inline-hook jump shape
-     *          and resolves the single site that uniquely matches. That structural gate is strong but address-blind: a
-     *          game reshape can leave an inline-hooked near-twin with a coincidental match. Pair a
-     *          @ref FallbackWitness with RequireIdentity to fail closed on an unconfirmed site.
-     */
+    /** @brief `[B-53]` How strictly hooked-prologue recovery, which is address-blind, confirms a recovered target. */
     enum class FallbackPolicy : std::uint8_t
     {
         /// Recovery disabled: a full direct miss stays a miss.
         Off,
-        /// Recover structurally; log a rejecting @ref FallbackWitness but still return the address.
+        /// Recover structurally and return the address. A @ref FallbackWitness rejection only logs a warning.
         WarnOnly,
         /// Recover structurally, then require a @ref FallbackWitness to confirm the recovered address.
         RequireIdentity,
     };
 
-    /**
-     * @brief A post-recovery identity check for hooked-prologue recovery.
-     * @details Signature-compatible with @ref anchor::AnchorValidator. The recovered absolute address is passed as
-     *          @p value. Return false to reject it as a coincidental near-twin.
-     * @param value The recovered absolute address, as a signed integer (a hook target is a code address).
-     * @param context The opaque @ref FallbackWitness::context pointer, forwarded verbatim (nullptr if unused).
-     */
+    /** @brief Returns false to reject a recovered site. It has the same type as @ref anchor::AnchorValidator. */
     using FallbackValidator = bool (*)(std::int64_t value, const void *context) noexcept;
 
-    /**
-     * @struct FallbackWitness
-     * @brief The witness a @ref FallbackPolicy runs against a recovered prologue-fallback target.
-     * @details A null @ref predicate means "no witness": WarnOnly then behaves as a plain structural recovery, and
-     *          RequireIdentity fails closed (it has nothing to confirm the site with). A typical witness corroborates
-     *          the recovered address against an independently resolved landmark, or reads a distinguishing byte past
-     *          the overwritten prologue.
-     */
+    /** @brief The FallbackPolicy witness. With a null predicate, WarnOnly recovers and RequireIdentity fails closed. */
     struct FallbackWitness
     {
-        /// Predicate run on the recovered address; nullptr for no identity check.
+        /// Predicate run on the recovered address, or nullptr for no identity check.
         FallbackValidator predicate = nullptr;
         /// Opaque pointer forwarded verbatim to @ref predicate.
         const void *context = nullptr;
     };
 
-    /**
-     * @struct ScanRequest
-     * @brief A non-owning resolution request: a candidate ladder plus the scope and policy to resolve it under.
-     * @details ladder, label, and exclusions are NON-owning views, so a ScanRequest is for a request built and consumed
-     *          in one expression (a temporary handed straight to resolve() outlives the call). To store or pass a
-     *          request around, use OwnedScanRequest, or build a borrowed one through borrow() so the lifetime-bound
-     *          diagnostic can ride its parameters (the attribute cannot annotate a data member).
-     */
+    /** @brief A non-owning resolution request for use within one expression. To store one, use OwnedScanRequest. */
     struct ScanRequest
     {
-        /// Candidates tried in order (after applying @ref order); the first that resolves uniquely wins.
+        /// Candidates tried in @ref order, where the first one that resolves wins.
         std::span<const Candidate> ladder;
-        /// Optional label for diagnostics; non-owning.
+        /// Optional non-owning label for diagnostics.
         std::string_view label{};
-        /// The memory range to resolve within; defaults to the host process image.
+        /// The memory range to resolve within.
         Region scope = Region::host();
-        /// Hooked-prologue recovery mode for a full direct miss (see @ref FallbackPolicy).
+        /// Hooked-prologue recovery strictness on a full direct miss (see @ref FallbackPolicy).
         FallbackPolicy fallback_policy = FallbackPolicy::Off;
         /// The identity witness the fallback runs on a recovered site (see @ref FallbackPolicy). Unused when Off.
         FallbackWitness fallback_witness{};
-        /// Fail closed on an ambiguous byte match (a second occurrence in scope) rather than taking the first.
+        /// Fail closed on an ambiguous byte match (a second occurrence in scope). False takes the first match.
         bool require_unique = true;
         /// How the ladder is ordered before it is tried.
         CandidateOrder order = CandidateOrder::AsDeclared;
         /// Page-protection class the Direct / RipRelative byte tiers scan.
         Pages pages = Pages::Readable;
         /**
-         * @brief Rejects a candidate whose final resolved address is not on a committed execute-readable page.
-         * @details Applies after each byte, RTTI, string-xref, or prologue-recovery backend resolves its final address.
-         *          Use it for a hook target that must be executable even when a byte candidate matches code then
-         *          transforms its match into a data address. Defaults false because a RipGlobal may intentionally
-         *          resolve a data global from an executable instruction reference.
+         * @brief Rejects each candidate or recovered site whose final address is off an execute-readable page. A
+         *        rejected candidate is skipped, not fatal. A RIP-relative data global needs false.
          */
         bool require_executable_result = false;
         /**
-         * @brief Caller-owned copies of the ladder's query bytes that no match can come from.
-         * @details A non-empty span satisfies the Readable authority rule of @ref Pages, so it must name every live
-         *          copy. Non-owning, like @ref ladder.
+         * @brief Every live caller copy of the query bytes. The byte and string-xref tiers do not count a match that
+         *        intersects one. A non-empty span satisfies the Readable authority rule.
          */
         std::span<const Region> exclusions{};
     };
 
     /**
-     * @brief Builds a borrowed ScanRequest whose lifetime-bound diagnostic rides its view parameters.
-     * @details DMK_LIFETIMEBOUND on the borrowed parameters lets Clang/MSVC warn when a temporary ladder/label is
-     *          passed. MinGW GCC has no such attribute, so the build there relies on the owning/borrowed split plus
-     *          `-Wdangling-reference`. For a stored or deferred request, prefer OwnedScanRequest.
-     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
-     *       allocation. The default scope query is setup/control-plane only.
+     * @brief Builds a borrowed ScanRequest. Clang and MSVC code analysis can flag a temporary ladder or label.
+     * @note Callback-safe with an explicit Region: no allocation. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ScanRequest borrow(
         std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
@@ -946,25 +695,10 @@ namespace DetourModKit::scan
     ) noexcept;
 
     /**
-     * @brief Builds a borrowed ScanRequest preset for resolving a CODE (hook) target.
-     * @param ladder Candidates tried in order; borrowed for the call.
-     * @param label Optional diagnostic label; borrowed.
-     * @param scope Module image to resolve within; defaults to the host process image.
-     * @param fallback_policy Hooked-prologue recovery strictness (see @ref FallbackPolicy). Defaults to WarnOnly:
-     *        recover a target another mod inline-hooked, structurally. Pass RequireIdentity with @p fallback_witness to
-     *        fail closed on a recovered site the witness cannot confirm.
-     * @param fallback_witness The identity witness the fallback runs on a recovered site (see @ref FallbackWitness).
-     * @return A ScanRequest carrying the code-target resolution policy.
-     * @details A hook target must land on an instruction, so this preset differs from the default data-capable
-     *          request in four ways: `Pages::Executable`, `require_executable_result`,
-     *          @ref CandidateOrder::UniqueFirst, and an enabled @p fallback_policy. `require_unique` stays true.
-     *          `Pages::Executable` narrows the Direct and RipRelative byte scans only. The final-result gate also
-     *          rejects a byte tier that resolves code bytes to a data address, and any RTTI or string-xref result
-     *          that is not executable. For a data, RTTI, or string target, use the default ScanRequest or
-     *          @ref borrow.
-     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
-     *       allocation. The default scope query is setup/control-plane only. For a stored or deferred request, copy
-     *       the same fields onto an OwnedScanRequest so the ladder is owned.
+     * @brief Builds a borrowed ScanRequest preset for a code (hook) target.
+     * @details The preset sets `Pages::Executable`, `require_executable_result`, and @ref CandidateOrder::UniqueFirst.
+     *          For a data, RTTI, or string target, use @ref borrow.
+     * @note Callback-safe with an explicit Region: no allocation. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ScanRequest borrow_code_target(
         std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
@@ -975,20 +709,8 @@ namespace DetourModKit::scan
     ) noexcept;
 
     /**
-     * @brief Builds a borrowed ScanRequest preset for a CODE (hook) target that fails closed on unconfirmed recovery.
-     * @param ladder Candidates tried in order; borrowed for the call.
-     * @param label Optional diagnostic label; borrowed. Required positionally because the witness that follows has no
-     *        default. Pass {} for none.
-     * @param fallback_witness The identity witness a recovered hooked-prologue site must satisfy. It has no default.
-     * @param scope Module image to resolve within; defaults to the host process image.
-     * @return A ScanRequest carrying the code-target policy under @ref FallbackPolicy::RequireIdentity.
-     * @details The strict counterpart to @ref borrow_code_target. Every field is identical except the fallback
-     *          strictness. Recovery runs under @ref FallbackPolicy::RequireIdentity, so a Direct candidate recovered
-     *          from an already inline-hooked target resolves only when @p fallback_witness confirms it. A
-     *          coincidental near-twin fails closed instead. The witness has no default because RequireIdentity
-     *          without a witness fails closed on every recovery, which is a silent always-miss.
-     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
-     *       allocation. The default scope query is setup/control-plane only.
+     * @brief The @ref borrow_code_target preset under @ref FallbackPolicy::RequireIdentity. For no label, pass {}.
+     * @note Callback-safe with an explicit Region: no allocation. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ScanRequest borrow_code_target_strict(
         std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
@@ -997,21 +719,14 @@ namespace DetourModKit::scan
         Region scope = Region::host()
     ) noexcept;
 
-    /**
-     * @struct OwnedScanRequest
-     * @brief An owning resolution request for stored or deferred resolution.
-     * @details Owns its ladder, label, and exclusions, so it is the safe shape to keep inside a registration or any
-     *          structure that outlives the expression that built it. The structural guarantee that stored entry points
-     *          take OwnedScanRequest (never a borrowed ScanRequest) is the primary defense against dangling views;
-     *          @ref view rebuilds a borrowed ScanRequest over this object's storage on demand.
-     */
+    /** @brief An owning resolution request for stored or deferred resolution. Stored entry points take this type. */
     struct OwnedScanRequest
     {
         /// Owned candidate ladder.
         std::vector<Candidate> ladder;
         /// Owned diagnostic label.
         std::string label;
-        /// The resolution scope; defaults to the host image.
+        /// The resolution scope.
         Region scope = Region::host();
         /// Hooked-prologue recovery strictness on a full direct miss (see @ref FallbackPolicy).
         FallbackPolicy fallback_policy = FallbackPolicy::Off;
@@ -1028,10 +743,7 @@ namespace DetourModKit::scan
         /// Owned copies of the caller-declared query exclusions (see @ref ScanRequest::exclusions).
         std::vector<Region> exclusions;
 
-        /**
-         * @brief Returns a borrowed ScanRequest viewing this object's owned storage.
-         * @return A ScanRequest whose ladder/label/exclusions alias *this; valid only while this object lives.
-         */
+        /** @brief Returns a ScanRequest that views this object's storage, valid only while this object lives. */
         [[nodiscard]] ScanRequest view() const noexcept DMK_LIFETIMEBOUND
         {
             return ScanRequest{
@@ -1050,106 +762,67 @@ namespace DetourModKit::scan
     };
 
     /**
-     * @brief Writes the index permutation @p order implies for @p ladder into @p out.
-     * @param order The ordering policy.
-     * @param ladder The candidate ladder to order.
-     * @param out Destination for the permutation; receives up to min(ladder.size(), out.size()) indices.
-     * @return The number of indices written.
-     * @details Pure index math, no allocation. UniqueFirst is a stable three-pass partition (unique-only text tiers,
-     *          then anchored byte patterns, then the rest), declared order preserved within each group. Every other
-     *          value, including an out-of-range one, yields the identity permutation, so a mis-declared order can never
-     *          select the UniqueFirst promotion; the fallible @ref resolve boundary rejects it with
-     *          @ref ErrorCode::InvalidArg.
-     * @note Callback-safe: pure index math, noexcept, no allocation.
+     * @brief Writes the index permutation that @p order implies for @p ladder into @p out.
+     * @return The number of indices written, at most min(ladder.size(), out.size()).
+     * @details AsDeclared and any out-of-range value yield the identity permutation.
+     * @note Callback-safe: pure index math with no allocation.
      */
     [[nodiscard]] std::size_t
     order_candidates(CandidateOrder order, std::span<const Candidate> ladder, std::span<std::size_t> out) noexcept;
 
     /**
-     * @brief Resolves a candidate ladder to a single address, trying each tier until one resolves uniquely.
-     * @param request The ladder, scope, and policy to resolve.
-     * @return The resolved Hit, or an Error describing why no candidate resolved.
-     * @details The whole resolver surface in one call. The resolver tries candidates in @ref ScanRequest::order order,
-     *          and the first candidate that resolves wins. A byte tier resolves when it matches in scope, passes the
-     *          uniqueness gate when required, and yields an in-scope plausible address. A text tier resolves through
-     *          its unique-only backend. When @ref ScanRequest::require_executable_result is true, every final address
-     *          must also be execute-readable.
+     * @brief Returns the Hit of the first candidate, in @ref ScanRequest::order, that resolves, or an Error.
+     * @details A byte tier resolves when it matches in scope, passes the uniqueness gate when required, and yields an
+     *          in-scope plausible address. A text tier resolves through its unique-only backend. After a full direct
+     *          miss with a non-Off fallback_policy, the resolver rebuilds each Direct prologue as a near or far JMP.
+     *          Only a unique match of the rebuilt shape resolves, regardless of require_unique. A byte tier whose own
+     *          sweep was truncated (BudgetExceeded or IncompleteScan) preempts that recovery. A recovery sweep that
+     *          skips a faulted region reports IncompleteScan, not a miss.
      *
-     *          On a full direct miss with a non-Off fallback_policy, the resolver rebuilds each Direct candidate's
-     *          prologue as a near/far JMP and retries it. This recovers a target that another mod already hooked
-     *          inline, subject to the policy's identity witness. A byte tier whose own sweep was truncated
-     *          (@ref ErrorCode::BudgetExceeded or @ref ErrorCode::IncompleteScan) preempts that recovery. Recovery
-     *          needs a full direct miss, and a partly read scope does not prove one. A recovery sweep that skips a
-     *          faulted region reports @ref ErrorCode::IncompleteScan instead of a miss.
-     *
-     *          A text tier failure does not preempt recovery. That failure is @ref ErrorCode::MalformedQueryText, or
-     *          @ref ErrorCode::NotAuthoritative or @ref ErrorCode::IncompleteScan from the tier's own readable sweep.
-     *          When nothing resolves, the result reports that failure in place of the generic miss.
-     *
-     *          A scope that fails the Readable authority rule of @ref Pages refuses the whole request before the
-     *          resolver grades any candidate. An out-of-range value fails closed with @ref ErrorCode::InvalidArg
-     *          instead of a permissive default. The checked values are @ref ScanRequest::pages,
-     *          @ref ScanRequest::order, @ref ScanRequest::fallback_policy, and the encoding and return mode of each
-     *          StringXref candidate. resolve() can allocate, so it is not noexcept. Only an allocation failure throws.
-     * @note Setup/control-plane only: a cascade resolve walks the image and is a startup-time operation.
+     *          A text tier failure does not preempt recovery. That failure is MalformedQueryText, or NotAuthoritative
+     *          or IncompleteScan from its own readable sweep. If nothing resolves, the result reports it in place of
+     *          the generic miss. A scope that fails the Readable authority rule of @ref Pages refuses the request
+     *          before the resolver grades any candidate. An out-of-range pages, order, fallback_policy, or StringXref
+     *          encoding or return mode returns @ref ErrorCode::InvalidArg. Only an allocation failure throws.
+     * @note Setup/control-plane only.
      */
     [[nodiscard]] Result<Hit> resolve(const ScanRequest &request);
 
     /**
      * @brief Resolves a batch of requests concurrently and returns one Result per request in input order.
-     * @param requests The requests to resolve.
-     * @param max_workers Upper bound on worker threads (0 = auto-select from hardware concurrency).
-     * @return The outer Result holds one @ref Hit or Error per request, in input order. The outer Result fails with
-     *         Error{OutOfMemory} when the result vector cannot be allocated, and with Error{Unknown} for any other
-     *         whole-batch exception. A caller must unwrap it before it indexes a slot.
-     * @details A per-request allocation failure sets that slot to Error{OutOfMemory}. Any other per-request exception
-     *          leaves the seeded Error{NoMatch} in that slot.
-     * @note Setup/control-plane only: it spawns a worker pool and allocates, so run it at startup, not per frame.
+     * @param max_workers Upper bound on worker threads, or 0 to select from the hardware concurrency.
+     * @return The outer Result fails with OutOfMemory if the result vector cannot be allocated, and with Unknown on any
+     *         other whole-batch exception. A slot holds OutOfMemory after its own allocation failure, and NoMatch after
+     *         any other exception.
+     * @note Setup/control-plane only: it spawns a worker pool and allocates.
      */
     [[nodiscard]] Result<std::vector<Result<Hit>>>
     resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 
     /**
      * @brief Scans one Pattern over a known scope and returns the Nth match address.
-     * @param pattern The compiled signature.
-     * @param scope The memory range to search.
-     * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
-     * @param pages Which page-protection class to accept (Readable superset by default, or Executable code-only).
-     * @return The address of the Nth match (adjusted by the Pattern's `|` offset), or an Error.
-     * @details The page-gated sweep walks @p scope through the OS page map and reads only committed pages of the
-     *          requested class under a fault guard. An unmapped or guard page inside the scope causes a skip, not a
-     *          host fault. A match that straddles two adjacent accepted regions is still found. Each call
-     *          rebuilds the engine pattern, can sample the haystack, and can query the loader for the authority check
-     *          before the walk. A cursor walk that calls scan() once per hit therefore repeats that setup for each
-     *          hit. @ref unchecked::find_pattern serves that loop over a range that the caller proves readable.
+     * @return The @p occurrence-th (1-based) match, adjusted by the `|` offset, or an Error. 0 returns NoMatch.
+     * @details The sweep reads only committed pages of the @p pages class. It skips an unmapped or guard page without a
+     *          host fault and still finds a match that straddles two adjacent accepted regions. Each call repeats its
+     *          setup, which can query the loader for the authority check. For a cursor walk over a range that the
+     *          caller proves readable, use @ref unchecked::find_pattern.
      *
-     *          A miss is typed, because "not found" and "not searched" are different answers.
-     *          @ref ErrorCode::NoMatch means the sweep traversed the whole scope and the pattern is absent.
-     *          @ref ErrorCode::IncompleteScan means a region faulted mid-scan and was skipped, so the pattern can
-     *          live in bytes that the sweep never read. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern
-     *          spent its backtracking budget before the traversal was exhaustive. Neither truncation is a miss. An
-     *          out-of-range @p pages value returns @ref ErrorCode::InvalidArg before the sweep starts.
-     *
-     *          A @ref Pages::Readable scan follows the Readable authority rule of @ref Pages.
-     * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
-     *       call. noexcept; an allocation failure while preparing the scan surfaces as Error{OutOfMemory}.
+     *          @ref ErrorCode::NoMatch means the sweep read the whole scope and found fewer than @p occurrence matches.
+     *          @ref ErrorCode::IncompleteScan means the sweep skipped a faulted region, so the pattern can live in
+     *          unread bytes. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern spent its backtracking budget.
+     *          Neither truncation is a miss. An out-of-range @p pages returns @ref ErrorCode::InvalidArg before the
+     *          sweep starts. A Readable scan follows the Readable authority rule of @ref Pages.
+     * @note Setup/control-plane only. An allocation failure while the scan is prepared returns OutOfMemory.
      */
     [[nodiscard]] Result<Address>
     scan(const Pattern &pattern, Region scope, std::size_t occurrence = 1, Pages pages = Pages::Readable) noexcept;
 
     /**
-     * @brief Scans one Pattern over a known scope while excluding caller-owned copies of the query bytes.
-     * @param pattern The compiled signature.
-     * @param scope The memory range to search.
-     * @param exclusions The caller's live copies of the query bytes. A match that intersects one is not counted. A
-     *        non-empty span satisfies the Readable authority rule of @ref Pages, so it must name every live copy.
-     * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
-     * @param pages Which page-protection class to accept.
-     * @return The address of the Nth non-excluded match, or an Error.
-     * @details Identical to the four-argument overload except that @p exclusions is added to the set DMK already
-     *          excludes for its own query storage. The combined set has 32 slots after merging touching spans; if it
-     *          cannot hold every span, the scan fails closed with @ref ErrorCode::NotAuthoritative.
-     * @note Setup/control-plane only, same constraints as the four-argument overload.
+     * @brief The four-argument scan() that does not count a match that intersects one of @p exclusions.
+     * @param exclusions The live caller copies of the query bytes, as @ref ScanRequest::exclusions describes.
+     * @details DMK adds @p exclusions to its own query-storage exclusions. The combined set has 32 slots after touching
+     *          spans merge. If the set cannot hold every span, the result is @ref ErrorCode::NotAuthoritative.
+     * @note Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> scan(
         const Pattern &pattern,
@@ -1159,7 +832,7 @@ namespace DetourModKit::scan
         Pages pages = Pages::Readable
     ) noexcept;
 
-    /// Common x86-64 RIP-relative opcode prefixes (the bytes preceding the disp32 field), for find_and_resolve.
+    /// Common x86-64 opcode prefixes, the bytes before the disp32 field, for find_and_resolve_rip_relative().
     inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
     inline constexpr std::array<std::byte, 3> PREFIX_MOV_RCX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
     inline constexpr std::array<std::byte, 3> PREFIX_MOV_RDX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x15}};
@@ -1171,43 +844,26 @@ namespace DetourModKit::scan
     inline constexpr std::array<std::byte, 1> PREFIX_JMP_REL32 = {std::byte{0xE9}};
 
     /**
-     * @brief Resolves an absolute address from an x86-64 RIP-relative instruction at a known address.
-     * @param instruction Address of the first byte of the instruction.
-     * @param displacement_offset Byte offset from @p instruction to the disp32 field.
-     * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32.
-     * @return The resolved absolute address (`instruction + instruction_length + disp32`), or an Error.
-     * @details The displacement is read under a fault guard. A resolved address that is not a plausible user-mode
-     *          pointer is rejected with ErrorCode::ImplausibleTarget rather than returned. For `FF 15`/`FF 25` forms
-     *          the resolved value is the pointer slot, itself an in-image address. A malformed field layout returns
-     *          ErrorCode::InvalidArg before any read.
-     * @note Callback-safe: a guarded read plus pointer arithmetic, no allocation.
+     * @brief Resolves `instruction + instruction_length + disp32` for an x86-64 RIP-relative instruction.
+     * @details An invalid layout returns InvalidArg before a read. A target that is not a plausible user-mode address
+     *          returns ImplausibleTarget. The `FF 15` and `FF 25` shapes return the pointer slot.
+     * @note Callback-safe: a guarded read and pointer arithmetic, with no allocation.
      */
     [[nodiscard]] Result<Address>
     resolve_rip_relative(Address instruction, std::size_t displacement_offset, std::size_t instruction_length) noexcept;
 
     /**
-     * @brief Scans forward in @p search for an opcode prefix, then resolves the RIP-relative target that follows it.
-     * @param search The region to scan; the disp32 is assumed to immediately follow the matched prefix.
-     * @param opcode_prefix The opcode byte sequence to search for.
-     * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32
-     *        that follows @p opcode_prefix.
-     * @return The resolved absolute address, or an Error.
-     * @details The first resolvable prefix wins. A matched occurrence is a coincidental decoy when its disp32
-     *          resolves to an implausible target, or when the first byte of the resolved target is not readable at
-     *          scan time. The scan skips each decoy and continues. The scan fails only after it exhausts the region,
-     *          and then reports the last concrete failure, for example @ref ErrorCode::ImplausibleTarget or
-     *          @ref ErrorCode::UnreadableTarget for a plausible target on an unreadable page. The prefix search
-     *          reads @p search directly with no page filter, so the caller must guarantee that the region is
-     *          committed and readable.
-     *          To resolve one instruction whose address is uncertain, use @ref resolve_rip_relative, whose
-     *          displacement read is guarded. For the `FF 15` and `FF 25` indirect forms the returned address is the
-     *          pointer slot, not the final target. The same ImplausibleTarget gate applies. For an ambiguous
-     *          signature, anchor through @ref resolve, which enforces per-candidate uniqueness. A malformed field
-     *          layout returns @ref ErrorCode::InvalidArg before the sweep starts.
-     * @note The prefix scan reads @p search unguarded (caller-guaranteed readable). The displacement read is guarded.
-     *       A one-byte @ref memory::is_readable check screens each resolved target. While the memory cache runs, a
-     *       cache miss in that check can allocate an entry. A failed allocation leaves the result unchanged.
-     * @note Setup/control-plane only: the sweep cost scales with @p search, so resolve at init, not per frame.
+     * @brief Scans @p search for @p opcode_prefix and resolves the disp32 after the first resolvable occurrence.
+     * @param instruction_length Total instruction length, at most 15. The disp32 immediately follows @p opcode_prefix.
+     * @details An occurrence is a decoy when its target is implausible or the first target byte is unreadable at scan
+     *          time. The scan skips each decoy. After it exhausts the region, it reports the last concrete failure,
+     *          for example @ref ErrorCode::ImplausibleTarget or @ref ErrorCode::UnreadableTarget. The `FF 15` and
+     *          `FF 25` shapes return the pointer slot. An invalid layout returns @ref ErrorCode::InvalidArg before the
+     *          sweep starts.
+     * @note The prefix search reads @p search unguarded, so it must be readable. While the memory cache runs, the
+     *       one-byte @ref memory::is_readable target check can allocate a cache entry. A failed allocation leaves the
+     *       result unchanged.
+     * @note Setup/control-plane only: the sweep cost scales with @p search.
      */
     [[nodiscard]] Result<Address> find_and_resolve_rip_relative(
         Region search,
@@ -1216,28 +872,17 @@ namespace DetourModKit::scan
     ) noexcept;
 
     /**
-     * @brief Cheap heuristic: does @p addr look like the first byte of a real function body?
-     * @param addr Absolute address to probe. A null @p addr returns false without reading memory.
-     * @return true if the byte at @p addr is readable and not on the poison list; false otherwise.
-     * @details Reads exactly one byte from @p addr under a fault guard. It rejects the bytes that never start a
-     *          callable x86-64 function: 0x00 (zero-fill / NULL page), 0xCC (int3 pad), and 0xC2 / 0xC3 (bare RET
-     *          stub). It returns true for 0xE9, 0xEB, and the 0xFF 0x25 prefix of an indirect JMP. A target whose
-     *          prologue another inline hook already overwrote therefore still passes, as nested hooks require. This is
-     *          the negative complement to the resolve() prologue-recovery fallback. Use it to filter scan poison (a
-     *          zero page or an alignment pad) after a resolve.
+     * @brief Cheap heuristic: tests whether @p addr looks like the first byte of a real function body.
+     * @return True when @p addr is non-null and its guarded byte is readable and not 0x00, 0xCC, 0xC2, or 0xC3.
+     * @details A jump opcode (0xE9, 0xEB, or the 0xFF of `FF 25`) passes, so a prologue that a hook rewrote passes.
      * @note Callback-safe: a single guarded byte read, no allocation.
      */
     [[nodiscard]] bool is_likely_function_prologue(Address addr) noexcept;
 
     /**
-     * @struct ImageIdentity
-     * @brief An ASLR-insensitive fingerprint of a loaded module's PE build identity.
-     * @details Folds the PE timestamp, image size, and section-table layout. The module base is excluded; a malformed
-     *          or incomplete header read yields an absent identity.
-     * @warning Layout identity, NOT content identity. Every input is an
-     *          @c IMAGE_FILE_HEADER / @c IMAGE_OPTIONAL_HEADER / @c IMAGE_SECTION_HEADER field; no section body is
-     *          ever read. Executable content patched in place, leaving the timestamp, @c SizeOfImage, and the section
-     *          table equal, produces a bit-identical identity. Use @ref WinningEvidence to witness content.
+     * @brief An ASLR-insensitive fingerprint of a loaded module's PE timestamp, image size, and section-table layout.
+     * @warning This is layout identity, not content identity. It reads no section body, so code patched in place under
+     *          equal headers keeps a bit-identical identity. Use @ref WinningEvidence to witness content.
      */
     struct ImageIdentity
     {
@@ -1248,10 +893,10 @@ namespace DetourModKit::scan
         /// A fold of every section header's name, RVA, virtual size, and characteristics.
         std::uint64_t section_digest = 0;
 
-        /// True when a live image was read (@ref size_of_image is non-zero); a default value is absent.
+        /// True when a live image was read.
         [[nodiscard]] constexpr bool present() const noexcept { return size_of_image != 0; }
 
-        /// A single 64-bit token folding all three fields, for a fingerprint or an equality key.
+        /// A 64-bit token that folds all three fields, for a fingerprint or an equality key.
         [[nodiscard]] constexpr std::uint64_t token() const noexcept
         {
             std::uint64_t seed = section_digest;
@@ -1265,21 +910,16 @@ namespace DetourModKit::scan
     };
 
     /**
-     * @brief Reads the ASLR-insensitive @ref ImageIdentity of the module mapped at @p range's base.
-     * @param range The module image to identify; defaults to the host executable. Only @p range.base is used, since
-     *              the live PE headers there carry the authoritative SizeOfImage and section table.
+     * @brief Reads the @ref ImageIdentity of the module mapped at @p range.base. The extent comes from its PE headers.
      * @return The identity, or an absent value when @p range is empty or its PE headers do not validate completely.
-     * @details Uses guarded reads and consults no loader.
-     * @note Callback-safe with an explicit Region: bounded guarded reads of the PE headers, no allocation or loader
-     *       call. The default scope query is setup/control-plane only.
+     * @note Callback-safe with an explicit Region: guarded PE header reads, with no allocation or loader call. The
+     *       default scope query is setup/control-plane only.
      */
     [[nodiscard]] ImageIdentity image_identity(Region range = Region::host()) noexcept;
 
     /**
      * @brief Flattens a resolve Result to its address, or a null Address on failure.
-     * @details A convenience adapter, not the primary contract: new code resolves through Result and handles the
-     *          Error.
-     * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
+     * @note Callback-safe: a pure Result read.
      */
     [[nodiscard]] inline Address or_null(const Result<Hit> &result) noexcept
     {
@@ -1287,10 +927,8 @@ namespace DetourModKit::scan
     }
 
     /**
-     * @brief Flattens a resolve Result to its address, or a caller-chosen fallback on failure.
-     * @details The general, non-default form of or_null (`or_null(r)` is `address_or(r, Address{})`). Same
-     *          convenience-adapter status: prefer handling the Error in new code.
-     * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
+     * @brief Flattens a resolve Result to its address, or @p fallback on failure.
+     * @note Callback-safe: a pure Result read.
      */
     [[nodiscard]] inline Address address_or(const Result<Hit> &result, Address fallback = Address{}) noexcept
     {
@@ -1300,20 +938,13 @@ namespace DetourModKit::scan
     namespace unchecked
     {
         /**
-         * @brief Raw single-pattern scan over a region the caller guarantees is fully readable.
-         * @param region The byte range to scan; every byte MUST be committed and readable.
-         * @param pattern The compiled signature.
-         * @param occurrence Which match to return (1-based). 1 = first match. 0 returns nullptr.
-         * @return A pointer to the Nth match (adjusted by the Pattern's `|` offset), or nullptr if not found.
-         * @details The unsafe twin of scan(): it performs no page filtering and uses raw SIMD/memchr loads, so an
-         *          unreadable byte in @p region faults the host. The return is a raw pointer, not a Result, because
-         *          there is no recoverable error to report. noexcept. A pattern allocation failure returns nullptr.
+         * @brief Raw single-pattern scan with no page filter. An unreadable byte in @p region faults the host.
+         * @return The @p occurrence-th (1-based) match, adjusted by the `|` offset. 0, a miss, and a pattern allocation
+         *         failure return nullptr.
          * @note Setup/control-plane only: each call copies @p pattern into two heap buffers, or three with bounded
-         *       jumps, before the walk. A call with @p occurrence N restarts from `region.base`. For a pattern whose
-         *       `offset()` is zero, a cursor walk passes occurrence 1 and advances `region.base` past each hit. A
-         *       nonzero offset places the hit after the match start, so a walk for such a pattern keeps `region` and
-         *       raises @p occurrence. Proof:
-         *       `ScannerUncheckedAllocationTest.CursorWalkFindsEveryNeedleAtAFixedPerCallCost`.
+         *       jumps, and restarts from `region.base`. For a pattern whose `offset()` is zero, a cursor walk passes
+         *       occurrence 1 and advances `region.base` past each hit. For a nonzero offset, raise only @p occurrence.
+         *       Proof: `ScannerUncheckedAllocationTest.CursorWalkFindsEveryNeedleAtAFixedPerCallCost`.
          */
         [[nodiscard]] const std::byte *
         find_pattern(Region region, const Pattern &pattern, std::size_t occurrence = 1) noexcept;

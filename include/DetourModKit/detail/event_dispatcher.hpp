@@ -4,10 +4,8 @@
 /**
  * @file event_dispatcher.hpp
  * @brief Typed event dispatcher with RAII subscription management.
- * @note Sits in detail/ for compile visibility (installed headers return EventDispatcher<T>&) and declares the type
- *       at the module-root DetourModKit namespace. The directory reflects compile visibility, not privacy.
- * @details Subscribers receive events by const reference. Subscriptions are RAII guards that retire their handler on
- *          destruction. The thread-safety and rundown contracts are on EventDispatcher and Subscription.
+ * @note Installed headers return EventDispatcher<T>&, so this detail/ header declares the type in the DetourModKit
+ *       namespace. The directory reflects compile visibility, not privacy.
  */
 
 #include "DetourModKit/logger.hpp"
@@ -24,36 +22,30 @@
 
 namespace DetourModKit
 {
-    /**
-     * @brief Opaque subscription identifier returned by EventDispatcher::subscribe().
-     */
+    /** @brief Opaque identifier of one subscription within its dispatcher. */
     enum class SubscriptionId : std::uint64_t
     {
     };
 
-    /**
-     * @brief The outcome of a waiting rundown.
-     */
+    /** @brief The outcome of a rundown that waits. */
     enum class Rundown : std::uint8_t
     {
         /**
-         * @brief The handler is dead and no invocation of it is running, so its captures may now be destroyed.
-         * @details This does not on its own make it safe to unload the module the handler's own code lives in; see
-         *          @ref Subscription::tombstone_and_wait.
+         * @brief The handler is retired and no invocation of it runs, so its captures can be destroyed.
+         * @note This is not a license to unload the handler's module. See @ref Subscription::tombstone_and_wait.
          */
         Drained,
         /**
-         * @brief The handler is dead, but waiting cannot be proven to terminate, so nothing was waited on.
-         * @details Either the calling thread is itself inside this dispatcher's emit, or an unrecorded emit cannot be
-         *          ruled out as the caller. In both cases the handler is retired and will not be entered again, but an
-         *          invocation may still be running, so its captures must be kept alive.
+         * @brief The handler is retired, but no wait ran, because the wait cannot be proven to end.
+         * @details The calling thread is inside this dispatcher's emit, an untracked emit runs and can be on the
+         *          calling thread, or the writer mutex lock failed. An invocation can still run, so keep its captures
+         *          alive.
          */
         Unwaitable,
         /**
-         * @brief There was nothing to run down: this Subscription holds no handler at all.
-         * @details Default-constructed, moved-from, or already reset. A subscription whose handler was retired by
-         *          someone else (clear(), a dispatcher rundown, ~EventDispatcher) still reports Drained rather than
-         *          Inactive, because it still owns the gate and the wait it performed is a real answer about it.
+         * @brief This Subscription holds no handler: it is default-constructed, moved-from, or already reset.
+         * @details A Subscription whose handler clear(), EventDispatcher::tombstone_and_wait, or ~EventDispatcher
+         *          retired still holds its gate. It reports Drained or Unwaitable, not Inactive.
          */
         Inactive
     };
@@ -62,26 +54,18 @@ namespace DetourModKit
 namespace DetourModKit::detail
 {
     /**
-     * @brief The rundown state of one subscription, shared by its Subscription and the published snapshot.
-     * @details Non-template so the non-template Subscription can own one and tombstone it without naming the event
-     *          type. Holds no callback, so tombstoning costs no allocation and no destruction of user state. Gates
-     *          are not recycled: the emit loop's SNAPSHOT (not InvocationGuard) pins the gate alive for the whole
-     *          iteration, so anything that shortens the snapshot's lifetime inside emit() invalidates this.
+     * @brief The rundown state of one subscription, shared by its Subscription and the published list.
+     * @details The list that an emit loads, not InvocationGuard, keeps the gate alive for the whole emit iteration.
      */
     struct EntryGate
     {
-        /// The rundown tombstone: false means no further invocation of this handler may begin.
+        /// The rundown tombstone: false means no further invocation of this handler can begin.
         std::atomic<bool> live{true};
-        /// Invocations that passed the tombstone recheck and have not returned.
+        /// Invocations that passed the tombstone recheck and did not return yet.
         std::atomic<std::uint32_t> in_flight{0};
     };
 
-    /**
-     * @brief One frame of the calling thread's dispatcher emit chain.
-     * @details Lives on emit()'s own stack, so maintaining the chain allocates nothing. It exists so a rundown can
-     *          answer "is THIS thread inside THIS dispatcher", which is what stops a rundown requested from inside a
-     *          handler from waiting on itself forever.
-     */
+    /** @brief One frame of the calling thread's emit chain, stored on emit()'s stack. */
     struct EmitFrame
     {
         const void *dispatcher{nullptr};
@@ -92,14 +76,11 @@ namespace DetourModKit::detail
     };
 
     /**
-     * @brief Registers one owner of the emit chain's Win32 TLS index. Control-plane only.
-     * @details subscribe() registers the dispatcher before its first handler publishes. A later subscription can
-     *          register it again after teardown returns that ownership. Destruction also returns ownership.
-     *          The last owner returns the index. Without an index, emits are untracked and concurrent rundown returns
-     *          Unwaitable.
-     *
-     *          Arbitrary host threads use a Win32 TLS index instead of thread_local ([B-86]).
+     * @brief Registers one owner of the emit chain's Win32 TLS index. The last owner to deregister returns the index.
+     * @details subscribe() registers the dispatcher before its first handler publishes. Arbitrary host threads use a
+     *          Win32 TLS index instead of thread_local ([B-86]). Without an index, every emit is untracked.
      *          Lifecycle.EmitTlsIndexReturnsWithTheLastSubscribedDispatcher proves the return.
+     * @note Setup/control-plane only.
      */
     void acquire_emit_frame_owner() noexcept;
 
@@ -108,66 +89,48 @@ namespace DetourModKit::detail
 
     /**
      * @brief Pushes @p frame onto the calling thread's emit chain.
-     * @return false when the frame was not recorded. The caller must then count itself untracked rather than let a
-     *         rundown conclude this thread is elsewhere. See @ref untracked_emit_frames.
+     * @return false when the frame was not recorded. The caller must then count itself in @ref untracked_emit_frames.
      */
     [[nodiscard]] bool push_emit_frame(EmitFrame &frame) noexcept;
 
-    /// Pops a frame. Only call when the matching @ref push_emit_frame returned true.
+    /// Pops @p frame. If the matching @ref push_emit_frame returned false, do not call it.
     void pop_emit_frame(const EmitFrame &frame) noexcept;
 
     /// True when the calling thread is inside @p dispatcher's emit.
     [[nodiscard]] bool thread_is_emitting_dispatcher(const void *dispatcher) noexcept;
 
-    /// True when the calling thread is inside the emit of any dispatcher sharing @p type_tag.
+    /// True when the calling thread is inside the emit of any dispatcher that shares @p type_tag.
     [[nodiscard]] bool thread_is_emitting_type(const void *type_tag) noexcept;
 
     /**
-     * @brief Emits whose thread was not recorded, so self-entry cannot be disproven for anyone.
-     * @details Process-wide rather than per-dispatcher: a thread that failed to record its frame is invisible to
-     *          every chain walk, so no dispatcher may claim it is absent. Counted rather than made sticky so a
-     *          rundown recovers once the untracked emit leaves.
+     * @brief The count of untracked emits that still run. An untracked emit is one that did not record a frame.
+     * @details The count is process-wide, because no chain walk can see an untracked emit. While it is nonzero,
+     *          @ref drain_gate returns Unwaitable and subscribe() returns an inactive Subscription.
      */
     [[nodiscard]] std::atomic<std::uint32_t> &untracked_emit_frames() noexcept;
 
     /**
      * @brief Waits out the invocations committed before @p gate was tombstoned.
-     * @param gate An already-tombstoned gate. Waiting on a live gate never terminates.
-     * @param dispatcher Identity used only to compare against this thread's emit chain; never dereferenced.
-     * @return Drained once no invocation remains, or Unwaitable when the wait cannot be proven to terminate.
-     * @details Refuses rather than waits when the calling thread is inside @p dispatcher's emit, or when any emit
-     *          anywhere did not record its frame. A wrong "this thread is elsewhere" makes the rundown wait on the
-     *          very thread running it. A wrong "it can be here" only costs a refusal.
+     * @param gate An already-tombstoned gate. On a live gate, a Drained result proves nothing.
+     * @param dispatcher Compared against this thread's emit chain only. It is never dereferenced.
+     * @return Drained once no invocation remains, or Unwaitable with no wait, as @ref Rundown::Unwaitable documents.
      */
     [[nodiscard]] Rundown drain_gate(EntryGate &gate, const void *dispatcher) noexcept;
 
-    /**
-     * @brief Test-only white-box accessor over EventDispatcher privates.
-     * @details Declared here so the dispatcher can befriend it unconditionally. Only the dispatcher test translation
-     *          unit defines it, so the installed class definition stays token-stable under every build macro.
-     */
+    /** @brief Test-only accessor to EventDispatcher privates. Only the dispatcher tests define it. */
     template <typename Event> struct EventDispatcherTestAccess;
 
-    /**
-     * @brief Returns the emit-chain TLS ownership of the never-destroyed diagnostics dispatchers at teardown.
-     * @details Declared here so the dispatcher can befriend it. Only `src/diagnostics.cpp` defines it.
-     */
+    /** @brief Returns the emit-chain TLS ownership of the never-destroyed diagnostics dispatchers at teardown. */
     struct DiagnosticsEmitOwner;
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
 {
     /**
-     * @brief RAII subscription guard that unsubscribes on destruction.
-     *
-     * @details Move-only. When the guard is destroyed or reset, the associated handler is retired.
-     *
-     *          **Lifetime contract (read before using across threads):** if the dispatcher was destroyed before this
-     *          operation with a happens-before edge (ordered teardown), the physical compaction is silently skipped:
-     *          the weak_ptr is observed expired and only the tombstone runs. That ordered case is the only lifetime
-     *          overlap the weak_ptr guard covers ([B-70]). A `~EventDispatcher` racing a Subscription operation on
-     *          another thread is a use-after-free. The caller must ensure the dispatcher outlives every concurrent
-     *          Subscription operation.
+     * @brief RAII guard that retires its handler when destroyed or reset.
+     * @warning The dispatcher must outlive every concurrent Subscription operation. A `~EventDispatcher` that races one
+     *          on another thread is a use-after-free. The weak_ptr guard covers only ordered teardown ([B-70]): after a
+     *          dispatcher destruction that happens-before the operation, the operation skips compaction.
      */
     class Subscription
     {
@@ -201,13 +164,12 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Retires the handler without waiting or reclaiming its published list slot.
-         * @details The handler is dead the instant the tombstone flips: no emit that has not already committed to
-         *          invoking it can begin one, on this thread or any other, including an emit nested inside the very
-         *          handler that called this. The operation is a single atomic store, so it does not allocate, block,
-         *          or fail and is callback-safe.
-         * @note Safe to call multiple times. Use @ref tombstone_and_wait before destroying the handler's code or
-         *       referenced state when an invocation may already be running.
+         * @brief Retires the handler. It does not wait and does not reclaim its list slot.
+         * @details After this call, no emit on any thread can begin an invocation it did not already commit to. This
+         *          includes an emit nested inside the handler that calls this. The call cannot allocate, block, or
+         *          fail.
+         * @note Callback-safe. Idempotent. If an invocation can already run, call @ref tombstone_and_wait before the
+         *       handler's captures go away.
          */
         void tombstone() noexcept
         {
@@ -218,17 +180,13 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Retires the handler and best-effort reclaims its published list slot.
-         * @details Calls @ref tombstone first, so logical removal is synchronous and cannot fail.
-         *
-         *          Reclaiming the list slot is a separate, best-effort step: it briefly takes the writer mutex, it
-         *          allocates, and it is skipped entirely if the dispatcher was destroyed first. Any of that may fail
-         *          without consequence. A skipped compaction costs one dead vector entry that every later emit
-         *          rejects at its liveness check; it never resurrects the handler.
-         *
-         * @warning This does not wait: an invocation already past the liveness check may still be running on another
-         *          thread when this returns. It is not callback-safe because compaction can block on the writer mutex;
-         *          use @ref tombstone when only non-blocking logical removal is required.
+         * @brief Retires the handler, then reclaims its list slot best-effort.
+         * @details The @ref tombstone runs first, so the removal is synchronous and cannot fail. The slot reclaim
+         *          takes the writer mutex and allocates. If the dispatcher was destroyed first, reset() skips the
+         *          reclaim. If the reclaim fails, one retired entry stays in the list, and every later emit rejects it.
+         * @warning This does not wait. An invocation already past the liveness check can still run on another thread.
+         *          It is not callback-safe, because the reclaim can block on the writer mutex. For a non-blocking
+         *          removal, use @ref tombstone.
          */
         void reset() noexcept
         {
@@ -237,21 +195,14 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Retires the handler and waits until no invocation of it is running.
-         * @return Drained when the handler is quiesced and its captures may be destroyed; Unwaitable when the wait
-         *         cannot be proven to terminate, so it was not attempted; Inactive when there was nothing to retire.
-         * @details The control-plane half of @ref reset(): use it before destroying what the handler captured. On
-         *          Drained, no invocation is running and none can begin, so the objects the handler references may be
-         *          destroyed.
-         *
-         *          Called from inside a handler on this dispatcher, this returns Unwaitable rather than wait on the
-         *          calling thread. The handler is still retired; only the wait is refused. A timeout is not offered,
-         *          because a wait that gives up has not drained anything.
-         * @note Drained does NOT by itself make it safe to unload the module the handler's own code lives in. It waits
-         *       out running invocations, but an emit still iterating on another thread holds the snapshot that owns the
-         *       handler's std::function, and destroying that snapshot later runs the callable's type-erased destructor.
-         *       Unloading the code needs the loader-grade quiescence a real teardown host provides, not this call.
-         * @note Not callable while any allocation-free guarantee is required: this blocks.
+         * @brief Retires the handler and waits until no invocation of it runs.
+         * @return Drained, Unwaitable, or Inactive, as @ref Rundown documents.
+         * @note Setup/control-plane only. On Drained and on Unwaitable, it then reclaims the list slot as @ref reset
+         *       does. Afterward, the Subscription holds no handler.
+         * @note Drained is not a license to unload the handler's module. An emit that still iterates on another thread
+         *       owns the handler's std::function and later runs its destructor. Module unload needs the loader-grade
+         *       quiescence of a teardown host.
+         * @warning The wait has no timeout. A handler that does not return hangs this call.
          */
         [[nodiscard]] Rundown tombstone_and_wait() noexcept
         {
@@ -299,7 +250,7 @@ namespace DetourModKit
 
         std::weak_ptr<void> m_alive;
         std::shared_ptr<detail::EntryGate> m_gate;
-        /// Compared against the emit chain to refuse a self-wait. Never dereferenced, so a stale value is harmless.
+        /// Compared against the emit chain to refuse a self-wait. Never dereferenced.
         const void *m_dispatcher{nullptr};
         std::function<void()> m_compact;
     };
@@ -307,27 +258,19 @@ namespace DetourModKit
     /**
      * @brief Thread-safe typed event dispatcher with RAII subscription management.
      *
-     * @tparam Event The event type. Must be copyable or movable. Handlers receive events by const reference.
-     *
-     * @details Each EventDispatcher manages a single event type. Compose one dispatcher per event type.
-     *
      * **Thread safety:**
-     * - `emit()` / `emit_safe()`: no lock of ours, and no allocation to dispatch. Per handler, the invocation takes
-     *   an enter/recheck/leave pass over that entry's gate. The one exception is emit_safe()'s catch arm, which
-     *   reports a throwing handler through the logger and may allocate there.
-     * - `subscribe()` / `clear()`: copy-on-write under a small writer mutex. See EntryNode for the callable boundary.
-     * - `Subscription::tombstone()` is synchronous, non-blocking, allocation-free, and cannot fail. `reset()`
-     *   tombstones first, then best-effort compacts under the writer mutex.
+     * - `emit()` / `emit_safe()`: no DMK lock and no allocation to dispatch, except as emit_safe() documents. The list
+     *   load takes the bounded internal lock of `std::atomic<std::shared_ptr>`. A thread's first emit can make
+     *   TlsSetValue allocate a TLS expansion array. If that fails, the emit runs untracked.
+     * - `subscribe()` / `clear()`: copy-on-write under a writer mutex. Consumer callables stay outside it ([B-101]).
      *
-     * **Reentrancy guard scope:** subscribe() is rejected from within a handler on a dispatcher of the SAME Event
-     * type, including a different instance of it. A handler on `EventDispatcher<A>` may freely subscribe to
-     * `EventDispatcher<B>`. If an emit frame cannot be recorded, subscriptions are conservatively rejected until
-     * that emit leaves.
+     * **Reentrancy:** a subscribe() from a handler on any dispatcher of the same Event type returns an inactive
+     * Subscription. A handler on `EventDispatcher<A>` can subscribe to `EventDispatcher<B>`. While an untracked emit
+     * runs, every subscribe() returns an inactive Subscription.
      *
-     * **Subscribe/emit ordering invariant:** subscribe() release-stores the snapshot pointer and the handler count.
-     * A thread that observes the returned Subscription (or synchronizes-with the thread that did) sees the
-     * subscription in subsequent emits. Without such a happens-before edge, a concurrent emit may or may not observe
-     * a freshly-published handler.
+     * **Ordering:** subscribe() release-stores the list and the handler count. A thread that observes the returned
+     * Subscription, or synchronizes with such a thread, sees the handler in later emits. Without that happens-before
+     * edge, a concurrent emit can miss a new handler.
      */
     template <typename Event> class EventDispatcher
     {
@@ -336,8 +279,7 @@ namespace DetourModKit
         using Handler = std::function<void(const Event &)>;
 
     private:
-        // Private type aliases surfaced here so they are visible to the public API's member declarations and
-        // constructor below.
+        // These types come before the public members that name them.
         struct Entry
         {
             SubscriptionId id;
@@ -366,11 +308,7 @@ namespace DetourModKit
         };
         using SharedList = std::shared_ptr<const HandlerList>;
 
-        /**
-         * @brief Keys the emit chain by Event type: one object per instantiation, identified by its address.
-         * @details Address-taken so the linker cannot fold two instantiations' tags together and merge two event
-         *          types' reentrancy guards.
-         */
+        /** @brief The emit-chain key of this Event type: one object per instantiation, identified by its address. */
         inline static const char s_type_tag{};
 
     public:
@@ -383,17 +321,11 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Retires every handler.
-         * @details A Subscription may outlive its dispatcher, and its gate is the only thing that can tell it the
-         *          handler can never run again. Retiring here keeps the gate authoritative instead of making every
-         *          reader infer liveness from a second signal.
-         *
-         *          Takes no lock of ours and allocates nothing, so the noexcept destructor is total: the gate stores
-         *          are atomic and idempotent, and a subscribe() racing this is already a caller lifetime violation.
-         *          (The snapshot load still takes the STL's internal lock for atomic<shared_ptr>, as everywhere else.)
-         *          A dispatcher that ever published a handler also deregisters its emit-chain TLS ownership.
-         * @warning Does not wait. Destroying a dispatcher while one of its handlers is running is a caller lifetime
-         *          violation; use tombstone_and_wait() first when that is possible.
+         * @brief Retires every handler, so a Subscription that outlives the dispatcher reads its handler as retired.
+         * @details Takes no DMK lock and allocates nothing. A subscribe() that races this is a caller lifetime
+         *          violation. A dispatcher that holds an emit-chain TLS ownership returns it here.
+         * @warning This does not wait. Destruction while a handler runs is a caller lifetime violation. If that is
+         *          possible, call tombstone_and_wait() first.
          */
         ~EventDispatcher() noexcept
         {
@@ -415,28 +347,20 @@ namespace DetourModKit
 
         /**
          * @brief Subscribes a handler to this event type.
-         * @param handler Callable invoked on each emit(). Must be safe to call from any thread. An empty handler is
-         *                rejected (see @return).
-         * @return RAII Subscription guard. The handler is retired when the guard is destroyed or reset(). An EMPTY
-         *         handler, a call made from within a same-type handler, ambiguous emit tracking, or a dispatcher
-         *         already closed by tombstone_and_wait yields an INACTIVE Subscription (active() == false) rather
-         *         than throwing; test active() when any is possible.
-         * @throws std::bad_alloc if the gate or the copy-on-write list cannot be allocated. This is a control-plane
-         *         call and is deliberately NOT fail-soft about that: a subscribe that cannot allocate has installed
-         *         nothing, which is a truthful failure the caller can act on. Retiring a handler is the operation that
-         *         must never depend on an allocation, and it does not.
-         * @note Copy-on-write allocates the entry node and a new handler list of size N+1.
-         *       The control path also registers this dispatcher as an emit-chain TLS owner, so emit() only reads the
-         *       index.
-         *       A thread's first TlsSetValue can still allocate an expansion array for an index beyond the TEB inline
-         *       slots. This mechanism reports allocation failure, while emutls aborts the process.
+         * @param handler Invoked on each emit(). It must be safe to call from any thread.
+         * @return The Subscription guard, or an inactive guard (active() == false) with no throw. The inactive cases
+         *         are an empty handler, a call from a same-type handler, an untracked emit, and a dispatcher that
+         *         tombstone_and_wait closed. If any case is possible, test active().
+         * @throws std::bad_alloc if an allocation fails.
+         * @throws std::system_error if the writer mutex lock fails. After either throw, the call installs nothing.
+         * @note Setup/control-plane only. It allocates the entry node and a new list of N+1 entries. It also
+         *       registers this dispatcher as an emit-chain TLS owner, so emit() only reads the index.
          */
         [[nodiscard]] Subscription subscribe(Handler handler)
         {
             if (!handler)
             {
-                // Rejected at the point of misuse rather than deferred into an unrelated emit, where it surfaces as
-                // a bad_function_call from someone else's call site.
+                // Reject here. An empty handler in the list throws bad_function_call from an unrelated emit.
                 report_empty_handler_rejection();
                 return {};
             }
@@ -452,30 +376,23 @@ namespace DetourModKit
                 return {};
             }
 
-            // Registered here, on the control plane and outside the writer mutex, so that emit() only ever READS the
-            // index. The first publish keeps the registration, and every other exit returns it.
+            // Register outside the writer mutex. The first publish keeps it, and every other exit returns it.
             EmitOwnerRegistration registration;
 
             const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
             auto gate = std::make_shared<detail::EntryGate>();
-            // Build the compaction callback before publishing. If wrapping it in std::function had to allocate (a
-            // future capture overflowing the small-object buffer) and threw, the handler must not already be live in
-            // the list with no Subscription returned to retire it. Constructing it here keeps subscribe's "installs
-            // nothing on allocation failure" contract intact.
+            // Build it before the publish, so a throw cannot leave a live handler that no Subscription can retire.
             std::function<void()> compact_fn = [this, id]() noexcept { this->compact(id); };
-            // Node construction occurs before lock acquisition because it can execute consumer move or copy code.
+            // Build the node before the lock, because it can run consumer move or copy code.
             EntryNode node = std::make_shared<const Entry>(Entry{id, gate, std::move(handler)});
-            // The outer lifetime follows EntryNode's post-unlock rule.
+            // This list outlives the lock, so any callable destruction through it runs after the unlock.
             SharedList superseded;
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 if (this->m_closed.load(std::memory_order_seq_cst))
                 {
-                    // Tested under the mutex, not before it: that is what lets tombstone_and_wait treat the snapshot
-                    // it loads as the complete set. A subscribe admitted here has published before that load; one
-                    // refused here never publishes at all. Checking outside the lock leaves exactly the window
-                    // where a handler is installed live behind a completed drain.
+                    // Test under the mutex, so no handler can publish behind a completed tombstone_and_wait drain.
                     report_closed_rejection();
                     return {};
                 }
@@ -487,8 +404,7 @@ namespace DetourModKit
                     this->m_emit_owner = true;
                     registration.held = false;
                 }
-                // Publish the new count first so a reader that sees 0 on the counter and skips the snapshot load cannot
-                // miss a handler that has already been installed in the snapshot.
+                // Store the count first, so a reader that reads 0 and skips the load misses no installed handler.
                 this->m_handler_count.store(next->entries.size(), std::memory_order_release);
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
             }
@@ -497,17 +413,14 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Emits an event to all subscribers.
-         * @param event The event payload, passed by const reference to each handler.
-         * @note Takes no lock of ours and allocates nothing to dispatch. Handlers are invoked synchronously in
-         *       subscription order. Exceptions thrown by handlers propagate to the caller.
-         * @warning From a game hook callback, or any context where an unhandled exception crashes the host process,
-         *          use emit_safe() instead. emit() lets handler exceptions propagate uncaught, which terminates the
-         *          process if no catch frame exists above the call site.
+         * @brief Emits an event to each live handler, synchronously and in subscription order.
+         * @note A handler exception propagates to the caller.
+         * @warning A handler exception with no catch frame above the call site terminates the process. In a hook
+         *          callback, or any context where an unhandled exception crashes the host, use emit_safe().
          */
         void emit(const Event &event) const
         {
-            // Fast path: no subscribers means no snapshot load at all.
+            // Fast path: with no published slot, skip the list load.
             if (this->m_handler_count.load(std::memory_order_acquire) == 0)
             {
                 return;
@@ -527,11 +440,8 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Emits an event, catching and discarding handler exceptions.
-         * @param event The event payload.
-         * @note Same read-path semantics as emit(). Handlers that throw are skipped; remaining handlers still
-         *       execute. Prefer this over emit() in hook callbacks and other contexts where an unhandled exception
-         *       crashes the host process.
+         * @brief Emits like emit(), but catches and logs each handler exception, then continues with the next handler.
+         * @note Best-effort. The log call for a caught exception can allocate.
          */
         void emit_safe(const Event &event) const noexcept
         {
@@ -555,42 +465,35 @@ namespace DetourModKit
                 }
                 catch (const std::exception &ex)
                 {
-                    // A subscriber threw. emit_safe contains the exception so the remaining handlers still run. A
-                    // SILENT swallow hides a real handler bug, so surface it best-effort with the exception text.
+                    // Report the swallow with its text. A silent swallow hides a handler bug.
                     report_handler_exception(ex.what());
                 }
                 catch (...)
                 {
-                    // A non-std throw carries no portable message; report the swallow without one.
+                    // A non-std throw carries no portable message.
                     report_handler_exception(nullptr);
                 }
             }
         }
 
-        /**
-         * @brief Returns the number of published subscriber slots.
-         * @note Counts published entries, including any retired handler whose slot is not compacted yet. It is a
-         *       list-occupancy figure, not a count of handlers that run.
-         */
+        /** @brief Returns the published slot count. A retired slot counts until compaction removes it. */
         [[nodiscard]] size_t subscriber_count() const noexcept
         {
             return this->m_handler_count.load(std::memory_order_acquire);
         }
 
-        /// Returns true if there are no published subscriber slots.
+        /// Returns true if there is no published slot.
         [[nodiscard]] bool empty() const noexcept { return this->m_handler_count.load(std::memory_order_acquire) == 0; }
 
         /**
-         * @brief Retires every subscriber.
-         * @note Every handler is dead the instant this returns; the tombstone pass allocates nothing and cannot fail.
-         *       Publishing the empty snapshot afterwards can fail under memory pressure, which leaves the dead
-         *       entries occupying the list until a later mutation reclaims them. It never resurrects a handler. Takes
-         *       the writer mutex, so this is a control-plane call and does not wait for in-flight handlers; use
-         *       @ref tombstone_and_wait when the handlers' code or captures are about to go away.
+         * @brief Retires every handler before this call returns.
+         * @note Setup/control-plane only. It takes the writer mutex. If the empty-list publish fails, the retired
+         *       entries stay until a later mutation reclaims them. This does not wait for a handler that still runs.
+         *       To wait, call @ref tombstone_and_wait instead of clear().
          */
         void clear() noexcept
         {
-            // The outer lifetime follows EntryNode's post-unlock rule.
+            // This list outlives the lock, so any callable destruction through it runs after the unlock.
             SharedList superseded;
             try
             {
@@ -611,15 +514,14 @@ namespace DetourModKit
                 {
                     return;
                 }
-                // Counter must go to 0 before publishing the empty snapshot so an emit that reads 0 on the fast-path
-                // counter cannot still see the non-empty old snapshot afterwards.
+                // Zero the counter before the empty-list publish, so an emit that reads 0 cannot see the old list.
                 this->m_handler_count.store(0, std::memory_order_release);
                 this->m_handlers.store(std::move(empty_snap), std::memory_order_release);
             }
             catch (...)
             {
-                // A synchronization failure must not escape this no-throw control path. Retire the stable snapshot
-                // visible now; a concurrent unordered subscribe may still publish after it.
+                // A lock failure must not escape. Retire the visible list. A concurrent unordered subscribe can still
+                // publish after it.
                 auto current = this->m_handlers.load(std::memory_order_acquire);
                 for (const auto &entry : current->entries)
                 {
@@ -630,24 +532,19 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Retires every subscriber and waits until no handler of this dispatcher is running.
-         * @return Drained when every handler is quiesced; Unwaitable when the calling thread is inside this
-         *         dispatcher's emit, or an emit was not recorded, so no wait was attempted.
-         * @details The rundown form of @ref clear(). On Drained, no handler is running and none can begin, so the
-         *          objects every handler references may be destroyed. As with @ref Subscription::tombstone_and_wait,
-         *          Drained does not on its own license unloading the module the handlers' code lives in.
-         *
-         *          This CLOSES the dispatcher permanently: every later subscribe() is refused and hands back an
-         *          inactive Subscription. A rundown is only complete over a set that cannot grow behind it, so the
-         *          set is closed before it is read.
-         * @note Holding the writer mutex across the drain is a deadlock: a handler may itself call subscribe().
-         *       Closing the set is what makes releasing the mutex safe.
+         * @brief Retires every handler, then waits until no handler in the published list runs.
+         * @return Drained or Unwaitable, as @ref Rundown documents.
+         * @details This closes the dispatcher permanently: every later subscribe() returns an inactive Subscription.
+         *          The list excludes a handler whose slot clear() or its Subscription already reclaimed, so no wait
+         *          covers it. After the drain, it runs @ref clear. If the writer mutex lock fails, it retires only the
+         *          visible list and returns Unwaitable with no wait and no clear.
+         * @note Setup/control-plane only.
+         * @warning The wait has no timeout, as @ref Subscription::tombstone_and_wait documents.
          */
         [[nodiscard]] Rundown tombstone_and_wait() noexcept
         {
-            // Close first, and outside the lock. subscribe() tests this flag while HOLDING the writer mutex, so a
-            // subscribe that already published is necessarily in the snapshot loaded below, and one that has not is
-            // necessarily refused. That is what makes the set read below closed rather than merely current.
+            // Close before the list load. subscribe() tests the flag under the writer mutex, so the list below is
+            // complete. The drain then runs without the mutex, because a handler can call subscribe().
             this->m_closed.store(true, std::memory_order_seq_cst);
 
             SharedList snap;
@@ -683,8 +580,7 @@ namespace DetourModKit
         }
 
     private:
-        // Unconditional friend: test access lives outside this installed definition, so its tokens never vary with a
-        // build macro.
+        // Unconditional friends keep this installed definition token-stable under every build macro.
         friend struct detail::EventDispatcherTestAccess<Event>;
         friend struct detail::DiagnosticsEmitOwner;
 
@@ -708,12 +604,11 @@ namespace DetourModKit
          * @param may_prune True to publish an empty list over retired entries before the return. A loader-lock caller
          *                  passes false, because the prune allocates and destroys consumer callables.
          * @details Never waits for the writer mutex. Idle means no live entry, no admitted invocation in the current
-         *          list, and no emit that holds any list. The epoch count covers a list that compaction superseded
-         *          while its handler still ran. A later subscribe registers again through the first-publish path.
+         *          list, and no emit that holds any list. A later subscribe that publishes a handler registers again.
          */
         [[nodiscard]] EmitOwnerRelease release_idle_emit_owner(bool may_prune) noexcept
         {
-            // The outer lifetime follows EntryNode's post-unlock rule.
+            // This list outlives the lock, so any callable destruction through it runs after the unlock.
             SharedList current;
             std::unique_lock lock{this->m_writer_mutex, std::try_to_lock};
             if (!lock.owns_lock())
@@ -734,7 +629,7 @@ namespace DetourModKit
                 }
                 admitted = admitted || entry->gate->in_flight.load(std::memory_order_seq_cst) != 0;
             }
-            // The in-flight read pairs with InvocationGuard's recheck, as the drain does. Every list copy happens under
+            // The in-flight read pairs with InvocationGuard's recheck, as the drain does. Every list copy runs under
             // the writer mutex, so an epoch count of one proves that no superseded list survives. The atomic and
             // `current` are then the only expected holders of the current list.
             if (admitted || current.use_count() != 2 || current->epoch.use_count() != 1)
@@ -767,15 +662,12 @@ namespace DetourModKit
 
         /**
          * @brief Reclaims the list slot of an already-retired entry.
-         * @details Physical compaction only: the handler is dead before this runs, so every outcome here is a
-         *          space question, not a correctness one. Allocation failure leaves the dead entry in place.
-         *
-         *          Safe to run while an emit of this instance is iterating: that iteration holds its own
-         *          copy-on-write snapshot alive, and this only stores a new one for future loads to observe.
+         * @details An allocation failure leaves the retired entry in place. A concurrent emit keeps its own list, so
+         *          this is safe while an emit iterates.
          */
         void compact(SubscriptionId id) noexcept
         {
-            // The outer lifetime follows EntryNode's post-unlock rule.
+            // This list outlives the lock, so any callable destruction through it runs after the unlock.
             SharedList superseded;
             try
             {
@@ -801,8 +693,7 @@ namespace DetourModKit
                     }
                 }
 
-                // Publish snapshot first, then the counter. An emit that loads a stale snapshot containing the removed
-                // handler is still safe: the entry is tombstoned, so its liveness check rejects it.
+                // Store the list first, then the counter. The gate rejects the removed entry in a stale list.
                 const size_t new_count = next->entries.size();
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
                 this->m_handler_count.store(new_count, std::memory_order_release);
@@ -813,12 +704,7 @@ namespace DetourModKit
             }
         }
 
-        /**
-         * @brief Surfaces an otherwise-silent rejection, best-effort.
-         * @details Deliberately does not assert: a reentrant subscribe is a defined outcome the caller can test with
-         *          active(), not a bug to abort on. The try/catch guards only the logger's first-use construction;
-         *          try_log itself never throws.
-         */
+        /** @brief Surfaces an otherwise-silent rejection, best-effort. The caller tests the outcome with active(). */
         static void report_reentrant_rejection(const char *op) noexcept
         {
             try
@@ -835,7 +721,7 @@ namespace DetourModKit
             }
         }
 
-        /// Surfaces an otherwise-silent rejection, best-effort. Same discipline as report_reentrant_rejection.
+        /// Surfaces an otherwise-silent rejection, best-effort.
         static void report_closed_rejection() noexcept
         {
             try
@@ -851,7 +737,7 @@ namespace DetourModKit
             }
         }
 
-        /// Surfaces an otherwise-silent rejection, best-effort. Same discipline as report_reentrant_rejection.
+        /// Surfaces an otherwise-silent rejection, best-effort.
         static void report_untracked_rejection() noexcept
         {
             try
@@ -867,7 +753,7 @@ namespace DetourModKit
             }
         }
 
-        /// Surfaces an otherwise-silent rejection, best-effort. Same discipline as report_reentrant_rejection.
+        /// Surfaces an otherwise-silent rejection, best-effort.
         static void report_empty_handler_rejection() noexcept
         {
             try
@@ -903,14 +789,10 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Admits or refuses one handler invocation, and counts it for as long as it runs.
-         * @details Enter, recheck, invoke, leave. The counter/recheck pair here and the tombstone/drain pair in
-         *          Subscription::tombstone_and_wait() are a Dekker seam: both sides are seq_cst, so at least one of
-         *          them observes the other. That is what makes "no invocation begins after a rundown returns
-         *          Drained" hold without any lock on the emit path. A bare liveness check before the call does not:
-         *          a tombstone landing between that check and the call is missed entirely.
-         *
-         *          The count is released by the destructor, so a handler that throws out of emit() still leaves.
+         * @brief Admits or refuses one handler invocation, and counts it while it runs.
+         * @details The increment and recheck here, the tombstone store, and the @ref detail::drain_gate load are all
+         *          seq_cst, so at least one side observes the other. No invocation can begin after a rundown returns
+         *          Drained. The destructor releases the count, so a handler that throws out of emit() still leaves.
          */
         struct InvocationGuard
         {
@@ -919,8 +801,7 @@ namespace DetourModKit
 
             explicit InvocationGuard(detail::EntryGate &gate_ref) noexcept : gate(gate_ref)
             {
-                // Cheap pre-check: skips the locked increment for an entry that is already retired and merely
-                // awaiting compaction. It is an optimization, never the guarantee.
+                // This pre-check skips a retired entry. It is only an optimization. The recheck below is the guarantee.
                 if (!gate.live.load(std::memory_order_acquire))
                 {
                     return;
@@ -950,12 +831,7 @@ namespace DetourModKit
             InvocationGuard &operator=(InvocationGuard &&) = delete;
         };
 
-        /**
-         * @brief RAII guard that records this dispatcher on the calling thread's emit chain.
-         * @details The chain exists so a rundown can refuse to wait on its own thread, and so subscribe() can reject
-         *          reentrancy. An emit whose frame cannot be recorded counts itself untracked instead, because a
-         *          rundown that wrongly concludes this thread is elsewhere waits on the very thread running it.
-         */
+        /** @brief Records this dispatcher on the calling thread's emit chain, or counts the emit as untracked. */
         struct EmitGuard
         {
             detail::EmitFrame frame;
@@ -1010,20 +886,16 @@ namespace DetourModKit
             EmitOwnerRegistration &operator=(EmitOwnerRegistration &&) = delete;
         };
 
-        // alignas(64) keeps the hot atomics on their own cache line so the writer mutex and shared_ptr control-block
-        // traffic do not produce false sharing with readers doing the fast-path counter load.
+        // alignas(64) starts the hot atomics on a cache-line boundary. The writer mutex still shares that line.
         alignas(64) mutable std::atomic<SharedList> m_handlers;
         mutable std::atomic<size_t> m_handler_count{0};
         std::atomic<uint64_t> m_next_id{1};
-        /**
-         * @brief Set once by tombstone_and_wait, never cleared.
-         * @details Read under m_writer_mutex by subscribe(), which is what closes the set the rundown drains.
-         */
+        /** @brief Set once by tombstone_and_wait and never cleared. subscribe() reads it under m_writer_mutex. */
         std::atomic<bool> m_closed{false};
         /// True from the publish that kept an emit-chain TLS ownership until its return. Written under m_writer_mutex.
         bool m_emit_owner{false};
-        mutable std::mutex m_writer_mutex; // serializes writers
-        // Prevents Subscription::reset() from compacting a destroyed dispatcher.
+        mutable std::mutex m_writer_mutex;
+        // Each Subscription holds a weak_ptr to this. Once it expires, the Subscription skips its compaction.
         std::shared_ptr<void> m_alive;
     };
 
