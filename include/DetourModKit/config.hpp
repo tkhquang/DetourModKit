@@ -3,24 +3,17 @@
 
 /**
  * @file config.hpp
- * @brief INI-backed configuration binding, hot-reload, and the INI-to-input combo fusion.
- * @details Binds INI keys to atomics, callbacks, and the logger, loads and hot-reloads an INI file, and fuses an INI
- *          key to a live input combo binding. The filesystem watcher that drives auto-reload is folded in behind
- *          enable_auto_reload / disable_auto_reload.
- *
- *          Config is fail-soft: a missing or malformed INI key falls back to the registered default and is logged,
- *          never reported as an error, so the surface speaks void / bool / AutoReloadStatus rather than Result. Only
- *          the input combo fusion returns an input::BindingGuard.
- *
- * @note Thread safety: bind_* / getters / log_all use a deferred-callback pattern: registry state is read and written
- *       under the config mutex, but setter callbacks run after the mutex is released, so a setter may re-enter those
- *       data-plane calls without deadlocking. load() and reload() hold an outer, non-reentrant pass lock across the
- *       whole read + content-hash + setter phase. load(), reload(), and disable_auto_reload() called by a bound
- *       setter are refused rather than allowed to deadlock. clear() is also refused except on the reload-servicer
- *       thread.
- * @warning `[B-100]` Run load(), reload(), registration, and enable_auto_reload() outside the loader lock. These
- *          routes allocate, and enable_auto_reload() creates the watcher thread. The loader-lock teardown path
- *          detaches the watcher without a wait. `ConfigWatcherLoaderLockTest.*` pins the boundary.
+ * @brief INI-backed configuration, hot reload, and INI-driven input combo bindings.
+ * @details Config is fail-soft, and no call returns an error for a missing or malformed value. A missing key or an
+ *          empty bool value applies the registered default with no log record. A malformed int, float, or bool value
+ *          applies the default, and a combo value with no parsable combo yields an empty list. Each logs a Warning,
+ *          except the empty and "NONE" combo opt-outs.
+ * @note Thread safety: every setter must be reentrant and thread-safe. A setter can call the bind family and log_all().
+ *       In a load() or reload() pass, a setter call to load(), reload(), or disable_auto_reload() is refused. A setter
+ *       call to clear() in a pass is refused except on the reload-servicer thread.
+ * @warning `[B-100]` Run load(), reload(), registration, and enable_auto_reload() outside the loader lock. These calls
+ *          allocate, and enable_auto_reload() creates the watcher thread. The loader-lock teardown path detaches the
+ *          watcher without a wait. `ConfigWatcherLoaderLockTest.*` pins the boundary.
  */
 
 #include "DetourModKit/input.hpp"
@@ -38,36 +31,29 @@ namespace DetourModKit
 {
     namespace config
     {
-        /**
-         * @enum AutoReloadStatus
-         * @brief Outcome of a call to enable_auto_reload().
-         */
+        /** @brief Outcome of enable_auto_reload(). */
         enum class AutoReloadStatus : std::uint8_t
         {
-            /// The watcher is now running.
+            /// The watcher started.
             Started,
-            /// Called while a watcher was already installed; the existing one was kept.
+            /// A watcher was already installed and stays in place.
             AlreadyRunning,
-            /// load() was never called, so there is no path to watch.
+            /// No load() path is cached, as before any load() or after clear(), so there is no path to watch.
             NoPriorLoad,
-            /// The parent-directory open failed or the start handshake failed.
+            /// The watcher did not start, for example on a failed directory open or handshake, or a set unload latch.
             StartFailed
         };
 
-        /// Constrains the atomic-backed bind to the scalar types the INI pipeline parses directly.
+        /// The value types that the atomic bind accepts.
         template <typename T>
         concept BindableScalar = std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>;
 
         /**
          * @brief Binds an integer INI key to a callback.
-         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
-         *          the parsed INI value. Integers are parsed with a hardened decimal/hex parser (range-checked) rather
-         *          than the underlying INI library's saturating conversion.
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param display_name Human-readable name shown in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent or unparsable.
+         * @details Registration calls @p setter with @p default_value at once. Each load() or reload() pass that
+         *          applies setters calls it again with the INI value. The value is decimal, or hex with a 0x prefix. An
+         *          out-of-range value falls back to the default.
+         * @param display_name Not shown in log records. The records name @p key.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_int(
@@ -97,16 +83,10 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Binds a string INI key to a callback (the general parse-into-anything form).
-         * @details The setter receives the raw INI value verbatim (narrow bytes; ASCII passes through unchanged, a
-         *          non-ASCII value arrives as raw bytes for the consumer to interpret). Use it to parse a value into a
-         *          mask, an enum, or a non-atomic field. The value is delivered as a string_view that is valid only for
-         *          the duration of the call and is not guaranteed to be NUL-terminated.
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param display_name Human-readable name shown in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent.
+         * @brief Binds a string INI key to a callback.
+         * @details The setter receives the raw INI value as narrow bytes, with no decoding. The string_view is valid
+         *          only during the call and is not guaranteed to be NUL-terminated. The invocation contract matches
+         *          bind_int.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_string(
@@ -118,16 +98,11 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Binds an INI combo string to a callback receiving the parsed combo list (no input binding).
-         * @details Parses the INI value into an input::KeyComboList (see press_combo for the combo grammar and the
-         *          "NONE"/empty opt-out) and delivers it to @p setter at registration and on each load() / reload().
-         *          Unlike press_combo this registers no input binding; the consumer owns the parsed combos and uses
-         *          them however it likes.
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param display_name Human-readable name shown in log output and in the typo Warning.
-         * @param setter Callback applied with the parsed combo list.
-         * @param default_value Default combo string when the key is absent.
+         * @brief Binds an INI combo string to a callback that receives the parsed combo list.
+         * @details It registers no input binding. The grammar and the "NONE" or empty opt-out match press_combo. The
+         *          invocation contract matches bind_int.
+         * @param display_name Name shown in the typo Warning.
+         * @param default_value Combo string used when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_combos(
@@ -139,16 +114,9 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Binds an INI key to a caller-supplied atomic (the most common form).
-         * @details Convenience over the matching bind_<T> callback that stores the parsed value with
-         *          std::memory_order_relaxed. The atomic must outlive every load() / reload(): the setter captures
-         *          @p out by reference.
-         * @tparam T One of int, bool, float.
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param display_name Human-readable name shown in log output.
-         * @param out Atomic destination updated on every successful parse.
-         * @param default_value Value applied when the INI key is missing.
+         * @brief Binds an INI key to a caller-supplied atomic.
+         * @details The matching bind_<T> stores each value into @p out with std::memory_order_relaxed. @p out must
+         *          outlive every later load() and reload().
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         template <BindableScalar T>
@@ -193,11 +161,8 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Binds an INI key to an atomic, using the atomic's current value as the default.
-         * @details Samples @p out once with std::memory_order_relaxed at registration time to use as the INI fallback,
-         *          then stores parsed values back to @p out on every load() / reload(). Initialize the atomic
-         *          deliberately before calling this overload.
-         * @tparam T One of int, bool, float.
+         * @brief Binds an INI key to an atomic, with the current value of @p out as the default.
+         * @details Registration reads @p out once, relaxed. Initialize @p out before the call.
          * @note Setup/control-plane only (see the default-taking overload).
          */
         template <BindableScalar T>
@@ -207,16 +172,11 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Binds an INI key to an atomic uint32 through a user parse function.
-         * @details The parse function turns the raw INI string into a uint32 (for example a bitmask) that is stored
-         *          with std::memory_order_relaxed. Applied at registration with @p default_value and again on each
-         *          load() / reload().
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param display_name Human-readable name shown in log output.
-         * @param out Atomic destination for the parsed value.
-         * @param parse Pure function turning the raw INI string into the stored value.
-         * @param default_value Default INI string parsed when the key is absent.
+         * @brief Binds an INI key to an atomic uint32 through a caller parse function.
+         * @details The parsed value is stored into @p out with std::memory_order_relaxed. @p out has the lifetime rule
+         *          of bind. The invocation contract matches bind_int.
+         * @param parse Pure function from the raw INI string to the stored value.
+         * @param default_value INI string that @p parse receives when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_parsed(
@@ -229,39 +189,31 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Binds a log-level INI key that applies directly to the logger.
-         * @details Parses @p default_value via the logger's string-to-level mapping and applies it both at registration
-         *          and on each load() / reload(). Unrecognized values fall back to the Info level.
-         * @param section INI section name.
-         * @param key INI key name.
-         * @param default_value Default level string (e.g. "INFO", "DEBUG").
+         * @brief Binds a log-level INI key that sets the logger level.
+         * @details The logger's string-to-level mapping applies the value at registration and on each load() or
+         *          reload(). An unrecognized value falls back to Info.
+         * @param default_value Level string used when the key is absent, for example "INFO" or "DEBUG".
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value = "INFO");
 
         /**
          * @brief Binds an INI combo string to a press-mode input binding and returns its guard.
-         * @details Parses the INI value as one or more key combinations (commas separate independent combos under OR
-         *          logic; '+' separates modifiers from the trailing trigger; tokens are key names or hex VK codes),
-         *          registers a press binding under @p binding_name via input::register_combo, and rebinds it on every
-         *          load() / reload() so the bound keys track the INI without re-registering.
+         * @details It registers a press binding under @p binding_name through input::register_combo. Each load() and
+         *          reload() rebinds its keys through input::Input::rebind. Commas separate combos under OR logic,
+         *          and '+' separates modifiers from the trailing trigger. A token is a key name or a hex VK code.
          *
-         *          Two opt-out sentinels yield an unbound but addressable binding silently: an empty value and the
-         *          literal "NONE" (case-insensitive, whole trimmed value only). A non-empty value whose every token
-         *          fails to parse is logged once at Warning level naming @p log_name and the offending string.
-         * @param section INI section name.
-         * @param ini_key INI key holding the combo string.
-         * @param log_name Human-readable name echoed by the config logger and in the typo Warning.
-         * @param binding_name input binding name (must be unique).
+         *          An empty value or "NONE" (case-insensitive, whole trimmed value only) leaves the binding registered
+         *          but unbound, with no log record. If no combo of another value parses, one Warning names @p log_name
+         *          and the value.
+         * @param log_name Name shown in the typo Warning and in the registration failure record.
+         * @param binding_name Unique input binding name.
          * @param on_press Callback fired on the key-down edge.
-         * @param default_combo Default combo string when the key is absent.
-         * @param consume Optional per-binding suppression facet. std::nullopt registers no extra key; a value registers
-         *                a bool item named "<ini_key>.Consume" wired to input suppression for this binding (honored for
-         *                digital gamepad buttons and the mouse wheel only).
-         * @return An input::BindingGuard owning the callback's lifetime. Store it (e.g. in an input::Scope); letting it
-         *         drop immediately disables the binding. Fail-soft: if the underlying input::register_combo cannot
-         *         allocate, an inert guard whose name() is empty is returned and the failure is logged (the binding is
-         *         simply not installed).
+         * @param default_combo Combo string used when the key is absent.
+         * @param consume If set, registers consume_flag on the key "<ini_key>.Consume" with this default.
+         * @return A guard that owns the binding. Store it, for example in an input::Scope. A dropped guard disables
+         *         the binding. If input::register_combo fails, the guard is inert with an empty name(), and the failure
+         *         is logged.
          * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] input::BindingGuard press_combo(
@@ -276,20 +228,10 @@ namespace DetourModKit
 
         /**
          * @brief Binds an INI combo string to a hold-mode input binding and returns its guard.
-         * @details The hold-mode mirror of press_combo. @p on_state_change fires true on the press edge and false on
-         *          the release edge; the returned guard synthesizes a single balancing false if it cancels a still-held
-         *          binding. The "NONE"/empty opt-out, the typo Warning, and the live-rebind on reload all match
-         *          press_combo.
-         * @param section INI section name.
-         * @param ini_key INI key holding the combo string.
-         * @param log_name Human-readable name echoed by the config logger and in the typo Warning.
-         * @param binding_name input binding name (must be unique).
-         * @param on_state_change Callback fired with the hold state (true = held, false = released).
-         * @param default_combo Default combo string when the key is absent.
-         * @param consume Optional per-binding suppression facet (see press_combo).
-         * @return An input::BindingGuard. Destroying it may synthesize the final on_state_change(false), so treat it as
-         *         setup/control-plane only. Fail-soft: a registration that cannot allocate yields an inert guard whose
-         *         name() is empty and is logged (the binding is simply not installed).
+         * @details @p on_state_change receives true on the press edge and false on the release edge. Every other
+         *          parameter and behavior matches press_combo.
+         * @return A guard that owns the binding. If the guard cancels a held binding, it synthesizes one final
+         *         on_state_change(false). Destroy it only in setup or control-plane code.
          * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] input::BindingGuard hold_combo(
@@ -303,16 +245,10 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Binds a boolean INI key that toggles input suppression for an already-registered binding.
-         * @details Fuses bind_bool with input suppression: the INI value decides whether @p binding_name hides its
-         *          trigger from the game, applied at registration and on each load() / reload(). Register the binding
-         *          first; this is a no-op for an unknown name. Suppression is honored for digital gamepad buttons and
-         *          the mouse wheel only.
-         * @param section INI section name.
-         * @param ini_key INI key name (e.g. "SetYToggle.Consume").
-         * @param display_name Human-readable name shown in log output.
-         * @param binding_name input binding name to toggle.
-         * @param default_value Suppression state when the INI key is missing.
+         * @brief Binds a boolean INI key that sets input suppression for a registered binding.
+         * @details The value sets input::ComboBinding::consume for @p binding_name. Register the binding first, because
+         *          each application to an unknown name is a no-op. The invocation contract matches bind_int.
+         * @param default_value Suppression state when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void consume_flag(
@@ -325,12 +261,12 @@ namespace DetourModKit
 
         /**
          * @brief Registers a hotkey combo that triggers reload() on press.
-         * @details A press_combo whose callback requests a reload off a dedicated background servicer thread (the press
-         *          callback only flips a flag and notifies, so per-press latency stays low). The INI-configured combo
-         *          overrides @p default_combo on each load() / reload(). A repeat call for the same @p ini_key updates
-         *          that binding in place, so the last @p default_combo wins.
-         * @param ini_key INI key that stores the combo string.
-         * @param default_combo Combo applied when the key is absent (e.g. "Ctrl+F5").
+         * @details The binding is a press_combo, so the INI value follows the press_combo grammar, opt-out, and typo
+         *          Warning. An opt-out @p default_combo instead fails the call, as @return states.
+         *          The reload and its setters run on the reload-servicer thread, not on the input poll thread. A repeat
+         *          call for the same @p ini_key updates that binding in place, so the last @p default_combo wins.
+         * @param ini_key Key in the [Input] section that holds the combo string.
+         * @param default_combo Combo used when the key is absent, for example "Ctrl+F5".
          * @return true if the binding was registered, or updated for a repeated @p ini_key. false if @p default_combo
          *         is empty, NONE, or has no parsable combo. false also when an unload latch is set or the input
          *         registration or update fails. A false return keeps any earlier binding for @p ini_key.
@@ -340,53 +276,37 @@ namespace DetourModKit
 
         /**
          * @brief Loads all bound settings from the named INI file.
-         * @details Resolves @p ini_filename against the mod's runtime directory, parses it, and applies each bound
-         *          setter with the INI value (or its default if the key is missing or invalid). The path is remembered
-         *          so reload() operates on the same file. If auto-reload is active and @p ini_filename resolves to a
-         *          different file than the watcher is currently monitoring, the watcher is re-pointed to the new file
-         *          (its debounce and on_reload callback are preserved), so a hot-swap of the config file keeps
-         *          auto-reload working. Re-pointing is skipped with a logged error if load() is called from the watcher
-         *          thread itself (a self-join hazard); re-point from another thread in that case.
-         * @param ini_filename The UTF-8 INI filename, resolved relative to the runtime directory. Ill-formed UTF-8 or
-         *                     an embedded NUL loads the defaults with an Error record.
+         * @details reload() reuses this path. If auto-reload watches a different file, the watcher moves to the new
+         *          file and keeps its debounce and on_reload callback. On the watcher thread, load() skips that move
+         *          and logs an Error record. Call load() from another thread to move the watcher.
+         * @param ini_filename The UTF-8 INI filename, resolved relative to filesystem::get_runtime_directory().
+         *                     Ill-formed UTF-8 or an embedded NUL loads the defaults with an Error record.
          * @note Setup/control-plane only: the load reads the file and runs every bound setter.
          */
         void load(std::string_view ini_filename);
 
         /**
-         * @brief Re-applies all bound setters against the last-loaded INI file.
-         * @details Re-reads the file passed to the most recent load() and re-invokes every setter with the fresh value.
-         *          If the file's bytes are unchanged since the last successful load (content-hash short-circuit), the
-         *          setters are skipped. If the file cannot be read (deleted or locked mid-save) or fails to parse, the
-         *          setters are also skipped and the last-applied values are retained rather than snapped back to their
-         *          defaults; reload() still returns true. Bindings persist across reloads.
-         * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
-         *         before any load().
-         * @note Safe from any thread. Concurrent reload() and load() passes are serialized end to end, so two racing
-         *       reloads apply in a well-defined order and a slower stale pass can never overwrite a fresher one. A
-         *       bound setter must not call reload()/load()/disable_auto_reload(): those calls are refused rather than
-         *       allowed to self-deadlock or join a worker waiting for this pass. clear() is likewise refused except
-         *       when the setter runs on the reload-servicer thread, whose owner can retire through the off-thread
-         *       reaper.
-         *       A bind_* registered after the last successful load re-hydrates on the next reload even when the file
-         *       bytes are unchanged. Only C++ exceptions from setters are caught; a structured-exception fault or a
-         *       throwing noexcept setter is not recoverable.
+         * @brief Re-reads the file of the most recent load() and re-applies every bound setter.
+         * @details The setters are skipped if the file bytes are unchanged since the last fully applied pass and no
+         *          bind_* call registered since then. A later pass that fails to read, parse, or apply every setter
+         *          cancels that skip. The setters are also skipped if the file is unreadable or fails to parse. A skip
+         *          keeps the last-applied values instead of the defaults.
+         * @return false if no load() path is cached, as before any load() or after clear(), or for a refused call from
+         *         a bound setter. Otherwise true, also for a skip.
+         * @note Safe from any thread. Concurrent load() and reload() passes are serialized end to end, so a stale pass
+         *       never overwrites a fresher one. Only C++ exceptions from setters are caught. A structured exception or
+         *       a throw from a noexcept setter is not recoverable. The file header lists the refused setter calls.
          * @note Setup/control-plane only: the reload reads the file and runs every bound setter.
          */
         [[nodiscard]] bool reload();
 
         /**
-         * @brief Starts a background watcher that calls reload() when the INI changes.
-         * @details Watches the directory of the path last passed to load(), collapsing bursty editor saves into one
-         *          reload via the @p debounce quiet window. After each reload, @p on_reload is invoked with a flag
-         *          that is true when at least one bound setter ran and false when none did: an unchanged-content,
-         *          read-failure, or parse-failure skip that retained the current values, a config whose bound keys
-         *          carry no setter, or an unload latch that aborted before the first setter. The watcher and the
-         *          callback run on the watcher's background thread.
-         * @param debounce Quiet window between change detection and reload (default 250 ms).
-         * @param on_reload Optional callback invoked after each reload attempt.
-         * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if
-         *         load() was never called; StartFailed if the directory open or the handshake failed.
+         * @brief Starts a background watcher that calls reload() when the INI file changes.
+         * @details The watcher observes the directory of the last load() path. It reloads once @p debounce passes with
+         *          no further change, so a burst of saves merges into one reload. The reload and @p on_reload run on
+         *          the watcher thread.
+         * @param on_reload Optional. Called after each reload attempt with true if at least one bound setter ran, and
+         *                  false otherwise. It is not called once an unload latch is set.
          * @note Setup/control-plane only: the start creates the watcher thread.
          */
         [[nodiscard]] AutoReloadStatus enable_auto_reload(
@@ -396,13 +316,12 @@ namespace DetourModKit
 
         /**
          * @brief Stops the auto-reload watcher synchronously.
-         * @details Idempotent. This is an honest synchronous rundown: it returns once the watcher's notification drain
-         *          (bounded), a final debounced reload callback if a change is still pending, and the worker join have
-         *          completed, so a blocking user callback blocks this call for exactly as long. It is not time-bounded
-         *          and never detaches a running callback. When the caller is not authorized to block (an unload phase
-         *          is published, or the fail-closed loader-lock probe vetoes), the worker is detached instead of
-         *          joined and the call returns without that rundown. A call from inside an on_reload callback (the
-         *          watcher thread) is a no-op that logs and leaves the watcher running, because a self-join deadlocks.
+         * @details Idempotent. On the authorized path it returns after any pending debounced reload callback runs and
+         *          the watcher thread exits. If an unload phase is published or the fail-closed loader-lock probe
+         *          vetoes, it detaches the watcher thread and does not wait for it. On the watcher thread, for example
+         *          inside on_reload, it logs and does not stop the watcher.
+         * @warning The authorized path has no time bound and never detaches a callback in progress. This call waits for
+         *          as long as the callback blocks.
          * @note Setup/control-plane only: the stop joins the watcher thread on the authorized path.
          */
         void disable_auto_reload() noexcept;
@@ -411,21 +330,17 @@ namespace DetourModKit
         void log_all();
 
         /**
-         * @brief Clears every bound item and the cached load path.
-         * @details Does not stop the auto-reload watcher; call disable_auto_reload() first so a watcher callback cannot
-         *          fire against a torn-down registry.
+         * @brief Clears every bound setting and the cached load path.
+         * @details It does not stop the auto-reload watcher. Call disable_auto_reload() first, so that no watcher
+         *          callback fires against the cleared registry. It releases every reload_hotkey() binding and stops the
+         *          reload-servicer thread, so it can wait for a hotkey reload in progress.
          * @note Setup/control-plane only: the clear tears down the config registry.
          */
         void clear() noexcept;
 
         class Ini;
 
-        /**
-         * @class SectionBinder
-         * @brief A section-scoped view that drops the repeated section argument from the bind family.
-         * @details Obtained from Ini::section() or config::section(). Each method forwards to the matching free
-         *          function with the bound section name. Lightweight and copyable; it holds only the section name.
-         */
+        /** @brief A copyable view that forwards each bind call to the matching free function with one section name. */
         class SectionBinder
         {
         public:
@@ -524,7 +439,7 @@ namespace DetourModKit
                 config::bind_log_level(m_section, key, default_value);
             }
 
-            /// Section-scoped press-combo fusion. See config::press_combo.
+            /// Section-scoped press_combo. See config::press_combo.
             [[nodiscard]] input::BindingGuard press_combo(
                 std::string_view ini_key,
                 std::string_view log_name,
@@ -545,7 +460,7 @@ namespace DetourModKit
                 );
             }
 
-            /// Section-scoped hold-combo fusion. See config::hold_combo.
+            /// Section-scoped hold_combo. See config::hold_combo.
             [[nodiscard]] input::BindingGuard hold_combo(
                 std::string_view ini_key,
                 std::string_view log_name,
@@ -566,7 +481,7 @@ namespace DetourModKit
                 );
             }
 
-            /// Section-scoped consume-flag fusion. See config::consume_flag.
+            /// Section-scoped consume_flag. See config::consume_flag.
             void consume_flag(
                 std::string_view ini_key,
                 std::string_view display_name,
@@ -587,13 +502,7 @@ namespace DetourModKit
             return SectionBinder{name};
         }
 
-        /**
-         * @class Ini
-         * @brief A handle to the process configuration registry.
-         * @details Exposes section() plus the common operations. The rest of the bind family is reached through the
-         *          free functions or through section(). Every Ini and every free function act on one shared process
-         *          registry, so an Ini is a thin, copyable handle rather than an independent configuration.
-         */
+        /** @brief A copyable handle to the one process registry that every Ini and every free function share. */
         class Ini
         {
         public:
@@ -664,7 +573,7 @@ namespace DetourModKit
             /// Logs every bound setting. See config::log_all.
             void log_all() const { config::log_all(); }
 
-            /// Clears every bound item. See config::clear.
+            /// Clears every bound setting. See config::clear.
             void clear() const noexcept { config::clear(); }
         };
     } // namespace config

@@ -3,11 +3,9 @@
 
 /**
  * @file input_codes.hpp
- * @brief Unified input code types for keyboard, mouse, and gamepad inputs.
- * @details Provides a tagged InputCode type that identifies both the device source and button/key code, along with
- *          named key resolution for human-readable configuration strings. Gamepad codes correspond to XInput button
- *          masks. Each PascalCase constant in GamepadCode and WheelCode also has an UPPER_SNAKE_CASE spelling with
- *          the same value. Both spellings are public API.
+ * @brief Tagged input codes for keyboard, mouse, mouse-wheel, and gamepad inputs, with named-key resolution.
+ * @details Each PascalCase constant in GamepadCode and WheelCode also has an UPPER_SNAKE_CASE spelling with the same
+ *          value. Both spellings are public API.
  */
 
 #include <cstdint>
@@ -18,10 +16,7 @@
 
 namespace DetourModKit
 {
-    /**
-     * @enum InputSource
-     * @brief Identifies the device type for an input code.
-     */
+    /** @brief Identifies the device type for an input code. */
     enum class InputSource : std::uint8_t
     {
         Keyboard,
@@ -30,11 +25,7 @@ namespace DetourModKit
         MouseWheel
     };
 
-    /**
-     * @brief Converts an InputSource enum to its string representation.
-     * @param source The InputSource enum value.
-     * @return std::string_view String representation of the source.
-     */
+    /** @brief Returns the enumerator name of @p source, or "Unknown" for a value outside the enum. */
     [[nodiscard]] constexpr std::string_view input_source_to_string(InputSource source) noexcept
     {
         switch (source)
@@ -52,13 +43,11 @@ namespace DetourModKit
     }
 
     /**
-     * @struct InputCode
-     * @brief A tagged input identifier combining a device source and a button/key code.
-     * @details For Keyboard and Mouse sources, the code is a Windows Virtual Key code (usable with GetAsyncKeyState).
-     *          For Gamepad, the code is an XInput button bitmask or a synthetic trigger identifier (see GamepadCode).
-     *          For MouseWheel, the code is a WheelCode direction identifier; the wheel is an event with no polled key
-     *          state, so it is captured by the input layer's queue message hook and surfaced as a momentary
-     *          per-direction pulse (trigger-only, never a held modifier).
+     * @brief A tagged input identifier: a device source and a button or key code.
+     * @details A Keyboard or Mouse code is a Windows virtual-key code, usable with GetAsyncKeyState. A Gamepad code is
+     *          an XInput button bitmask or a synthetic GamepadCode identifier. A MouseWheel code is a WheelCode
+     *          direction. It fires at most one momentary pulse per whole notch of queue-delivered wheel input and
+     *          never acts as a held modifier. `input::Input::WheelBackend` documents the capture scope.
      */
     struct InputCode
     {
@@ -68,9 +57,7 @@ namespace DetourModKit
         constexpr bool operator==(const InputCode &) const noexcept = default;
     };
 
-    /**
-     * @brief Hash functor for InputCode, enabling use in unordered containers.
-     */
+    /** @brief Hash functor for InputCode keys in unordered containers. */
     struct InputCodeHash
     {
         std::size_t operator()(const InputCode &ic) const noexcept
@@ -79,53 +66,31 @@ namespace DetourModKit
         }
     };
 
-    /**
-     * @brief Creates a keyboard InputCode from a Windows Virtual Key code.
-     * @param vk The VK code (e.g., 0x41 for 'A').
-     * @return InputCode Tagged as Keyboard.
-     */
+    /** @brief Creates a Keyboard InputCode from a Windows virtual-key code, for example 0x41 for 'A'. */
     [[nodiscard]] constexpr InputCode keyboard_key(int vk) noexcept
     {
         return {InputSource::Keyboard, vk};
     }
 
-    /**
-     * @brief Creates a mouse InputCode from a Windows Virtual Key code.
-     * @param vk The VK code (e.g., 0x01 for VK_LBUTTON).
-     * @return InputCode Tagged as Mouse.
-     */
+    /** @brief Creates a Mouse InputCode from a Windows virtual-key code, for example 0x01 for VK_LBUTTON. */
     [[nodiscard]] constexpr InputCode mouse_button(int vk) noexcept
     {
         return {InputSource::Mouse, vk};
     }
 
-    /**
-     * @brief Creates a gamepad InputCode from an XInput button code.
-     * @param code The XInput button mask or synthetic trigger code (see GamepadCode).
-     * @return InputCode Tagged as Gamepad.
-     */
+    /** @brief Creates a Gamepad InputCode from an XInput button mask or a synthetic GamepadCode identifier. */
     [[nodiscard]] constexpr InputCode gamepad_button(int code) noexcept
     {
         return {InputSource::Gamepad, code};
     }
 
-    /**
-     * @brief Creates a mouse-wheel InputCode from a wheel direction code.
-     * @param code The wheel direction identifier (see WheelCode).
-     * @return InputCode Tagged as MouseWheel.
-     */
+    /** @brief Creates a MouseWheel InputCode from a WheelCode direction. */
     [[nodiscard]] constexpr InputCode mouse_wheel(int code) noexcept
     {
         return {InputSource::MouseWheel, code};
     }
 
-    /**
-     * @namespace GamepadCode
-     * @brief XInput-compatible gamepad button codes and synthetic analog identifiers.
-     * @details Digital button codes match XInput XINPUT_GAMEPAD_* bitmask values. LeftTrigger/RightTrigger and
-     *          thumbstick direction codes are synthetic identifiers for analog inputs treated as digital with
-     *          configurable deadzone thresholds.
-     */
+    /** @brief Button codes equal XINPUT_GAMEPAD_* bitmasks. Trigger and stick-direction codes are synthetic. */
     namespace GamepadCode
     {
         inline constexpr int DpadUp = 0x0001;
@@ -147,10 +112,7 @@ namespace DetourModKit
         inline constexpr int LeftTrigger = 0x10000;
         inline constexpr int RightTrigger = 0x10001;
 
-        /**
-         * @brief Synthetic codes for thumbstick axes treated as digital inputs.
-         * @details Each direction fires when the axis exceeds the stick deadzone threshold.
-         */
+        /** @brief Synthetic thumbstick codes. Each fires when its axis exceeds the stick deadzone threshold. */
         inline constexpr int LeftStickUp = 0x10002;
         inline constexpr int LeftStickDown = 0x10003;
         inline constexpr int LeftStickLeft = 0x10004;
@@ -160,16 +122,13 @@ namespace DetourModKit
         inline constexpr int RightStickLeft = 0x10008;
         inline constexpr int RightStickRight = 0x10009;
 
-        /// Default analog trigger threshold (0-255 range, values above are "pressed").
+        /// Default of `input::Input::Settings::trigger_threshold` (0 to 255 range). A trigger fires above the setting.
         inline constexpr int TriggerThreshold = 30;
 
-        /**
-         * @brief Default thumbstick deadzone threshold (0-32767 range).
-         * @details Matches XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE (7849).
-         */
+        /** @brief Default stick deadzone threshold (0 to 32767 range), equal to XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE. */
         inline constexpr int StickThreshold = 7849;
 
-        // UPPER_SNAKE_CASE spellings of the constants above (A, B, X, Y are identical in both spellings).
+        // A, B, X, and Y are identical in both spellings.
         inline constexpr int DPAD_UP = DpadUp;
         inline constexpr int DPAD_DOWN = DpadDown;
         inline constexpr int DPAD_LEFT = DpadLeft;
@@ -195,10 +154,9 @@ namespace DetourModKit
     } // namespace GamepadCode
 
     /**
-     * @namespace WheelCode
-     * @brief Mouse-wheel direction identifiers used by InputSource::MouseWheel codes.
-     * @details Values are 1-based and dense so the input layer can map a code to a zero-based direction index with
-     *          `code - WheelCode::Up`. Up/Down are the vertical wheel; Left/Right are the horizontal (tilt) wheel.
+     * @brief Mouse-wheel direction identifiers for InputSource::MouseWheel codes.
+     * @details Values are 1-based and dense, so `code - WheelCode::Up` is a zero-based direction index. Up and Down
+     *          are the vertical wheel. Left and Right are the horizontal (tilt) wheel.
      */
     namespace WheelCode
     {
@@ -207,7 +165,6 @@ namespace DetourModKit
         inline constexpr int Left = 3;
         inline constexpr int Right = 4;
 
-        // UPPER_SNAKE_CASE spellings of the constants above.
         inline constexpr int UP = Up;
         inline constexpr int DOWN = Down;
         inline constexpr int LEFT = Left;
@@ -215,43 +172,27 @@ namespace DetourModKit
     } // namespace WheelCode
 
     /**
-     * @brief Attempts to resolve a human-readable name to an InputCode.
-     * @details Performs case-insensitive matching against a built-in table of known key, mouse button, and gamepad
-     *          button names.
-     *
-     *          Recognized name formats:
-     *          - Keyboard: "A"-"Z", "0"-"9", "F1"-"F24", "Ctrl", "Shift", "Alt",
-     *            "Space", "Enter", "Escape", "Tab", "Backspace", Windows/menu keys ("LWin", "RWin", "Apps"), and OEM
-     *            punctuation ("Grave"/"Backtick"/"Tilde", "Semicolon", "Comma", "Period", "Slash", etc.)
-     *          - Mouse: "Mouse1" (left) through "Mouse5" (XButton2)
-     *          - Mouse wheel: "WheelUp", "WheelDown", "WheelLeft", "WheelRight"
-     *          - Gamepad: "Gamepad_A", "Gamepad_B", "Gamepad_LB", "Gamepad_LT", etc.
-     *          - Source-tagged hex (the inverse of format_input_code's off-table form): "Mouse:0xFE",
-     *            "Gamepad:0x800", "MouseWheel:0x9", "Keyboard:0xFF".
-     *
-     * @param name The input name to resolve.
-     * @return std::optional<InputCode> The resolved code, or std::nullopt if unrecognized.
-     * @note A bare (untagged) hex token such as "0xFF" yields std::nullopt: this resolver handles named keys and
-     *       source-tagged hex only. See format_input_code for the two off-table forms and their reconstruction paths.
+     * @brief Resolves a human-readable input name to an InputCode, case-insensitively.
+     * @details Recognized name formats:
+     *          - Keyboard: "A" through "Z", "0" through "9", "F1" through "F24", "Ctrl", "Shift", "Alt", "Space",
+     *            "Enter", "Escape", "Tab", "Backspace", "LWin", "RWin", "Apps", and others.
+     *          - OEM punctuation: "Grave"/"Backtick"/"Tilde", "Semicolon", "Comma", "Period", "Slash", and others.
+     *          - Mouse: "Mouse1" (left) through "Mouse5" (XButton2).
+     *          - Mouse wheel: "WheelUp", "WheelDown", "WheelLeft", "WheelRight".
+     *          - Gamepad: "Gamepad_A", "Gamepad_B", "Gamepad_LB", "Gamepad_LT", and others.
+     *          - Source-tagged hex: "Mouse:0xFE", "Gamepad:0x800", "MouseWheel:0x9", "Keyboard:0xFF".
+     * @return The resolved code, or std::nullopt for an unrecognized name or a bare hex token such as "0xFF".
      */
     [[nodiscard]] std::optional<InputCode> parse_input_name(std::string_view name);
 
-    /**
-     * @brief Returns a human-readable name for an InputCode, if one exists.
-     * @param code The input code to look up.
-     * @return std::string_view The canonical name, or an empty view if not in the table.
-     */
+    /** @brief Returns the canonical name of @p code, or an empty view if the name table has no entry for it. */
     [[nodiscard]] std::string_view input_code_to_name(const InputCode &code);
 
     /**
      * @brief Formats an InputCode as a human-readable string.
-     * @details Returns the canonical name if the code is in the lookup table. Off-table codes fall back to hex: a
-     *          Keyboard code emits bare hex ("0x72"), while any other source is tagged with its device name
-     *          ("Mouse:0xFE") so the source is not lost. A source-tagged token round-trips through parse_input_name.
-     *          A bare-hex Keyboard token round-trips through the config combo parser used by config::bind_combos,
-     *          whose untagged-hex fallback defaults to the Keyboard source.
-     * @param code The input code to format.
-     * @return std::string Formatted string.
+     * @details Returns the canonical name if the name table has one. An off-table Keyboard code formats as bare hex
+     *          ("0xFF"). Any other off-table code formats as source-tagged hex ("Mouse:0xFE"). parse_input_name reads
+     *          the tagged form back, and config::bind_combos reads bare hex back as a Keyboard code.
      */
     [[nodiscard]] std::string format_input_code(const InputCode &code);
 

@@ -4,9 +4,8 @@
 /**
  * @file error.hpp
  * @brief Shared ErrorCode, Error, and Result<T> definitions.
- * @details Result-bearing APIs use `Result<T>` and the propagation macros below. Best-effort query APIs retain their
- *          documented `bool`, `std::optional`, or `void` contracts. ErrorCode stores its subsystem category in the high
- *          byte so category recovery needs no lookup table.
+ * @details Result-tier APIs return `Result<T>`, and DMK_TRY and DMK_TRY_VOID propagate its Error. Best-effort APIs
+ *          return their own documented types, for example `bool`, `std::optional`, or `void`, and never an Error.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -21,11 +20,7 @@
 
 namespace DetourModKit
 {
-    /**
-     * @enum ErrorCategory
-     * @brief The subsystem an ErrorCode belongs to, recovered from the high byte of its value.
-     * @details Categories remain stable so persisted or logged numeric codes retain their meaning.
-     */
+    /** @brief The subsystem of an ErrorCode, held in the high byte of its value. The category values are stable. */
     enum class ErrorCategory : std::uint8_t
     {
         /// Cross-cutting codes such as argument checks, allocation failures, and pattern errors.
@@ -40,38 +35,35 @@ namespace DetourModKit
         Rtti = 0x04,
         /// Manifest serialization and parsing.
         Manifest = 0x05,
-        /// Session / bootstrap process lifecycle (start, single-instance gating, worker spawn).
+        /// Session and bootstrap process lifecycle: start, single-instance gate, and worker spawn.
         Lifecycle = 0x06
     };
 
     /**
-     * @enum ErrorCode
-     * @brief The flat library-wide failure code, tagged by subsystem in its high byte.
-     * @details Each block is based at `category << 8`; the high byte names the @ref ErrorCategory and the low byte is
-     *          the ordinal within that block. Only the high byte is stable: the low byte follows declaration order, so
-     *          inserting an enumerator renumbers every later member of its block. Branch on the enumerator, never on
-     *          its numeric value. A log format, wire protocol, or telemetry field that needs a fixed external
-     *          representation owns a versioned enumerator-to-symbol mapping and writes that symbol; persisting the raw
-     *          number silently remaps every later code in the block the next time one is inserted.
+     * @brief The library-wide failure code, with its @ref ErrorCategory in the high byte.
+     * @details Each category block starts at `category << 8`. Only the high byte is stable. The low byte follows
+     *          declaration order, so a new enumerator renumbers every later member of its block. Branch on the
+     *          enumerator, never on its numeric value. If a log, wire, or telemetry format needs a fixed value, write a
+     *          versioned symbol for each enumerator.
      */
     enum class ErrorCode : std::uint16_t
     {
-        // General (0x00xx): cross-cutting failures.
-        /// Success sentinel; never stored in an Error that is actually surfaced as a failure.
+        // General (0x00xx).
+        /// Success sentinel. An Error that reports a failure never holds it.
         Ok = 0x0000,
-        /// A factory/operation rejected its arguments (empty name, null target, empty ladder, ...).
+        /// A factory or operation rejected its arguments, for example an empty name, a null target, or an empty ladder.
         InvalidArg,
-        /// An allocation failed; constructed without allocating so the noexcept batch seed can use it.
+        /// An allocation failed.
         OutOfMemory,
         /// An AOB pattern failed to parse or exceeded the inline-storage cap.
         BadPattern,
-        /// A pointer-chain walk was handed a null root.
+        /// A pointer-chain walk received a null root.
         NullChain,
         /// Last-resort code when no more specific one applies.
         Unknown,
 
-        // Hook failures (0x01xx).
-        /// The hook backend allocator could not be obtained.
+        // Hook (0x01xx).
+        /// The hook backend allocator was not available.
         AllocatorNotAvailable = 0x0100,
         /// The target address to hook was null or unusable.
         InvalidTargetAddress,
@@ -83,17 +75,17 @@ namespace DetourModKit
         HookAlreadyExists,
         /// No hook with that name is registered.
         HookNotFound,
-        /// The manager is tearing down and rejects new operations.
+        /// The manager is in teardown and rejects new operations.
         ShutdownInProgress,
-        /// The underlying hooking backend reported a failure.
+        /// The hook backend reported a failure.
         BackendFailed,
-        /// Enabling (arming) the hook failed.
+        /// The hook failed to enable.
         EnableFailed,
-        /// Disabling the hook failed.
+        /// The hook failed to disable.
         DisableFailed,
         /// The hook was in a state that does not permit the requested operation.
         InvalidHookState,
-        /// The object (e.g. VMT instance) was null or invalid.
+        /// The object, for example a VMT instance, was null or invalid.
         InvalidObject,
         /// No VMT hook is registered for that object.
         VmtHookNotFound,
@@ -103,56 +95,46 @@ namespace DetourModKit
         MethodNotFound,
         /**
          * @brief This linked DMK instance already holds the target, and the install asked to refuse a duplicate.
-         * @details Reported by the same-kit ledger, whose scope is one linked archive rather than the process. The
-         *          record covers a hook that is created but not yet armed as well as an armed one, so the prologue is
-         *          not necessarily patched. Drop the prior handle, or clear Options::fail_if_already_hooked to layer
-         *          deliberately. A record a pin left behind (hook::Hook::release, or a teardown that could not restore)
-         *          belongs to no handle and refuses every later strict install on that target for good. Records are
-         *          keyed by address and a pinned one is never erased, so an address freed and reissued by the
-         *          allocator can carry a record for a target this kit no longer holds. This code is also what a
-         *          recorded target reports when a foreign module has since patched it: the record is found first and
-         *          the prologue decode behind @ref TargetAlreadyHookedByAnotherModule never runs.
+         * @details The same-kit ledger reports it, with a scope of one linked archive, not the process. A hook that is
+         *          created but not enabled also holds a record, so this code does not prove that the prologue is
+         *          patched. Drop the prior handle, or clear Options::fail_if_already_hooked to layer on it. A pinned
+         *          record (hook::Hook::release, or a teardown that failed to restore) belongs to no handle and is never
+         *          erased. It refuses every later strict install on that address, also after the allocator reissues the
+         *          address. A recorded target reports this code even after a foreign module patches it, because the
+         *          ledger check runs before the @ref TargetAlreadyHookedByAnotherModule decode.
          */
         TargetAlreadyHookedByThisKit,
         /**
          * @brief The target's prologue already branches out of its own module, and the install asked to refuse.
-         * @details Reported by the foreign-JMP decode, which runs only when the same-kit ledger has no record. The
-         *          decode refuses every branch whose destination does not resolve to the target's own module, which
-         *          includes a destination in no loaded module at all: a detour parked in private trampoline memory is
-         *          the usual shape. The responses differ from @ref TargetAlreadyHookedByThisKit: nothing this kit owns
-         *          can be dropped, so the caller either coexists by layering or abandons the target.
+         * @details The foreign-JMP decode reports it when the same-kit ledger has no record. A destination in no loaded
+         *          module also counts, for example a detour in private trampoline memory. This kit owns nothing to
+         *          drop, so the caller either layers on the target or abandons it.
          */
         TargetAlreadyHookedByAnotherModule,
         /// A re-entrant call into the guarded path was rejected.
         ReentrantCallRejected,
-        /// The target prologue could not be relocated safely.
+        /// The target prologue is not safe to relocate.
         TargetPrologueUnsafe,
-        /// An unclassified hook error: an unmapped backend failure, or a hook gate that could not be acquired.
+        /// An unclassified hook error: an unmapped backend failure, or a failed hook gate acquisition.
         UnknownError,
-        /**
-         * @brief The operation would have altered target bytes a newer layered hook on the same target still owns.
-         * @details Refused without changing anything. Tear down or disable the newer layer first.
-         */
+        /** @brief Refused with no change: a newer layered hook owns the target bytes. Disable or tear it down first. */
         LayerConflict,
         /**
-         * @brief Every mid-hook adapter is in use; no further mid hook can be installed until one is destroyed.
-         * @details A mid hook needs one adapter from a fixed pool, because the backend's callback signature carries no
-         *          user-data parameter and a distinct function is the only way to pass per-hook identity. Nothing was
-         *          patched. Destroy a mid hook you no longer need, or hook fewer sites; inline and VMT hooks are
-         *          unaffected.
+         * @brief Every mid-hook adapter in the fixed pool is in use, so nothing was patched.
+         * @details Destroy an unneeded mid hook, or hook fewer sites. Inline and VMT hooks are unaffected.
          */
         MidHookCapacityExhausted,
         /// The hook module refuses mutation under its loader-lock precondition.
         LoaderLockActive,
 
-        // Scan (0x02xx): cascade resolve + read_code_constant + RIP resolve + string xref
+        // Scan (0x02xx).
         /// No candidates were supplied to the cascade.
         EmptyCandidates = 0x0200,
         /// No cascade candidate matched the scanned scope.
         NoMatch,
         /// Every byte-candidate pattern failed to parse.
         AllPatternsInvalid,
-        /// A Direct candidate existed, but none could be rebuilt safely as a hooked prologue.
+        /// A Direct candidate existed, but none was safe to rebuild as a hooked prologue.
         PrologueFallbackNotApplicable,
         /// The supplied module range was not a valid mapped image.
         InvalidRange,
@@ -168,14 +150,11 @@ namespace DetourModKit
         PrefixNotFound,
         /// RIP resolve: the search region was too small to hold the displacement.
         RegionTooSmall,
-        /// RIP resolve: the displacement bytes could not be read.
+        /// RIP resolve: the displacement bytes were unreadable.
         UnreadableDisplacement,
         /// RIP resolve: the resolved target was not a plausible address.
         ImplausibleTarget,
-        /**
-         * @brief RIP resolve: the last matched prefix resolved plausibly to an unreadable target.
-         * @details `Error::detail` holds the last unreadable target address.
-         */
+        /** @brief RIP resolve: the last matched prefix resolved to a plausible, unreadable address in Error::detail. */
         UnreadableTarget,
         /// String xref: the query text was empty.
         EmptyQuery,
@@ -193,148 +172,145 @@ namespace DetourModKit
         StoreNotFound,
         /// Prologue recovery found a unique site, but identity confirmation rejected it or was missing.
         PrologueIdentityRejected,
-        /// Export resolve: the module's export directory holds no name matching the requested export (or has none).
+        /// Export resolve: no usable export with the requested name. @ref scan::resolve_export lists the cases.
         ExportNotFound,
-        /// Export resolve: the export is a forwarder to another module (a "Dll.Func" string, not code); fails closed.
+        /// Export resolve: the export forwards to another module as a "Dll.Func" string, not code. It fails closed.
         ExportForwarded,
         /**
          * @brief A bounded-jump pattern spent its backtracking work budget, so the traversal stopped short.
-         * @details Distinct from NoMatch: the scan proved nothing about the unvisited positions. Add a literal byte to
-         *          the pattern's leading segment, or narrow the scope, then retry.
+         * @details Distinct from NoMatch: the scan proved nothing about the unvisited positions. Before a retry, add a
+         *          literal byte to the leading segment of the pattern, or narrow the scope.
          */
         BudgetExceeded,
         /**
-         * @brief A page-gated sweep skipped a region that faulted mid-scan, so its occurrence count is a lower bound.
-         * @details Distinct from NoMatch: a match (or a duplicate that would have made the result ambiguous) may live
-         *          in the skipped bytes. Caused by a concurrent decommit or reprotect of the scanned range.
+         * @brief A page-gated sweep skipped a region, so its occurrence count is a lower bound.
+         * @details Distinct from NoMatch: the skipped bytes can hold a match, or a duplicate that makes the result
+         *          ambiguous. A concurrent decommit or reprotect of the scanned range causes it. So does a MinGW sweep
+         *          with no guarded-read fault handler installed (@ref diagnostics::ScannerFaultEvent).
          */
         IncompleteScan,
         /**
-         * @brief The scan could not prove its result unique because query-owned storage may participate in it.
-         * @details Raised under the Readable authority rule of @ref scan::Pages. Also raised when the declared
-         *          exclusion spans overflow the bounded set after a merge, which leaves some query storage visible to
-         *          the sweep. The remedy is fewer declared spans or a narrower scope.
+         * @brief The scan did not prove its result unique, because query-owned storage can participate in it.
+         * @details Raised under the Readable authority rule of @ref scan::Pages, which lists its remedies. Also raised
+         *          when the merged exclusion spans overflow their bounded set. The overflow remedy is fewer declared
+         *          spans or a narrower scope.
          */
         NotAuthoritative,
         /// String xref: the query text is not well-formed UTF-8, or it violates the embedded-NUL policy.
         MalformedQueryText,
         /**
          * @brief Prologue recovery rebuilt a usable hook shape, but it matched more than one executable site.
-         * @details Distinct from NoMatch and PrologueFallbackNotApplicable: the rebuilt pattern collides at two or
-         *          more sites, so no single redirected target can be trusted. Sharpen the signature's surviving tail.
+         * @details No single redirected target is trustworthy. Sharpen the surviving tail of the signature.
          */
         PrologueFallbackAmbiguous,
         /**
          * @brief The selected byte rung no longer resolves the decoded site at the fresh epoch.
-         * @details The selector evidence is stale.
-         *          Its physical span can fail to match. A bounded-gap result point can move.
-         *          A wildcarded RIP locator can resolve elsewhere.
-         *          The read fails closed because the decoded operand lacks valid evidence.
+         * @details The selector evidence is stale. Its physical span can fail to match, a bounded-gap result point can
+         *          move, or a wildcarded RIP locator can resolve elsewhere.
          */
         EvidenceMismatch,
 
-        // Memory (0x03xx): guarded memory and protection failures.
+        // Memory (0x03xx).
         /// The write target address was null.
         NullTargetAddress = 0x0300,
         /// The source byte span was null.
         NullSourceBytes,
         /// The operation size exceeded the permitted bound.
         SizeTooLarge,
-        /// Changing page protection failed.
+        /// The page protection change failed.
         ProtectionChangeFailed,
-        /// Restoring the original page protection failed.
+        /// The restore of the original page protection failed.
         ProtectionRestoreFailed,
         /**
-         * A guarded read faulted. `Error::detail` holds an address inside the requested span that could not be read,
-         * so a span crossing into an unmapped or protected page names that page rather than the span start. It is the
-         * address the copy actually faulted on, which is the first unreadable byte for the small spans a typed read
-         * issues, but need not be for a span wide enough that the platform's `memcpy` touches bytes out of order. A
-         * span refused before any access (below @ref memory::USERSPACE_PTR_MIN, an end that wraps the address space,
-         * or an end past @ref memory::USERSPACE_PTR_MAX), and the MinGW fallback that validates through `VirtualQuery`
-         * instead of faulting, have no faulting byte and report the requested start instead. For @ref memory::walk the
-         * field is the failing hop index, not an address.
+         * @brief A guarded read faulted.
+         * @details `Error::detail` holds the address of the fault, inside the requested span. For the small spans of a
+         *          typed read, it is the first unreadable byte. A wide span can fault out of order in `memcpy`, so a
+         *          later byte can be reported. A span refused before any access reports its start: below
+         *          @ref memory::USERSPACE_PTR_MIN, an end past @ref memory::USERSPACE_PTR_MAX, or an end that wraps.
+         *          The MinGW fallback, which validates through `VirtualQuery` without a fault, also reports the start.
+         *          For @ref memory::walk, the field is the failing hop index, not an address.
          */
         ReadFaulted,
-        /// A guarded in-place write faulted with no byte modified: the target was not writable. Error::detail holds it.
+        /// A guarded write failed before it changed any byte. Error::detail holds the target address.
         WriteFaulted,
         /**
-         * A guarded write faulted after the copy may already have modified a prefix of the span (it reached a writable
-         * page, then faulted on an unwritable or unmapped byte further in). The changed prefix has an unknown length
-         * and can be empty: a fixed-width store retires as one instruction, so a store that straddles a writable page
-         * and an unwritable one faults with no byte changed and still reports this code. No byte outside the requested
-         * span was written. Treat the whole target as indeterminate. @ref WriteFaulted is the stronger result, because
-         * it guarantees that no byte changed. Error::detail holds the target address.
+         * @brief A guarded write reached a writable page, then faulted on an unwritable or unmapped byte further in.
+         * @details The changed prefix of the span has an unknown length and can be empty. A fixed-width store that
+         *          straddles a writable and an unwritable page changes no byte but still reports this code. No byte
+         *          outside the requested span changes. Treat the whole target as indeterminate. Error::detail holds the
+         *          target address.
          */
         WriteMayBePartial,
         /// A code patch wrote its bytes but the instruction-cache flush failed. Error::detail holds the target address.
         InstructionFlushFailed,
         /**
-         * A typed read encountered a byte pattern that is not a valid object representation of the requested type (for
-         * example a foreign byte other than 0 or 1 decoded through @ref memory::read_bool). No value was formed.
-         * Error::detail holds the source address.
+         * @brief A typed read found bytes that are not a valid object representation of the requested type.
+         * @details An example is a byte other than 0 or 1 for @ref memory::read_bool. No value was formed.
+         *          Error::detail holds the source address.
          */
         InvalidRepresentation,
         /**
-         * The caller-supplied buffer or source span intersects the target range. The copy primitives require the two
-         * half-open ranges to be disjoint and refuse an intersecting pair in either direction before any byte moves.
-         * Error::detail holds the target address.
+         * @brief The caller buffer or source span overlaps the target range, in either direction.
+         * @details The copy primitives require disjoint half-open ranges and refuse an overlap before any byte moves.
+         *          Error::detail holds the target address.
          */
         OverlappingRanges,
 
-        // Rtti (0x04xx): reverse identification and healing failures.
-        /// The slot address was null or below the user-mode floor; no read was attempted.
+        // Rtti (0x04xx).
+        /// The slot address was null or below the user-mode floor. No read was attempted.
         BadSlotAddress = 0x0400,
         /// The slot read faulted, or the qword held a null/low value.
         UnreadableSlot,
         /// The slot resolved to neither a pointer-to-object nor a direct object.
         NoRtti,
-        /// The landmark/fingerprint descriptor is malformed; no memory was touched.
+        /// The landmark/fingerprint descriptor is malformed. No memory was touched.
         BadDescriptor,
         /// No slot in the window resolved to the expected type.
         HealNoMatch,
         /// Equidistant slots both match, or fingerprint deltas tied.
         HealAmbiguous,
         /**
-         * A validity-bearing healed-offset slot was not @ref rtti::OffsetValidity::Confirmed for consumption: a
-         * required heal missed (the slot is Invalid) or an optional heal retained an unconfirmed nominal (Unverified).
-         * The value must not authorize a mutation. Consult @ref rtti::HealedSlot::load for the retained value and its
-         * validity.
+         * @brief A healed offset is not confirmed for use.
+         * @details A required heal missed (Invalid), or an optional heal kept an unconfirmed nominal (Unverified).
+         *          The HealedSlot form of @ref rtti::HealRun::heal_into also returns it when the image generation of a
+         *          resolved heal is absent or changed, or its evidence changed. @ref rtti::HealedSlot::authorized also
+         *          rejects a Confirmed slot with a zero or stale generation. The value must not authorize a mutation.
+         *          @ref rtti::HealedSlot::load returns the retained value and its validity.
          */
         OffsetNotConfirmed,
 
-        // Manifest failures (0x05xx).
-        /// The first non-blank line was not the manifest header.
+        // Manifest (0x05xx).
+        /// The `[manifest]` section or its `schema` key is absent, or the schema is unsupported.
         MissingHeader = 0x0500,
-        /// A record line had the wrong field count or an unparseable field.
+        /// A line, key, or value that @ref manifest::parse rejects, as manifest.hpp lists.
         MalformedLine,
-        /// The file could not be opened (missing, locked, denied, or not a regular file).
+        /// The file did not open or read, for example because it is missing, locked, denied, or not a regular file.
         FileOpenFailed,
-        /// The file opened but a subsequent write failed (disk full, an I/O error, or the stream went bad mid-write).
+        /// The file opened but a later write failed, for example on a full disk, an I/O error, or a failed stream.
         FileWriteFailed,
         /**
          * @brief Two section or key identities collide after case folding or exact/whitespace normalization.
-         * @details Fails the whole manifest before parsing or trust evaluation can observe an ambiguous contract.
+         * @details The whole manifest fails before parsing or trust evaluation can observe an ambiguous contract.
          */
         ManifestIdentityCollision = 0x0504,
         /**
-         * @brief A raw manifest frames a multi-line (heredoc) value unsafely: the block is never closed, its opener
-         *        carries an empty tag, or its first body line is its own terminator.
-         * @details Each shape reads differently in the INI backend than any safe model of it, so the value (and every
-         *          section below it) could silently change identity. Checked serialization reports unsafe source
-         *          values as InvalidArg before emitting them.
+         * @brief A raw manifest frames a multi-line (heredoc) value unsafely.
+         * @details The unsafe shapes are an unclosed block, an opener with an empty tag, and a first body line that is
+         *          its own terminator. Checked serialization reports an unsafe source value as InvalidArg before it
+         *          writes the value.
          */
         ManifestFramingUnsafe,
 
-        // Lifecycle (0x06xx): Session / bootstrap process lifecycle
-        /// The running executable did not match ModInfo::game_process_name; the session declined to load (not a fault).
+        // Lifecycle (0x06xx).
+        /// The running executable did not match ModInfo::game_process_name. The session declined to load (not a fault).
         ProcessMismatch = 0x0600,
-        /// The single-instance mutex was already held: another load of this mod is already live in the process.
+        /// The single-instance mutex was already held: another load of this mod is live in the process.
         InstanceAlreadyRunning,
         /// start()/bootstrap() was called while a Session is already active in this process (a caller sequencing bug).
         SessionAlreadyActive,
         /**
          * @brief A system lifecycle operation failed.
-         * @details Error::detail carries GetLastError() unless the function that reports it documents another value.
+         * @details Error::detail holds GetLastError() unless the function that reports it documents another value.
          */
         SystemCallFailed,
         /// A bootstrap lifecycle operation raced a concurrent attach, a drain, or the previous generation's retirement.
@@ -342,30 +318,19 @@ namespace DetourModKit
         /// Loader detach already claimed the bootstrap state, so a synchronous drain can no longer be guaranteed.
         SessionShutdownUnavailable,
         /**
-         * @brief A synchronous bootstrap drain was refused because waiting would block.
-         * @details Either the calling thread may hold the Windows loader lock, or it is the bootstrap worker itself,
-         *          whose exit the drain would otherwise wait for.
+         * @brief A synchronous bootstrap drain was refused because the wait can block.
+         * @details The caller possibly holds the loader lock, or it is the bootstrap worker that the drain waits for.
          */
         SessionShutdownWouldBlock
     };
 
-    /**
-     * @brief Recovers the subsystem category of an ErrorCode from its high byte.
-     * @param code The error code.
-     * @return The ErrorCategory the code belongs to.
-     * @details Pure shift, no lookup table. Every enumerator is based at `category << 8`, so the high byte IS the
-     *          category and cannot drift out of sync with the codes.
-     */
+    /** @brief Returns the @ref ErrorCategory in the high byte of @p code. */
     [[nodiscard]] constexpr ErrorCategory category(ErrorCode code) noexcept
     {
         return static_cast<ErrorCategory>((static_cast<std::uint16_t>(code) >> 8) & 0xFFU);
     }
 
-    /**
-     * @brief Returns a short human-readable label for a subsystem category.
-     * @param value The category.
-     * @return A static string view; "unknown" for an out-of-range value.
-     */
+    /** @brief Returns a static label for @p value, or "unknown" for an out-of-range value. */
     [[nodiscard]] constexpr std::string_view to_string(ErrorCategory value) noexcept
     {
         switch (value)
@@ -388,12 +353,7 @@ namespace DetourModKit
         return "unknown";
     }
 
-    /**
-     * @brief Returns the enumerator name for an ErrorCode.
-     * @param code The error code.
-     * @return A static string view naming the code; "UnknownCode" for an out-of-range value.
-     * @details Every named enumerator is listed, so `-Wswitch` flags a future code added without a label here.
-     */
+    /** @brief Returns the static enumerator name of @p code, or "UnknownCode" for an out-of-range value. */
     [[nodiscard]] constexpr std::string_view to_string(ErrorCode code) noexcept
     {
         switch (code)
@@ -583,51 +543,34 @@ namespace DetourModKit
     }
 
     /**
-     * @struct Error
-     * @brief One trivially copyable failure record: a code plus a static label and two raw context slots.
-     * @details Construction never allocates (it is a plain aggregate of a code, a pointer, and two integers), so an
-     *          Error can be built on the noexcept batch/seed paths where throwing would terminate. Only message()
-     *          allocates. `where` is a `const char *` by strong convention pointing at a static/literal label (e.g.
-     *          "scan", "hook::inline"); that documents intent and keeps the common case dangle-free, but it is a
-     *          convention the type cannot enforce. A caller can still hand it a pointer into a transient buffer, so
-     *          callers must pass only static storage. The two raw slots carry whatever context the raising code
-     *          documents for that ErrorCode (an address, a failing-hop index, a candidate ordinal, ...).
+     * @brief One trivially copyable failure record: a code, a static label, and two raw context slots.
+     * @details Construction never allocates or throws, so noexcept paths can build an Error. Only message() allocates.
+     *          The function that reports the error, or its ErrorCode, documents what `detail` and `extra` hold.
      */
     struct Error
     {
-        /// The failure code; its category names the raising subsystem.
+        /// The failure code. Its category names the subsystem that raised it.
         ErrorCode code{ErrorCode::Ok};
-        /// Static/literal label for the raising site, e.g. "scan" or "hook::inline".
+        /// Label of the site that raised the error, for example "scan". It must point at static storage.
         const char *where{""};
-        /// Primary raw context: address / instruction pointer / failing-hop index, per the code's documentation.
+        /// Primary raw context, for example an address, an instruction pointer, or a failing-hop index.
         std::uintptr_t detail{0};
-        /// Secondary raw context: candidate index / slot / hop count, per the code's documentation.
+        /// Secondary raw context, for example a candidate index, a slot, a hop count, or an OS error.
         std::uint32_t extra{0};
 
-        /**
-         * @brief Composes a single greppable diagnostic line for this error.
-         * @return A formatted string: "[category] CodeName @ where (detail=0x..., extra=...)".
-         * @details The ONLY allocating member. It is never called on a hot path: the noexcept batch paths pre-seed
-         *          their result vectors with Errors and only ever format them later, off the critical section.
-         */
+        /** @brief Formats one greppable line: "[category] CodeName @ where (detail=0x..., extra=...)". */
         [[nodiscard]] std::string message() const;
     };
 
-    // The non-allocating-construction guarantee that the noexcept batch seed relies on is only true while Error stays
-    // trivially copyable (a code, a pointer, two integers). Pin it so a future field with a non-trivial type cannot
-    // silently make Error construction able to throw.
+    // Error construction stays non-throwing only while Error is trivially copyable.
     static_assert(std::is_trivially_copyable_v<Error>, "Error must stay trivially copyable for the noexcept seed.");
 
-    /**
-     * @brief The single fallible-return alias: a value of type @p T on success, an Error on failure.
-     * @tparam T The success type; use `Result<void>` for an operation that returns no value.
-     */
+    /** @brief The fallible return type: a @p T on success, an Error on failure. Use `Result<void>` for no value. */
     template <class T> using Result = std::expected<T, Error>;
 
     inline std::string Error::message() const
     {
-        // Keep the distinctive code name whole and lead with the subsystem so the line stays both human-readable and
-        // greppable by category. An empty/absent label is rendered as "?" rather than a blank gap.
+        // An empty or null label prints as "?".
         const char *label = (where != nullptr && where[0] != '\0') ? where : "?";
         return std::format(
             "[{}] {} @ {} (detail=0x{:X}, extra={})",
@@ -642,13 +585,9 @@ namespace DetourModKit
 } // namespace DetourModKit
 
 /**
- * @def DMK_TRY
- * @brief Unwraps a `Result<T>` into @p var, or returns the propagated Error from the enclosing function.
- * @details The value-binding propagation form. It expands to three statements (bind the result, short-circuit on
- *          failure, move the value out), so it must live in a braced block. It cannot be the sole controlled
- *          statement of a brace-less `if`/`for`. The enclosing function must itself return a `Result`/`std::expected`
- *          so the `std::unexpected(...)` early-return is well-formed. The temporary is named after @p var, so several
- *          DMK_TRY uses in one scope never collide.
+ * @brief Unwraps a `Result<T>` into @p var, or returns its Error from the enclosing function.
+ * @details It expands to three statements, so it cannot be the body of a brace-less `if` or `for`. The enclosing
+ *          function must return a `Result` or `std::expected`. Uses with distinct @p var in one scope do not collide.
  */
 #define DMK_TRY(var, expr)                                                                                             \
     auto &&_r_##var = (expr);                                                                                          \
@@ -657,12 +596,9 @@ namespace DetourModKit
     auto var = std::move(*_r_##var)
 
 /**
- * @def DMK_TRY_VOID
- * @brief Propagates the Error from a `Result<void>` (or any Result whose value is discarded), binding nothing.
- * @details The void form has no value to bind, so it wraps its temporary in a `do { ... } while (0)` block. That
- *          gives it a fresh scope (so nested uses never collide on the temporary name) and makes the whole macro a
- *          single statement that IS safe as the controlled statement of a brace-less `if`/`for`. As with DMK_TRY, the
- *          enclosing function must return a `Result`/`std::expected`.
+ * @brief Propagates the Error from a `Result<void>`, or from any Result whose value is discarded.
+ * @details It expands to one scoped statement, so it is safe as the body of a brace-less `if` or `for`, and nested uses
+ *          do not collide. The enclosing function must return a `Result` or `std::expected`.
  */
 #define DMK_TRY_VOID(expr)                                                                                             \
     do                                                                                                                 \

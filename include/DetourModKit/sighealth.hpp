@@ -4,26 +4,10 @@
 /**
  * @file sighealth.hpp
  * @brief Offline signature-health analysis: score a signature's robustness before it runs against a game.
- * @details Everything here is offline and side-effect-free under `[B-57]`. It touches no process memory, spawns no
- *          worker, and needs no running game. It reads the compiled @ref scan::Pattern bytes and the
- *          @ref manifest::SignatureRecord fields and returns a report. Health never gates runtime behavior.
- *
- *          Three axes drive the metric findings. @ref Grade derives from the worst finding present, structural
- *          defects included:
- *          - Atom rarity, over each maximal run of fully-known bytes, scored against the scan engine's own frequency
- *            table (@ref DetourModKit::detail::byte_frequency_class), so the grade matches the byte the engine
- *            anchors on.
- *          - Byte entropy, which catches a long low-information run such as `90 90 90 90`.
- *          - Expected ambiguity, an order-of-magnitude estimate of the false matches a pattern draws in a nominal
- *            module (@ref HealthPolicy::nominal_haystack_bytes) under an independent-byte model. It is a heuristic,
- *            not a guarantee. The runtime resolver still verifies uniqueness.
- *
- *          @ref analyze_pattern grades one @ref scan::Pattern, @ref analyze_candidate one ladder rung,
- *          @ref analyze_record one @ref manifest::SignatureRecord, and @ref analyze_manifest a whole file. Each level
- *          yields a @ref Grade and a list of @ref Finding values that name what is weak. The @ref format_report
- *          overloads render a report for a tool or a log.
- * @warning `[B-100]` Analysis and report format can allocate, so run them only off the loader lock. The to_string
- *          value maps are safe there.
+ * @details `[B-57]` The analysis is offline and side-effect-free. It reads only the compiled @ref scan::Pattern bytes
+ *          and the @ref manifest::SignatureRecord fields, touches no process memory, and starts no worker. Health
+ *          never gates runtime behavior. docs/guides/scanning/signature-health.md explains the quality axes.
+ * @warning `[B-100]` Every function except `to_string` can allocate. Call only `to_string` under the loader lock.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -40,38 +24,25 @@ namespace DetourModKit
 {
     namespace sighealth
     {
-        /**
-         * @enum Severity
-         * @brief The concern level of a single @ref Finding, ordered least to most.
-         * @details There is no informational tier. Every @ref Finding names a real weakness, so a clean report holds
-         *          no findings at all and grades @ref Grade::Robust.
-         */
+        /** @brief The concern level of a @ref Finding, ordered least to most. */
         enum class Severity : std::uint8_t
         {
-            /// A real weakness: the signature works today but is brittle or weakly selective and needs a review.
+            /// The signature works today but is brittle or weakly selective, so it needs a review.
             Warning,
-            /// A structural defect: the signature cannot anchor reliably (no fixed byte, empty text, will not compile).
+            /// A structural defect (no fixed byte, empty text, failed compile) or effectively non-unique selectivity.
             Critical
         };
 
-        /**
-         * @enum FindingKind
-         * @brief The specific health issue a @ref Finding names. Each maps to one actionable authoring fix.
-         * @details The three quality axes (atom rarity, entropy, expected ambiguity) surface as @ref CommonBytesOnly /
-         *          @ref ShortestAnchorRun, @ref LowByteEntropy, and @ref WeakSelectivity respectively; the rest are the
-         *          structural checks that make those axes actionable. Several kinds can fire on one signature at once
-         *          (a short, over-wildcarded, common-byte pattern trips three), which is intentional: each names a
-         *          distinct reason and a distinct fix.
-         */
+        /** @brief The specific health issue a @ref Finding names. Several kinds can fire on one signature. */
         enum class FindingKind : std::uint8_t
         {
-            /// The byte pattern has no fully-known byte to anchor on, forcing a masked compare at every position.
+            /// The byte pattern has no fully-known byte to anchor on, so every position needs a masked compare.
             NoFixedAnchor,
             /// A byte-tier rung's AOB string failed to compile (malformed, empty, or over the inline-storage cap).
             UncompilablePattern,
             /// The pattern is shorter than the recommended byte floor, so it is unlikely to be unique.
             ShortPattern,
-            /// The longest run of consecutive fully-known bytes (the memchr atom) is short, weakening the prefilter.
+            /// The longest run of consecutive fully-known bytes (the memchr atom) is short and weakens the prefilter.
             ShortestAnchorRun,
             /// Every fully-known byte is a high-frequency opcode or padding, so a long atom is still a poor anchor.
             CommonBytesOnly,
@@ -79,63 +50,39 @@ namespace DetourModKit
             HighWildcardRatio,
             /// The fully-known bytes are repetitive (low Shannon entropy): long in bytes but low in information.
             LowByteEntropy,
-            /// The estimated false-match count in a nominal module is high; the pattern is weakly selective.
+            /// The expected-match estimate is high, so the pattern is weakly selective.
             WeakSelectivity,
-            /// A text anchor (string-xref literal or vtable mangled name) is empty and cannot resolve anything.
+            /// A text anchor (string-xref literal, mangled name, or export name) is empty and cannot resolve anything.
             EmptyAnchorText,
-            /// A text anchor is short enough that it may not be unique in the image (a common literal, a bare name).
+            /// A string-xref literal is short enough to collide with another literal in the image.
             ShortAnchorText,
-            /// A Manual pinned literal cannot self-heal across a game patch; it will silently go stale.
+            /// A Manual pinned literal cannot self-heal across a game patch, so it silently goes stale.
             UnhealableManual,
-            /// The record's kind (Quorum / CallArgHome) is not file-serializable and cannot live in a manifest record.
+            /// The record's kind (Quorum, CallArgHome, or Unset) cannot live in a manifest record.
             NonSerializableKind,
             /// No rung in a candidate ladder graded Robust, so the record has no strong tier to fall back on.
             NoRobustRung,
-            /**
-             * @brief The record as a whole fails @ref manifest::Signature::compile (a malformed RIP-relative rung
-             *        layout, an out-of-range page class, or a non-serializable kind), so the trust gate could never
-             *        build it however strong a single rung looks in isolation.
-             */
+            /// The record fails @ref manifest::Signature::compile and no other finding already graded it Unusable.
             UncompilableRecord,
             /**
-             * @brief A RIP-relative rung fixes a byte of its declared disp32.
-             * @details The check covers directly mapped segment-0 pattern bytes.
-             *          The displacement can change on a relink.
-             *          A fixed full byte or nibble can then cause a mismatch.
-             *          Each covered displacement byte needs a wildcard.
-             *          The check stops at the first bounded jump.
+             * @brief A RIP-relative rung fixes a byte or nibble of its declared disp32, which a relink can change.
+             * @details The check covers only the bytes before the first bounded jump. Use `??` for each disp32 byte.
              */
             VolatileDisplacementBytes
         };
 
-        /**
-         * @enum Grade
-         * @brief The overall robustness verdict for a pattern, rung, record, or manifest.
-         * @details Derived from the worst @ref Severity present: any @ref Severity::Critical finding yields
-         *          @ref Unusable, any @ref Severity::Warning yields @ref Fragile, and a clean report yields
-         *          @ref Robust.
-         *          A byte record starts from its first declared rung because static lint cannot know whether that rung
-         *          will resolve uniquely in the live scope; that first-rung verdict is only the starting point, since
-         *          record-level findings and the whole-record compilability ceiling can only worsen it (flooring an
-         *          uncompilable record to @ref Unusable), never raise it. A manifest grades by its weakest record.
-         */
+        /** @brief A robustness verdict. The worst finding decides a pattern or rung grade. See @ref analyze_record. */
         enum class Grade : std::uint8_t
         {
-            /// Selective and resilient: ship it.
+            /// A pattern or rung with no finding: the signature is selective and resilient, so ship it.
             Robust,
-            /// Resolves today but brittle or weakly selective: review before shipping.
+            /// A pattern or rung whose worst finding is a Warning: review the signature before you ship it.
             Fragile,
-            /// Cannot anchor reliably: no fixed byte, empty text, will not compile, or effectively non-unique.
+            /// A pattern or rung whose worst finding is Critical: the signature cannot anchor reliably.
             Unusable
         };
 
-        /**
-         * @struct Finding
-         * @brief One health issue: what is wrong (@ref kind) and how much it matters (@ref severity).
-         * @details Deliberately data-only and trivially copyable: the specific numbers (byte counts, entropy, expected
-         *          matches) live in the surrounding report struct, so a finding stays a cheap (kind, severity) tag that
-         *          @ref to_string names and @ref format_report renders against those numbers.
-         */
+        /** @brief One health issue: what is wrong (@ref kind) and how much it matters (@ref severity). */
         struct Finding
         {
             /// The specific issue.
@@ -144,31 +91,20 @@ namespace DetourModKit
             Severity severity = Severity::Warning;
         };
 
-        /**
-         * @struct HealthPolicy
-         * @brief The thresholds the analysis grades against. Defaults target a large, fast-patching game module.
-         * @details A plain value with no global state, so an author can hold one policy per game or per feature (a
-         *          small helper DLL scanned inside a 4 MiB module tolerates a looser floor than a signature scanned
-         *          inside a 200 MiB game). Every threshold is a documented lint knob, not a hard runtime limit:
-         *          relaxing one only changes which findings fire, never what the resolver accepts.
-         */
+        /** @brief The grading thresholds. Defaults target a large game module that patches often. */
         struct HealthPolicy
         {
-            /**
-             * @brief The module size, in bytes, the expected-ambiguity estimate models. A larger value is stricter: a
-             *        bigger haystack draws more false matches for the same pattern. The default models a large game's
-             *        executable pages.
-             */
+            /// Module size in bytes that the expected-match estimate models. A larger value is stricter.
             std::size_t nominal_haystack_bytes = 64u * 1024u * 1024u;
             /// A byte pattern shorter than this trips @ref FindingKind::ShortPattern.
             std::size_t min_pattern_bytes = 5;
-            /// A longest fully-known run shorter than this trips @ref FindingKind::ShortestAnchorRun.
+            /// A non-empty longest fully-known run shorter than this trips @ref FindingKind::ShortestAnchorRun.
             std::size_t min_longest_atom = 4;
-            /// A text anchor (string literal / mangled name) shorter than this trips @ref FindingKind::ShortAnchorText.
+            /// A non-empty string-xref literal shorter than this trips @ref FindingKind::ShortAnchorText.
             std::size_t min_anchor_text_bytes = 5;
             /// A full-wildcard fraction above this trips @ref FindingKind::HighWildcardRatio.
             double max_wildcard_ratio = 0.6;
-            /// Fully-known byte entropy below this (given enough fixed bytes) trips @ref FindingKind::LowByteEntropy.
+            /// Below this, @ref FindingKind::LowByteEntropy trips once a pattern has enough fully-known bytes to judge.
             double min_byte_entropy_bits = 1.5;
             /// An expected-match estimate above this trips a @ref Severity::Warning @ref FindingKind::WeakSelectivity.
             double warn_expected_matches = 1.0;
@@ -176,46 +112,28 @@ namespace DetourModKit
             double fail_expected_matches = 32.0;
         };
 
-        /**
-         * @struct PatternHealth
-         * @brief The static analysis of one @ref scan::Pattern: its byte composition, selectivity, and findings.
-         * @details All counts are over the compiled pattern's positions. The headline signals are @ref longest_atom
-         *          (atom rarity, with @ref common_bytes_only), @ref byte_entropy_bits (entropy), and
-         *          @ref expected_matches (ambiguity). @ref findings names every threshold the pattern crossed and
-         *          @ref grade rolls them up.
-         */
+        /** @brief The static analysis of one @ref scan::Pattern. Counts cover the compiled pattern's positions. */
         struct PatternHealth
         {
-            /// Total bytes in the pattern.
+            /// Number of positions, as @ref scan::Pattern::size reports it (gap bytes excluded).
             std::size_t length = 0;
             /// Positions with a fully-known byte (mask 0xFF).
             std::size_t fixed_bytes = 0;
-            /// Positions with a single fixed nibble (mask 0xF0 or 0x0F).
+            /// Positions with one known nibble (mask 0xF0 or 0x0F).
             std::size_t nibble_bytes = 0;
             /// Positions that match any byte (mask 0x00).
             std::size_t wildcard_bytes = 0;
-            /**
-             * @brief Number of maximal runs of consecutive fully-known bytes.
-             * @details A bounded jump ends an atom.
-             *          The matcher treats each segment separately.
-             */
+            /// Number of maximal runs of consecutive fully-known bytes. A bounded jump ends an atom.
             std::size_t atom_count = 0;
-            /// Length of the longest such run (the atom a byte prefilter can actually search for).
+            /// Length of the longest such run.
             std::size_t longest_atom = 0;
             /// Fraction of positions that are full wildcards, in [0, 1].
             double wildcard_ratio = 0.0;
-            /**
-             * @brief Estimated selectivity in bits: the sum over all positions of how much each constrains a match. A
-             *        rare fixed byte contributes up to 8 bits, a common one fewer, a fixed nibble 4, a wildcard 0.
-             */
+            /// Selectivity in bits: at most 8 per fully-known byte (fewer if common), 4 per nibble, 0 per wildcard.
             double selectivity_bits = 0.0;
-            /// Shannon entropy in bits over the distribution of fully-known byte VALUES (0 when there are none).
+            /// Shannon entropy in bits over the fully-known byte values, or 0 when there are none.
             double byte_entropy_bits = 0.0;
-            /**
-             * @brief Estimated number of false matches in a haystack of @ref HealthPolicy::nominal_haystack_bytes,
-             *        `nominal_haystack_bytes * 2^(-selectivity_bits)`. A heuristic order-of-magnitude figure, not a
-             *        guarantee.
-             */
+            /// Heuristic expected-match estimate, not a guarantee. The signature-health guide owns the formula.
             double expected_matches = 0.0;
             /// True when every fully-known byte is a high-frequency opcode or padding (low atom rarity).
             bool common_bytes_only = false;
@@ -225,24 +143,16 @@ namespace DetourModKit
             Grade grade = Grade::Robust;
         };
 
-        /**
-         * @struct CandidateHealth
-         * @brief The health of one candidate-ladder rung, byte tier or text tier.
-         * @details A ladder rung (@ref manifest::CandidateSpec) resolves through one of the four @ref scan::Mode tiers.
-         *          The two byte tiers (Direct, RipRelative) are graded by @ref pattern; the two text tiers (RttiVtable,
-         *          StringXref) have no byte pattern and are graded by @ref anchor_text_bytes and the text findings.
-         *          @ref grade exposes the rung roll-up for either tier.
-         *          Callers can inspect @ref pattern when they need byte metrics.
-         */
+        /** @brief One rung's health: byte tier (Direct, RipRelative) or text tier (RttiVtable, StringXref). */
         struct CandidateHealth
         {
             /// Which resolution tier this rung uses.
             scan::Mode mode = scan::Mode::Direct;
-            /// Byte tiers only: false when the rung's AOB string failed to compile. Always true for the text tiers.
+            /// False when a byte-tier rung's AOB string failed to compile. Always true for a text tier.
             bool compiled = true;
             /// Byte tiers: the compiled pattern's analysis. Text tiers: default-constructed (length 0).
             PatternHealth pattern;
-            /// Text tiers: the anchor literal / mangled-name length in bytes. 0 for the byte tiers.
+            /// Text tiers: the anchor text length in bytes. 0 for the byte tiers.
             std::size_t anchor_text_bytes = 0;
             /// The rung findings. A byte tier also reports pattern and rung-layout findings.
             std::vector<Finding> findings;
@@ -250,29 +160,20 @@ namespace DetourModKit
             Grade grade = Grade::Robust;
         };
 
-        /**
-         * @struct RecordHealth
-         * @brief The health of one @ref manifest::SignatureRecord: its ladder or text anchor, plus record findings.
-         * @details Which fields are meaningful depends on @ref kind, exactly as it does on the record itself. A byte
-         *          backend (RipGlobal / CodeOperand) starts from its first @ref ladder rung; a text backend
-         *          (StringXref / VtableIdentity) starts from @ref anchor_text_bytes. That starting verdict is then a
-         *          ceiling only: record-level @ref findings and @ref manifest::Signature::compile can worsen @ref grade
-         *          (flooring an uncompilable record to @ref Grade::Unusable), never raise it. @ref label is owned by
-         *          the report, and per-rung findings remain available in @ref ladder.
-         */
+        /** @brief The health of one @ref manifest::SignatureRecord. @ref analyze_record owns the grade rule. */
         struct RecordHealth
         {
             /// The signature's key.
             std::string label;
             /// Which anchor backend the record uses, and therefore which fields below are meaningful.
             anchor::AnchorKind kind = anchor::AnchorKind::RipGlobal;
-            /// Byte backends: one entry per ladder rung, in file order. Empty for text / Manual backends.
+            /// Byte backends (RipGlobal, CodeOperand): one entry per rung, in file order. Empty for other backends.
             std::vector<CandidateHealth> ladder;
-            /// Text backends: the string literal / mangled-name length in bytes. 0 otherwise.
+            /// Text backends (StringXref, VtableIdentity, ExportName): the anchor text length in bytes. 0 otherwise.
             std::size_t anchor_text_bytes = 0;
-            /// The strongest rung's selectivity in bits (byte backends); 0 for text / Manual backends.
+            /// Selectivity bits of the compiled byte-tier rung with the lowest expected-match estimate, or 0 if none.
             double best_selectivity_bits = 0.0;
-            /// The strongest rung's expected-match estimate (byte backends); 0 for text / Manual backends.
+            /// The lowest expected-match estimate among the compiled byte-tier rungs, or 0 if none.
             double best_expected_matches = 0.0;
             /// How many ladder rungs graded @ref Grade::Robust.
             std::size_t robust_rungs = 0;
@@ -282,14 +183,7 @@ namespace DetourModKit
             Grade grade = Grade::Robust;
         };
 
-        /**
-         * @struct ManifestHealth
-         * @brief The health of a whole @ref manifest::Manifest: per-record reports plus a grade tally.
-         * @details @ref records mirrors the manifest's records in file order and owns each copied label. @ref grade is
-         *          the weakest record's grade, because each signature gates its own feature, so a single Unusable
-         *          signature makes the file only as trustworthy as that signature even if every other one is Robust.
-         *          The three counters partition @ref records by grade for a one-line summary.
-         */
+        /** @brief The health of a whole @ref manifest::Manifest: per-record reports plus a grade tally. */
         struct ManifestHealth
         {
             /// Per-record health, in file order.
@@ -306,96 +200,72 @@ namespace DetourModKit
 
         /**
          * @brief Grades one compiled byte pattern's robustness.
-         * @param pattern The compiled pattern (from @ref scan::Pattern::compile or @ref scan::Pattern::literal).
-         * @param policy The grading thresholds.
-         * @return The pattern's composition, selectivity, entropy, expected-match estimate, findings, and grade.
-         * @note Setup/control-plane only: it allocates the findings vector, so it is not noexcept. It reads no process
-         *       memory and needs no game running.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] PatternHealth analyze_pattern(const scan::Pattern &pattern, const HealthPolicy &policy = {});
 
         /**
-         * @brief Grades one candidate-ladder rung, compiling its byte pattern or measuring its text anchor by tier.
-         * @param spec The rung to grade.
-         * @param policy The grading thresholds.
-         * @return The rung's tier-appropriate health. A byte tier whose AOB fails to compile reports
-         *         @ref FindingKind::UncompilablePattern and grades @ref Grade::Unusable rather than throwing.
-         * @note Setup/control-plane only: allocates, reads no process memory.
+         * @brief Grades one ladder rung. An uncompilable byte-tier AOB grades @ref Grade::Unusable and does not throw.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] CandidateHealth
         analyze_candidate(const manifest::CandidateSpec &spec, const HealthPolicy &policy = {});
 
         /**
          * @brief Grades one signature record: its ladder (byte backends) or its text anchor (text backends).
-         * @param record The record to grade.
-         * @param policy The grading thresholds.
-         * @return The record's health. The verdict starts from the first declared rung (byte backends) or the
-         *         anchor-text length (text backends); a Manual pin and non-serializable kinds report a record-level
-         *         finding; record-level findings and @ref manifest::Signature::compile then apply a ceiling that can
-         *         only worsen it, flooring an uncompilable record to @ref Grade::Unusable.
-         * @note Setup/control-plane only: allocates, reads no process memory.
+         * @details A byte record starts from its first declared rung. A text record starts from its anchor text length.
+         *          Record-level findings and @ref manifest::Signature::compile can only worsen that grade. A record
+         *          that does not compile grades @ref Grade::Unusable.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] RecordHealth
         analyze_record(const manifest::SignatureRecord &record, const HealthPolicy &policy = {});
 
         /**
-         * @brief Grades a whole manifest, record by record, and rolls the results into a manifest verdict.
-         * @param manifest The parsed manifest (from @ref manifest::parse or @ref manifest::load).
-         * @param policy The grading thresholds.
-         * @return The per-record health plus the grade tally; @ref ManifestHealth::grade is the weakest record's grade.
-         * @note Setup/control-plane only: allocates, reads no process memory.
+         * @brief Grades a whole manifest record by record and rolls the results into a manifest verdict.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] ManifestHealth
         analyze_manifest(const manifest::Manifest &manifest, const HealthPolicy &policy = {});
 
         /**
-         * @brief Maps a @ref Severity to a short human-readable label.
-         * @param severity The severity.
-         * @return A static string view naming it.
+         * @brief Maps a @ref Severity to a short label with static storage.
          * @note Callback-safe: pure value map, no allocation.
          */
         [[nodiscard]] std::string_view to_string(Severity severity) noexcept;
 
         /**
-         * @brief Maps a @ref FindingKind to a short human-readable description of the issue.
-         * @param kind The finding kind.
-         * @return A static string view describing it.
+         * @brief Maps a @ref FindingKind to a short description with static storage.
          * @note Callback-safe: pure value map, no allocation.
          */
         [[nodiscard]] std::string_view to_string(FindingKind kind) noexcept;
 
         /**
-         * @brief Maps a @ref Grade to a short human-readable label.
-         * @param grade The grade.
-         * @return A static string view naming it.
+         * @brief Maps a @ref Grade to a short label with static storage.
          * @note Callback-safe: pure value map, no allocation.
          */
         [[nodiscard]] std::string_view to_string(Grade grade) noexcept;
 
         /**
          * @brief Renders one pattern's health as a multi-line lint report.
-         * @param health The analyzed pattern.
-         * @param label An optional caption for the pattern (e.g. the rung name); rendered when non-empty.
-         * @return A human-readable report: the grade, the byte composition, the selectivity and expected-match figures,
-         *         and one line per finding.
-         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
+         * @param label An optional caption, for example the rung name. The report omits an empty label.
+         * @return The grade, the measured counts and figures, and one line per finding.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] std::string format_report(const PatternHealth &health, std::string_view label = {});
 
         /**
          * @brief Renders one signature record's health as a multi-line lint report.
-         * @param health The analyzed record.
-         * @return A human-readable report: the record label, kind, grade, the strongest rung's figures, and the
-         *         per-rung and record-level findings.
-         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
+         * @return The label, kind, and grade, the strongest byte rung's figures or the anchor text length, each rung's
+         *         grade and findings, and the record-level findings.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] std::string format_report(const RecordHealth &health);
 
         /**
          * @brief Renders a whole manifest's health as a multi-line lint report.
-         * @param health The analyzed manifest.
-         * @return A human-readable report: the grade tally, the manifest verdict, and one section per record.
-         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
+         * @return A first line with the manifest grade and the record count per grade, then one section per record.
+         * @note Setup/control-plane only: it allocates.
          */
         [[nodiscard]] std::string format_report(const ManifestHealth &health);
     } // namespace sighealth

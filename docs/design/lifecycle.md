@@ -16,6 +16,8 @@ Every such leak must meet these terms:
 - The reference releases after a clean off-loader-lock join (`detail::release_module_ref`, or `FreeLibraryAndExitThread` for the raw bootstrap worker). On a loader-lock detach it is left outstanding.
 - Do not take the reference from the detach path itself. The loader refuses to reference a module whose refcount already reached zero and unloads. See the `Hook` / `VmtHook` handle destructors, the bootstrap worker in `session.cpp`, and `Logger::shutdown_internal`.
 
+`detail::blocking_teardown_permitted()` lets a teardown block only when the loader-lock probe does not veto and the caller is authorized. The published loader phase `Normal` or `ExplicitDrain` authorizes every thread, and the worker identity authorizes the bootstrap worker in every phase.
+
 Mid-route continuation ownership, process coordination, and retention reside in the [hook note](hooking.md). XInput chain and pair attribution reside in the [input note](input.md).
 
 ## Loader-lock proof inventory
@@ -38,7 +40,7 @@ Mid-route continuation ownership, process coordination, and retention reside in 
 - `Lifecycle.GuardedReadDrainSkipsAtProcessExit` and `Lifecycle.GuardedReadLockSkipsAtProcessExit` prove the [`shutdown_cache` exit contract](../../include/DetourModKit/memory.hpp).
 - `Lifecycle.DiagnosticsTlsIndexLoaderShutdownSkipsTheRelease` proves the native loader-state check without a published exit context.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
-- `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs.
+- `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs. The exact-case `memory::is_module_loaded` request fails closed under the loader lock because it requires a counted module reference.
 - `RegionLoaderBoundary.*` pins the Region boundary: allocation-free value operations, the loader-backed factories, and the loader-free `whole_process()`.
 - `RttiLoaderBoundary.*` pins the RTTI boundary.
 - `RttiDissectLoaderBoundary.*` pins the RTTI dissect boundary.
@@ -53,7 +55,7 @@ Mid-route continuation ownership, process coordination, and retention reside in 
 
 A reference requested from a `DLL_PROCESS_DETACH` or unload path is a no-op. After `FreeLibrary` drives the refcount to zero, the loader commits to the unmap and refuses to pin or reference the module.
 
-- Take the reference before the thread can run: `detail::acquire_module_ref(reason)` in `StoppableWorker`, the input poller, the async-logger writer, the memory-cache cleanup thread, and the bootstrap worker. For a hook or callback (`Hook` / `VmtHook`), take it before publication.
+- Take the reference before the thread can run. `StoppableWorker`, the input poller, the async-logger writer, and the memory-cache cleanup thread use `detail::acquire_module_ref(reason)`. The bootstrap worker uses `detail::try_acquire_module_ref(reason)`. For a hook or callback (`Hook` / `VmtHook`), take it before publication.
 - On a clean off-loader-lock teardown, release it after the join (`detail::release_module_ref(module, reason)`, or `FreeLibraryAndExitThread` for the raw bootstrap worker, so no code runs after the release).
 - On a loader-lock detach, leave it outstanding so the module stays mapped for the leaked thread.
 - Every acquire and release carries a `diagnostics::ModulePinReason`, so `diagnostics::module_pin_count` reports the open references per reason. A `FreeLibraryAndExitThread` self-release decrements its reason first. The pin tests listed in [docs/tests/README.md](../tests/README.md) prove the routed reasons.
@@ -105,7 +107,7 @@ A close is legal only once no live thread can still be inside the use. That is e
 - Never free it with a nonzero in-flight count.
 - Never join while you hold a mutex that the worker needs.
 - Never restore a prologue when a newer layer still chains through it.
-- Check `HookLedger::newer_live_count` before `Hook::~Hook` touches backend memory.
+- Check the newer-live count that `HookLedger::acquire_target_slot` returns before `Hook::~Hook` touches backend memory.
 - If a newer layer remains live, retain the older backend and keep the target tracked as hooked.
 - Preallocate the aligned XInput retention cell before hook publication.
 - If the 10 ms XInput drain expires, transfer the hooks and keepalives into that cell.
@@ -144,7 +146,9 @@ A failed engine cache rebuild that clears the name index never lets a named drai
 
 With those preconditions met, `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DMK worker callable remains. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` never authorize `FreeLibrary`.
 
-The legacy void `on_logic_dll_unload*` functions are best-effort abandon wrappers only. Under the loader lock they close admission without a wait, a join, or a destroy of consumer callable storage. A timed-out transaction leaves input admission closed with the rundown pending but releases transaction ownership, so an off-loader retry can finish. Only a retry that completes the drain clears the pending state. `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload`, and `input().start()` re-arms it only after such a drain. Session teardown does not (`InputLifecycleProof.TimedOutDrainCannotBeReopenedByAnAdmittedStart`, `SessionHotReload.ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin`).
+If `detail::blocking_teardown_permitted()` returns true, the void `on_logic_dll_unload*` functions call `prepare_logic_dll_unload*` with the default deadline and discard the status. They are best-effort wrappers and never authorize `FreeLibrary`. If `detail::blocking_teardown_permitted()` returns false, they close input admission and disable config reloads without a wait, a join, or a destroy of consumer callable storage.
+
+A timed-out transaction leaves input admission closed with the rundown pending but releases transaction ownership, so an off-loader retry can finish. Only a retry that completes the drain clears the pending state. `prepare_logic_dll_unload*` reopens admission when it reports `SafeToUnload` (`SessionHotReload.ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin`). Session teardown does not reopen it. While a drain is pending, `input().start()` returns `ShutdownInProgress` and does not reopen admission. After an `input().prepare_logic_dll_unload*` retry returns `Drained`, `input().start()` reopens admission (`InputLifecycleProof.TimedOutDrainCannotBeReopenedByAnAdmittedStart`).
 
 ### [B-90]
 

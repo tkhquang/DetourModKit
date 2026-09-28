@@ -3,7 +3,7 @@
 
 /**
  * @file math.hpp
- * @brief Provides basic mathematical utility functions.
+ * @brief Converts angles between degrees and radians.
  */
 #include <numbers>
 

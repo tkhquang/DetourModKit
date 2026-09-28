@@ -1,6 +1,6 @@
 # Error Handling (`error.hpp`)
 
-DetourModKit uses a two-tier error model, not a uniform one. This guide shows how to consume both tiers. The full `ErrorCode` list and the per-code `Error::detail` meanings live in [`error.hpp`](../../include/DetourModKit/error.hpp), which is the source of truth.
+DetourModKit uses a two-tier error model, not a uniform one. This guide shows how to consume both tiers. [`error.hpp`](../../include/DetourModKit/error.hpp) owns the full `ErrorCode` list and the code meanings.
 
 ## The two tiers
 
@@ -9,7 +9,7 @@ DetourModKit uses a two-tier error model, not a uniform one. This guide shows ho
 **Best-effort tier.** Deliberately best-effort and query surfaces return `bool`, `std::optional`, or `void` by design and never surface an `Error`:
 
 - the RTTI query API (`type_name_of`, `vtable_is_type`, `region_has_rtti`),
-- config load, reload, and bind (an absent or malformed key falls back to its registered default, see `config.hpp`),
+- config load, reload, and bind (an absent key or a malformed int, float, or bool value falls back to its registered default, see `config.hpp`),
 - `EventDispatcher::emit_safe` (`emit` lets handler exceptions propagate).
 
 A best-effort surface documents its non-`Result` return in its header. Do not assume uniformity across the two tiers. [Public API](../design/public-api.md) owns the exception-use rule.
@@ -56,8 +56,8 @@ DetourModKit::Result<void> load_signatures(const std::filesystem::path &path)
 | --- | --- |
 | `code` | The `ErrorCode`. Its high byte names the raising subsystem. |
 | `where` | A static label for the raising site, `"scan"` or `"hook::inline"` for example. |
-| `detail` | Primary raw context: an address, instruction pointer, or failing-hop index, per the code's documentation. |
-| `extra` | Secondary raw context: a candidate index, slot, or hop count, per the code's documentation. |
+| `detail` | Primary raw context, for example an address, a failed hop index, or a `GetLastError()` value. |
+| `extra` | Secondary raw context, for example an OS error or a pattern parse status. |
 
 `err.message()` composes one greppable diagnostic line, `[category] CodeName @ where (detail=0x..., extra=...)`. It is the only allocating member, so call it off a hot path.
 
@@ -95,7 +95,7 @@ if (!opened && opened.error().code == dmk::ErrorCode::SystemCallFailed)
 }
 ```
 
-Other codes document their own `detail` meaning at the enumerator. A guarded read fault carries the faulting address, a pointer-chain walk carries the failing-hop index, and a resolve carries a candidate ordinal. Read the `error.hpp` doc comment for the code you handle before you interpret `detail`.
+Before you interpret `detail` or `extra`, read the doc comment of the called function and of the enumerator. For example, `memory::ProtectGuard::make` puts the OS error of a failed protection change in `Error::extra`.
 
 ## Related
 

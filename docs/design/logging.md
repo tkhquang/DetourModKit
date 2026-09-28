@@ -17,11 +17,13 @@ Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded i
 - `shutdown_internal` retires a writer that a `configure` and `enable_async_mode` pair publishes inside its dropped-mutex window. It never closes a sink that a detached writer still owns (`LoggerTest.ShutdownKeepsTheSinkForAWriterDetachedInsideTheGap`). `[B-48]` in [lifecycle.md](lifecycle.md) owns the rule.
 - `enable_async_mode` is noexcept and fail-soft. A refused activation leaves synchronous delivery and releases the unpublished writer's retention root. A committed activation stays published. `LoggerTest.PostPublicationThrowIsContainedAndKeepsThePublishedWriter` and `LoggerTest.NonStandardThrowBeforePublicationIsContainedAndBreaksTheRoot` prove the boundary.
 - `set_log_level` uses a private route that bypasses the level filter. A stricter threshold cannot hide its transition record. `LoggerTest.SetLogLevel_ChangedThresholdsEmitInfoControlRecord` proves the contract.
-- `dropped_count()` aggregates facade and async drops as best-effort observability.
+- `dropped_count()` aggregates facade and async drops as best-effort observability. A failed async write batch counts in full, because the stream exposes no complete-record durability boundary.
 
 Hot-path mechanism: The `log()` level check costs one atomic load.
 
 Formatted records apply one `LogSourceStampMode` policy. `always()` retains every stamp. `at_or_below(level)` retains stamps from Trace through that level. `never()` removes every stamp. The default uses `at_or_below(Debug)`, so the default Info admission produces no stamped records. The policy does not change record admission or the raw record tier. Each formatted path reads one relaxed atomic value before line format.
+
+`LocatedFormat` captures the call site in the format-string argument, because a defaulted `std::source_location` parameter cannot follow a deduced argument pack.
 
 ### AsyncLogger
 

@@ -86,9 +86,11 @@ std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
 }
 ```
 
-The first successful call walks RTTI for every non-null slot and caches the matching vtable address and image generation. A warm call reads the image-generation token twice, once before the slot sweep and once before it returns, and compares qwords in between. If the image changed or no slot carries the cached vtable, the function clears the stale identity, performs one cold RTTI pass, and refreshes the cache on a match. Dedicate each cache instance to one expected name and call `reset()` when the owner already knows its module lifecycle changed.
+The first successful call walks RTTI for each slot with a readable object and vtable pointer, up to the first match. It caches the matching vtable address, image base, and image generation. A warm call reads the image-generation token twice, once before the slot sweep and once before it returns, and compares qwords in between. If the image changed or no slot carries the cached vtable, the call runs a cold RTTI pass. A verified match refreshes the cache, and a miss clears it. The refresh checks the type again between two equal generation reads, so a mapping transition cannot attach a new generation to an old vtable.
 
-The raw `std::atomic<Address>*` overload remains source-compatible, but it cannot carry an image generation. Clear that atomic at lifecycle boundaries. To disable caching, pass `nullptr`. To support tables that interleave per-slot metadata between pointers, pass a larger `stride`.
+When another cache writer, such as `reset()`, runs during the call, the call drops its own cache update and still returns its lookup result. Dedicate each cache instance to one expected name and call `reset()` when the owner already knows its module lifecycle changed.
+
+The raw `std::atomic<Address>*` overload cannot carry an image generation. Clear that atomic at lifecycle boundaries. To disable caching, pass `nullptr`. To support tables that interleave per-slot metadata between pointers, pass a larger `stride`.
 
 ### Zero-allocation logging
 
@@ -144,7 +146,9 @@ bool is_combat_camera(dmk::Address obj) noexcept
 
 Scope to one `Region` (the default is the host EXE) is load-bearing for correctness, not only ergonomics. The same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
 
-A successful resolve is cached and stamped with the resolving module's image generation (`rtti::image_generation`, derived from its base, `SizeOfImage`, PE timestamp, and section-table digest). Those are the same fields `scan::image_identity` folds, so a replacement whose section layout differs still reads as a different image when base, size, and timestamp are preserved. Publication checks the generation before and after the sweep, so a mapping transition cannot attach a new stamp to an old result. Every warm call re-validates that stamp. A changed image drops the stale value, refreshes the full module extent, and re-resolves against the current mapping. This is layout identity, not content identity. A replacement that preserves all folded PE fields while it changes only section bytes remains invisible. Call `invalidate()` to force a cold resolve immediately. A private-buffer scope carries generation `0` and must be reset explicitly. Misses are not latched, but retries are throttled so a poll of an absent type does not re-sweep the module every frame.
+A successful resolve is cached and stamped with the resolving module's image generation (`rtti::image_generation`, derived from its base, `SizeOfImage`, PE timestamp, and section-table digest). A replacement whose section layout differs therefore still reads as a different image when base, size, and timestamp are preserved. Publication checks the generation before and after the sweep, so a mapping transition cannot attach a new stamp to an old result. Every warm call re-validates that stamp. A changed image drops the stale value and re-resolves against the current mapping. A scope that equals one whole module also refreshes to the current extent of the module at its original base address.
+
+This is layout identity, not content identity. A replacement that preserves all folded PE fields while it changes only section bytes remains invisible. Call `invalidate()` to force a cold resolve immediately. A private-buffer scope carries generation `0` and must be reset explicitly. Misses are not latched, but retries are throttled so a poll of an absent type does not re-sweep the module every frame.
 
 `TypeIdentity` is a concrete public type whose private atomic cache is embedded in the object. DetourModKit does not promise a stable binary layout for it across library releases. Clean-rebuild the static library and every consumer object whenever you update the installed headers/archive pair.
 
@@ -153,7 +157,7 @@ A successful resolve is cached and stamped with the resolving module's image gen
 - Each walker call runs the COL prelude. Its module lookup calls the loader and then reads the DOS and NT headers through the guarded engine. The COL walk then issues two guarded reads: the COL pointer at `vtable - 8` and one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall. The batched `ColHead` read still matters, because it replaces six separate field reads with one guarded call.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in one guarded read and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters. On genuinely hot paths cache a `rtti::TypeIdentity`, because every walker call still runs the loader-querying COL prelude.
-- `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it reads each slot's object and vtable qwords, then compares against the cached vtable.
+- On a cold cache or a stale generation, `find_in_pointer_table` walks RTTI up to the first match. It checks each slot with a readable object and vtable pointer. With a valid warm cache it reads each slot's object and vtable qwords and compares against the cached vtable, up to the first match. If no slot carries the cached vtable, the call then runs that cold pass.
 
 ## When the walker returns nothing
 

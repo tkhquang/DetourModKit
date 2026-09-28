@@ -3,11 +3,8 @@
 
 /**
  * @file profile_ring.hpp
- * @brief The sample slot, the saturating tick conversion, and the ticket publication protocol behind @ref
- *        DetourModKit::Profiler.
- *
- * @details Separated from profiler.hpp so the publication protocol can be driven directly at a small capacity: the
- *          singleton's fixed 65536-slot ring cannot be stepped through a slot-reuse collision deterministically.
+ * @brief The sample slot, the saturating tick conversion, and the ticket publication protocol behind
+ *        @ref DetourModKit::Profiler.
  */
 
 #include <atomic>
@@ -19,13 +16,9 @@
 namespace DetourModKit::detail
 {
     /**
-     * @brief Computes `remainder * multiplier / divisor` exactly without a wide integer type.
-     * @param remainder Numerator, which must be smaller than @p divisor.
-     * @param multiplier Scale factor.
-     * @param divisor Denominator; zero yields 0.
-     * @return The truncated quotient.
-     * @pre `remainder < divisor`. The reduction step computes `divisor - remainder`, so a larger numerator wraps and
-     *      the result is meaningless. Callers pass a modulus result, which satisfies this by construction.
+     * @brief Computes `remainder * multiplier / divisor` exactly, without a wide integer type.
+     * @return The truncated quotient, or 0 when @p divisor is 0.
+     * @pre `remainder < divisor`. A larger numerator wraps, and the result is meaningless.
      */
     [[nodiscard]] inline constexpr std::uint64_t
     multiply_fraction(std::uint64_t remainder, std::uint64_t multiplier, std::uint64_t divisor) noexcept
@@ -74,38 +67,29 @@ namespace DetourModKit::detail
         return quotient;
     }
 
-    /**
-     * @struct ProfileSample
-     * @brief One ring slot: a committed timing sample plus the ticket word that publishes it.
-     */
+    /** @brief One ring slot: a committed timing sample plus the ticket word that publishes it. */
     struct ProfileSample
     {
         /**
-         * @brief Publication word: `((ticket + 1) << 1) | busy`, where `ticket` is the ring write position that owns
-         *        the slot and zero means the slot has never been committed.
-         * @details Odd means a write is in flight and readers must skip the slot. Offset encoding keeps the first
-         *          committed ticket distinct from the zero-initialized state. Because the encoded ticket increases
-         *          across every reuse of the slot, a reader that sees the same word before and after copying the
-         *          payload has observed one committed sample.
+         * @brief Publication word `((ticket + 1) << 1) | busy`, where `ticket` is the ring write position that owns
+         *        the slot.
+         * @details Zero means that no writer committed the slot. Odd means a write is in flight, so readers skip the
+         *          slot. The encoded ticket increases on every reuse, so the same word before and after a payload copy
+         *          proves one committed sample.
          */
         std::atomic<std::uint64_t> state{0};
         /**
-         * @brief Non-owning pointer to the sample name.
-         * @note Must outlive the process; the exporter reads it asynchronously. A null name marks a slot that has never
-         *       been committed.
+         * @brief Non-owning sample name. A committed slot can hold null, and export skips such a slot.
+         * @note The name must outlive the process, because the exporter reads it asynchronously.
          */
         const char *name{nullptr};
         /// QPC tick count at scope entry.
         std::int64_t start_ticks{0};
-        /// Duration in microseconds, saturated at UINT32_MAX (~71 minutes).
+        /// Duration in microseconds, saturated at UINT32_MAX (about 71 minutes).
         std::uint32_t duration_us{0};
-        /// Win32 thread ID of the recording thread.
+        /// Win32 thread ID of the thread that recorded the sample.
         std::uint32_t thread_id{0};
-        /**
-         * @brief Byte count of @ref name, published with it.
-         * @note The extent travels with the pointer, so the exporter never scans for a terminator. A source array
-         *       with no null still exports exactly its own bytes.
-         */
+        /** @brief Byte count of @ref name, published with it. The exporter never scans for a terminator. */
         std::uint32_t name_length{0};
 
         ProfileSample() noexcept = default;
@@ -116,16 +100,10 @@ namespace DetourModKit::detail
     };
 
     /**
-     * @brief Converts a QPC tick interval to microseconds without overflow or undefined behaviour.
-     * @param start_ticks Interval start.
-     * @param end_ticks Interval end. Any ordering is accepted; a non-increasing interval converts to 0.
-     * @param frequency Ticks per second. A non-positive frequency converts to 0.
-     * @return Microseconds, saturated at UINT32_MAX.
-     * @details The difference is taken in unsigned arithmetic because `end_ticks - start_ticks` is undefined (not
-     *          merely large) for extreme caller-supplied pairs such as a negative start with a positive end. The
-     *          scaling is split into whole seconds plus remainder so the product never overflows: the direct
-     *          `delta * 1'000'000` form wraps past a 10.7-day interval at a 10 MHz tick and reports a small duration
-     *          for a huge one.
+     * @brief Converts a QPC tick interval to microseconds without overflow or undefined behavior.
+     * @param frequency Ticks per second.
+     * @return Microseconds, saturated at UINT32_MAX. The function accepts any tick values. A non-increasing interval or
+     *         a non-positive @p frequency returns 0.
      */
     [[nodiscard]] inline std::uint32_t
     ticks_to_microseconds(std::int64_t start_ticks, std::int64_t end_ticks, std::int64_t frequency) noexcept
@@ -158,25 +136,16 @@ namespace DetourModKit::detail
 
     /**
      * @brief Fixed-capacity sample ring with lock-free claim/publish and drop-on-collision.
+     * @details @ref claim refuses a slot that another writer still owns or that a later writer already committed, and
+     *          counts a drop. See docs/design/events.md "Profiler" for the torn-payload rationale.
      *
-     * @details A writer claims a slot with one CAS and publishes into it. A claim whose slot another writer still
-     *          owns, or whose slot a later writer already committed to, is refused and counted instead of clobbering.
-     *          That refusal is what makes the exporter's before/after ticket comparison a proof rather than a
-     *          heuristic: no sequence of collisions can leave a torn payload behind an unchanged word.
-     *
-     *          Construction never throws. A ring that cannot allocate its slots, or that is asked for a capacity that
-     *          is zero or not a power of two, reports capacity 0 and drops every claim.
-     *
-     * **Thread safety:** `claim` / `publish` are lock-free and callable from any thread. `visit_committed` is safe
-     * concurrently with them. `reset` requires that no claim is in flight.
+     * **Thread safety:** `claim` / `publish` are lock-free and callable from any thread. `visit_committed` can run
+     * concurrently with them.
      */
     class ProfileRing
     {
     public:
-        /**
-         * @brief A slot reservation.
-         * @details `owned` is false for a refused claim; passing such a claim to @ref publish is a safe no-op.
-         */
+        /** @brief A slot reservation. */
         struct Claim
         {
             /// Ring slot index owned by the claim.
@@ -188,9 +157,8 @@ namespace DetourModKit::detail
         };
 
         /**
-         * @brief Allocates @p capacity slots.
-         * @param capacity Slot count; must be a power of two. Zero, a non-power-of-two, or an allocation failure yields
-         *                 an inert ring.
+         * @brief Allocates @p capacity slots, which must be a power of two.
+         * @details Zero, a non-power-of-two, or an allocation failure yields an inert ring that drops every claim.
          */
         explicit ProfileRing(std::size_t capacity) noexcept
         {
@@ -212,7 +180,7 @@ namespace DetourModKit::detail
         ProfileRing &operator=(ProfileRing &&) = delete;
         ~ProfileRing() noexcept = default;
 
-        /// Takes the next ring position without inspecting its slot. Complete it exactly once through @ref claim_at.
+        /// Takes the next ring position and does not inspect its slot. @ref claim_at completes the reservation.
         [[nodiscard]] std::uint64_t reserve_position() noexcept
         {
             return m_write_pos.fetch_add(1, std::memory_order_relaxed);
@@ -222,11 +190,8 @@ namespace DetourModKit::detail
         [[nodiscard]] Claim claim() noexcept { return claim_at(reserve_position()); }
 
         /**
-         * @brief Completes a reservation for an already-issued ring @p position.
-         * @details The second half of @ref claim, split out because a writer descheduled between taking its position
-         *          and inspecting its slot is exactly the collision the drop rule exists for; driving this directly is
-         *          the only way to reproduce it deterministically. Callers other than @ref claim must pass a position
-         *          returned by @ref reserve_position exactly once, since this function does not advance the ring.
+         * @brief Completes a reservation for a @p position that @ref reserve_position returned.
+         * @pre Pass each reserved position exactly once. This function does not advance the ring.
          */
         [[nodiscard]] Claim claim_at(std::uint64_t position) noexcept
         {
@@ -239,9 +204,8 @@ namespace DetourModKit::detail
             const auto index = static_cast<std::size_t>(position & m_mask);
             std::atomic<std::uint64_t> &state = m_slots[index].state;
 
-            // Refuse rather than overwrite in both collision directions: an odd word means an earlier writer still
-            // owns the slot, and a committed ticket above ours means a later writer already published here while this
-            // one was descheduled for a full ring cycle.
+            // Refuse every collision. An odd word means another writer still owns the slot. A committed ticket above
+            // ours means a later writer published here, and an equal ticket means a repeated claim of this position.
             std::uint64_t observed = state.load(std::memory_order_acquire);
             const std::uint64_t encoded_ticket = position + TICKET_OFFSET;
             if ((observed & BUSY_BIT) != 0 || (observed != EMPTY_STATE && (observed >> 1) >= encoded_ticket))
@@ -284,9 +248,8 @@ namespace DetourModKit::detail
             }
             ProfileSample &slot = m_slots[claim.index];
 
-            // The payload is published through std::atomic_ref because the exporter reads the same fields
-            // concurrently. Relaxed is sufficient: the release store on the ticket word below is what orders these
-            // writes for a reader that accepts the slot.
+            // The exporter reads these fields concurrently, so they go through std::atomic_ref. The release store on
+            // the ticket word below orders them for a reader that accepts the slot.
             std::atomic_ref<const char *>(slot.name).store(name, std::memory_order_relaxed);
             std::atomic_ref<std::uint32_t>(slot.name_length).store(name_length, std::memory_order_relaxed);
             std::atomic_ref<std::int64_t>(slot.start_ticks).store(start_ticks, std::memory_order_relaxed);
@@ -337,7 +300,7 @@ namespace DetourModKit::detail
             }
         }
 
-        /// Discards every sample and restarts ticketing. Requires that no claim is in flight.
+        /// Discards every sample and restarts the ticket sequence. Requires that no claim is in flight.
         void reset() noexcept
         {
             m_write_pos.store(0, std::memory_order_relaxed);
@@ -357,7 +320,7 @@ namespace DetourModKit::detail
         /// Slot count, or 0 for an inert ring.
         [[nodiscard]] std::size_t capacity() const noexcept { return m_capacity; }
 
-        /// Claims attempted since construction or the last @ref reset, including refused ones.
+        /// Claims attempted since construction or the last @ref reset. Refused claims count too.
         [[nodiscard]] std::uint64_t claims() const noexcept { return m_write_pos.load(std::memory_order_relaxed); }
 
         /// Claims refused because the slot was owned, already newer, or the ring is inert.
