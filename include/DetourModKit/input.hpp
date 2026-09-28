@@ -54,7 +54,10 @@ namespace DetourModKit
         {
             /// Fires the on_press callback once per key-down edge.
             Press,
-            /// Sends on_state_change(true) on press and false on release, and false once at teardown while held.
+            /**
+             * @brief Sends on_state_change(true) on press and false on release. A teardown that invokes callbacks
+             *        sends one false while held.
+             */
             Hold
         };
 

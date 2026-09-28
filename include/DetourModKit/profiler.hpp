@@ -101,7 +101,7 @@ namespace DetourModKit
             uint32_t thread_id
         ) noexcept;
 
-        /** @brief Discards all samples and counters. If a record() call is in flight, do not call it. */
+        /** @brief Discards all samples and counters. Requires that no record() call and no export is in flight. */
         void reset() noexcept;
 
         /** @brief Exports the resident samples as a Chrome Tracing JSON array, or "[]" if none are resident. */

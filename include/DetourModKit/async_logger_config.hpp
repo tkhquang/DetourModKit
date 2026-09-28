@@ -29,7 +29,8 @@ namespace DetourModKit
      * @brief Defines the action of a producer when the bounded queue is full.
      * @warning On a callback path, use only DropNewest. On that path, keep each record within
      *          @ref LOG_INLINE_MESSAGE_SIZE. Each other policy has the hazard that its enumerator states.
-     * @note The drop policies change acceptance, not producer latency.
+     * @note The policies differ in acceptance and in producer cost at the overflow step. DropNewest alone never waits
+     *       or locks there.
      */
     enum class OverflowPolicy : std::uint8_t
     {

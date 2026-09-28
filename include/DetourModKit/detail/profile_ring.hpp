@@ -300,7 +300,7 @@ namespace DetourModKit::detail
             }
         }
 
-        /// Discards every sample and restarts the ticket sequence. Requires that no claim is in flight.
+        /// Discards every sample and restarts the ticket sequence. Requires that no claim or visit is in flight.
         void reset() noexcept
         {
             m_write_pos.store(0, std::memory_order_relaxed);

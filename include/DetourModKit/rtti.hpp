@@ -18,8 +18,10 @@ namespace DetourModKit
      *          RVA returns a failure. A guarded read whose guard-page re-arm fails (`[B-20]`) passes its fault to the
      *          host. Names are mangled, for example ".?AVMyClass@ns@@", and compare byte-exact.
      *
-     *          In a /GR- host, every resolver fails closed. The raw-byte fallbacks are @ref scan::find_string_xref and
-     *          @ref scan::read_code_constant. See docs/guides/rtti/rtti-walker.md.
+     *          A type built under /GR- has no RTTI record, so every resolver fails closed for it. The resolvers still
+     *          read the records that linked /GR code, such as the static CRT, emits into a /GR- host. The raw-byte
+     *          fallbacks are @ref scan::find_string_xref and @ref scan::read_code_constant. See
+     *          docs/guides/rtti/rtti-walker.md.
      * @warning `[B-100]` Under the loader lock, call @ref TypeIdentity::matches only after it is warm, or use another
      *          Callback-safe entry point. Cold identity paths and setup routes can query the loader or sweep an image.
      */
