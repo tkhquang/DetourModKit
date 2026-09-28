@@ -4,18 +4,7 @@
 /**
  * @file memory.hpp
  * @brief The guarded-memory surface: fault-tolerant reads, writes, pointer-chain walks, and a protection guard.
- * @details The fault guard (MSVC `__try`, MinGW vectored handler) lives entirely in the engine translation unit, so
- *          this header pulls in no `<windows.h>` and no SEH.
- *
- *          The surface is layered by safety:
- *          - `read`, `read_into`, `write`, `write_bytes`, and `walk` are GUARDED. They validate, fault-protect, and
- *            report failure as an `Error`, unless the guard-page re-arm in `[B-20]` fails. Use them whenever the
- *            address can be stale.
- *          - `is_plausible_ptr` is a pure arithmetic pre-screen with no syscall and no access.
- *          - The cache and the `is_readable` and `is_writable` predicates answer protection questions for one-shot
- *            setup validation and diagnostics, not for per-frame hot paths. Each consults a lock and, on a miss, can
- *            walk the range one `VirtualQuery` per region.
- *          - `unchecked::read` performs NO validation and FAULTS THE HOST on an unreadable byte.
+ * @details Each guarded entry point reports a fault as an `Error`, unless the guard-page re-arm in `[B-20]` fails.
  * @warning `[B-100]` Under the loader lock, call only the Callback-safe entry points in this header. Cache startup and
  *          the exact-case module lookup fail closed.
  */
@@ -50,23 +39,17 @@ namespace DetourModKit
         template <class U> inline constexpr bool is_initializer_list_v<std::initializer_list<U>> = true;
 
         /**
-         * @brief Trait that is true for every `std::ranges::view` and every `std::initializer_list`.
-         * @details `[B-21]` A view is trivially copyable, but its bit-copy stores the view's pointer and length. Typed
-         *          `write<T>` rejects every view, even byte spans. Only `write_in_place` has a byte-span overload,
-         *          which a contiguous byte view reaches through its span conversion. Use `write_bytes` for other views.
-         *          Constraint sites inspect `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past.
+         * @brief True for every `std::ranges::view` and every `std::initializer_list`.
+         * @details `[B-21]` Typed `write<T>` rejects every view, even a byte span. `write_bytes` and `write_in_place`
+         *          write the viewed bytes of a contiguous byte view.
          */
         template <class T>
         inline constexpr bool is_non_owning_view_v = std::ranges::view<T> || is_initializer_list_v<T>;
 
         /**
-         * @brief Opt-in trait for aggregate types whose every object representation may be read from foreign bytes.
-         * @details The default is false because C++23 cannot inspect aggregate members: a trivially copyable class may
-         *          still contain `bool` or another representation-sensitive member. Specialize this trait to
-         *          `std::true_type` only after verifying the complete transitive object representation, including that
-         *          the type has no padding bytes whose value the caller intends to interpret. Built-in arrays are
-         *          checked recursively; `std::array` opts in when its element type is representation-safe.
-         * @tparam T Aggregate type to classify.
+         * @brief Opt-in trait for an aggregate whose every object representation is valid to read from foreign bytes.
+         * @details Before you specialize it, verify the whole transitive object representation. Also verify that no
+         *          padding byte holds a value that you interpret. `std::array` opts in when its element type qualifies.
          */
         template <class T> struct enable_representation_safe_aggregate : std::false_type
         {
@@ -77,21 +60,11 @@ namespace DetourModKit
         inline constexpr bool enable_representation_safe_aggregate_v =
             enable_representation_safe_aggregate<std::remove_cv_t<T>>::value;
 
-        /**
-         * @brief True when @p E is an enumeration with a fixed underlying type.
-         * @details [dcl.enum]/8 gives such an enumeration the value range of its underlying type, so every bit pattern
-         *          of that type is a valid enumerator value. Direct-list-initialization from the underlying type is
-         *          well-formed only for the fixed case, which is the detection this concept uses.
-         */
+        /** @brief True when @p E has a fixed underlying type, so [dcl.enum]/8 admits every underlying value. */
         template <class E>
         concept fixed_underlying_enum = std::is_enum_v<E> && requires { E{std::underlying_type_t<E>{}}; };
 
-        /**
-         * @brief True when @p F is a binary floating-point type whose object representation carries no padding bits.
-         * @details Padding bits have no defined value, so a foreign byte pattern read into such a type is not
-         *          necessarily a valid object representation. The bit-count test is required because `is_iec559` alone
-         *          is not enough: MinGW's 16-byte x87 `long double` reports `is_iec559` for an 80-bit format.
-         */
+        /** @brief True for a binary floating-point type with no padding bits. MinGW's x87 `long double` fails it. */
         template <class F> [[nodiscard]] constexpr bool padding_free_binary_float() noexcept
         {
             using Limits = std::numeric_limits<F>;
@@ -145,8 +118,7 @@ namespace DetourModKit
             else if constexpr (std::is_floating_point_v<U>)
                 return padding_free_binary_float<U>();
             else if constexpr (std::is_enum_v<U>)
-                // The underlying type must itself qualify: `enum class E : bool` has a fixed base, yet [dcl.enum]/8
-                // gives it only bool's two values, so a foreign 0x02 is no more valid as an E than as a bool.
+                // [dcl.enum]/8 gives `enum class E : bool` only the two bool values, so the base must qualify too.
                 return fixed_underlying_enum<U> && representation_safe<std::underlying_type_t<U>>();
             else if constexpr (std::is_pointer_v<U>)
                 return true;
@@ -175,75 +147,44 @@ namespace DetourModKit
         );
 
         /**
-         * @brief True when every bit pattern of @p T's object representation is a valid value, so forming @p T from
-         *        arbitrary foreign bytes with `std::bit_cast` is well defined.
-         * @details The participation gate for the raw typed reads (@ref memory::read, @ref memory::unchecked::read, and
-         *          the engine's `detail::guarded_read`). The domain is an explicit allowlist, not "every scalar":
-         *          - every integral type except `bool`;
-         *          - a binary floating-point type with no padding bits (@ref padding_free_binary_float), which admits
-         *            `float` and `double` on both toolchains and `long double` only on MSVC, where it is `double`;
-         *          - an enumeration with a fixed underlying type (@ref fixed_underlying_enum) that is itself in the
-         *            domain, which admits every scoped enumeration over an integer and `std::byte`;
-         *          - an object or function pointer, as a Windows x64 ABI concession, not a portable C++ theorem. The
-         *            result does NOT recover pointer provenance, so treat it as an address to screen with
-         *            @ref memory::is_plausible_ptr and read through a guarded route, never as a pointer to
-         *            dereference.
-         *          - a bounded built-in array or `std::array` whose element type qualifies, recursively;
-         *          - @ref Address, and any other class or union explicitly opted in through
-         *            @ref enable_representation_safe_aggregate.
-         *
-         *          Rejected: `bool`, because a foreign byte such as `0x02` is not a valid `bool` object
-         *          representation and the bit-cast is undefined behavior before a `Result` can report it. Decode it
-         *          with @ref memory::read_bool. Also rejected: `std::nullptr_t`; member-object and member-function
-         *          pointers, whose representations are implementation-defined multi-field structures; an unscoped
-         *          enumeration with no fixed base; an enumeration over `bool`; an unbounded array; and a
-         *          floating-point format with padding bits, such as MinGW's 16-byte x87 `long double`. Use
-         *          @ref memory::read_into to copy any of these as raw bytes and decode them yourself.
-         *
-         *          Enum DOMAIN validity is a separate concern: a fixed-underlying enumeration's bit patterns are all
-         *          valid representations even when a specific value is semantically invalid for an API.
+         * @brief True when every bit pattern of the object representation of @p T is a valid value of @p T.
+         * @details The domain is an allowlist. Copy any other type as raw bytes with @ref memory::read_into.
+         *          - Every integral type except `bool`. Decode `bool` with @ref memory::read_bool.
+         *          - A padding-free binary float: `float`, `double`, and `long double` only on MSVC.
+         *          - An enumeration whose fixed underlying type is in the domain. The value can match no enumerator.
+         *          - An object or function pointer, under the Windows x64 ABI. The value has no pointer provenance.
+         *            Screen it with @ref memory::is_plausible_ptr. Read through it only by a guarded route.
+         *          - A bounded built-in array or `std::array` of an element type in the domain.
+         *          - @ref Address, and a class or union opted in through @ref enable_representation_safe_aggregate.
          */
         template <class T> inline constexpr bool is_representation_safe_v = representation_safe<T>();
     } // namespace detail
 
     namespace memory
     {
-        /**
-         * @brief Inclusive lower bound of the canonical x64 user-mode address window.
-         * @details The low 64 KiB is the reserved null-dereference region, so any value below this bound cannot be a
-         *          valid object pointer.
-         */
+        /// Inclusive lower bound of the x64 user-mode pointer window. The reserved low 64 KiB holds no object.
         inline constexpr std::uintptr_t USERSPACE_PTR_MIN = 0x10000;
 
-        /**
-         * @brief Exclusive upper bound of the canonical x64 user-mode address window.
-         * @details Mapped user addresses sit below the 47-bit canonical split, so a value at or above this bound is a
-         *          kernel-range or non-canonical address.
-         */
+        /// Exclusive upper bound of the x64 user-mode pointer window, at the 47-bit canonical split.
         inline constexpr std::uintptr_t USERSPACE_PTR_MAX = 0x0000800000000000ULL;
 
-        /// Maximum byte count a single @ref write_bytes call accepts before failing with ErrorCode::SizeTooLarge.
+        /// Largest span that each write entry point accepts. A larger span fails with `ErrorCode::SizeTooLarge`.
         inline constexpr std::size_t MAX_WRITE_SIZE = 64ULL * 1024 * 1024;
 
-        /// Default number of region entries the protection cache holds.
+        /// Default number of region entries across the protection cache.
         inline constexpr std::size_t DEFAULT_CACHE_SIZE = 256;
-        /// Default cache entry lifetime, in milliseconds, before a re-query.
+        /// Default expiry window of a cache entry, in milliseconds, before a re-query.
         inline constexpr unsigned int DEFAULT_CACHE_EXPIRY_MS = 50;
         /// Minimum permitted cache size.
         inline constexpr std::size_t MIN_CACHE_SIZE = 1;
-        /// Default number of cache shards, striped to reduce reader contention.
+        /// Default number of cache shards.
         inline constexpr std::size_t DEFAULT_CACHE_SHARD_COUNT = 16;
-        /// Default multiplier bounding the cache's hard maximum size relative to its configured size.
+        /// Default ratio of the hard entry maximum of a shard to its configured capacity.
         inline constexpr std::size_t DEFAULT_MAX_CACHE_SIZE_MULTIPLIER = 2;
 
         /**
-         * @brief Structural plausibility test for an x64 user-mode pointer.
-         * @param address The address to test.
-         * @return True only when @p address lies in [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX).
-         * @details Rejects obviously bad values (null, small enum-shaped integers, non-canonical addresses) before a
-         *          guarded read pays for a fault. It does NOT prove the pointer is mapped or that the target object is
-         *          the expected type. Pair it with @ref module_of and a guarded @ref read for full validation.
-         * @note Callback-safe: pure `constexpr` arithmetic with no memory access, lock, or syscall.
+         * @brief True when @p address lies in [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX). It proves no mapping.
+         * @note Callback-safe.
          */
         [[nodiscard]] inline constexpr bool is_plausible_ptr(Address address) noexcept
         {
@@ -252,41 +193,22 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Guarded copy of @p out.size() bytes from @p address into @p out.
-         * @param address Source address.
-         * @param out Destination byte span. An empty span is a successful no-op.
-         * @return An empty `Result` on full success. `ErrorCode::OverlappingRanges` when @p out intersects the source
-         *         range, and nothing is read (see @ref ErrorCode::OverlappingRanges). Otherwise
-         *         `ErrorCode::ReadFaulted` on a rejected argument or an unreadable source byte, unless the guard-page
-         *         re-arm in `[B-20]` fails. `Error::detail` then holds the address of an unreadable byte inside the
-         *         requested source span `[address, address + out.size())`, not inside the destination @p out. It is
-         *         the first unreadable byte for the small spans a typed @ref read issues; for a span wide enough that
-         *         the platform's `memcpy` touches bytes out of order it can be a later byte of the same unreadable
-         *         region. A span rejected before any access, and the MinGW fallback that validates through
-         *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
-         * @details Every typed @ref read forwards to this byte-level read primitive. The copy runs under the engine's
-         *          fault guard. The pre-screen rejects only out-of-range spans: addresses below @ref USERSPACE_PTR_MIN,
-         *          wrapped ends, or ends above @ref USERSPACE_PTR_MAX. It does not prove pointer validity. An in-range
-         *          pointer can remain unmapped or stale, and the fault guard reports that access failure, unless the
-         *          guard-page re-arm in `[B-20]` fails. On failure the contents of @p out are unspecified.
-         * @note Callback-safe: allocates nothing, takes no lock, and on the established hot path issues no syscall.
+         * @brief Guarded copy of @p out.size() bytes from @p address into @p out. An empty @p out is a no-op success.
+         * @return An empty `Result`, or `ErrorCode::OverlappingRanges`, with nothing read, if @p out intersects the
+         *         source. Otherwise `ErrorCode::ReadFaulted` for a source span that wraps, leaves
+         *         [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX), or holds an unreadable byte, unless the guard-page
+         *         re-arm in `[B-20]` fails. On failure the contents of @p out are unspecified.
+         * @details `Error::detail` holds an unreadable source address. A scalar typed @ref read names its first
+         *          unreadable byte. A larger span can name a later byte of the same region. A span rejected before any
+         *          access, and the MinGW `VirtualQuery` fallback, report @p address.
+         * @note Callback-safe: on the established fast path it allocates nothing, takes no lock, and issues no syscall.
          */
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;
 
         /**
-         * @brief Guarded typed read of a representation-safe @p T at @p address.
-         * @tparam T A trivially copyable type in the representation-safe domain
-         *           (@ref detail::is_representation_safe_v, which enumerates what participates and what does not). It
-         *           need not be default constructible: the bytes are read into untyped storage and reinterpreted with
-         *           `std::bit_cast`, so no @p T object is constructed on the failure path. A type outside the domain is
-         *           a compile error, not a runtime risk; decode `bool` through @ref read_bool and anything else through
-         *           raw bytes with @ref read_into.
-         * @param address Source address.
-         * @return The value on success, or the propagated @ref read_into error on a read fault. A top-level bounded
-         *         built-in array is returned as the equivalent nested `std::array`, because C++ functions cannot return
-         *         a built-in array by value.
-         * @details Forwards to @ref read_into so the `__try` frame stays in the engine TU. On success, the read
-         *          collapses to a single guarded copy of `sizeof(T)` bytes followed by a no-op bit_cast.
+         * @brief Guarded typed read of a representation-safe @p T, which need not be default constructible.
+         * @return The value, or the @ref read_into error. A top-level bounded built-in array returns as the equivalent
+         *         nested `std::array`.
          * @note Callback-safe (see @ref read_into).
          */
         template <class T>
@@ -302,59 +224,35 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Guarded checked decode of a single foreign byte into a `bool`.
-         * @param address Source address of the byte.
-         * @return `false`/`true` for a byte of `0`/`1`; `ErrorCode::ReadFaulted` (faulting address in `Error::detail`)
-         *         on a read fault, or `ErrorCode::InvalidRepresentation` (source address in `Error::detail`) for any
-         *         other byte value.
-         * @details The representation-safe route for `bool`, which the raw typed @ref read excludes: it reads one byte
-         *          through the fault guard and validates it before forming the `bool`, so an arbitrary foreign byte can
-         *          never be bit-cast into an invalid `bool`. Extend this checked-decoder pattern for any other
-         *          representation-sensitive type a caller needs.
+         * @brief Guarded checked decode of one foreign byte into a `bool`.
+         * @return `false` for a byte of `0` and `true` for `1`. A read fault returns the @ref read_into error. Any
+         *         other byte returns `ErrorCode::InvalidRepresentation` with the source address in `Error::detail`.
          * @note Callback-safe (see @ref read_into).
          */
         [[nodiscard]] Result<bool> read_bool(Address address) noexcept;
 
         /**
-         * @brief Guarded write of a byte span to @p address, changing page protection only if it must.
-         * @param address Destination address.
-         * @param source Source byte span. An empty span is a successful no-op, but the null-target check runs
-         *               first: a null @p address fails with `NullTargetAddress` even for an empty span.
-         * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
-         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `OverlappingRanges` (@p source intersects the target
-         *         range; nothing is written), `ProtectionChangeFailed`, `WriteFaulted` (nothing was written),
-         *         `WriteMayBePartial` (the changed prefix is indeterminate, as @ref ErrorCode::WriteMayBePartial
-         *         defines),
-         *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
-         * @details The escalating DATA write. @ref patch_code is the route for bytes that are executed. It first
-         *          attempts a guarded write that changes NO page protection, so a target that is already writable
-         *          costs no `VirtualProtect` and no instruction-cache flush. Only a fault on that attempt takes the
-         *          slow path: change protection to writable per region, so a data page never gains execute, copy,
-         *          flush the instruction cache for an executable region, restore the original protection, and
-         *          invalidate the affected cache range. A @ref ProtectGuard held over a hot region therefore keeps
-         *          the writes inside it on the cheap path. The slow-path copy also runs under the fault guard. A page
-         *          reprotected or unmapped mid-copy returns `WriteMayBePartial`, and the restore and flush still run,
-         *          with `ProtectionRestoreFailed` taking priority. A successful already-writable fast path issues no
-         *          flush. A fast path that faults after it changed a prefix of an EXECUTABLE target is flushed before
-         *          the fallback runs, so a protection-setup failure cannot leave modified code unflushed.
-         * @note A slow-path write that straddles a protection seam is handled per region: each VirtualQuery region the
-         *       span covers is unprotected and restored to its own prior protection, so patching across a .rdata/.text
-         *       boundary never flattens the executable region to PAGE_READONLY. A span crossing an unrealistically
-         *       large number of distinct protection regions fails closed with `ProtectionChangeFailed`.
-         * @note Callback-safe on the fast path; the slow (protection-changing) path is setup/control-plane work.
+         * @brief Guarded data write. It changes page protection only if a first attempt without a change faults.
+         * @param source An empty span is a no-op success, but a null @p address still fails with `NullTargetAddress`.
+         * @return An empty `Result`, or `ErrorCode::NullTargetAddress`, `NullSourceBytes`, `SizeTooLarge` (over
+         *         @ref MAX_WRITE_SIZE), `OverlappingRanges` (nothing written), `ProtectionChangeFailed`, `WriteFaulted`
+         *         (nothing written), @ref ErrorCode::WriteMayBePartial, `InstructionFlushFailed`, or
+         *         `ProtectionRestoreFailed`.
+         * @details A successful first attempt issues no flush. A first attempt that faults past the first byte flushes
+         *          the whole request if any region of it is executable. Use @ref patch_code for bytes that execute.
+         *
+         *          The slow path makes each `VirtualQuery` region writable, with no execute added to a data page. It
+         *          then copies, flushes executable regions, restores each prior protection, and invalidates the cached
+         *          range. A failed change, for example over too many regions, returns `WriteMayBePartial` if the first
+         *          attempt faulted past the first byte, and otherwise `ProtectionChangeFailed`. A slow-path copy fault
+         *          returns `WriteFaulted` after the restore and flush if both attempts faulted on the first byte, and
+         *          otherwise `WriteMayBePartial`. `ProtectionRestoreFailed` outranks every other slow-path error.
+         * @note Callback-safe on the fast path. The slow path changes protection and is setup/control-plane work.
          */
         [[nodiscard]] Result<void> write_bytes(Address address, std::span<const std::byte> source) noexcept;
 
         /**
-         * @brief Guarded write of a trivially copyable @p T to @p address.
-         * @tparam T A trivially copyable type. Its object representation is copied byte-for-byte; no @p T object is
-         *           constructed at @p address.
-         * @param address Destination address.
-         * @param value Value whose object representation is written.
-         * @return The propagated @ref write_bytes result.
-         * @details Forwards to @ref write_bytes, so the same fast-path-then-unprotect policy and fault guard apply.
-         * @note Constrained against any non-owning view. A view argument is a compile error instead of a silent
-         *       bit-copy of the view object. @ref detail::is_non_owning_view_v owns the rationale.
+         * @brief Guarded write of the object representation of @p value through @ref write_bytes, which it returns.
          * @note Callback-safe on the fast path (see @ref write_bytes).
          */
         template <class T>
@@ -367,62 +265,30 @@ namespace DetourModKit
 
         /**
          * @brief Guarded code patch: writes @p source at @p address and flushes the instruction cache for the target.
-         * @param address Destination code address.
-         * @param source Bytes to write. Empty-span and null-target rules match @ref write_bytes.
-         * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` /
-         *         `OverlappingRanges` (@p source intersects the target range) for a rejected argument,
-         *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (the changed
-         *         prefix is indeterminate, as @ref ErrorCode::WriteMayBePartial defines), `ProtectionRestoreFailed`, or
-         *         `InstructionFlushFailed` (the bytes landed but the flush failed).
-         * @details Use this route whenever the target bytes are executed as code. Every path that may modify the target
-         *          checks an instruction-cache flush, including already-writable code and a partial guarded prefix. A
-         *          covering flush for a partial prefix uses the full requested range before protection-changing
-         *          fallback setup. Read-only targets are made writable without adding execute to data pages, then
-         *          written, flushed, restored, and invalidated in the protection cache. Use @ref write_bytes or
-         *          @ref write_in_place for data.
-         * @warning The write is not atomic.
-         *          A copy that can have changed a prefix receives a full-range flush. A later retry that writes nothing
-         *          cannot downgrade `WriteMayBePartial` to `WriteFaulted`.
-         *          Restoration failure outranks partial-write status, which outranks a flush-only failure.
-         * @note Callback-safe on the fast path; the protection-changing slow path is setup/control-plane work.
+         * @return An empty `Result`, or an error of @ref write_bytes. `InstructionFlushFailed` means that the bytes
+         *         landed but the flush failed.
+         * @details The argument rules and the slow path match @ref write_bytes, except that every path that can modify
+         *          the target flushes, even on already-writable code.
+         * @warning The write is not atomic. `ProtectionRestoreFailed` outranks `WriteMayBePartial`, which outranks
+         *          `InstructionFlushFailed`.
+         * @note Callback-safe on the fast path. The slow path changes protection and is setup/control-plane work.
          */
         [[nodiscard]] Result<void> patch_code(Address address, std::span<const std::byte> source) noexcept;
 
         /**
-         * @brief Strict guarded write of a byte span that NEVER changes page protection.
-         * @param address Destination address.
-         * @param source Source byte span. Empty-span and null-target rules match @ref write_bytes.
-         * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
-         *         (over @ref MAX_WRITE_SIZE) / `OverlappingRanges` (@p source intersects the target range) for a
-         *         rejected argument; `ErrorCode::WriteFaulted` when the target's first byte was not writable and
-         *         nothing was written; or `ErrorCode::WriteMayBePartial` when a byte further in the span faulted after
-         *         the copy reached a writable page.
-         * @warning Not atomic across a writability seam. When @p source straddles a writable page and an adjacent
-         *          unwritable one, the copy faults and returns `ErrorCode::WriteMayBePartial`, whose changed prefix is
-         *          indeterminate and can be empty. Size a per-frame store so it cannot straddle a protection boundary,
-         *          or treat a `WriteMayBePartial` target as indeterminate; a `WriteFaulted` return, by contrast,
-         *          guarantees that no byte changed.
-         * @details The counterpart to @ref write_bytes for memory the target already keeps writable. It does NOT
-         *          escalate: a read-only, executable, or no-access target fails closed with `WriteFaulted` instead of
-         *          an unprotect and a write. Use it to keep a per-frame store off the `VirtualProtect` path, or to
-         *          make a stale pointer that lands in read-only memory surface as an error. For a one-shot code patch
-         *          use @ref patch_code.
-         * @note Callback-safe: allocates nothing, takes no lock, changes no protection, and issues no syscall on the
-         *       fast path.
+         * @brief Strict guarded write of a byte span that never changes page protection.
+         * @return An empty `Result`, or an argument error of @ref write_bytes under its rules. `WriteFaulted`, with no
+         *         byte changed, when the first target byte is not writable, as on a read-only or execute-read page.
+         *         `WriteMayBePartial` when a later byte faulted after the copy reached a writable page.
+         * @warning The write is not atomic across a writability seam, and the changed prefix of `WriteMayBePartial` is
+         *          indeterminate and can be empty. Size a per-frame store so that it cannot cross a seam.
+         * @note Callback-safe (see @ref read_into).
          */
         [[nodiscard]] Result<void> write_in_place(Address address, std::span<const std::byte> source) noexcept;
 
         /**
-         * @brief Strict guarded write of a trivially copyable @p T that NEVER changes page protection.
-         * @tparam T A trivially copyable type; its object representation is copied byte-for-byte.
-         * @param address Destination address.
-         * @param value Value whose object representation is written.
-         * @return The propagated @ref write_in_place result.
-         * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract and
-         *          seam warning apply. This is the typed per-frame store.
-         * @note Constrained against any non-owning view. A mutable `std::span<std::byte>` or another contiguous byte
-         *       view routes to the byte-span overload above. Any other view is a compile error instead of a silent
-         *       bit-copy of the view object. @ref detail::is_non_owning_view_v owns the rationale.
+         * @brief Strict guarded write of the object representation of @p value through @ref write_in_place.
+         * @note A `std::span<std::byte>` or other contiguous byte view writes its viewed bytes, not the view object.
          * @note Callback-safe (see @ref write_in_place).
          */
         template <class T>
@@ -434,102 +300,56 @@ namespace DetourModKit
         }
 
         /**
-         * @struct ChainStep
-         * @brief One hop of a pointer-chain @ref walk: a byte offset plus the per-hop plausibility floor.
-         * @details A walk applies each step's @ref offset to the running address; every step except the last is then
-         *          dereferenced to obtain the next link, and that link must be at or above @ref min_valid (and below
-         *          @ref USERSPACE_PTR_MAX) or the walk stops. @ref min_valid is the per-hop equivalent of
-         *          @ref is_plausible_ptr's floor, defaulting to the canonical user-mode minimum; raise it for a hop
-         *          whose link must live above a known module base.
+         * @brief One hop of a pointer-chain @ref walk. The walk adds @ref offset to the current address, then
+         *        dereferences the result on every hop except the last.
          */
         struct ChainStep
         {
-            /// Byte offset added to the running address at this hop (may be negative).
+            /// Byte offset of this hop. It can be negative.
             std::ptrdiff_t offset;
-            /// Lowest address the dereferenced link at this hop may hold; a link below it stops the walk.
+            /// Floor of the dereferenced link. A link outside [min_valid, @ref USERSPACE_PTR_MAX) stops the walk.
             Address min_valid = Address{USERSPACE_PTR_MIN};
         };
 
         /**
-         * @brief Resolves a multi-level pointer chain under the engine's fault guard, exposing every intermediate hop.
-         * @param base Root address of the chain.
-         * @param steps One @ref ChainStep per hop. Every offset except the last is added and dereferenced to obtain the
-         *              next link; the final offset is added but not dereferenced, yielding the target field address. An
-         *              empty span returns @p base unchanged.
-         * @param trace Optional out-buffer. When non-empty, `trace[i]` receives the value resolved at hop `i` (the
-         *              dereferenced link for an intermediate hop, the leaf address for the final hop), for as many hops
-         *              as fit, and is populated for the successfully-walked prefix EVEN ON PARTIAL FAILURE so a caller
-         *              can inspect how far the chain got.
-         * @return The resolved leaf address on success; on failure, `ErrorCode::NullChain` for a null @p base with a
-         *         non-empty chain, or `ErrorCode::ReadFaulted` with the FAILING HOP INDEX in `Error::detail` when an
-         *         intermediate dereference faults or yields a link below that hop's @ref ChainStep::min_valid, or when
-         *         the final leaf's signed-offset arithmetic wraps or lands outside [@ref USERSPACE_PTR_MIN,
-         *         @ref USERSPACE_PTR_MAX).
-         * @details The walk gates each hop, captures each intermediate link, and exits at the first bad hop. It does
-         *          not dereference the returned leaf, but it screens the leaf into
-         *          [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX) like every intermediate link, so a wrapped or
-         *          non-canonical result reports a failure instead of a plausible success. The caller reads the leaf,
-         *          usually through @ref read.
+         * @brief Resolves a pointer chain under the fault guard and reports each intermediate hop.
+         * @param trace `trace[i]` receives the dereferenced link or the final leaf of hop `i`, for as many hops as fit.
+         *              The walk fills `trace` for each completed hop, even when a later hop fails.
+         * @return The leaf address, which the walk does not read, or @p base for an empty chain. `ErrorCode::NullChain`
+         *         for a null @p base with a non-empty chain. `ErrorCode::ReadFaulted` for a faulted dereference, a link
+         *         outside its @ref ChainStep range, or a leaf that wraps or leaves
+         *         [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX). `Error::detail` holds the failed hop index.
          * @note Callback-safe (see @ref read_into).
          */
         [[nodiscard]] Result<Address>
         walk(Address base, std::span<const ChainStep> steps, std::span<Address> trace = {}) noexcept;
 
         /**
-         * @brief Convenience @ref walk taking bare offsets, flooring every hop at @ref USERSPACE_PTR_MIN.
-         * @param base Root address of the chain.
-         * @param offsets Byte offsets applied left to right (see the @ref ChainStep overload for the hop semantics).
-         *        Capped at 32 hops. Past the cap the call fails with @ref ErrorCode::SizeTooLarge (see the @note).
-         * @param trace Optional intermediate-capture buffer (see the @ref ChainStep overload).
-         * @return The resolved leaf address, or the same errors as the @ref ChainStep overload, plus
-         *         `ErrorCode::SizeTooLarge` when @p offsets exceeds the 32-hop inline bound.
-         * @details The common chain shape carries no per-hop floor, so this overload accepts a plain `{0x18, 0x40}`
-         *          offset list and applies the default plausibility floor to each dereferenced link. It is exactly the
-         *          @ref ChainStep overload with every `min_valid` defaulted.
-         * @note Callback-safe (see @ref read_into): it builds the step list on a fixed 32-entry stack buffer and never
-         *       allocates. A chain longer than 32 hops therefore fails closed with `ErrorCode::SizeTooLarge`. Route
-         *       such a chain through the @ref ChainStep overload, whose caller owns the step storage.
+         * @brief Pointer-chain @ref walk over bare offsets, with every hop floored at @ref USERSPACE_PTR_MIN.
+         * @return The @ref ChainStep overload result, or `ErrorCode::SizeTooLarge` for more than 32 offsets.
+         * @note Callback-safe (see @ref read_into). Route a longer chain through the @ref ChainStep overload.
          */
         [[nodiscard]] Result<Address>
         walk(Address base, std::span<const std::ptrdiff_t> offsets, std::span<Address> trace = {}) noexcept;
 
         /**
-         * @class ProtectGuard
-         * @brief Move-only RAII page-protection change: applies a @ref Prot to a @ref Region and restores it on scope
-         *        exit.
-         * @details Built only through @ref make, so a guard cannot exist without a successful protection change to
-         *          unwind. Hold one over a region that is patched or written repeatedly. If the applied @ref Prot
-         *          includes @ref Prot::W, every @ref write_bytes inside the guarded window uses the cheap no-reprotect
-         *          fast path. Destructor restoration is best-effort. To observe the restore result, call @ref restore
-         *          before the guard dies.
-         * @note The guard captures each VirtualQuery region's own prior protection across the span and restores every
-         *       region to its own value, so a guard laid over a .rdata/.text seam does not flatten the executable
-         *       region to PAGE_READONLY on restore. A span that crosses an unrealistically large number of distinct
-         *       protection regions fails closed at @ref make instead of a partially-changed span.
-         * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, and
-         *       move-assignment (which restores the replaced guard's own region before adopting the source) each call
-         *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable /
-         *       @ref is_writable from a snapshot taken before the guard changed (or restored) the protection.
+         * @brief Move-only guard that changes a @ref Region to a @ref Prot until scope exit.
+         * @details The guard captures and restores each `VirtualQuery` region of the span separately. Destructor
+         *          restoration is best-effort. To observe the result, call @ref restore.
+         * @note @ref make, @ref restore, the destructor, and move-assignment each invalidate the cached range.
+         *       Move-assignment first restores the region of the replaced guard.
          */
         class ProtectGuard
         {
         public:
             /**
              * @brief Changes @p region to @p protection and returns a guard that restores the prior protection.
-             * @param region The span whose protection is changed; an empty region fails closed. It may cross protection
-             *               seams: each region within it is captured and restored separately (see the class notes).
-             * @param protection The protection to apply for the guard's lifetime.
-             * @return An armed guard on success; `ErrorCode::OutOfMemory` if the guard's capture state could not be
-             *         allocated (no protection change is attempted, so nothing leaks);
-             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection could
-             *         not be changed for a region, or the span crosses more distinct protection regions than the guard
-             *         can track, in which case any region already changed is rolled back before returning; or
-             *         `ErrorCode::ProtectionRestoreFailed` if that rollback itself failed, leaving a region in a
-             *         transient protection.
-             * @details The capture state is allocated before any protection is changed, so a failed allocation cannot
-             *          strand the region in the new protection with no guard to restore it. On success the changed
-             *          range is dropped from the protection cache (@ref invalidate_range).
-             * @note Setup/control-plane only: the guard allocates and issues VirtualProtect syscalls.
+             * @return An armed guard, or `ErrorCode::OutOfMemory` with no protection changed.
+             *         `ErrorCode::ProtectionChangeFailed` for a null or empty region, with `Error::extra` zero. The
+             *         same code, with the OS error in `Error::extra`, for a failed change or too many protection
+             *         regions. The call first rolls back each changed region. `ErrorCode::ProtectionRestoreFailed` if
+             *         that rollback failed.
+             * @note Setup/control-plane only: the guard allocates and issues `VirtualProtect` calls.
              */
             [[nodiscard]] static Result<ProtectGuard> make(Region region, Prot protection) noexcept;
 
@@ -538,74 +358,58 @@ namespace DetourModKit
             ProtectGuard(const ProtectGuard &) = delete;
             ProtectGuard &operator=(const ProtectGuard &) = delete;
 
-            /// Restores the original page protection unless the guard was moved-from or @ref release was called.
+            /// Restores the original page protection if the guard is still armed.
             ~ProtectGuard() noexcept;
 
-            /// True while the guard is armed (it will restore on destruction); false after a move or @ref release.
+            /// True while the guard is armed. False after a move, @ref release, or @ref restore.
             [[nodiscard]] explicit operator bool() const noexcept;
 
             /**
-             * @brief Disarms the guard. Its destructor then leaves the changed protection in place.
-             * @details The page entry leaves the ledger once no other guard holds that page, so the next guard over
-             *          it captures the current protection. While another guard still holds the page, this guard's
-             *          applied protection becomes that guard's restore baseline.
-             * @note Setup/control-plane only: ledger removal takes the protection ledger lock.
+             * @brief Disarms the guard, so its destructor leaves the changed protection in place.
+             * @details If no other guard holds a page, the next guard captures its current protection. If another
+             *          guard still holds the page, the applied protection becomes that guard's restore baseline.
+             * @note Setup/control-plane only: the call takes the protection ledger lock.
              */
             void release() noexcept;
 
             /**
              * @brief Restores the original protection now, reports the result, and disarms the guard.
-             * @return An empty `Result` on success; `ErrorCode::ProtectionRestoreFailed` (OS error in `Error::extra`)
-             *         when a region could not be restored. A moved-from, released, or already-restored guard returns
-             *         success. There is nothing left to restore.
-             * @details The observable counterpart to the best-effort destructor. Idempotent: it disarms the guard, so
-             *          the destructor then does nothing. On failure the guard is still disarmed, and the range is
-             *          dropped from the protection cache exactly as the destructor does.
-             * @note Setup/control-plane only: the restore issues VirtualProtect syscalls.
+             * @return An empty `Result`, also for a disarmed guard, or `ErrorCode::ProtectionRestoreFailed` with the OS
+             *         error in `Error::extra`. The guard disarms on both outcomes.
+             * @note Setup/control-plane only: the restore issues `VirtualProtect` calls.
              */
             [[nodiscard]] Result<void> restore() noexcept;
 
         private:
-            // Private so the only way to obtain a guard is make(), which guarantees the protection change succeeded.
+            // Only make() constructs a guard.
             ProtectGuard() noexcept;
 
-            // The captured base/size/old-protection live in the engine TU so this header carries no Win32 type.
+            // The captured regions live in the implementation file, so this header holds no Win32 type.
             struct Impl;
             std::unique_ptr<Impl> m_impl;
         };
 
         /**
-         * @brief Resolves the mapped image span of the module that owns @p address.
-         * @param address Any address inside the target module.
-         * @return The owning module's @ref Region, or an empty Region when @p address is null, falls inside no loaded
-         *         module, or the module's PE headers do not validate.
-         * @details Every call reports the extent the image currently publishes, so a module replaced at the same
-         *          base is never answered from the previous image's headers.
+         * @brief Resolves the mapped image span of the module that owns @p address, from its current PE headers.
+         * @return The module's @ref Region, or an empty Region when @p address is null, lies in no loaded module, or
+         *         the module's PE headers do not validate.
          * @note Setup/control-plane only: the call issues a loader lookup and a guarded PE-header read.
-         * @warning The returned Region is a non-owning scope. It does not pin the module, so a module unloaded after
-         *          this returns leaves a span that references freed address space.
+         * @warning The Region does not pin the module. After an unload, the span references freed address space.
          */
         [[nodiscard]] Region module_of(Address address) noexcept;
 
         /**
-         * @brief Reports whether a module with the given base name is currently loaded in the process.
-         * @param basename The module's file name as the loader knows it (e.g. "kernel32.dll"); a bare name, not a path.
-         * @param case_insensitive When true (the default, matching Windows module-name semantics) the comparison
-         *                         ignores case.
-         * @return True when a loaded module's base name matches @p basename.
-         *         A path longer than `MAX_PATH` does not change either answer.
+         * @brief Reports whether a loaded module has the base name @p basename, for example "kernel32.dll", not a path.
+         * @details A module path longer than `MAX_PATH` does not change the result in either case mode.
          * @note Setup/control-plane only: the query reaches the loader. An exact-case request fails closed under the
-         *       loader lock, because it requires a counted module reference.
+         *       loader lock.
          */
         [[nodiscard]] bool is_module_loaded(std::string_view basename, bool case_insensitive = true) noexcept;
 
         /**
-         * @struct MemoryStats
-         * @brief Allocation-free snapshot of protection-cache configuration and counters.
-         * @details Every field mirrors a value reported by @ref get_cache_stats. Counters are loaded with relaxed
-         *          atomics and the live-entry totals are summed under the shard reader guard, so the struct is a
-         *          consistent-per-field but not globally-atomic view. @ref hit_rate_percent is -1.0 when no queries
-         *          have been tracked (hits + misses == 0).
+         * @brief Allocation-free snapshot of the cache configuration and counters, not atomic as a whole.
+         * @details @ref clear_cache on a running cache and a clean @ref shutdown_cache reset every counter except
+         *          `lifecycle_violations`.
          */
         struct MemoryStats
         {
@@ -617,45 +421,35 @@ namespace DetourModKit
             std::size_t hard_max_per_shard = 0;
             /// Cache-entry expiry window in milliseconds.
             unsigned int expiry_ms = 0;
-            /// Cumulative cache hits.
+            /// Cache hits.
             std::uint64_t hits = 0;
-            /// Cumulative cache misses.
+            /// Cache misses.
             std::uint64_t misses = 0;
-            /// Cumulative range invalidations.
+            /// Range invalidations.
             std::uint64_t invalidations = 0;
-            /// Cumulative in-flight query coalesces.
+            /// In-flight query coalesces.
             std::uint64_t coalesced_queries = 0;
-            /// Cumulative on-demand cleanup passes.
+            /// On-demand cleanup passes.
             std::uint64_t on_demand_cleanups = 0;
             /// Live entry count summed across all shards at snapshot time.
             std::size_t total_entries = 0;
-            /// hits / (hits + misses) * 100, or -1.0 when no queries have been tracked.
+            /// hits / (hits + misses) * 100, or -1.0 when hits + misses is zero.
             double hit_rate_percent = -1.0;
-            /**
-             * @brief Sticky count of lifecycle-invariant violations recovered without terminating.
-             * @details Includes an unexpected joinable handle before start and any contained join/detach failure.
-             *          Monotonic; never reset by clear or shutdown, and expected to remain zero in normal operation.
-             */
+            /// Recovered cleanup-thread lifecycle violations, normally zero. No call resets it.
             std::uint64_t lifecycle_violations = 0;
         };
 
         /**
-         * @brief Initializes the protection-region cache used by @ref is_readable / @ref is_writable.
-         * @param cache_size Desired number of entries across the cache.
-         * @param expiry_ms Cache entry expiry time in milliseconds.
-         * @param shard_count Number of cache shards for concurrent access.
-         * @return True if the cache is ready for use.
-         *         False if lifecycle state blocks a start or cache setup fails.
-         *         A false return leaves the cache stopped, so readers use the uncached `VirtualQuery` route.
-         * @details A call while the cache is running returns true and keeps the running configuration, with no
-         *          reconfiguration and no loader-lock check.
-         *          A call after @ref shutdown_cache starts a fresh cache with the arguments of that call. A start fails
-         *          if readers from a prior session do not exit before the drain deadline. It retains that session's
-         *          storage and precommitted module reference.
-         *          A successful start creates the cleanup thread when the platform permits it.
-         *          Otherwise, the cache uses on-demand cleanup.
-         *          MinGW also installs the process fault handler for guarded reads.
-         * @note Setup/control-plane only. Every cache setup failure appears in the return value.
+         * @brief Initializes the protection cache that @ref is_readable and @ref is_writable consult.
+         * @param cache_size Soft entry capacity across all shards. Each shard rounds its share up.
+         * @return True when the cache runs. False when the lifecycle state blocks a start or setup fails, and readers
+         *         then use the uncached `VirtualQuery` route.
+         * @details A call while the cache runs returns true and keeps its configuration, with no loader-lock check. A
+         *          call after @ref shutdown_cache uses its own arguments. A start fails if readers of a prior session
+         *          outlive the drain deadline (see @ref shutdown_cache). A start creates the cleanup thread if the
+         *          platform permits it, and otherwise cleanup runs on demand. On MinGW, a start also installs the
+         *          guarded-read fault handler.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] bool init_cache(
             std::size_t cache_size = DEFAULT_CACHE_SIZE,
@@ -664,152 +458,98 @@ namespace DetourModKit
         );
 
         /**
-         * @brief Clears all entries from the protection cache, leaving it initialized.
-         * @details Invalidates all cached region information; the background cleanup thread keeps running.
+         * @brief Clears every protection-cache entry. The cache and its cleanup thread continue to run.
          * @note Setup/control-plane only: the clear takes every shard's exclusive lock.
          */
         void clear_cache() noexcept;
 
         /**
-         * @brief Shuts the cache down and joins the background cleanup thread.
-         * @details After shutdown, @ref init_cache must initialize the cache before reuse. Under loader lock, teardown
-         *          detaches the cleanup thread. At process termination, it skips the MinGW handler release because a
-         *          terminated thread can retain a VEH lock or an active read.
-         *          The first guarded read can install that handler without @ref init_cache. Without a @ref Session,
-         *          call this after the module's last guarded read and before unload. Off-loader-lock Hook destruction
+         * @brief Shuts the cache down and joins the cleanup thread, or detaches it under the loader lock.
+         * @details The cache then needs @ref init_cache before reuse, and a permission query takes the uncached
+         *          `VirtualQuery` route. The wait for admitted readers has a fixed deadline. A clean shutdown releases
+         *          the cache storage and module reference. On deadline expiry, the cache retains both and records one
+         *          @ref diagnostics::LeakSubsystem::MemoryCache event. A later @ref init_cache or @ref shutdown_cache
+         *          can reclaim the storage after the stalled reader exits.
+         *
+         *          On MinGW, the call releases the guarded-read fault handler, except at process exit. The first
+         *          guarded read can install that handler without @ref init_cache. Without a @ref Session, call this
+         *          after the last guarded read of the module and before unload. Hook destruction off the loader lock
          *          takes a guarded read.
          *
-         *          Session teardown blocks lazy handler installation until Session setup or
-         *          @ref init_cache succeeds. During that interval, MinGW byte access uses the validated
-         *          fallback and guarded region scans fail closed. A VMT hook object update installs the
-         *          handler only for the duration of that call.
-         *
-         *          Teardown closes reader admission first. A later permission query takes the uncached `VirtualQuery`
-         *          route. The wait for admitted readers has a fixed deadline. The cache precommits a module reference
-         *          before admission opens. On expiry it retains that reference and the cache storage. It also records
-         *          one @ref diagnostics::LeakSubsystem::MemoryCache event. A later @ref init_cache or
-         *          @ref shutdown_cache call can reclaim the storage after the stalled reader exits. A clean shutdown
-         *          releases the cache reference.
-         *
-         *          Without an active @ref Session, this call also returns the emit-chain TLS index of each idle
-         *          diagnostics dispatcher. @ref diagnostics::hook_lifecycle owns that contract.
+         *          Session teardown blocks lazy handler installation until Session setup or @ref init_cache succeeds.
+         *          In that interval, MinGW byte access uses the validated fallback, and guarded region scans fail
+         *          closed. A VMT hook object update installs the handler only for that call. Without an active
+         *          @ref Session, the call also returns the emit-chain TLS index of each idle diagnostics dispatcher,
+         *          as @ref diagnostics::hook_lifecycle documents.
          * @note Setup/control-plane only.
          */
         void shutdown_cache() noexcept;
 
-        /**
-         * @brief Returns an allocation-free snapshot of cache statistics.
-         * @return A @ref MemoryStats snapshot.
-         */
+        /** @brief Returns an allocation-free snapshot of the cache statistics. */
         [[nodiscard]] MemoryStats get_memory_stats() noexcept;
 
-        /**
-         * @brief Returns a human-readable string of cache statistics, built over @ref get_memory_stats.
-         * @return A formatted statistics string. Prefer @ref get_memory_stats for telemetry consumers.
-         */
+        /** @brief Formats @ref get_memory_stats as a human-readable string. */
         [[nodiscard]] std::string get_cache_stats();
 
         /**
-         * @brief Invalidates cache entries overlapping @p range, forcing a re-query on the next probe.
-         * @param range The span whose cached protection state is dropped. An empty range is a no-op.
-         * @details Used after external protection changes (a VirtualProtect by other code) so a later @ref is_readable
-         *          does not answer from stale protection. @ref write_bytes performs this automatically on its
-         *          protection-changing slow path.
+         * @brief Drops the cached protection of every entry that overlaps @p range. An empty range is a no-op.
+         * @details Call it after other code changes protection. Paths in this header that change protection call it.
          * @note Setup/control-plane only: the invalidation mutates the cache shards.
          */
         void invalidate_range(Region range) noexcept;
 
-        /**
-         * @enum ReadableStatus
-         * @brief Tri-state result for the non-blocking readability check.
-         */
+        /** @brief Tri-state result of @ref is_readable_nonblocking. */
         enum class ReadableStatus : std::uint8_t
         {
             /// The region is committed and readable.
             Readable,
-            /// The region is not committed, not readable, or the arguments were rejected.
+            /// The region is not committed, not readable, or the call rejected the arguments.
             NotReadable,
-            /**
-             * @brief Reports that a wait is required before the check can produce a result.
-             * @details This value arises only while the cache runs, in these cases:
-             *          - The shard lock is contended.
-             *          - The cache misses.
-             *          - A concurrent shutdown unpublished the shards.
-             */
+            /// The check needs a wait. @ref is_readable_nonblocking lists the cases.
             Unknown
         };
 
         /**
-         * @brief Reports whether @p range is committed and readable.
-         * @param range The span to check. An empty range returns false.
-         * @return True when the entire range is readable and committed.
-         * @warning On a per-dereference hot path, do not use this function. A hit takes a shard reader lock. A miss can
-         *          walk the range's regions with one VirtualQuery per region. The answer is a time-of-check/time-of-use
-         *          snapshot. For hot game-owned reads, a guarded @ref read provides a checked `Result`. An optional
-         *          @ref is_plausible_ptr call can pre-screen the address.
-         * @note Setup/control-plane only: see the hot-path warning above; a latency-sensitive caller uses
-         *       @ref is_readable_nonblocking.
+         * @brief Reports whether @p range is committed and readable. An empty range returns false.
+         * @warning Do not call it on a per-dereference hot path. A hit takes a shard reader lock, and a miss can call
+         *          `VirtualQuery` once per region. The answer is a time-of-check/time-of-use snapshot.
+         * @note Setup/control-plane only. A hot path uses a guarded @ref read or @ref is_readable_nonblocking.
          */
         [[nodiscard]] bool is_readable(Region range) noexcept;
 
         /**
-         * @brief Reports whether @p range is committed and writable.
-         * @param range The span to check. An empty range returns false.
-         * @return True when the entire range is writable and committed.
-         * @warning Carries the same hot-path cost and time-of-check/time-of-use caveat as @ref is_readable; reserve it
-         *          for one-shot setup validation. To write, prefer attempting a guarded @ref write_bytes which fails
-         *          closed.
+         * @brief Reports whether @p range is committed and writable. An empty range returns false.
+         * @warning The @ref is_readable hot-path warning applies. To write, attempt a guarded @ref write_bytes instead.
          * @note Setup/control-plane only (see @ref is_readable).
          */
         [[nodiscard]] bool is_writable(Region range) noexcept;
 
         /**
-         * @brief Non-blocking readability check that returns @ref ReadableStatus::Unknown rather than stalling.
-         * @param range The span to check. An empty range returns @ref ReadableStatus::NotReadable.
-         * @return @ref ReadableStatus::Readable / NotReadable for a definite answer, or @ref ReadableStatus::Unknown
-         *         when answering would require blocking (a contended shard try-lock or a cache miss, while the cache
-         *         runs), so a latency-sensitive caller can fall back to a guarded @ref read instead of stalling.
-         * @details While the cache is not in its running state (before @ref init_cache, during initialization or
-         *          shutdown, or after @ref shutdown_cache), there is no cache to consult. The check then falls back
-         *          to a blocking range walk with one VirtualQuery per region and returns a definite answer, never
-         *          Unknown.
-         * @note Callback-safe while the cache runs: a try-lock probe with no allocation. Outside the running state it
-         *       takes the blocking fallback above.
+         * @brief Readability check that returns @ref ReadableStatus::Unknown instead of a wait.
+         * @return `NotReadable` for an empty range. `Unknown` only while the cache runs, after shard lock contention, a
+         *         cache miss, or a concurrent shutdown that unpublished the shards.
+         * @note Callback-safe while the cache runs: a try-lock probe with no allocation. If the cache does not run, the
+         *       call blocks on a `VirtualQuery` walk of each region.
          */
         [[nodiscard]] ReadableStatus is_readable_nonblocking(Region range) noexcept;
 
-        /**
-         * @namespace DetourModKit::memory::unchecked
-         * @brief The raw, validation-free fast path. Every entry point here FAULTS THE HOST on an unreadable byte.
-         * @details Quarantined in its own namespace so the danger is visible at the call site: nothing here guards,
-         *          gates, or reports an error, because the contract is "the caller has already proven this access is
-         *          safe".
-         */
+        /** @brief Raw reads with no validation. Each entry point here faults the host on an unreadable byte. */
         namespace unchecked
         {
             /**
-             * @brief Unguarded typed read of a representation-safe @p T at @p address.
-             * @tparam T A trivially copyable type in the representation-safe domain
-             *           (@ref detail::is_representation_safe_v), the same gate the guarded @ref read applies. This
-             *           route has no error channel at all, so the domain is enforced purely at compile time; decode
-             *           `bool` through the guarded @ref read_bool.
-             * @param address Source address. EVERY byte of `[address, address + sizeof(T))` MUST be committed and
-             *                 readable; this performs NO validation and a violation faults the host process.
-             * @return The value at @p address. A top-level bounded built-in array is returned as the equivalent nested
-             *         `std::array`, because C++ functions cannot return a built-in array by value.
-             * @details Under `NDEBUG`, this is a single inlined copy with no SEH, `VirtualQuery`, or cache lookup. A
-             *          Debug build first evaluates `assert(is_readable(...))`, which can take a shard lock or call
-             *          `VirtualQuery`. Use it only for pointers that the caller proves are live for the current frame.
-             *          For anything that can be stale, use the guarded @ref read.
-             * @note Callback-safe under `NDEBUG`: it does nothing but copy. A Debug build can block or call
-             *       `VirtualQuery` during the assertion.
+             * @brief Unguarded typed read of a representation-safe @p T.
+             * @param address Every byte of `[address, address + sizeof(T))` must be committed, readable, and live for
+             *                the current frame. Use the guarded @ref read for an address that can be stale.
+             * @return The value. A top-level bounded built-in array returns as the equivalent nested `std::array`.
+             * @note Callback-safe under `NDEBUG`. A Debug build can block or call `VirtualQuery` in its `is_readable`
+             *       assertion.
              * @warning Under `NDEBUG`, an invalid address faults the host. A Debug build stops at the assertion.
              */
             template <class T>
                 requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
             [[nodiscard]] detail::representation_read_value_t<T> read(Address address) noexcept
             {
-                // The is_readable() probe must not survive into Release. assert() discards it under NDEBUG.
+                // assert() discards the is_readable() probe under NDEBUG.
                 assert(
                     is_readable(Region{address, sizeof(T)}) &&
                     "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated"

@@ -10,13 +10,13 @@ Rules owned here: `[B-25]`, `[B-26]`, `[B-27]`, `[B-29]`, `[B-30]`, `[B-35]`, `[
 
 Lifecycle takes a `mutex`. Reads go through an `atomic<shared_ptr<detail::InputPoller>>`.
 
-- When first-use allocation fails, `instance()` publishes an inert singleton: a null pimpl whose every operation fails closed. The function-local static stays, so `~Input` still runs the bare- `FreeLibrary` teardown.
+- When first-use allocation fails, `instance()` publishes an inert singleton: a null pimpl whose every operation fails closed. The singleton stays a function-local static, so a bare `FreeLibrary` still runs `~Input`, which is a no-op for the null pimpl.
 - Each started poller precommits a self-keepalive before publication and clears it only after a clean join and rundown. Loader-lock, failed-join, and failed-reaper paths therefore retain the complete owner without an allocation.
 - A `shutdown()` reached from a binding callback on any thread requests stop, publishes not-running, and hands its external reference to the off-thread reaper (`src/internal/lifecycle_reaper.hpp`). The reaper invokes shutdown while the owner remains alive, then releases it only after the join, the detour uninstall, and the final `on_state_change(false)` complete. The method documents that asynchronous contract.
 
 - See `InputBinding` for the unlocked retirement contract. The seven `InputLifecycleProof.*DestroysCallablesOutside*` modes verify both lock domains.
 - The process-default Scope follows `[B-47]`. `Lifecycle.InputLoaderDetachRetainsCompleteOwner` verifies its loader-detach lifetime.
-- See `Scope::clear()` for its reentrant add contract. `InputTest.ScopeClearKeepsAGuardAddedFromAReleaseCallback` verifies batch isolation.
+- See `Scope::clear()` for its reentrant add contract. `InputTest.ScopeClearKeepsAGuardAddedFromAReleaseCallback` verifies batch isolation. A Hold guard release can deliver a balancing `on_state_change(false)`. `Scope` releases its guards in reverse insertion order, so a later binding that depends on an earlier one unwinds first.
 
 Hot-path mechanism: The read is an `atomic<shared_ptr<detail::InputPoller>>` acquire-load, then the engine's `shared_lock` plus a relaxed load. The path is not lock-free.
 
@@ -26,6 +26,7 @@ State lives in an atomic `m_active_states[]` array.
 
 - The poll thread re-reserves its deferred-callback staging vector to the live binding count each cycle and stages under one catch. Runtime binding growth past the startup reserve therefore cannot reallocate-then-throw out of the `jthread` body.
 - The cycle is a transaction. Each staged edge carries its own `m_active_states` transition, and a non-throwing store loop commits the whole batch after the pass. The drained wheel backlog rolls back, and the accumulated consume masks clear. A failed pass therefore owes no callback whose state it already consumed. The next cycle re-derives every such edge from the unchanged physical input, with no physical release and repress needed.
+- The poll loop delivers a staged `false` edge after a rebind advances the generation of its registration. That edge can only end a held state and never fires a stale activation. Without that delivery, a consumer whose release edge was staged before the rebind stays held. A remove, a clear, or a count-changing rebind that drops the registration tombstones it, and the poll loop then refuses that edge. If `invoke_callbacks` is true, a remove or a clear synthesizes the balancing `false` itself. A count-changing rebind has no `invoke_callbacks` flag and synthesizes it for each held Hold binding.
 - The derived name/modifier caches rebuild build-then-swap. A rebuild driven by a flag-only change (`set_consume`) retains those caches on allocation failure. It does not clear an index that still describes the binding set. It still disarms gamepad consume suppression, because the flag change can be a retirement and a retained rule list outlives its binding.
 - A failed rebuild after a reshape clears the name index, and name lookups scan the binding set until a rebuild succeeds. `InputPollerTest.ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe` verifies it.
 
@@ -95,7 +96,7 @@ Clients must not duplicate this predicate.
 
 `route_status` can settle physical mount health after a target liveness check. It must never end a control transaction. Quiescence alone cannot expire, cancel, or complete one.
 
-A retarget retry uses its latest thread argument. It does not reuse the destination from the first failed call. `wheel_host_stop` can replace a pending Close transaction. This operation lets the loader recover after the lease owner exits.
+A retarget retry uses its latest thread argument. It does not reuse the destination from the first failed call. `wheel_host_stop` can replace a pending Close transaction. This operation lets the loader recover after the lease owner exits. `wheel_host_stop` keeps the process-lifetime module reference, because a callback that the OS already selected can still run host code after hook removal.
 
 Callback order (both backends): count admission folds and counts on `PM_REMOVE` before `CallNextHookEx` with no message mutation, so older hooks see the original record. `CallNextHookEx` runs exactly once. Consume finalization writes `WM_NULL` after it returns, only while the entry epoch, consume mask, TTL, and focus gate all remain current. Each admitted phase is counted so a close, retarget, or Stop drains admitted decisions, bounded. Consume stays best effort: a newer hook can rewrite the message after DMK returns.
 
@@ -118,7 +119,7 @@ The raw wheel counter saturates at `MAX_WHEEL_NOTCHES` at its write site. `Inter
 
 ### [B-26]
 
-The per-direction wheel-consume mask (`publish_wheel_consume`) and the gamepad reactive mask both work this way. A `Ctrl+WheelUp` consume binding masks only the Up direction while Ctrl is held, never a bare WheelDown.
+The per-direction wheel-consume mask (`publish_wheel_consume`) and the gamepad reactive mask both work this way. A `Ctrl+WheelUp` consume binding masks only the Up direction while Ctrl is held, never a bare WheelDown. The same-frame gamepad rules run in the XInput detours, which read only `wButtons`. If any registered modifier is not a digital gamepad button, the detours cannot apply strict modifier matching, so the engine publishes no rule.
 
 Disarm on the arm-to-disarm transition too, not only through the TTL. When the last consume binding is removed, the poll loop must publish an empty mask on the next cycle. The same applies when focus or the controller is lost. Otherwise the game stays masked until the deadline lapses (~2 s). The wheel path publishes its mask every cycle. The gamepad path tracks a was-armed edge and disarms on it. A gamepad publish gated on `m_has_consume_gamepad_bindings` alone skips the disarm exactly when that flag flips false on removal.
 

@@ -1739,6 +1739,61 @@ TEST(ScanResolve, RipRelativeRejectsInstructionDrift)
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
 }
 
+// E8 (call) and E9 (jmp) carry a rel32 immediate, not a RIP-relative memory operand, so a RipRelative candidate over
+// either never resolves. The Direct arms prove that both byte patterns match, so each refusal is semantic and not a
+// prefilter miss. The lea arm proves that a RIP-relative memory operand still resolves in the same buffer.
+TEST(ScanResolve, RipRelativeNeverResolvesARelativeBranch)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    const std::size_t target = 0x200;
+    const auto rel32_to_target = [&](std::size_t instruction, std::size_t length)
+    {
+        return static_cast<std::int32_t>(
+            static_cast<std::int64_t>(target) -
+            (static_cast<std::int64_t>(instruction) + static_cast<std::int64_t>(length))
+        );
+    };
+    buffer.put(0x100, {0xE8});
+    buffer.put_disp32(0x101, rel32_to_target(0x100, 5));
+    buffer.put(0x140, {0xE9});
+    buffer.put_disp32(0x141, rel32_to_target(0x140, 5));
+    buffer.put(0x180, {0x48, 0x8D, 0x05});
+    buffer.put_disp32(0x183, rel32_to_target(0x180, 7));
+
+    const auto resolve_one = [&](Candidate candidate)
+    {
+        const std::array<Candidate, 1> ladder = {std::move(candidate)};
+        return scan::resolve(
+            scan::ScanRequest{
+                .ladder = ladder,
+                .scope = buffer.region(),
+            }
+        );
+    };
+
+    const auto call = resolve_one(Candidate::rip_relative("call", scan::Pattern::literal("E8 ?? ?? ?? ??"), 1, 5));
+    ASSERT_FALSE(call.has_value());
+    EXPECT_EQ(call.error().code, ErrorCode::NoMatch);
+
+    const auto jump = resolve_one(Candidate::rip_relative("jmp", scan::Pattern::literal("E9 ?? ?? ?? ??"), 1, 5));
+    ASSERT_FALSE(jump.has_value());
+    EXPECT_EQ(jump.error().code, ErrorCode::NoMatch);
+
+    const auto call_site = resolve_one(Candidate::direct("call-site", scan::Pattern::literal("E8 ?? ?? ?? ??")));
+    ASSERT_TRUE(call_site.has_value());
+    EXPECT_EQ(call_site->address.raw(), buffer.address_of(0x100));
+
+    const auto jump_site = resolve_one(Candidate::direct("jmp-site", scan::Pattern::literal("E9 ?? ?? ?? ??")));
+    ASSERT_TRUE(jump_site.has_value());
+    EXPECT_EQ(jump_site->address.raw(), buffer.address_of(0x140));
+
+    const auto lea = resolve_one(Candidate::rip_relative("lea", scan::Pattern::literal("48 8D 05 ?? ?? ?? ??"), 3, 7));
+    ASSERT_TRUE(lea.has_value());
+    EXPECT_EQ(lea->address.raw(), buffer.address_of(target));
+}
+
 TEST(ScanResolve, RipRelativeSemanticDecodeStopsAtTheInstructionBoundary)
 {
     constexpr std::size_t PAGE_SIZE = 0x1000;

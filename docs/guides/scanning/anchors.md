@@ -142,7 +142,7 @@ For `CodeOperand`, `byte_width = 0` preserves the decoded value and 1 through 8 
 
 A `Pages::Readable` scan follows the Readable authority rule of `scan::Pages` in [scan.hpp](../../../include/DetourModKit/scan.hpp). The anchor trust layer is stricter: `VtableIdentity`, `RipGlobal`, `CodeOperand`, and `StringXref` require their common scope to stay inside one reserved allocation regardless of page class. They re-check that boundary after validators and witness construction, because uniqueness depends on the whole searched range. Use a narrow module or allocation `Region`. Cross-module quorum evidence remains supported through explicit `ExportName::export_module` members. A refusal reaches an anchor caller as `AnchorStatus::Failed`, because `ResolvedAnchor` carries no error code.
 
-`resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value, domain, witness}`) and returns the count written. `value` is meaningful only when `status == AnchorStatus::Resolved`. `domain` distinguishes a code site, data address, vtable address, and scalar so a mutation gate can reject an incompatible binding. `witness` is the semantic-site evidence a resolved entry carries beyond its value (see below). The `label` view borrows the source anchor's storage. The scope defaults to `Region::host()`. Pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
+`resolve_all` writes one `ResolvedAnchor` (`{label, kind, status, value, domain, witness}`) for each of the first `min(anchors.size(), out.size())` inputs and returns that count. `value` is meaningful only when `status == AnchorStatus::Resolved`. `domain` distinguishes a code site, data address, vtable address, and scalar so a mutation gate can reject an incompatible binding. `witness` is the semantic-site evidence a resolved entry carries beyond its value (see below). The `label` view borrows the source anchor's storage. The scope defaults to `Region::host()`. Pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
 
 For startup tables whose anchors are independent, `resolve_all_parallel` resolves the same report through a fork-join worker pool:
 
@@ -198,7 +198,9 @@ case an::GateVerdict::Fail:
 }
 ```
 
-Because the gate reads a report (or a sub-span of one), feature-granular gating is only a matter of which anchors you resolve into which report. One primitive serves both a whole-manifest health check and a per-feature kill switch. A `GatePolicy` tunes the thresholds. `min_resolved_ratio` is the fraction of *resolvable* anchors that must resolve (the unsupported `CallArgHome` kind is excluded from the denominator so a forward-compatible declaration never drags the score down). `max_failed` is a hard cap on `Failed` + `QuorumNotIndependent`. `manual_at_risk_degrades` decides whether a resolved-but-pinned `Manual` literal downgrades `Pass` to `Degraded`. A cosmetic overlay can afford a lower ratio than a frame-time camera patch that writes a live pointer, so hold one policy per feature. An empty report or a report with only unsupported anchors has nothing assessable and returns `Degraded`, never a false `Pass`.
+Because the gate reads a report (or a sub-span of one), feature-granular gating is only a matter of which anchors you resolve into which report. One primitive serves both a whole-manifest health check and a per-feature kill switch.
+
+In a `GatePolicy`, `min_resolved_ratio` is the fraction of *resolvable* anchors that must resolve. The unsupported `CallArgHome` kind is not in the denominator, so a forward-compatible declaration never lowers the score. `max_failed` is a hard cap on `Failed` + `QuorumAmbiguous` + `QuorumNotIndependent`. `manual_at_risk_degrades` decides whether any `Manual` entry, in any status, downgrades `Pass` to `Degraded`. A cosmetic overlay can afford a lower ratio than a frame-time camera patch that writes a live pointer, so hold one policy per feature. An empty report or a report with only unsupported anchors has nothing assessable and returns `Degraded`, never a false `Pass`.
 
 ## Anchor fingerprints
 
@@ -210,7 +212,9 @@ Because the gate reads a report (or a sub-span of one), feature-granular gating 
 - `ExportName`: the module and export name.
 - `Manual`: the literal.
 
-It deliberately excludes the resolved address. `Pages::Readable` is omitted from a `RipGlobal` fingerprint to preserve existing baselines. `Pages::Executable` is folded because it changes the resolution policy. A candidate's cosmetic `name` and the anchor's `label` are excluded too, because neither changes which address resolves. Because `scan::Pattern` compiles the signature and does not retain its source AOB text, the cascade evidence is derived from the compiled content (the byte and wildcard-mask spans plus the result offset). That content is equally stable across a diff and needs no re-parse.
+It deliberately excludes the resolved address. `Pages::Readable` is omitted from a `RipGlobal` fingerprint to preserve existing baselines. `Pages::Executable` is folded because it changes the resolution policy. A candidate's cosmetic `name` and the anchor's `label` are excluded too, because neither changes which address resolves.
+
+`scan::Pattern` keeps no source AOB text, so a byte rung contributes its compiled byte and wildcard-mask spans, result offset, and bounded-jump gaps. The rung also contributes its mode and its walk-back or RIP decode parameters. The fingerprint therefore needs no re-parse of AOB text.
 
 The point is a diffable identity that is stable when only the address drifts. Persist a fingerprint next to each resolved value, and on the next game version a manifest diff can tell two cases apart:
 
@@ -233,13 +237,13 @@ A resolved report also carries a `ResolvedWitness` in `ResolvedAnchor::witness`,
 
 ## Per-game scan profile
 
-A `ScanProfile` (also in `anchor.hpp`) bundles a few setup-only, per-game scan-tuning defaults as a plain value, with no hidden global state. It supplies *defaults* only. An explicit per-call option (a query's `broad_match`, a request's candidate order) still wins, so a wire-up of a profile never overrides an explicit choice.
+A `ScanProfile` (in `anchor.hpp`) is a plain value with per-game scan tuning for every anchor in a profiled resolve, and no hidden global state. No `Anchor` field overrides the profile's deny-list or candidate order.
 
-- `default_broad_string_xref` widens the broad string-xref sweep on for `StringXref` anchors (it can only widen, never force off, and a per-anchor `xref_broad_match` still wins). `anchor::apply_profile` folds this into a `scan::StringRefQuery`.
+- `default_broad_string_xref` turns on the broad string-xref sweep for every `StringXref` anchor, even one with `xref_broad_match = false`. It never turns the sweep off. `anchor::apply_profile` folds this into a `scan::StringRefQuery`.
 - `candidate_order` is a `scan::CandidateOrder` that reuses the scan module's ordering policy. `UniqueFirst` promotes the unique-only text tiers (RTTI and string xref) and anchored byte patterns ahead of looser byte fallbacks. `anchor::resolve_with_profile` applies it to `RipGlobal` (through the request's `order` field) and to `CodeOperand` (by a build of a local reordered ladder via `scan::order_candidates`), so the caller's static candidate table is never mutated.
 - `deny_backend` is a per-`AnchorKind` deny-list.
 
-Resolve a profile-aware table with `anchor::resolve_with_profile` / `resolve_all_with_profile`. Use `resolve_all_with_profile_parallel` when the profile-aware table is safe to dispatch concurrently. A denied backend fails *closed* (status `Failed`, value 0), never a silent replacement by a different, possibly-wrong backend. The profile threads into `Quorum` sub-anchors, so candidate-order and broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to a resolve with an empty profile.
+Resolve one anchor with `anchor::resolve_with_profile`, or a table with `anchor::resolve_all_with_profile`. Use `resolve_all_with_profile_parallel` when the profile-aware table is safe to dispatch concurrently. A denied backend fails *closed* (status `Failed`, value 0), never a silent replacement by a different, possibly-wrong backend. Quorum members use the same profile, so a denied member fails and casts no vote. Candidate order and the broad string-xref sweep default also apply to each member. The plain `resolve` / `resolve_all` are equivalent to a resolve with an empty profile.
 
 ## Re-heal on a validation miss
 

@@ -35,9 +35,9 @@ The typed reads participate over an explicit allowlist, not over every scalar:
 - object and function pointers under the Windows x64 ABI,
 - `Address`,
 - bounded arrays of accepted elements,
-- aggregates opted in through `detail::enable_representation_safe_aggregate`.
+- a class or union opted in through `detail::enable_representation_safe_aggregate`. The trait defaults to false because C++23 has no general member reflection to reject a member such as a `bool`.
 
-A top-level built-in array returns as the equivalent nested `std::array`. `std::nullptr_t`, both member-pointer forms, an unbounded array, and an unscoped enum with no fixed base are compile errors. Copy their bytes with `memory::read_into` instead. `tests/test_memory_representation.cpp` is the participation matrix, and the migration guide restates the domain for consumers.
+A top-level built-in array returns as the equivalent nested `std::array`. `std::nullptr_t`, both member-pointer forms, an unbounded array, and an unscoped enum with no fixed base are compile errors. Copy their bytes with `memory::read_into` instead. A member pointer has an implementation-defined representation, and a member-function pointer can hold several fields. `tests/test_memory_representation.cpp` is the participation matrix, and the migration guide restates the domain for consumers.
 
 The full pattern (worked examples, the primitive selection table, and the anti-patterns to remove) lives in [hot-path-memory.md](../guides/memory/hot-path-memory.md).
 
@@ -59,13 +59,15 @@ The AOB scanner and the fault-guarded probe deliberately read arbitrary mapped p
 
 ### memory::unchecked::read
 
-`memory::unchecked::read<std::uintptr_t>(addr)` is the raw validation-free fast path: a single inlined `memcpy` into stack storage followed by `std::bit_cast`. It has no SEH, no `VirtualQuery`, no cache lookup, and no range guard of any kind: no low-address floor, no `USERSPACE_PTR_MAX` ceiling. The caller must prove in advance that every byte of `[addr, addr + sizeof(T))` is committed and readable. A debug-only `assert(is_readable(...))` trips a violated precondition at the offending call site but compiles out under `NDEBUG`. A release build is therefore a bare copy that faults the host on an invalid address, exactly as documented. Reach for the guarded `memory::read` when the pointer can be stale.
+`memory::unchecked::read<std::uintptr_t>(addr)` is the raw validation-free fast path: a single inlined `memcpy` into stack storage followed by `std::bit_cast`. It never uses SEH and never compares the address against the `USERSPACE_PTR_MIN` floor or the `USERSPACE_PTR_MAX` ceiling. Under `NDEBUG`, it also has no `VirtualQuery` and no cache lookup.
+
+The caller must prove in advance that every byte of `[addr, addr + sizeof(T))` is committed and readable. A debug-only `assert(is_readable(...))` trips a violated precondition at the offending call site but compiles out under `NDEBUG`. A release build is therefore a bare copy that faults the host on an invalid address, exactly as documented. Reach for the guarded `memory::read` when the pointer can be stale.
 
 ### memory::read / read_into
 
 `memory::read<T>()` and `read_into()` are the typed and raw guarded reads:
 
-- MSVC uses a frame-based SEH guard. MinGW uses a process-wide vectored handler and a non-unwindable setjmp frame. The [`shutdown_cache` contract](../../include/DetourModKit/memory.hpp) owns handler lifetime and fallback behavior. `Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession` proves retirement after a late Hook destruction. `Lifecycle.GuardedReadHandlerReopensOnSessionRestart` and `Lifecycle.GuardedReadHandlerReopensOnCacheRestart` prove new epochs.
+- MSVC uses a frame-based SEH guard. MinGW uses a process-wide vectored handler and a non-unwindable setjmp frame. The [`shutdown_cache` contract](../../include/DetourModKit/memory.hpp) owns handler lifetime and fallback behavior. At process exit, `shutdown_cache` keeps the MinGW handler, because a terminated thread can leave the handler lock held or a guarded access counted. `Lifecycle.GuardedReadHandlerRetiresAfterAHookOutlivesTheSession` proves retirement after a late Hook destruction. `Lifecycle.GuardedReadHandlerReopensOnSessionRestart` and `Lifecycle.GuardedReadHandlerReopensOnCacheRestart` prove new epochs.
 - Both toolchains swallow the same foreign-read fault set through the shared predicate `detail::is_guarded_read_fault` : `EXCEPTION_ACCESS_VIOLATION`, `STATUS_GUARD_PAGE_VIOLATION`, and `EXCEPTION_IN_PAGE_ERROR`. The last is a file-backed or image-mapped page that fails to page in, for example during an RTTI or section walk. Any other fault continues the handler search. An access-class fault is claimed only when its address lies in the declared foreign range.
 - A claimed guard-page fault re-arms the `PAGE_GUARD` bit that the OS consumed on dispatch ( `rearm_guard_page_if_consumed`) before the read fails closed. A read of a foreign guard page therefore cannot disarm the host's fence and let a retry through it.
 - A guarded access publishes its foreign range to one per-thread slot and SAVES the enclosing value rather than a clear, so guarded accesses can nest. A nested read restores the outer range on the way out, and the enclosing span stays armed for the rest of the outer access. The same claimed fault set and guard-page re-arm apply at either depth. `FaultContainment.GuardedRegionStaysArmedAcrossANestedGuardedRead` pins that on both toolchains.

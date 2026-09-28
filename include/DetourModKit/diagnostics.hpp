@@ -3,15 +3,10 @@
 
 /**
  * @file diagnostics.hpp
- * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, a diagnostic event bus for
- *        scanner-fault and hook-lifecycle transitions, and a one-call runtime-diagnostics @ref
- *        DetourModKit::diagnostics::Snapshot aggregator.
- *
- * @details Every counter and dispatcher here is scoped to one linked DMK instance, not to the process. DMK is a static
- *          library, so two modules in one process that each link it hold independent diagnostic state: a subscriber
- *          registered through one module's dispatcher never observes the other module's events.
- * @warning `[B-100]` Run dispatcher first use, subscription, and collect() outside the loader lock. Counter queries
- *          and recorders use only static atomics and remain Callback-safe. `DiagnosticsLoaderBoundary.*` pins the
+ * @brief Leak and module-pin counters, scanner-fault and hook-lifecycle event buses, and a Snapshot aggregator.
+ * @details Every counter and dispatcher belongs to one linked DMK instance, not to the process.
+ * @warning `[B-100]` Run dispatcher first use, subscription, and collect() outside the loader lock. Counter queries and
+ *          recorders use only relaxed static atomics and stay Callback-safe. `DiagnosticsLoaderBoundary.*` pins the
  *          boundary.
  */
 
@@ -30,12 +25,9 @@ namespace DetourModKit
     namespace diagnostics
     {
         /**
-         * @enum LeakSubsystem
-         * @brief Identifies the subsystem that took an intentional leak / detach path.
-         * @details Each enumerator names a class of site that deliberately leaks storage or detaches a thread instead
-         *          of joining or freeing. The caller-requested retention verbs book here too. These are not
-         *          normal-shutdown counters, and a subsystem may record several events.
-         *          @ref LeakSubsystem::HookManager books one per hook that pins its backend.
+         * @brief Identifies a subsystem that took an intentional leak or detach path. Caller-requested retention verbs
+         *        also record here. These are not normal-shutdown counters. HookManager records one event per hook that
+         *        retains its backend.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -49,53 +41,30 @@ namespace DetourModKit
             Bootstrap,
             /// A diagnostics dispatcher kept its emit-chain TLS index at teardown. See @ref hook_lifecycle.
             Diagnostics,
-            /// Sentinel: the number of tracked subsystems. Not a subsystem.
+            /// The number of tracked subsystems, not a subsystem.
             Count
         };
 
         /**
-         * @brief Records that @p subsystem took an intentional leak / detach path.
-         * @details Performs a single relaxed atomic increment. Safe to call from a noexcept destructor and from
-         *          DllMain / loader-lock context: it touches only a static atomic and never allocates, locks, or calls
-         *          a Win32 API.
-         * @param subsystem The subsystem reporting the event. @ref LeakSubsystem::Count (or any out-of-range value) is
-         *                  ignored.
-         * @note Relaxed ordering is sufficient: the counter is an independent event tally with no happens-before
-         *       relationship to other state.
+         * @brief Adds one relaxed count to @p subsystem. An out-of-range value such as @ref LeakSubsystem::Count is
+         *        ignored. A noexcept destructor or a DllMain caller can use it.
          */
         void record_intentional_leak(LeakSubsystem subsystem) noexcept;
 
-        /**
-         * @brief Returns how many intentional leak / detach events @p subsystem recorded.
-         * @param subsystem The subsystem to query.
-         * @return The event count, or 0 if @p subsystem is out of range.
-         */
+        /** @brief Returns the event count of @p subsystem, or 0 if @p subsystem is out of range. */
         [[nodiscard]] std::size_t intentional_leak_count(LeakSubsystem subsystem) noexcept;
 
-        /**
-         * @brief Returns the total intentional leak / detach events across all subsystems.
-         * @details A Worker event can appear here and in @ref LifecycleCounters, so their sum is not a
-         *          unique-incident count. The @ref intentional_leak_count function provides subsystem attribution.
-         * @return The summed event count.
-         * @note The function snapshots relaxed counters and never throws.
-         */
+        /** @brief Returns the relaxed sum of all subsystem counts. @ref LifecycleCounters states the Worker overlap. */
         [[nodiscard]] std::size_t total_intentional_leaks() noexcept;
 
-        /**
-         * @brief Resets every subsystem counter to zero.
-         * @details Intended for test isolation; consumers normally only read.
-         */
+        /** @brief Resets every subsystem count to zero, for test isolation. */
         void reset_intentional_leaks() noexcept;
 
         /**
-         * @enum ModulePinReason
-         * @brief Identifies the purpose of a counted module reference.
-         * @details Each counted reference uses one reason.
-         *          Its live count equals successful acquires minus releases.
-         *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
-         *          XInputTarget refers to an XInput provider module.
-         * @note After Session teardown, MessageHookKeepalive is inert. A retained XInput pair or chain may still
-         *       forward calls. Other open self-module reasons can identify live code.
+         * @brief Identifies the purpose of a counted module reference. Counts stay readable after Session teardown and
+         *        during static teardown. Every reason except @ref XInputTarget references the module that links DMK.
+         * @note After Session teardown, @ref MessageHookKeepalive is inert. A retained XInput pair or chain can still
+         *       forward calls, and another open self-module reason can identify live code.
          */
         enum class ModulePinReason : std::uint8_t
         {
@@ -113,83 +82,58 @@ namespace DetourModKit
             InputPoller,
             /// Tracks the permanent lifecycle-reaper reference also reported by @ref LifecycleCounters.
             LifecycleReaper,
-            /// Reserved inert value for the WndProc keepalive. It keeps this numeric slot and never counts.
+            /// Reserved inert value for the WndProc keepalive. It keeps its numeric value and never counts.
             WndprocKeepalive,
             /// Tracks the XInput self-reference until a rollback or uninstall that retains no XInput chain.
             XInputKeepalive,
-            /** @brief Tracks an XInput provider reference paired with @ref XInputKeepalive. */
+            /// Tracks an XInput provider reference paired with @ref XInputKeepalive.
             XInputTarget,
             /// Tracks the permanent message-hook keepalive from the first successful local-backend hook publication.
             MessageHookKeepalive,
-            /// Gives the number of tracked reasons and is not a reason.
+            /// The number of tracked reasons, not a reason.
             Count
         };
 
         /**
-         * @brief Returns how many counted module references are outstanding under @p reason.
-         * @details The count belongs to one linked DMK instance.
-         *          It stays readable after @c ~Session and throughout static teardown.
-         * @param reason The reason to query.
-         * @return The outstanding reference count, or 0 if @p reason is out of range.
-         * @note Callback-safe:
-         *       - It performs one relaxed atomic read.
-         *       - It allocates no memory.
-         *       - It takes no lock and makes no Win32 call.
+         * @brief Returns the outstanding counted module references of @p reason, or 0 if @p reason is out of range.
+         * @note Callback-safe.
          */
         [[nodiscard]] std::size_t module_pin_count(ModulePinReason reason) noexcept;
 
         /**
-         * @brief Returns the outstanding counted module references summed across all reasons.
-         * @details Each reason has an independent sample.
-         *          Concurrent transitions can skew the sum.
-         * @return The summed outstanding reference count.
-         * @note Callback-safe:
-         *       - It performs relaxed atomic reads.
-         *       - It allocates no memory.
-         *       - It takes no lock and makes no Win32 call.
+         * @brief Returns the sum of @ref module_pin_count over all reasons. Concurrent transitions can skew it.
+         * @note Callback-safe.
          */
         [[nodiscard]] std::size_t total_module_pins() noexcept;
 
         /**
-         * @struct LifecycleCounters
-         * @brief Contains observability counters for the lifecycle machinery's own retention decisions.
-         * @details These counters expose the off-thread retirement facility. Each counter is monotonic and belongs to
-         *          one linked DMK instance. The reaper can retain an unbounded number of parcels. A Worker retirement
-         *          can increment an intentional-leak counter and @ref abandoned_owners. Their sum does not represent
-         *          unique incidents. The abandoned-owner tally has no subsystem attribution.
+         * @brief Monotonic counters of the lifecycle reaper, which can retain unbounded parcels. A Worker retirement
+         *        can count in @ref abandoned_owners and in an intentional-leak counter, so their sum can overcount.
          */
         struct LifecycleCounters
         {
-            /// Holds 1 after the process-lifetime reaper thread launches and 0 before it launches.
+            /// Holds 1 after the process-lifetime reaper thread starts, and 0 before.
             std::size_t reaper_started = 0;
             /// Counts the permanent module reference that the reaper takes when its thread starts.
             std::size_t permanent_pins = 0;
-            /// Counts failed retirements that the reaper retains permanently.
+            /// Counts failed retirements that the reaper retains permanently, with no subsystem attribution.
             std::size_t abandoned_owners = 0;
         };
 
         /**
-         * @brief Returns the lifecycle observability counters.
-         * @return The current @ref LifecycleCounters values.
-         * @note The function uses callback-safe relaxed atomic reads:
-         *       - It allocates no memory.
-         *       - It takes no lock.
-         *       - It makes no Win32 call.
-         * @note Each field is sampled independently. Concurrent lifecycle transitions can produce cross-field skew.
+         * @brief Returns the current @ref LifecycleCounters. Concurrent transitions can skew one field against another.
+         * @note Callback-safe.
          */
         [[nodiscard]] LifecycleCounters lifecycle_counters() noexcept;
 
         /**
-         * @struct ScannerFaultEvent
-         * @brief A region-walking AOB sweep skipped one or more regions that faulted mid-scan.
-         * @details Emitted once per sweep by the page-filtered scanners when a concurrent decommit / reprotect faults
-         *          a region between the per-region VirtualQuery gate and the read. The region-granular fault guard
-         *          covers both toolchains, so the sweep skipped each faulted region and continued. A clean sweep
-         *          emits nothing.
+         * @brief A page-filtered AOB sweep skipped regions that faulted during the read, for example after a concurrent
+         *        decommit or reprotect. On MinGW, it also skips each region while no guarded-read fault handler is
+         *        installed, for example after Session teardown. One event follows the sweep. A clean sweep emits none.
          */
         struct ScannerFaultEvent
         {
-            /// Number of regions skipped because they faulted mid-scan.
+            /// The number of regions skipped for a read fault or, on MinGW, a missing fault handler.
             std::size_t faulted_regions = 0;
             /// Inclusive low bound of the scanned window.
             std::uintptr_t window_low = 0;
@@ -197,10 +141,7 @@ namespace DetourModKit
             std::uintptr_t window_high = 0;
         };
 
-        /**
-         * @enum HookKind
-         * @brief Which hook flavor a @ref HookLifecycleEvent describes.
-         */
+        /** @brief The hook flavor that a @ref HookLifecycleEvent describes. */
         enum class HookKind : std::uint8_t
         {
             Inline,
@@ -208,19 +149,12 @@ namespace DetourModKit
             Vmt
         };
 
-        /**
-         * @enum HookTransition
-         * @brief The lifecycle transition a @ref HookLifecycleEvent reports.
-         */
+        /** @brief The lifecycle transition that a @ref HookLifecycleEvent reports. */
         enum class HookTransition : std::uint8_t
         {
-            /**
-             * @brief A hook was created by an install verb (inline_at / mid_at / vmt_for).
-             * @details Inline and mid hooks are created disabled, so this reports the install, not an armed target;
-             *          @ref Enabled reports the arming. A VMT hook is live on creation.
-             */
+            /// An install verb (inline_at, mid_at, vmt_for) created the hook. Only a VMT hook starts Active.
             Created,
-            /// An existing hook published Active, which includes conservative possible reachability.
+            /// An existing hook published Active: physically armed, or possibly reachable by a conservative estimate.
             Enabled,
             /// An existing hook was disabled.
             Disabled,
@@ -229,20 +163,16 @@ namespace DetourModKit
         };
 
         /**
-         * @struct HookLifecycleEvent
-         * @brief A hook crossed an install / enable / disable / remove transition.
-         * @details The hook surface emits after the operation completes. The emit holds no hook lock.
-         *          A handler therefore runs outside every hook critical section.
-         * @details A completed physical and published transition emits once, even when its Result carries a
-         *          post-commit error. A failure without a transition emits nothing. An idempotent no-op emits nothing.
-         * @details A handler mutation can emit nested lifecycle events. Avoid unbounded event recursion.
-         *          If a handler retains @ref name, copy it during the emit call.
+         * @brief A hook crossed an install, enable, disable, or remove transition. The emit runs after the operation
+         *        completes, outside every hook lock. A completed physical and published transition emits once, even
+         *        when its Result carries a post-commit error. A failure without a transition, or an idempotent no-op,
+         *        emits nothing. A hook mutation in a handler can emit nested events. Avoid unbounded event recursion.
          */
         struct HookLifecycleEvent
         {
-            /// The hook id (the caller-supplied name). Valid only for the duration of the emit call; copy to retain.
+            /// The caller-supplied hook name. It is valid only during the emit call, so copy it to retain it.
             std::string_view name;
-            /// Lifetime identity unique within this linked DMK instance; 0 means the hook is untracked.
+            /// A lifetime identity, unique within this DMK instance. 0 means that the hook is untracked.
             std::uint64_t ledger_id = 0;
             /// The hook flavor.
             HookKind kind = HookKind::Inline;
@@ -251,70 +181,51 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Returns this linked DMK instance's dispatcher for @ref ScannerFaultEvent.
-         * @details A single shared dispatcher the stateless scanner emits to. Subscribe before running a scan to see
-         *          skipped-region faults. The dispatcher is never destroyed, so the returned reference and the emit
-         *          path both stay valid through static teardown and a late module-pinned emitter is still delivered.
-         * @return The shared @ref ScannerFaultEvent dispatcher.
-         * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
-         *       the existing reference.
-         * @note The TLS index contract of @ref hook_lifecycle also applies to this dispatcher.
+         * @brief Returns the shared dispatcher for @ref ScannerFaultEvent. The dispatcher is never destroyed, so it
+         *        stays valid through static teardown for a late module-pinned emitter. The TLS index contract of
+         *        @ref hook_lifecycle also applies here.
+         * @note Setup/control-plane only on the first call, which can allocate. Later calls only return the reference.
          */
         EventDispatcher<ScannerFaultEvent> &scanner_faults();
 
         /**
-         * @brief Returns this linked DMK instance's dispatcher for @ref HookLifecycleEvent.
-         * @details A single shared dispatcher the hook surface emits hook lifecycle transitions to. Never destroyed, so
-         *          a hook destroyed during static teardown still emits safely.
-         * @return The shared @ref HookLifecycleEvent dispatcher.
-         * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
-         *       the existing reference.
-         * @note A subscription makes this dispatcher an owner of the emit-chain TLS index of this DMK copy. Session
+         * @brief Returns the shared dispatcher for @ref HookLifecycleEvent. It is never destroyed, so a hook destroyed
+         *        during static teardown still emits safely.
+         * @note Setup/control-plane only on the first call, which can allocate. Later calls only return the reference.
+         * @note A subscription makes this dispatcher an owner of the emit-chain TLS index of this DMK instance. Session
          *       teardown returns that ownership when no subscription is live and no emit runs. Without an active
-         *       Session, memory::shutdown_cache() returns idle ownership. A live subscription keeps ownership silently,
-         *       with no leak record. A later memory::shutdown_cache() call returns an
-         *       ownership that teardown kept, after the dispatcher becomes idle.
-         * @note An authorized teardown waits up to one second for a running emit. It does not wait under the loader
-         *       lock, inside a diagnostics handler, or while an untracked emit runs. An emit that still runs then keeps
-         *       the index and records one @ref LeakSubsystem::Diagnostics event per kept ownership.
-         *       Teardown does not log under the loader lock, and it skips the release at process exit.
+         *       Session, memory::shutdown_cache() returns an idle ownership, also one that an earlier teardown kept.
+         *       For a live subscription, memory::shutdown_cache() keeps the ownership silently, with no leak record.
+         * @note An authorized teardown waits up to one second for an emit to finish. It does not wait under the loader
+         *       lock, inside a diagnostics handler, or while an untracked emit runs. If an emit still runs, teardown
+         *       keeps the index and records one @ref LeakSubsystem::Diagnostics event per kept ownership. Teardown
+         *       does not log under the loader lock and skips the release at process exit.
          *       `Lifecycle.DiagnosticsTlsIndex*` pins this contract.
          * @warning Drop every subscription before Session teardown. A subscription that is live at Session teardown
          *          keeps the index and records one @ref LeakSubsystem::Diagnostics event.
          */
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle();
 
-        /**
-         * @struct Snapshot
-         * @brief Holds an aggregate observation of DMK's runtime diagnostics from @ref collect.
-         * @details This is a plain value snapshot. Independent counter groups can reflect different instants amid
-         *          concurrent updates. Collection re-runs no scanner and tallies caller-supplied reports directly.
-         */
+        /** @brief A value snapshot from @ref collect. Each counter group can reflect a different instant. */
         struct Snapshot
         {
-            /// Intentional leak / detach events per subsystem, indexed by @c static_cast<std::size_t>(LeakSubsystem).
+            /// Events per subsystem, indexed by @c static_cast<std::size_t>(LeakSubsystem).
             std::array<std::size_t, static_cast<std::size_t>(LeakSubsystem::Count)> intentional_leaks{};
-            /// Total intentional leak / detach events across all subsystems.
+            /// The sum of @ref intentional_leaks.
             std::size_t total_intentional_leaks = 0;
 
             /**
-             * @brief Live DMK hooks (inline + mid + VMT) held by this linked DMK instance.
-             * @details Tallied without allocation from process start, including hooks created before the first
-             *          @ref collect.
-             * @note A hook whose target or clone remains conservatively tracked after teardown stays counted, as does
-             *       one abandoned by @c Hook::release() or @c VmtHook::release().
+             * @brief Live inline, mid, and VMT hooks. The count includes hooks created before the first @ref collect. A
+             *        hook still counts after Hook::release() or VmtHook::release(), and while teardown keeps its target
+             *        or clone conservatively tracked.
              */
             std::size_t hooks_total = 0;
-            /**
-             * @brief Counts live hooks in published Active state.
-             * @details Active means the hook is physically armed or has conservative possible reachability. A VMT
-             *          hook is Active from creation.
-             */
+            /// Live hooks in the Active state that @ref HookTransition::Enabled defines. A VMT hook starts Active.
             std::size_t hooks_active = 0;
             /// Live disabled hooks. @ref hooks_active + @ref hooks_disabled == @ref hooks_total, from one observation.
             std::size_t hooks_disabled = 0;
 
-            /// Contains lifecycle observability counters copied from @ref lifecycle_counters.
+            /// The @ref lifecycle_counters values.
             LifecycleCounters lifecycle{};
 
             /// Landmarks in the supplied drift report.
@@ -324,31 +235,20 @@ namespace DetourModKit
             /// Landmarks that failed to heal.
             std::size_t drift_failed = 0;
 
-            /// Robustness roll-up of the supplied anchor report (empty when no anchor report is passed).
+            /// Robustness roll-up of the supplied anchor report, empty when no anchor report is passed.
             anchor::AnchorQuality anchor_quality{};
 
-            /**
-             * @brief Holds counted module references per reason.
-             * @details Index each value with
-             *          @c static_cast<std::size_t>(ModulePinReason).
-             */
+            /// Outstanding counted references per reason, indexed by @c static_cast<std::size_t>(ModulePinReason).
             std::array<std::size_t, static_cast<std::size_t>(ModulePinReason::Count)> module_pins{};
-            /// Total outstanding counted module references across all reasons.
+            /// The sum of @ref module_pins.
             std::size_t total_module_pins = 0;
         };
 
         /**
-         * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
-         * @details Reads this instance's intentional-leak counters, module pins, and hook population.
-         *          It then rolls up both caller-owned reports.
-         *          Subscriber retirement and a cleared @ref hook_lifecycle do not affect the population.
-         *          Pass an empty span to skip either report.
-         * @param drift_report A self-heal drift report.
-         *                     Pass an empty span to skip the drift summary.
-         * @param anchor_report An anchor drift report.
-         *                      Pass an empty span to skip the anchor-quality summary.
-         * @return The aggregated snapshot.
-         * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
+         * @brief Aggregates the leak counters, counted module references, and hook population into a @ref Snapshot. It
+         *        tallies the caller-owned reports without a scan. Pass an empty span to skip either report. Subscriber
+         *        retirement and a cleared @ref hook_lifecycle do not change the hook population.
+         * @note Setup/control-plane only.
          */
         [[nodiscard]] Snapshot collect(
             std::span<const rtti::DriftEntry> drift_report = {},

@@ -3,9 +3,7 @@
 
 /**
  * @file format.hpp
- * @brief String and format utilities for DetourModKit.
- * @details Provides string manipulation (trimming) and formatting utilities for common game modding types like memory
- *          addresses, byte values, and virtual key codes.
+ * @brief String trimming and hex formatting for addresses, integers, bytes, and virtual key codes.
  */
 
 #include <concepts>
@@ -20,14 +18,7 @@ namespace DetourModKit
 {
     namespace string
     {
-        /**
-         * @brief Trims leading and trailing whitespace characters from a string.
-         * @details Whitespace characters considered are space, tab, newline, carriage return, form feed, and vertical
-         *          tab.
-         * @param s The string_view to trim.
-         * @return std::string A new string with leading/trailing whitespace removed. Returns an empty string if the
-         *         input string is empty or contains only whitespace.
-         */
+        /** @brief Trims leading and trailing space, tab, newline, carriage return, form feed, and vertical tab. */
         [[nodiscard]] inline std::string trim(std::string_view s)
         {
             const char *whitespace_chars = " \t\n\r\f\v";
@@ -45,24 +36,17 @@ namespace DetourModKit
 
     namespace format
     {
-        /**
-         * @brief Formats a memory address as a hexadecimal string.
-         * @param address The memory address to format.
-         * @return std::string Formatted address (e.g., "0x00007FFE12345678").
-         */
+        /** @brief Formats an address as full-width hex, for example "0x00007FFE12345678". */
         [[nodiscard]] inline std::string format_address(uintptr_t address)
         {
             return std::format("0x{:0{}X}", address, sizeof(uintptr_t) * 2);
         }
 
         /**
-         * @brief Formats a signed integer as an unsigned hexadecimal string.
-         * @details Prints the unsigned two's-complement bit pattern, so a negative value widens to its unsigned
-         *          representation (e.g. -1 -> "0xFFFFFFFF"). Use the ptrdiff_t overload when a leading '-' and the
-         *          signed magnitude are wanted, or the unsigned-integral overload for size_t / unsigned values.
-         * @param value The integer value to format.
-         * @param width Minimum width of the hex part (0 for no padding).
-         * @return std::string Formatted hex string (e.g., "0xFF").
+         * @brief Formats the unsigned two's-complement bit pattern of @p value, for example -1 as "0xFFFFFFFF".
+         * @param width Minimum digit count of the zero-padded hex part. 0 adds no padding. Every format_hex overload
+         *              keeps the "0x" prefix and any '-' outside the padded field.
+         * @note For a leading '-' and the signed magnitude, pass a ptrdiff_t.
          */
         [[nodiscard]] inline std::string format_hex(int value, int width = 0)
         {
@@ -71,14 +55,7 @@ namespace DetourModKit
             return std::format("0x{:X}", static_cast<unsigned int>(value));
         }
 
-        /**
-         * @brief Formats a signed long as an unsigned hexadecimal string.
-         * @details Exact match for the 32-bit Win32 LONG family (HRESULT, LONG, LSTATUS, NTSTATUS). Negative values
-         *          print the unsigned two's-complement bit pattern like the int overload.
-         * @param value The long value to format.
-         * @param width Minimum width of the hex part (0 for no padding).
-         * @return std::string Formatted hex string (e.g., "0x80004005").
-         */
+        /** @brief Formats a long as the int overload does. HRESULT, LONG, LSTATUS, and NTSTATUS bind here exactly. */
         [[nodiscard]] inline std::string format_hex(long value, int width = 0)
         {
             if (width > 0)
@@ -86,17 +63,7 @@ namespace DetourModKit
             return std::format("0x{:X}", static_cast<unsigned long>(value));
         }
 
-        /**
-         * @brief Formats any unsigned integer as a hexadecimal string.
-         * @details Constrained to std::unsigned_integral so a size_t / unsigned / uint64_t argument binds here exactly
-         *          instead of being ambiguous between the int and ptrdiff_t overloads. The full value is preserved
-         *          with no narrowing. The signed int and ptrdiff_t overloads are unaffected because a signed argument
-         *          does not satisfy the constraint.
-         * @tparam T The unsigned integral type of the value.
-         * @param value The unsigned value to format.
-         * @param width Minimum width of the hex part (0 for no padding).
-         * @return std::string Formatted hex string (e.g., "0xDEADBEEF").
-         */
+        /** @brief Formats the full unsigned value with no narrowing. @p width works as in the int overload. */
         template <std::unsigned_integral T> [[nodiscard]] inline std::string format_hex(T value, int width = 0)
         {
             if (width > 0)
@@ -105,20 +72,14 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Formats a ptrdiff_t as a signed hexadecimal string.
-         * @details The signed 64-bit path (LONG_PTR / SSIZE_T / long long on LLP64), and the one signed overload that
-         *          prints a leading '-' with the magnitude rather than the two's-complement bit pattern. A pointer
-         *          difference is a distance, not a register image. The pad count applies to the hex digits only; the
-         *          '-' and the "0x" prefix sit outside the padded field, matching the other overloads.
-         * @param value The value to format.
-         * @param width Minimum width of the hex part (0 for no padding).
-         * @return std::string Formatted hex string (e.g., "0xFF" or "-0x10").
+         * @brief Formats a signed 64-bit value. A negative value prints '-' and the magnitude, for example "-0x10".
+         * @details LONG_PTR, SSIZE_T, and long long bind here on LLP64. @p width works as in the int overload.
          */
         [[nodiscard]] inline std::string format_hex(ptrdiff_t value, int width = 0)
         {
             if (value < 0)
             {
-                // Two's complement negation via unsigned cast avoids UB on PTRDIFF_MIN
+                // The unsigned negation avoids undefined behavior on PTRDIFF_MIN.
                 const auto magnitude = static_cast<size_t>(~static_cast<size_t>(value) + 1u);
                 if (width > 0)
                     return std::format("-0x{:0{}X}", magnitude, width);
@@ -129,21 +90,13 @@ namespace DetourModKit
             return std::format("0x{:X}", static_cast<size_t>(value));
         }
 
-        /**
-         * @brief Formats a byte value as a two-digit hexadecimal string.
-         * @param b The byte value to format.
-         * @return std::string Formatted byte (e.g., "0xCC").
-         */
+        /** @brief Formats a byte as two hex digits, for example "0xCC". */
         [[nodiscard]] inline std::string format_byte(std::byte b)
         {
             return std::format("0x{:02X}", static_cast<unsigned int>(b));
         }
 
-        /**
-         * @brief Formats a vector of integers as a comma-separated hex list.
-         * @param values The vector of integer values.
-         * @return std::string Formatted list (e.g., "[0x72, 0xA0, 0x20]").
-         */
+        /** @brief Formats integers as a comma-separated hex list, for example "[0x72, 0xA0, 0x20]". */
         [[nodiscard]] inline std::string format_int_vector(const std::vector<int> &values)
         {
             if (values.empty())
@@ -151,7 +104,7 @@ namespace DetourModKit
                 return "[]";
             }
 
-            // "0x" + 2+ hex digits ~4 chars per entry, plus ", " separator
+            // Each entry is about 4 characters ("0x" and 2 or more hex digits) plus the ", " separator.
             std::string result;
             result.reserve(1 + values.size() * 6 + 1);
             result += '[';
@@ -167,21 +120,13 @@ namespace DetourModKit
             return result;
         }
 
-        /**
-         * @brief Formats a Virtual Key code as a two-digit hexadecimal string.
-         * @param vk_code The virtual key code.
-         * @return std::string Formatted VK code (e.g., "0x72").
-         */
+        /** @brief Formats a virtual key code as two hex digits, for example "0x72". */
         [[nodiscard]] inline std::string format_vkcode(int vk_code)
         {
             return format_hex(vk_code, 2);
         }
 
-        /**
-         * @brief Formats a vector of Virtual Key codes.
-         * @param keys The vector of VK codes.
-         * @return std::string Formatted VK code list.
-         */
+        /** @brief Formats virtual key codes as format_int_vector does. */
         [[nodiscard]] inline std::string format_vkcode_list(const std::vector<int> &keys)
         {
             return format_int_vector(keys);

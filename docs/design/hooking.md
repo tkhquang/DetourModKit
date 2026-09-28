@@ -16,7 +16,7 @@ The call gate:
 - `call()` copies the gate into a strong reference BEFORE the lock. `enable()`, `disable()`, `~Hook`, and `operator=(Hook&&)` can therefore run concurrently with a guarded call, without reclamation of backend storage still in use.
 - A late caller that only pinned the gate before teardown reads a null callable and fails closed.
 - The gate word lives in never-destroyed storage inside the handle (`[B-47]`). `~Hook` runs no member destructor over it, so a `call()` that races teardown on retained storage reads a null word instead of a destroyed atomic. `HookConcurrency.CallRacesDestructorOnRetainedStorage` pins the race.
-- `enable()` and `disable()` drive an atomic CAS status machine and publish or clear the gate's callable under the gate mutex.
+- `enable()` and `disable()` drive an atomic CAS status machine and publish or clear the gate's callable under the gate mutex. `is_enabled()` takes the same mutex, because the backend's enabled flag is not atomic.
 
 The ledger:
 
@@ -199,7 +199,9 @@ A throw can cross generated code that does publish valid records, and the routed
 
 Code that DMK's backend generates, and that a destination call can raise through, registers its records before the route can be published. That code (the routed gateway, wrappers, and exit thunk) never modifies RSP anywhere its records do not describe. The gateway and exit save with `push rbx; pushfq`, restore with `popfq; pop rbx`, and then jump or return. Both intercepted RFLAGS and callback-written RFLAGS therefore survive, while the final pop/jump or pop/ret remains a recognized epilogue. Each wrapper uses the ordinary fixed `sub rsp, 40` / `add rsp, 40` frame. Registration failure fails the create. Failed unregistration conservatively retains the referenced storage. A published route keeps its code and records together until the idle proof at teardown withdraws both ("Clean x64 mid teardown"). A chain that fails the proof keeps both for the process lifetime.
 
-Generated code that adjusts RSP dynamically cannot be described this way (SafetyHook's mid stub), so a throw must still never reach it. A DMK-managed callback adapter must preserve the exact backend signature, contain every user exception, and own an enter/recheck/leave rundown. It reaches the user callback from a real DMK frame, which is the only place containment and in-flight accounting can live. A raw arbitrary-signature detour (`hook::inline_at`) cannot be wrapped that way, because the erased form does not know the target's signature. It carries a documented no-throw contract and caller-owned quiescence instead. Document that requirement rather than encode it as a `noexcept` function type. The header already accepts ordinary function pointers, so the tightened type is a compatibility break.
+Generated code that adjusts RSP dynamically cannot be described this way (SafetyHook's mid stub), so a throw must still never reach it. A DMK-managed callback adapter must preserve the exact backend signature, contain every user exception, and own an enter/recheck/leave rundown. It reaches the user callback from a real DMK frame, which is the only place containment and in-flight accounting can live. The backend signature carries no user-data parameter, so each mid hook takes a distinct adapter function from a fixed pool to carry its identity.
+
+DMK cannot wrap a raw arbitrary-signature detour (`hook::inline_at`) that way, because `detail::inline_at_raw` receives it as an erased `void *` without the target's signature. It carries a documented no-throw contract and caller-owned quiescence instead. Document that requirement rather than encode it as a `noexcept` function type. The header already accepts ordinary function pointers, so the tightened type is a compatibility break.
 
 ### [B-85]
 

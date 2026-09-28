@@ -55,7 +55,7 @@ Hot-path mechanism: None. The subsystem is control-plane only, and the watcher p
 
 ## Combo string syntax
 
-`config::press_combo`, `config::hold_combo`, `config::bind_combos`, and the INI-driven `Input::rebind` share one combo-list parser. The table is the contract for the raw INI value. `config.hpp` states the same contract per function.
+`config::press_combo`, `config::hold_combo`, `config::bind_combos`, and the INI-driven `Input::rebind` share one combo-list parser. The table is the contract for the raw INI value. `config.hpp` states the grammar and the opt-out at `press_combo`, and `hold_combo`, `bind_combos`, and `reload_hotkey` point there.
 
 | Input form                                                     | Result                                                          | Log                                               |
 |----------------------------------------------------------------|-----------------------------------------------------------------|---------------------------------------------------|
@@ -71,13 +71,13 @@ The `NONE` sentinel is whole-string only by design. A `NONE` token inside a list
 
 ### [B-36]
 
-The config watcher pump calls `on_reload` while a `ReadDirectoryChangesW` notify IRP still references the heap `WatchIoState` (its `OVERLAPPED` plus notification buffer). The `CancelIoEx` plus bounded drain that lets the kernel finish with them runs only after the pump loop. A throw that unwinds the worker body therefore frees them under the live IRP, a use-after-free that the kernel writes into. It also silently ends the pump that the header states "continues running".
+The config watcher pump calls `on_reload` while a `ReadDirectoryChangesW` notify IRP still references the heap `WatchIoState` (its `OVERLAPPED` plus notification buffer). The `CancelIoEx` plus bounded drain that lets the kernel finish with them runs only after the pump loop. A throw that unwinds the worker body therefore frees them under the live IRP, a use-after-free that the kernel writes into. It also ends the pump.
 
 Catch at the invocation site with a noexcept handler (`try_log`, never a throwing `error()`), log, and continue. The drain is then reached on every path and the watcher keeps its pump (`ConfigWatcher`'s `fire_reload`). A docblock that states a callback's exceptions are caught must point at that site-level `try/catch` and carry a throwing-callback test.
 
 ### [B-37]
 
-Parse numbers with `std::from_chars` (locale-independent, `.` -only decimal) and case-fold with an ASCII table. On a non-numeric or out-of-range value, fall back to the default with a Warning, never silently.
+Parse numbers with `std::from_chars` (locale-independent, `.` -only decimal) and case-fold with an ASCII table. On a non-numeric or out-of-range value, fall back to the default with a Warning, never silently. The int bind parses the raw string itself, because SimpleIni `GetLongValue` silently saturates an out-of-range value to the 32-bit `long` limit on LLP64.
 
 These sites all parse this way:
 
