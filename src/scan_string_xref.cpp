@@ -441,14 +441,14 @@ namespace DetourModKit
                     }
                     if (found_count >= 2)
                     {
-                        // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        // resolve_string_xref maps a merged count of 2 or more to AmbiguousReference.
                         incomplete = faulted_windows > 0;
                         log_faulted_windows(faulted_windows);
                         return 0;
                     }
                 }
-                // A skipped faulted window makes the count a lower bound: surface it so a lone surviving reference is
-                // not committed as unique. The caller fails closed on the truncation itself.
+                // A skipped faulted window makes the count a lower bound. Surface it so that resolve_string_xref never
+                // commits a lone surviving reference as unique. It fails closed on the truncation itself.
                 incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
                 return (found_count == 1) ? first_site : 0;
@@ -1005,14 +1005,14 @@ namespace DetourModKit
                     }
                     if (found_count >= 2)
                     {
-                        // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        // resolve_string_xref maps a merged count of 2 or more to AmbiguousReference.
                         incomplete = faulted_windows > 0;
                         log_faulted_windows(faulted_windows);
                         return 0;
                     }
                 }
-                // Surface any skipped faulted window (see scan_string_ref_narrow): the caller fails closed on a
-                // lower-bound count rather than reporting a lone surviving reference as unique.
+                // Surface any skipped faulted window (see scan_string_ref_narrow). resolve_string_xref fails closed on
+                // a lower-bound count and does not report a lone surviving reference as unique.
                 incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
                 if (found_count != 1)
@@ -1206,65 +1206,24 @@ namespace DetourModKit
 
         namespace
         {
-            // The whole two-phase resolve. Both entry points below are thin wrappers over it: the public one passes no
-            // exclusion set, the internal one carries the ladder resolver's.
-            Result<Address> resolve_string_xref(
-                const StringRefQuery &query,
-                Region scope,
-                const detail::ScanExclusions *provided_exclusions,
-                std::span<const Region> declared_exclusions,
-                Region *physical_source = nullptr
-            )
+            /**
+             * @brief Returns the address of the only occurrence of @p pattern in the readable pages, or the phase-1
+             *        failure.
+             * @details The linker pools identical literals, so a second occurrence makes the anchor ambiguous and must
+             *          fail closed.
+             */
+            [[nodiscard]] Result<std::uintptr_t> locate_unique_string(
+                const detail::EnginePattern &pattern,
+                const detail::ModuleSpan &range,
+                const detail::ScanExclusions *provided_exclusions
+            ) noexcept
             {
-                if (physical_source != nullptr)
-                {
-                    *physical_source = Region{};
-                }
-                if (!detail::valid_string_encoding(query.encoding) || !detail::valid_xref_return(query.return_mode))
-                {
-                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_string_xref"});
-                }
-                if (query.text.empty())
-                {
-                    return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});
-                }
-                const detail::ModuleSpan range = detail::module_span(scope);
-                if (!range.valid())
-                {
-                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});
-                }
-                // Phase 1 is a readable sweep and follows the Readable authority rule of scan::Pages.
-                if (!detail::readable_scan_is_authoritative(range, Pages::Readable, declared_exclusions))
-                {
-                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
-                }
-
-                detail::ScanExclusions direct_exclusions;
-                if (provided_exclusions == nullptr)
-                {
-                    direct_exclusions.restrict_to(range.base, range.end);
-                    direct_exclusions.add_text(query.text);
-                    provided_exclusions = &direct_exclusions;
-                }
-                if (provided_exclusions->overflowed())
-                {
-                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
-                }
-
-                // Phase 1: locate the single occurrence of the string in the image's readable pages. The linker pools
-                // identical literals, so a second occurrence makes the anchor ambiguous and must fail closed.
-                const Result<detail::EnginePattern> pattern = compile_string_pattern(query);
-                if (!pattern)
-                {
-                    // MalformedQueryText: the query defines no literal, so the caller fixes the query, not the image.
-                    return std::unexpected(pattern.error());
-                }
                 // One traversal counts zero, one, or two-or-more occurrences, so the located address and the uniqueness
                 // verdict describe the same view of memory; two independent passes could straddle a concurrent write
                 // and certify a pairing that never existed. compile_string_pattern emits literal bytes only, so this
                 // pattern carries no bounded jumps and a skipped faulted region is its only truncation channel.
                 const detail::MatchResult located = detail::scan_module_readable(
-                    *pattern,
+                    pattern,
                     range,
                     detail::ScanQuery{
                         .occurrence = 1,
@@ -1295,22 +1254,23 @@ namespace DetourModKit
                     // the ladder resolver's typed-failure latch cannot degrade it to NoMatch.
                     return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
                 }
-                const auto string_addr = reinterpret_cast<std::uintptr_t>(located.match);
+                return reinterpret_cast<std::uintptr_t>(located.match);
+            }
 
-                // Phase 2: find the single RIP-relative reference whose target is the string. The narrow scan is the
-                // fast, desync-immune default; broad_match keeps that coverage and adds a Zydis sweep for rarer
-                // reference shapes.
-                //
-                // Both sweeps run over ONE enumeration of the execute-readable windows. Enumerating twice would
-                // let a concurrent reprotect hide a window from the second sweep only, and a window that is absent is
-                // indistinguishable from a window that agreed: the confirmation below would then certify a site it
-                // never examined. Sharing the list routes any mid-sweep loss through the faulted-window channel, which
-                // does fail closed.
-                const std::vector<detail::ExecutableWindow> windows = detail::collect_executable_windows(range);
-
+            /**
+             * @brief Returns the narrow reference result over @p windows, merged with the broad result when the broad
+             *        sweep runs.
+             * @details The narrow sweep writes @p lea_info.
+             */
+            [[nodiscard]] ReferenceScanResult sweep_string_references(
+                const StringRefQuery &query,
+                std::uintptr_t string_addr,
+                std::span<const detail::ExecutableWindow> windows,
+                LeaReferenceInfo &lea_info
+            )
+            {
                 ReferenceScanResult references{};
                 std::size_t narrow_count = 0;
-                LeaReferenceInfo lea_info{};
                 bool narrow_incomplete = false;
                 const std::uintptr_t narrow_site =
                     scan_string_ref_narrow(string_addr, windows, narrow_count, lea_info, narrow_incomplete);
@@ -1351,26 +1311,22 @@ namespace DetourModKit
                     );
                     merge_reference_scan(references, broad_site, broad_end, broad_key, broad_count, broad_incomplete);
                 }
+                return references;
+            }
 
-                if (references.count >= 2)
-                {
-                    return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
-                }
-                if (references.incomplete)
-                {
-                    // An execute-readable window faulted mid-sweep and was skipped, so the reference count is a lower
-                    // bound: a second reference to the string could hide in the skipped window. A lone surviving
-                    // reference (or none) is therefore not provably unique. Fail closed on the truncation itself, the
-                    // phase-2 twin of the phase-1 gate above; the count-driven AmbiguousReference just above stays the
-                    // authoritative multiplicity verdict. Only the faulted-window channel reaches here, because
-                    // merge_reference_scan carries no work budget.
-                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
-                }
-                if (references.count == 0)
-                {
-                    return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
-                }
-
+            /**
+             * @brief Maps the unique reference to the address that query.return_mode selects.
+             * @details A non-null @p physical_source receives the reference extent, which StringPointerSlot extends
+             *          through the store.
+             */
+            [[nodiscard]] Result<Address> derive_xref_return(
+                const StringRefQuery &query,
+                const ReferenceScanResult &references,
+                const LeaReferenceInfo &lea_info,
+                const detail::ModuleSpan &range,
+                Region *physical_source
+            ) noexcept
+            {
                 if (physical_source != nullptr)
                 {
                     // The referencing instruction is the byte evidence every return mode rides on. Publish its whole
@@ -1427,6 +1383,103 @@ namespace DetourModKit
                     return Address{function_start};
                 }
                 return Address{references.site};
+            }
+
+            /**
+             * @brief Runs the two-phase resolve behind the three entry points below.
+             * @details Only the ladder resolver passes an exclusion set, through find_string_xref_with_exclusions.
+             */
+            Result<Address> resolve_string_xref(
+                const StringRefQuery &query,
+                Region scope,
+                const detail::ScanExclusions *provided_exclusions,
+                std::span<const Region> declared_exclusions,
+                Region *physical_source = nullptr
+            )
+            {
+                if (physical_source != nullptr)
+                {
+                    *physical_source = Region{};
+                }
+                if (!detail::valid_string_encoding(query.encoding) || !detail::valid_xref_return(query.return_mode))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_string_xref"});
+                }
+                if (query.text.empty())
+                {
+                    return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});
+                }
+                const detail::ModuleSpan range = detail::module_span(scope);
+                if (!range.valid())
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});
+                }
+                // Phase 1 is a readable sweep and follows the Readable authority rule of scan::Pages.
+                if (!detail::readable_scan_is_authoritative(range, Pages::Readable, declared_exclusions))
+                {
+                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
+                }
+
+                detail::ScanExclusions direct_exclusions;
+                if (provided_exclusions == nullptr)
+                {
+                    direct_exclusions.restrict_to(range.base, range.end);
+                    direct_exclusions.add_text(query.text);
+                    provided_exclusions = &direct_exclusions;
+                }
+                if (provided_exclusions->overflowed())
+                {
+                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
+                }
+
+                const Result<detail::EnginePattern> pattern = compile_string_pattern(query);
+                if (!pattern)
+                {
+                    // MalformedQueryText: the query defines no literal, so the caller fixes the query, not the image.
+                    return std::unexpected(pattern.error());
+                }
+                const Result<std::uintptr_t> located_string =
+                    locate_unique_string(*pattern, range, provided_exclusions);
+                if (!located_string)
+                {
+                    return std::unexpected(located_string.error());
+                }
+                const std::uintptr_t string_addr = *located_string;
+
+                // Phase 2: find the single RIP-relative reference whose target is the string. The narrow sweep is the
+                // fast, desync-immune default. A broad_match query keeps that coverage and adds a Zydis sweep for rarer
+                // reference shapes.
+                //
+                // Both sweeps run over ONE enumeration of the execute-readable windows. With two enumerations, a
+                // concurrent reprotect can hide a window from the second sweep only. An absent window is
+                // indistinguishable from a window that agreed, so the confirmation in sweep_string_references can then
+                // certify a site that it never examined. The shared list routes any mid-sweep loss through the
+                // faulted-window channel, which fails closed.
+                const std::vector<detail::ExecutableWindow> windows = detail::collect_executable_windows(range);
+
+                LeaReferenceInfo lea_info{};
+                const ReferenceScanResult references = sweep_string_references(query, string_addr, windows, lea_info);
+
+                if (references.count >= 2)
+                {
+                    return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
+                }
+                if (references.incomplete)
+                {
+                    // An execute-readable window faulted mid-sweep and was skipped, so the reference count is a lower
+                    // bound. A second reference to the string can hide in the skipped window. A lone surviving
+                    // reference is therefore not provably unique, and a zero count is not a proven absence. Fail closed
+                    // on the truncation itself, as locate_unique_string does in phase 1. The count-driven
+                    // AmbiguousReference check above stays the authoritative multiplicity verdict. Only the
+                    // faulted-window channel reaches here, because merge_reference_scan carries no work budget.
+                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
+                }
+                if (references.count == 0)
+                {
+                    return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
+                }
+
+                return derive_xref_return(query, references, lea_info, range, physical_source);
             }
 
         } // namespace

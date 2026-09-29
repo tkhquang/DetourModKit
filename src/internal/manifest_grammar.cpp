@@ -97,202 +97,125 @@ namespace DetourModKit::manifest::detail
             }
             return name.substr(0, marker);
         }
-    } // namespace
 
-    Result<void> validate_manifest_grammar(std::string_view text, const GrammarLimits &limits, const char *context)
-    {
-        if (text.size() > limits.max_file_bytes)
+        [[nodiscard]] std::size_t line_end_from(std::string_view text, std::size_t start) noexcept
         {
-            return fail(ErrorCode::SizeTooLarge, context);
-        }
-        // The backend strips a leading UTF-8 BOM before tokenizing, so a BOM-prefixed first line is invisible here yet
-        // parsed by the store: its section or key identities would escape collision detection. The checked serializer
-        // never emits a BOM, so rejection is round-trip safe.
-        if (text.starts_with("\xEF\xBB\xBF"))
-        {
-            return fail(ErrorCode::MalformedLine, context);
-        }
-        // The backend's tokenizer is NUL-terminated and silently stops at the first '\0', so every byte after it would
-        // be validated here yet never loaded: a record could vanish without an error. The checked serializer never
-        // emits a NUL, so rejection is round-trip safe.
-        if (text.find('\0') != std::string_view::npos)
-        {
-            return fail(ErrorCode::MalformedLine, context);
-        }
-
-        std::unordered_set<std::string> seen_sections;
-        std::unordered_set<std::string> seen_keys; // reset on each section
-        std::unordered_map<std::string, std::size_t> rung_counts;
-        std::size_t section_count = 0;
-        std::size_t key_count = 0;
-        std::size_t record_count = 0;
-        std::size_t total_bytes = 0;
-
-        const std::size_t size = text.size();
-        std::size_t pos = 0;
-
-        const auto line_end_from = [&](std::size_t start) noexcept
-        {
-            while (start < size && !is_newline(text[start]))
+            while (start < text.size() && !is_newline(text[start]))
             {
                 ++start;
             }
             return start;
-        };
-        // Consume one line terminator: a lone `\r`, a lone `\n`, or a `\r\n` pair, matching the backend's SkipNewLine.
-        const auto skip_newline = [&](std::size_t at) noexcept
+        }
+
+        /// Consumes one line terminator as the backend's SkipNewLine does: a lone `\r`, a lone `\n`, or a `\r\n` pair.
+        [[nodiscard]] std::size_t skip_newline(std::string_view text, std::size_t at) noexcept
         {
-            if (at < size && text[at] == '\r')
+            if (at < text.size() && text[at] == '\r')
             {
                 ++at;
-                if (at < size && text[at] == '\n')
+                if (at < text.size() && text[at] == '\n')
                 {
                     ++at;
                 }
             }
-            else if (at < size && text[at] == '\n')
+            else if (at < text.size() && text[at] == '\n')
             {
                 ++at;
             }
             return at;
-        };
+        }
 
-        while (pos < size)
+        /// Rejects a section name that parse() never reads or whose folded form repeats, and charges the section cap.
+        [[nodiscard]] Result<void> register_section(
+            std::string_view name,
+            const GrammarLimits &limits,
+            const char *context,
+            std::unordered_set<std::string> &seen_sections,
+            std::size_t &section_count
+        )
         {
-            // Skip whitespace runs, which folds away leading indentation, blank lines, and every line terminator.
-            while (pos < size && is_space(text[pos]))
+            // parse() reads only the canonical lowercase `manifest` header and `sig.` sections. Any other name,
+            // including a miscased one, holds state that parse() never reads. An empty name (`[]`, `[   ]`) also
+            // reopens the backend's implicit default section, where a key collision escapes the per-section
+            // namespace. This pass fails closed instead.
+            if (name != "manifest" && !name.starts_with("sig."))
             {
-                ++pos;
+                return fail(ErrorCode::MalformedLine, context);
             }
-            if (pos >= size)
+            std::string folded = to_lower(name);
+            // The folded, trimmed name is the merge key. The backend merges two sections that reach it by case,
+            // whitespace, or exact repetition into one before the trust gate.
+            if (section_count >= limits.max_sections)
             {
-                break;
+                return fail(ErrorCode::SizeTooLarge, context);
             }
-
-            // Comment line.
-            if (text[pos] == ';' || text[pos] == '#')
+            if (!seen_sections.insert(std::move(folded)).second)
             {
-                pos = line_end_from(pos);
-                continue;
+                return fail(ErrorCode::ManifestIdentityCollision, context);
             }
+            ++section_count;
+            return {};
+        }
 
-            // Section header.
-            if (text[pos] == '[')
+        /**
+         * @brief Rejects a `sig.` rung without a parent label or a `sig.` label over the field cap, then charges the
+         *        record or rung cap.
+         * @details A rung charges the rung cap of its parent record. A name without the `sig.` prefix passes with no
+         *          check or charge.
+         */
+        [[nodiscard]] Result<void> charge_signature_section(
+            std::string_view name,
+            const GrammarLimits &limits,
+            const char *context,
+            std::unordered_map<std::string, std::size_t> &rung_counts,
+            std::size_t &record_count
+        )
+        {
+            // Classify a record or a rung by the raw name, not the folded name. parse() reads `.rung.` case-sensitively
+            // and treats a miscased marker as an ordinary label. This pass and parse() must charge the same cap, and a
+            // fold counts the legitimate record `sig.a.RUNG.0` (label `a.RUNG.0`) against a rung cap.
+            if (name.starts_with("sig."))
             {
-                ++pos;
-                while (pos < size && is_space(text[pos]))
-                {
-                    ++pos;
-                }
-                const std::size_t name_start = pos;
-                while (pos < size && text[pos] != ']' && !is_newline(text[pos]))
-                {
-                    ++pos;
-                }
-                if (pos >= size || text[pos] != ']')
-                {
-                    // No closing bracket. The backend does not discard this line: FindEntry points its section cursor
-                    // at the name before testing for `]`, and on the miss it resumes the scan without clearing that
-                    // cursor, so the next key line's NUL terminator folds the unterminated name plus an embedded
-                    // newline into a section identity this pass never validated. A `sig.`-prefixed record can reach
-                    // the store past every collision, prefix, and size check. A canonical manifest never opens a
-                    // bracket it does not close, so fail closed.
-                    return fail(ErrorCode::MalformedLine, context);
-                }
-                const std::string_view name = rtrim(text.substr(name_start, pos - name_start));
-                pos = line_end_from(pos);
-
-                // parse reads only the canonical lowercase `manifest` header and `sig.` sections. Any other name,
-                // including a miscased one, holds state that parse never reads. An empty name (`[]`, `[   ]`) also
-                // reopens the backend's implicit default section, where a key collision escapes the per-section
-                // namespace. Fail closed instead.
-                if (name != "manifest" && !name.starts_with("sig."))
+                const std::string_view parent = rung_parent(name);
+                if (!parent.empty() && parent.size() <= 4U)
                 {
                     return fail(ErrorCode::MalformedLine, context);
                 }
-                std::string folded = to_lower(name);
-                // The folded, trimmed name is the merge key: two sections reaching it by case, whitespace, or exact
-                // repetition would collapse into one before the trust gate.
-                if (section_count >= limits.max_sections)
+                const std::string_view label = parent.empty() ? name.substr(4) : parent.substr(4);
+                if (label.size() > limits.max_field_bytes)
                 {
                     return fail(ErrorCode::SizeTooLarge, context);
                 }
-                if (!seen_sections.insert(std::move(folded)).second)
+                if (parent.empty())
                 {
-                    return fail(ErrorCode::ManifestIdentityCollision, context);
-                }
-                ++section_count;
-
-                // Classify record vs rung on the raw name, not the fold: parse() reads `.rung.` case-sensitively and
-                // treats a miscased marker as an ordinary label, so folding here would charge a legitimate record
-                // (e.g. `sig.a.RUNG.0`, label `a.RUNG.0`) against the rung cap the two passes must agree on.
-                if (name.starts_with("sig."))
-                {
-                    const std::string_view parent = rung_parent(name);
-                    if (!parent.empty() && parent.size() <= 4U)
-                    {
-                        return fail(ErrorCode::MalformedLine, context);
-                    }
-                    const std::string_view label = parent.empty() ? name.substr(4) : parent.substr(4);
-                    if (label.size() > limits.max_field_bytes)
+                    if (record_count >= limits.max_records)
                     {
                         return fail(ErrorCode::SizeTooLarge, context);
                     }
-                    if (parent.empty())
-                    {
-                        if (record_count >= limits.max_records)
-                        {
-                            return fail(ErrorCode::SizeTooLarge, context);
-                        }
-                        ++record_count;
-                    }
-                    else
-                    {
-                        auto count_it = rung_counts.try_emplace(std::string(parent), 0).first;
-                        if (count_it->second >= limits.max_rungs_per_record)
-                        {
-                            return fail(ErrorCode::SizeTooLarge, context);
-                        }
-                        ++count_it->second;
-                    }
+                    ++record_count;
                 }
-                seen_keys.clear();
-                key_count = 0;
-                continue;
+                else
+                {
+                    auto count_it = rung_counts.try_emplace(std::string(parent), 0).first;
+                    if (count_it->second >= limits.max_rungs_per_record)
+                    {
+                        return fail(ErrorCode::SizeTooLarge, context);
+                    }
+                    ++count_it->second;
+                }
             }
+            return {};
+        }
 
-            // Key line. The key runs to the first `=` or newline. A key before the first header lands in the backend's
-            // implicit default section, which parse never reads, so it fails closed.
-            if (section_count == 0)
-            {
-                return fail(ErrorCode::MalformedLine, context);
-            }
-            const std::size_t key_start = pos;
-            while (pos < size && text[pos] != '=' && !is_newline(text[pos]))
-            {
-                ++pos;
-            }
-            if (pos >= size || text[pos] != '=')
-            {
-                // The backend discards a noncomment line with no `=`. A dropped separator can restore a default value.
-                return fail(ErrorCode::MalformedLine, context);
-            }
-            if (pos == key_start)
-            {
-                // The backend discards an empty key without entry into heredoc mode.
-                return fail(ErrorCode::MalformedLine, context);
-            }
-            const std::string_view key = rtrim(text.substr(key_start, pos - key_start));
-            ++pos; // past '='
-            while (pos < size && !is_newline(text[pos]) && (text[pos] == ' ' || text[pos] == '\t'))
-            {
-                ++pos;
-            }
-            const std::size_t value_start = pos;
-            const std::size_t value_end = line_end_from(pos);
-            const std::string_view value = rtrim(text.substr(value_start, value_end - value_start));
-            pos = value_end;
-
+        /// Rejects a non-lowercase or repeated key and charges it against the per-section key cap.
+        [[nodiscard]] Result<void> register_key(
+            std::string_view key,
+            const GrammarLimits &limits,
+            const char *context,
+            std::unordered_set<std::string> &seen_keys,
+            std::size_t &key_count
+        )
+        {
             std::string folded_key = to_lower(key);
             if (key != folded_key)
             {
@@ -307,7 +230,23 @@ namespace DetourModKit::manifest::detail
                 return fail(ErrorCode::ManifestIdentityCollision, context);
             }
             ++key_count;
+            return {};
+        }
 
+        /**
+         * @brief Rejects unsafe heredoc framing and charges a key value against the field and aggregate caps.
+         * @details On entry, `pos` indexes the end of the value line. A heredoc value advances `pos` past its
+         *          terminator line, and any other value leaves it unchanged.
+         */
+        [[nodiscard]] Result<void> consume_value(
+            std::string_view text,
+            std::string_view value,
+            const GrammarLimits &limits,
+            const char *context,
+            std::size_t &pos,
+            std::size_t &total_bytes
+        ) noexcept
+        {
             if (value.starts_with("<<<"))
             {
                 // A heredoc runs until a line whose trailing-trimmed form EQUALS the tag (case-sensitive, matching the
@@ -321,16 +260,16 @@ namespace DetourModKit::manifest::detail
                 {
                     return fail(ErrorCode::ManifestFramingUnsafe, context);
                 }
-                pos = skip_newline(pos);
+                pos = skip_newline(text, pos);
                 std::size_t body_bytes = 0;
                 bool has_body_line = false;
                 bool closed = false;
-                while (pos < size)
+                while (pos < text.size())
                 {
                     const std::size_t body_start = pos;
-                    const std::size_t body_end = line_end_from(pos);
+                    const std::size_t body_end = line_end_from(text, pos);
                     const std::string_view body_line = text.substr(body_start, body_end - body_start);
-                    pos = skip_newline(body_end);
+                    pos = skip_newline(text, body_end);
                     if (rtrim(body_line) == tag)
                     {
                         // A terminator as the first body line is not an empty value in the backend: its
@@ -374,6 +313,125 @@ namespace DetourModKit::manifest::detail
                     return fail(ErrorCode::SizeTooLarge, context);
                 }
             }
+            return {};
+        }
+    } // namespace
+
+    Result<void> validate_manifest_grammar(std::string_view text, const GrammarLimits &limits, const char *context)
+    {
+        if (text.size() > limits.max_file_bytes)
+        {
+            return fail(ErrorCode::SizeTooLarge, context);
+        }
+        // The backend strips a leading UTF-8 BOM before it tokenizes, so the store and this pass read a BOM-prefixed
+        // first line differently. The checked serializer never emits a BOM, so rejection is round-trip safe.
+        if (text.starts_with("\xEF\xBB\xBF"))
+        {
+            return fail(ErrorCode::MalformedLine, context);
+        }
+        // The backend's tokenizer is NUL-terminated and stops at the first '\0'. Without this check, this pass
+        // validates the bytes after that NUL, which the store never loads, and a record vanishes without an error.
+        // The checked serializer never emits a NUL, so rejection is round-trip safe.
+        if (text.find('\0') != std::string_view::npos)
+        {
+            return fail(ErrorCode::MalformedLine, context);
+        }
+
+        std::unordered_set<std::string> seen_sections;
+        std::unordered_set<std::string> seen_keys; // reset on each section
+        std::unordered_map<std::string, std::size_t> rung_counts;
+        std::size_t section_count = 0;
+        std::size_t key_count = 0;
+        std::size_t record_count = 0;
+        std::size_t total_bytes = 0;
+
+        const std::size_t size = text.size();
+        std::size_t pos = 0;
+
+        while (pos < size)
+        {
+            // One whitespace run absorbs leading indentation, blank lines, and every line terminator.
+            while (pos < size && is_space(text[pos]))
+            {
+                ++pos;
+            }
+            if (pos >= size)
+            {
+                break;
+            }
+
+            if (text[pos] == ';' || text[pos] == '#')
+            {
+                pos = line_end_from(text, pos);
+                continue;
+            }
+
+            if (text[pos] == '[')
+            {
+                ++pos;
+                while (pos < size && is_space(text[pos]))
+                {
+                    ++pos;
+                }
+                const std::size_t name_start = pos;
+                while (pos < size && text[pos] != ']' && !is_newline(text[pos]))
+                {
+                    ++pos;
+                }
+                if (pos >= size || text[pos] != ']')
+                {
+                    // The backend does not discard a line with no closing bracket. FindEntry points its section cursor
+                    // at the name before it tests for `]`. On the miss, it resumes the scan and leaves that cursor set.
+                    // The next key line's NUL terminator then folds the unterminated name and an embedded newline into
+                    // a section identity that this pass never validates. A `sig.`-prefixed record can then reach the
+                    // store past every collision, prefix, and size check. A canonical manifest never opens a bracket
+                    // that it does not close, so this pass fails closed.
+                    return fail(ErrorCode::MalformedLine, context);
+                }
+                const std::string_view name = rtrim(text.substr(name_start, pos - name_start));
+                pos = line_end_from(text, pos);
+
+                DMK_TRY_VOID(register_section(name, limits, context, seen_sections, section_count));
+                DMK_TRY_VOID(charge_signature_section(name, limits, context, rung_counts, record_count));
+                seen_keys.clear();
+                key_count = 0;
+                continue;
+            }
+
+            // Any other line is a key line, and its key runs to the first `=` or newline. A key before the first header
+            // lands in the backend's implicit default section, which parse() never reads, so this pass fails closed.
+            if (section_count == 0)
+            {
+                return fail(ErrorCode::MalformedLine, context);
+            }
+            const std::size_t key_start = pos;
+            while (pos < size && text[pos] != '=' && !is_newline(text[pos]))
+            {
+                ++pos;
+            }
+            if (pos >= size || text[pos] != '=')
+            {
+                // The backend discards a noncomment line with no `=`. A dropped separator can restore a default value.
+                return fail(ErrorCode::MalformedLine, context);
+            }
+            if (pos == key_start)
+            {
+                // The backend discards an empty key without entry into heredoc mode.
+                return fail(ErrorCode::MalformedLine, context);
+            }
+            const std::string_view key = rtrim(text.substr(key_start, pos - key_start));
+            ++pos;
+            while (pos < size && !is_newline(text[pos]) && (text[pos] == ' ' || text[pos] == '\t'))
+            {
+                ++pos;
+            }
+            const std::size_t value_start = pos;
+            const std::size_t value_end = line_end_from(text, pos);
+            const std::string_view value = rtrim(text.substr(value_start, value_end - value_start));
+            pos = value_end;
+
+            DMK_TRY_VOID(register_key(key, limits, context, seen_keys, key_count));
+            DMK_TRY_VOID(consume_value(text, value, limits, context, pos, total_bytes));
         }
         return {};
     }

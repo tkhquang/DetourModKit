@@ -411,6 +411,28 @@ namespace DetourModKit
             ) noexcept;
 
             void poll_loop(std::stop_token stop_token);
+
+            /**
+             * @brief Installs the active-input hooks on demand, maintains the wheel route, and republishes pending
+             *        consume rules.
+             * @details Call only from the poll thread. Takes the binding lock exclusive only for the republish.
+             * @return The acquire snapshot of @ref m_has_wheel_bindings that this cycle uses.
+             */
+            [[nodiscard]] bool maintain_interception_sources() noexcept;
+
+            /**
+             * @brief Drains the external host wheel counts for this cycle and merges the parked carry into them.
+             * @details Call only from the poll thread with zero in @p external_wheel_generation. Takes the binding lock
+             *          shared only to read the binding generation. When wheel bindings exist, stamps
+             *          @p external_wheel_generation with that generation.
+             * @return true when wheel bindings exist and the counts were drained.
+             */
+            [[nodiscard]] bool drain_external_wheel_counts(
+                std::array<int, 4> &external_wheel_counts,
+                std::uint64_t &external_wheel_generation,
+                std::array<int, 4> &external_wheel_carry
+            );
+
             void release_active_holds() noexcept;
             [[nodiscard]] bool is_process_foreground() const noexcept;
 

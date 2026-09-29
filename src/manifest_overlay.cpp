@@ -683,177 +683,160 @@ namespace DetourModKit::manifest
 
     namespace
     {
-        // revision_checked is deliberately separate from revision_ok: "compatible" and "never checked" are the same
-        // value there and must not be.
-        [[nodiscard]] GateResult gate_impl(
-            std::span<const Signature> signatures,
+        /// Records a rejection and returns true if the signature is unresolved or the policy refuses its fingerprint.
+        [[nodiscard]] bool reject_unresolved_or_refused_fingerprint(
+            const Signature &signature,
+            const anchor::ResolvedAnchor &resolved,
+            FingerprintState fingerprint,
             const GatePolicy &policy,
-            Region scope,
-            bool revision_checked,
-            bool revision_ok
+            GateResult &result
         )
         {
-            GateResult result;
-
-            // Resolve every signature before summary. assess_quality needs the whole report. A signature's fingerprint
-            // verdict is independent of the resolve outcome.
-            std::vector<anchor::ResolvedAnchor> report;
-            report.reserve(signatures.size());
-            std::vector<Region> winning_spans;
-            winning_spans.reserve(signatures.size());
-            for (const Signature &signature : signatures)
+            // A non-unique or missed locate is never trusted.
+            if (resolved.status != anchor::AnchorStatus::Resolved)
             {
-                Region winning_span{};
-                report.push_back(detail::GateAccess::resolve(signature, scope, winning_span));
-                winning_spans.push_back(winning_span);
-            }
-            result.quality = anchor::assess_quality(report);
-
-            // Keep fingerprint states parallel to result.trusted. The whole-manifest floor demotion then reports the
-            // true drift state directly.
-            std::vector<FingerprintState> trusted_fingerprints;
-            trusted_fingerprints.reserve(signatures.size());
-
-            for (std::size_t index = 0; index < signatures.size(); ++index)
-            {
-                const Signature &signature = signatures[index];
-                const anchor::ResolvedAnchor &resolved = report[index];
-                const FingerprintState fingerprint = signature.fingerprint_state();
-
-                // A non-unique or missed locate is never trusted.
-                if (resolved.status != anchor::AnchorStatus::Resolved)
-                {
-                    result.rejected.push_back(
-                        RejectedSignature{
-                            .label = signature.label(),
-                            .status = resolved.status,
-                            .fingerprint = fingerprint,
-                            .reason = GateReason::Unresolved,
-                        }
-                    );
-                    continue;
-                }
-                if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
-                {
-                    result.rejected.push_back(
-                        RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = FingerprintState::Drifted,
-                            .reason = GateReason::FingerprintDrifted,
-                        }
-                    );
-                    continue;
-                }
-                if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
-                {
-                    result.rejected.push_back(
-                        RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = FingerprintState::Unset,
-                            .reason = GateReason::FingerprintUnset,
-                        }
-                    );
-                    continue;
-                }
-                // Evaluate binding_authorizes_mutation once here. Every later mutation gate uses this live, writable
-                // target fact.
-                const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
-                                              binding_authorizes_mutation(signature.binding().kind, resolved.domain);
-                // A mutation-strict entry must bind a live address through a compatible consumer primitive. A Manual
-                // pin or binding-domain mismatch equals !mutation_capable and causes rejection.
-                if (policy.require_mutation_safe_binding && !mutation_capable)
-                {
-                    result.rejected.push_back(
-                        RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = fingerprint,
-                            .reason = GateReason::BindingCannotMutate,
-                        }
-                    );
-                    continue;
-                }
-                // An unchecked revision and an incompatible revision both refuse authorization. The first skips
-                // comparison. The second comparison finds disagreement.
-                if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
-                {
-                    result.rejected.push_back(
-                        RejectedSignature{
-                            .label = signature.label(),
-                            .status = anchor::AnchorStatus::Resolved,
-                            .fingerprint = fingerprint,
-                            .reason = GateReason::ContractRevision,
-                        }
-                    );
-                    continue;
-                }
-                if (mutation_capable && (policy.require_live_image_identity || policy.require_captured_image_identity))
-                {
-                    const scan::ImageIdentity &expected = signature.record().expected_image_identity;
-                    const scan::ImageIdentity &live = resolved.witness.image;
-                    const bool missing_baseline = policy.require_captured_image_identity && !expected.present();
-                    const bool mismatched = policy.require_live_image_identity && expected.present() &&
-                                            (!live.present() || expected != live);
-                    if (missing_baseline || mismatched)
-                    {
-                        result.rejected.push_back(
-                            RejectedSignature{
-                                .label = signature.label(),
-                                .status = anchor::AnchorStatus::Resolved,
-                                .fingerprint = fingerprint,
-                                .reason = GateReason::ImageIdentity,
-                            }
-                        );
-                        continue;
-                    }
-                }
-                if (mutation_capable && policy.require_winning_evidence_baseline)
-                {
-                    // Both sides need complete captures. Empty captures never count as agreement. Re-read the selected
-                    // match span directly before trust publication. The direct read detects any content change after
-                    // the sweep.
-                    const scan::WinningEvidence &expected = signature.record().expected_winning_bytes;
-                    const scan::WinningEvidence &live = resolved.witness.evidence;
-                    std::array<std::byte, scan::MAX_MUTATION_WITNESS_BYTES> current{};
-                    const Region winning_span = winning_spans[index];
-                    const bool span_matches =
-                        expected.present() && live.present() && expected == live &&
-                        winning_span.size == expected.length &&
-                        DetourModKit::detail::guarded_read_bytes(
-                            winning_span.base.raw(),
-                            current.data(),
-                            expected.length
-                        ) &&
-                        std::equal(current.begin(), current.begin() + expected.length, expected.bytes.begin());
-                    if (!span_matches)
-                    {
-                        result.rejected.push_back(
-                            RejectedSignature{
-                                .label = signature.label(),
-                                .status = anchor::AnchorStatus::Resolved,
-                                .fingerprint = fingerprint,
-                                .reason = GateReason::WinningEvidence,
-                            }
-                        );
-                        continue;
-                    }
-                }
-
-                result.trusted.push_back(
-                    GatedSignature{
+                result.rejected.push_back(
+                    RejectedSignature{
                         .label = signature.label(),
-                        .kind = signature.kind(),
-                        .address = Address{static_cast<std::uintptr_t>(resolved.value)},
-                        .binding = &signature.binding(),
+                        .status = resolved.status,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::Unresolved,
                     }
                 );
-                trusted_fingerprints.push_back(fingerprint);
+                return true;
             }
+            if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
+            {
+                result.rejected.push_back(
+                    RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = FingerprintState::Drifted,
+                        .reason = GateReason::FingerprintDrifted,
+                    }
+                );
+                return true;
+            }
+            if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
+            {
+                result.rejected.push_back(
+                    RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = FingerprintState::Unset,
+                        .reason = GateReason::FingerprintUnset,
+                    }
+                );
+                return true;
+            }
+            return false;
+        }
 
-            // If too small a fraction is trustworthy, demote the whole manifest. NaN and negative floors disable the
-            // floor, while values above one clamp to one.
+        /// Records a rejection and returns true if a mutation gate refuses the signature.
+        [[nodiscard]] bool reject_mutation_unsafe(
+            const Signature &signature,
+            const anchor::ResolvedAnchor &resolved,
+            FingerprintState fingerprint,
+            const Region &winning_span,
+            const GatePolicy &policy,
+            bool revision_checked,
+            bool revision_ok,
+            GateResult &result
+        )
+        {
+            // Evaluate binding_authorizes_mutation once here. Every later mutation gate uses this live, writable
+            // target fact.
+            const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
+                                          binding_authorizes_mutation(signature.binding().kind, resolved.domain);
+            // A mutation-strict entry must bind a live address through a compatible consumer primitive. A Manual
+            // pin or binding-domain mismatch equals !mutation_capable and causes rejection.
+            if (policy.require_mutation_safe_binding && !mutation_capable)
+            {
+                result.rejected.push_back(
+                    RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::BindingCannotMutate,
+                    }
+                );
+                return true;
+            }
+            // An incompatible revision refuses authorization. An unchecked revision refuses it only when the policy
+            // requires a checked revision.
+            if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
+            {
+                result.rejected.push_back(
+                    RejectedSignature{
+                        .label = signature.label(),
+                        .status = anchor::AnchorStatus::Resolved,
+                        .fingerprint = fingerprint,
+                        .reason = GateReason::ContractRevision,
+                    }
+                );
+                return true;
+            }
+            if (mutation_capable && (policy.require_live_image_identity || policy.require_captured_image_identity))
+            {
+                const scan::ImageIdentity &expected = signature.record().expected_image_identity;
+                const scan::ImageIdentity &live = resolved.witness.image;
+                const bool missing_baseline = policy.require_captured_image_identity && !expected.present();
+                const bool mismatched =
+                    policy.require_live_image_identity && expected.present() && (!live.present() || expected != live);
+                if (missing_baseline || mismatched)
+                {
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::ImageIdentity,
+                        }
+                    );
+                    return true;
+                }
+            }
+            if (mutation_capable && policy.require_winning_evidence_baseline)
+            {
+                // Both sides need complete captures. Empty captures never count as agreement. Re-read the selected
+                // match span directly before trust publication. The direct read detects any content change after
+                // the sweep.
+                const scan::WinningEvidence &expected = signature.record().expected_winning_bytes;
+                const scan::WinningEvidence &live = resolved.witness.evidence;
+                std::array<std::byte, scan::MAX_MUTATION_WITNESS_BYTES> current{};
+                const bool span_matches =
+                    expected.present() && live.present() && expected == live && winning_span.size == expected.length &&
+                    DetourModKit::detail::guarded_read_bytes(
+                        winning_span.base.raw(),
+                        current.data(),
+                        expected.length
+                    ) &&
+                    std::equal(current.begin(), current.begin() + expected.length, expected.bytes.begin());
+                if (!span_matches)
+                {
+                    result.rejected.push_back(
+                        RejectedSignature{
+                            .label = signature.label(),
+                            .status = anchor::AnchorStatus::Resolved,
+                            .fingerprint = fingerprint,
+                            .reason = GateReason::WinningEvidence,
+                        }
+                    );
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// Demotes the whole manifest if the trusted fraction falls below the clamped policy.min_resolved_fraction.
+        void demote_below_health_floor(
+            std::span<const Signature> signatures,
+            const GatePolicy &policy,
+            const std::vector<FingerprintState> &trusted_fingerprints,
+            GateResult &result
+        )
+        {
+            // NaN and negative floors disable the floor, while values above one clamp to one.
             double floor = policy.min_resolved_fraction;
             if (!(floor >= 0.0))
             {
@@ -883,6 +866,78 @@ namespace DetourModKit::manifest
                     result.trusted.clear();
                 }
             }
+        }
+
+        /**
+         * @brief Resolves and gates every signature, then applies the whole-manifest health floor.
+         * @details revision_checked stays separate from revision_ok because revision_ok holds the same value for
+         *          "compatible" and "never checked", and the gate must tell them apart.
+         */
+        [[nodiscard]] GateResult gate_impl(
+            std::span<const Signature> signatures,
+            const GatePolicy &policy,
+            Region scope,
+            bool revision_checked,
+            bool revision_ok
+        )
+        {
+            GateResult result;
+
+            // Resolve every signature before the quality summary. assess_quality needs the whole report. A signature's
+            // fingerprint state is independent of the resolve outcome.
+            std::vector<anchor::ResolvedAnchor> report;
+            report.reserve(signatures.size());
+            std::vector<Region> winning_spans;
+            winning_spans.reserve(signatures.size());
+            for (const Signature &signature : signatures)
+            {
+                Region winning_span{};
+                report.push_back(detail::GateAccess::resolve(signature, scope, winning_span));
+                winning_spans.push_back(winning_span);
+            }
+            result.quality = anchor::assess_quality(report);
+
+            // Keep fingerprint states parallel to result.trusted. demote_below_health_floor then reports the true
+            // fingerprint state directly.
+            std::vector<FingerprintState> trusted_fingerprints;
+            trusted_fingerprints.reserve(signatures.size());
+
+            for (std::size_t index = 0; index < signatures.size(); ++index)
+            {
+                const Signature &signature = signatures[index];
+                const anchor::ResolvedAnchor &resolved = report[index];
+                const FingerprintState fingerprint = signature.fingerprint_state();
+
+                if (reject_unresolved_or_refused_fingerprint(signature, resolved, fingerprint, policy, result))
+                {
+                    continue;
+                }
+                if (reject_mutation_unsafe(
+                        signature,
+                        resolved,
+                        fingerprint,
+                        winning_spans[index],
+                        policy,
+                        revision_checked,
+                        revision_ok,
+                        result
+                    ))
+                {
+                    continue;
+                }
+
+                result.trusted.push_back(
+                    GatedSignature{
+                        .label = signature.label(),
+                        .kind = signature.kind(),
+                        .address = Address{static_cast<std::uintptr_t>(resolved.value)},
+                        .binding = &signature.binding(),
+                    }
+                );
+                trusted_fingerprints.push_back(fingerprint);
+            }
+
+            demote_below_health_floor(signatures, policy, trusted_fingerprints, result);
 
             return result;
         }

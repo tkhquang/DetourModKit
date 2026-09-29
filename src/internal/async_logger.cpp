@@ -525,9 +525,15 @@ namespace DetourModKit
         [[nodiscard]] bool writer_was_detached() const noexcept;
 
         void writer_thread_func() noexcept;
+        /// Yields to an in-flight push, flushes the sink on the interval, and parks while work can still arrive.
+        void run_idle_cycle(std::chrono::steady_clock::time_point &last_flush) noexcept;
+        /// Flushes the sink, zeroes the pending count, and publishes Stopped at the writer exit.
+        void finish_writer_drain() noexcept;
         void finish_producer() noexcept;
         [[nodiscard]] size_t write_batch(std::span<const detail::LogMessage> messages) noexcept;
         bool handle_overflow(detail::LogMessage &&message) noexcept;
+        /// Retries the Block-policy push until the deadline, and on timeout counts a drop and returns false.
+        [[nodiscard]] bool retry_push_until_deadline(detail::LogMessage &message) noexcept;
         // Wakes a parked writer after a successful push. SetEvent acquires no DMK control-plane mutex, so a
         // callback-safe Drop-policy producer cannot stall behind a flusher or the writer here. The producer publishes
         // the queue slot before it reads m_writer_waiting; the writer publishes m_writer_waiting before it rechecks for
@@ -954,11 +960,6 @@ namespace DetourModKit
 
     void AsyncLogger::Impl::writer_thread_func() noexcept
     {
-        // Per-idle-cycle cap on the cooperative yields the writer spins through when the pending count
-        // shows an in-flight push whose queue slot has not landed yet. Small and fixed so a producer
-        // preempted mid-publish cannot turn the idle path into a tight hot loop.
-        constexpr size_t INFLIGHT_SPIN_LIMIT = 8;
-
         // No pre-reserve here: this frame is noexcept, so a throwing reserve would std::terminate on host OOM.
         // try_pop_batch owns the (fail-closed) reservation and only pops within the capacity it can secure. After the
         // first pop the batch retains its capacity across the clear()s below, so the steady-state reserve is a no-op.
@@ -1026,66 +1027,75 @@ namespace DetourModKit
             }
             else
             {
-                // Nothing was drainable this cycle. A producer bumps m_pending_messages before it publishes its queue
-                // slot, so a non-zero pending count here means a push is in flight. That holds whether or not the
-                // queue reports itself empty, because a claimed-but-unpublished slot counts toward its size. The idle
-                // gates are therefore conditioned on this branch (no progress) rather than on emptiness, which a
-                // claimed but not yet readable slot does not satisfy while offering nothing to drain. A small fixed
-                // yield budget handles the common few-instruction window. A producer preempted beyond it sends the
-                // writer to the event wait below instead of restarting an unbounded yield loop.
-                for (size_t spin = 0;
-                     spin < INFLIGHT_SPIN_LIMIT && m_state.load(std::memory_order_acquire) == State::Async &&
-                     m_pending_messages.load(std::memory_order_seq_cst) != 0;
-                     ++spin)
-                {
-                    std::this_thread::yield();
-                }
-
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_flush >= m_config.flush_interval)
-                {
-                    std::lock_guard<std::mutex> lock(*m_log_mutex);
-                    if (m_file_stream->is_open())
-                    {
-                        m_file_stream->flush();
-                    }
-                    last_flush = now;
-                }
-
-                // Park on the wake event. Publish the parked flag first (seq_cst) so a producer that publishes a slot
-                // after this point observes it and SetEvents the event; the recheck below closes the lost-wakeup
-                // window. Parking on the event instead of returning immediately from a pending-count predicate bounds
-                // the idle work: the writer sleeps until the producer signals or a bounded recheck expires.
-                m_writer_waiting.store(true, std::memory_order_seq_cst);
-                const bool has_pending = m_pending_messages.load(std::memory_order_seq_cst) != 0;
-                const bool keep_running = m_state.load(std::memory_order_seq_cst) == State::Async ||
-                                          m_active_producers.load(std::memory_order_seq_cst) != 0;
-                if (keep_running || has_pending)
-                {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    if (auto *counter = detail::g_async_logger_idle_park_counter.load(std::memory_order_acquire))
-                    {
-                        counter->fetch_add(1, std::memory_order_relaxed);
-                    }
-#endif
-                    // A push in flight (has_pending, nothing drainable) parks for a bounded 1 ms recheck instead of
-                    // the full interval, so the rare lost-wakeup case (a producer that read m_writer_waiting ==
-                    // false just before the store above, then published without signalling) self-heals in a
-                    // millisecond without burning a core. A genuinely idle writer sleeps the whole interval and the
-                    // next producer's SetEvent wakes it.
-                    const auto interval = m_config.flush_interval.count();
-                    const DWORD wait_ms = has_pending ? 1u
-                                                      : static_cast<DWORD>(
-                                                            interval < 1            ? 1
-                                                            : interval > 0x7FFFFFFF ? 0x7FFFFFFF
-                                                                                    : interval
-                                                        );
-                    ::WaitForSingleObject(m_wake_event, wait_ms);
-                }
-                m_writer_waiting.store(false, std::memory_order_seq_cst);
+                run_idle_cycle(last_flush);
             }
         }
 
+        finish_writer_drain();
+    }
+
+    void AsyncLogger::Impl::run_idle_cycle(std::chrono::steady_clock::time_point &last_flush) noexcept
+    {
+        // This limit caps the cooperative yields per idle cycle. The limit covers the common few-instruction
+        // publish window. A producer preempted beyond it sends the writer to the event wait below, not into an
+        // unbounded yield loop.
+        constexpr size_t INFLIGHT_SPIN_LIMIT = 8;
+
+        // A producer bumps m_pending_messages before it publishes its queue slot, so a non-zero pending count here
+        // means that a push is in flight. A claimed but unpublished slot counts toward the queue size, so
+        // m_queue.empty() returns false while the slot offers nothing to drain. The caller therefore gates this cycle
+        // on a pop that drained nothing, not on queue emptiness.
+        for (size_t spin = 0; spin < INFLIGHT_SPIN_LIMIT && m_state.load(std::memory_order_acquire) == State::Async &&
+                              m_pending_messages.load(std::memory_order_seq_cst) != 0;
+             ++spin)
+        {
+            std::this_thread::yield();
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_flush >= m_config.flush_interval)
+        {
+            std::lock_guard<std::mutex> lock(*m_log_mutex);
+            if (m_file_stream->is_open())
+            {
+                m_file_stream->flush();
+            }
+            last_flush = now;
+        }
+
+        // The writer publishes m_writer_waiting (seq_cst) before the recheck below, so a producer that publishes a slot
+        // after that store signals the event. The writer parks on the event, not on a pending-count predicate that
+        // returns at once, to bound the idle work.
+        m_writer_waiting.store(true, std::memory_order_seq_cst);
+        const bool has_pending = m_pending_messages.load(std::memory_order_seq_cst) != 0;
+        const bool keep_running = m_state.load(std::memory_order_seq_cst) == State::Async ||
+                                  m_active_producers.load(std::memory_order_seq_cst) != 0;
+        if (keep_running || has_pending)
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *counter = detail::g_async_logger_idle_park_counter.load(std::memory_order_acquire))
+            {
+                counter->fetch_add(1, std::memory_order_relaxed);
+            }
+#endif
+            // With a push in flight (has_pending, nothing drained), the writer parks for a 1 ms wait instead of the
+            // full interval. A producer that publishes its slot and reads m_writer_waiting == false before the store
+            // above sends no signal. The short wait recovers that rare lost wakeup within a millisecond and does not
+            // burn a core. An idle writer parks for up to the full interval, and the next producer's SetEvent wakes it.
+            const auto interval = m_config.flush_interval.count();
+            const DWORD wait_ms = has_pending ? 1u
+                                              : static_cast<DWORD>(
+                                                    interval < 1            ? 1
+                                                    : interval > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                                            : interval
+                                                );
+            ::WaitForSingleObject(m_wake_event, wait_ms);
+        }
+        m_writer_waiting.store(false, std::memory_order_seq_cst);
+    }
+
+    void AsyncLogger::Impl::finish_writer_drain() noexcept
+    {
         {
             std::lock_guard<std::mutex> lock(*m_log_mutex);
             if (m_file_stream->is_open())
@@ -1210,62 +1220,7 @@ namespace DetourModKit
         }
 
         case OverflowPolicy::Block:
-        {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            if (auto *counter = detail::g_async_logger_block_entry_counter.load(std::memory_order_acquire))
-            {
-                counter->fetch_add(1, std::memory_order_relaxed);
-            }
-            if (auto *gate = detail::g_async_logger_block_entry_gate.load(std::memory_order_acquire))
-            {
-                while (gate->load(std::memory_order_acquire))
-                {
-                    std::this_thread::yield();
-                }
-            }
-#endif
-            const auto deadline = std::chrono::steady_clock::now() + m_config.block_timeout_ms;
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            if (auto *start_ns = detail::g_async_logger_block_start_ns.load(std::memory_order_acquire))
-            {
-                const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()
-                );
-                start_ns->store(now_ns.count(), std::memory_order_release);
-            }
-#endif
-            size_t spin_count = 0;
-
-            // Pre-increment so flush sees the in-flight message throughout the retry loop
-            m_pending_messages.fetch_add(1, std::memory_order_seq_cst);
-
-            while (std::chrono::steady_clock::now() < deadline)
-            {
-                if (m_queue.try_push(message))
-                {
-                    notify_writer();
-                    return true;
-                }
-
-                if (spin_count < m_config.spin_backoff_iterations)
-                {
-                    ++spin_count;
-                }
-                else if (spin_count < m_config.block_max_spin_iterations)
-                {
-                    std::this_thread::yield();
-                    ++spin_count;
-                }
-                else
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-            }
-            // Timed out: undo the pre-increment
-            m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
-            m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
+            return retry_push_until_deadline(message);
 
         case OverflowPolicy::SyncFallback:
         {
@@ -1303,6 +1258,63 @@ namespace DetourModKit
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
+    }
+
+    bool AsyncLogger::Impl::retry_push_until_deadline(LogMessage &message) noexcept
+    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (auto *counter = detail::g_async_logger_block_entry_counter.load(std::memory_order_acquire))
+        {
+            counter->fetch_add(1, std::memory_order_relaxed);
+        }
+        if (auto *gate = detail::g_async_logger_block_entry_gate.load(std::memory_order_acquire))
+        {
+            while (gate->load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+#endif
+        const auto deadline = std::chrono::steady_clock::now() + m_config.block_timeout_ms;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (auto *start_ns = detail::g_async_logger_block_start_ns.load(std::memory_order_acquire))
+        {
+            const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            );
+            start_ns->store(now_ns.count(), std::memory_order_release);
+        }
+#endif
+        size_t spin_count = 0;
+
+        // Count the message as pending for the whole retry loop, so a flush waiter sees it in flight.
+        m_pending_messages.fetch_add(1, std::memory_order_seq_cst);
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (m_queue.try_push(message))
+            {
+                notify_writer();
+                return true;
+            }
+
+            if (spin_count < m_config.spin_backoff_iterations)
+            {
+                ++spin_count;
+            }
+            else if (spin_count < m_config.block_max_spin_iterations)
+            {
+                std::this_thread::yield();
+                ++spin_count;
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
+        m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     // AsyncLogger is a thin facade: construction builds the Impl (which validates the config and starts the writer
