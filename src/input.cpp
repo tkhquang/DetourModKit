@@ -186,6 +186,53 @@ namespace DetourModKit
             // A consume release action holds a weak facade token before it calls set_consume_by_owner. The action
             // becomes a no-op after facade teardown. No other guard action reaches facade state.
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
+
+            /// Installs the guard's one-shot release action: the gate release, then the consume clear by owner.
+            void attach_release_action(
+                BindingGuard::Impl &guard_impl,
+                std::function<void()> &&gate_release,
+                Input *facade,
+                std::uint64_t consume_owner
+            );
+
+            /**
+             * @brief Forwards the exploded entries to the live poller, or stages them for the next start().
+             * @details The helper takes m_mutex, so the caller must not hold it. The caller holds an engaged
+             *          AdmissionCommitLease.
+             */
+            [[nodiscard]] Result<BindingGuard> commit_registration(
+                std::vector<detail::InputBinding> &&entries,
+                std::unique_ptr<BindingGuard::Impl> &&guard_impl,
+                const std::shared_ptr<std::atomic<bool>> &enabled
+            );
+
+            /**
+             * @brief Prepares the ExternalHost wheel source of @p poller.
+             * @details The caller holds m_mutex through @p lock. The helper releases @p lock around the host call.
+             *          On a lease rejection, the helper returns SystemCallFailed for a required host and rebuilds
+             *          @p poller on MessageHook for an optional one. The ShutdownInProgress refusal returns with
+             *          @p lock released.
+             */
+            [[nodiscard]] Result<void> prepare_external_wheel_source(
+                std::unique_lock<std::mutex> &lock,
+                std::shared_ptr<detail::InputPoller> &poller,
+                const Input::Settings &settings
+            );
+
+            /**
+             * @brief Removes the pending entries at @p indices and appends one entry per combo in @p combos.
+             * @details An empty @p combos yields one inert sentinel, so the name stays addressable for a later rebind.
+             *          The caller holds m_mutex and passes a non-empty @p indices, which the helper sorts in place.
+             *          An allocation failure throws before any move and leaves m_pending unchanged. @p retired
+             *          receives the removed entries, and @p rebuilt receives the previous storage. The caller destroys
+             *          both after it releases m_mutex.
+             */
+            void rebuild_pending_bindings(
+                std::vector<std::size_t> &indices,
+                const KeyComboList &combos,
+                std::vector<detail::InputBinding> &retired,
+                std::vector<detail::InputBinding> &rebuilt
+            );
         };
 
         void Input::ImplDeleter::operator()(Impl *impl) const noexcept
@@ -315,6 +362,165 @@ namespace DetourModKit
             return instance;
         }
 
+        namespace
+        {
+            /// Creates a Hold gate that owns @p on_state_change, and writes its delivery and release wrappers.
+            [[nodiscard]] std::shared_ptr<detail::HoldGate> create_hold_gate(
+                std::function<void(bool)> &&on_state_change,
+                const std::shared_ptr<std::atomic<bool>> &enabled,
+                const std::shared_ptr<detail::BindingLifecycle> &lifecycle,
+                std::function<void(bool)> &hold_wrapper,
+                std::function<void()> &gate_release
+            )
+            {
+                auto gate = std::make_shared<detail::HoldGate>();
+                gate->enabled = enabled;
+                gate->lifecycle = lifecycle;
+                gate->on_state_change = std::move(on_state_change);
+                hold_wrapper = [gate](bool active) { gate->deliver(active); };
+                gate_release = [gate]() { gate->release(); };
+                return gate;
+            }
+
+            /// Creates a Press gate that owns @p on_press, and writes its delivery and release wrappers.
+            [[nodiscard]] std::shared_ptr<detail::PressGate> create_press_gate(
+                std::function<void()> &&on_press,
+                const std::shared_ptr<std::atomic<bool>> &enabled,
+                const std::shared_ptr<detail::BindingLifecycle> &lifecycle,
+                std::function<void()> &press_wrapper,
+                std::function<void()> &gate_release
+            )
+            {
+                auto gate = std::make_shared<detail::PressGate>();
+                gate->enabled = enabled;
+                gate->lifecycle = lifecycle;
+                gate->on_press = std::move(on_press);
+                press_wrapper = [gate]() { gate->deliver(); };
+                gate_release = [gate]() { gate->release(); };
+                return gate;
+            }
+
+            /**
+             * @brief Builds one entry per combo through @p make_entry, or one inert sentinel for an empty list.
+             * @details The sentinel keeps the name addressable for a later rebind.
+             */
+            template <typename MakeEntry>
+            [[nodiscard]] std::vector<detail::InputBinding>
+            explode_combo_entries(const KeyComboList &combos, const MakeEntry &make_entry)
+            {
+                std::vector<detail::InputBinding> entries;
+                if (combos.empty())
+                {
+                    entries.push_back(make_entry({}, {}));
+                }
+                else
+                {
+                    entries.reserve(combos.size());
+                    for (const auto &combo : combos)
+                    {
+                        entries.push_back(make_entry(combo.keys, combo.modifiers));
+                    }
+                }
+                return entries;
+            }
+        } // namespace
+
+        void Input::Impl::attach_release_action(
+            BindingGuard::Impl &guard_impl,
+            std::function<void()> &&gate_release,
+            Input *facade,
+            std::uint64_t consume_owner
+        )
+        {
+            // Callback disable does not clear consume suppression, which reads InputBinding::consume. A later
+            // set_consume(name, true) can enable it on any binding, so every release clears it. The clear goes by
+            // owner identity because empty names do not enter the name index, and it is a no-op while the flag is
+            // off. The weak token rejects a late release.
+            const std::weak_ptr<char> facade_alive = m_liveness;
+            const auto consume_release = [facade_alive, facade, consume_owner]()
+            {
+                if (auto keep = facade_alive.lock())
+                {
+                    facade->set_consume_by_owner(consume_owner, false);
+                }
+            };
+
+            // If a Hold edge throws, the consume clear runs before the exception resumes.
+            guard_impl.on_release = [gate_release = std::move(gate_release), consume_release]()
+            {
+                try
+                {
+                    gate_release();
+                }
+                catch (...)
+                {
+                    consume_release();
+                    throw;
+                }
+                consume_release();
+            };
+        }
+
+        Result<BindingGuard> Input::Impl::commit_registration(
+            std::vector<detail::InputBinding> &&entries,
+            std::unique_ptr<BindingGuard::Impl> &&guard_impl,
+            const std::shared_ptr<std::atomic<bool>> &enabled
+        )
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
+                    s_callback_admission_commit_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
+
+            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller that
+            // holds m_mutex.
+            std::shared_ptr<detail::InputPoller> live;
+            {
+                std::lock_guard lock(m_mutex);
+                if (m_poller)
+                {
+                    live = m_poller;
+                }
+                else
+                {
+                    // Stage all-or-nothing. The reserve is the only allocating step, and InputBinding moves are
+                    // noexcept, so no push_back throws. Without the reserve, a mid-loop bad_alloc leaves part of a
+                    // multi-combo registration staged, and that part goes live half-registered at the next start().
+                    m_pending.reserve(m_pending.size() + entries.size());
+                    for (auto &entry : entries)
+                    {
+                        m_pending.push_back(std::move(entry));
+                    }
+                    advance_start_revision();
+                    return BindingGuard{std::move(guard_impl)};
+                }
+            }
+            if (!m_running.load(std::memory_order_acquire))
+            {
+                // shutdown() sets m_running to false under m_mutex before it tears the captured poller down. A false
+                // load here means a concurrent shutdown began after the capture above. Return a valid but inert guard,
+                // the same observable outcome as a registration after shutdown.
+                enabled->store(false, std::memory_order_release);
+                return BindingGuard{std::move(guard_impl)};
+            }
+
+            // Add multi-combo bindings as one all-or-nothing batch. A per-entry append that runs out of memory midway
+            // leaves a partially registered consume binding behind. Consume suppression reads the engine entry's
+            // consume flag, not the guard's enabled flag, so the failure path cannot disarm it.
+            const bool added = (entries.size() == 1) ? live->add_binding(std::move(entries.front()))
+                                                     : live->add_bindings(std::move(entries));
+            if (!added)
+            {
+                enabled->store(false, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
+            }
+            return BindingGuard{std::move(guard_impl)};
+        }
+
         Result<BindingGuard> Input::register_combo(ComboBinding binding) noexcept
         {
             if (is_inert())
@@ -365,23 +571,18 @@ namespace DetourModKit
                 std::shared_ptr<detail::BindingGate> binding_gate;
                 if (is_hold)
                 {
-                    auto gate = std::make_shared<detail::HoldGate>();
-                    gate->enabled = enabled;
-                    gate->lifecycle = lifecycle;
-                    gate->on_state_change = std::move(binding.on_state_change);
-                    hold_wrapper = [gate](bool active) { gate->deliver(active); };
-                    gate_release = [gate]() { gate->release(); };
-                    binding_gate = gate;
+                    binding_gate = create_hold_gate(
+                        std::move(binding.on_state_change),
+                        enabled,
+                        lifecycle,
+                        hold_wrapper,
+                        gate_release
+                    );
                 }
                 else
                 {
-                    auto gate = std::make_shared<detail::PressGate>();
-                    gate->enabled = enabled;
-                    gate->lifecycle = lifecycle;
-                    gate->on_press = std::move(binding.on_press);
-                    press_wrapper = [gate]() { gate->deliver(); };
-                    gate_release = [gate]() { gate->release(); };
-                    binding_gate = gate;
+                    binding_gate =
+                        create_press_gate(std::move(binding.on_press), enabled, lifecycle, press_wrapper, gate_release);
                 }
                 // The gate registered its delivery marker ownership on this control thread, before any dispatch. A
                 // reservation re-arms the warning, so each episode without an index logs once.
@@ -403,38 +604,8 @@ namespace DetourModKit
                 // and fails open ([B-26], InputLifecycleProof.TlsExhaustionLeavesConsumeDisarmed).
                 const bool consume = binding.consume && binding_gate->delivery_tls.reserved();
 
-                // Callback disable does not clear consume suppression, which reads InputBinding::consume. A later
-                // set_consume(name, true) can enable it on any binding, so every release clears it. The clear goes by
-                // owner identity because empty names do not enter the name index, and it is a no-op while the flag is
-                // off. The weak token rejects a late release.
-                const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
-                Input *const facade = this;
-                const auto consume_release = [facade_alive, facade, consume_owner]()
-                {
-                    if (auto keep = facade_alive.lock())
-                    {
-                        facade->set_consume_by_owner(consume_owner, false);
-                    }
-                };
+                m_impl->attach_release_action(*impl, std::move(gate_release), this, consume_owner);
 
-                // Release the gate before the consume clear. If a Hold edge throws, run the clear before the exception
-                // resumes.
-                impl->on_release = [gate_release = std::move(gate_release), consume_release]()
-                {
-                    try
-                    {
-                        gate_release();
-                    }
-                    catch (...)
-                    {
-                        consume_release();
-                        throw;
-                    }
-                    consume_release();
-                };
-
-                // Explode the combos into one engine entry per alternative, all sharing the name (OR logic). An empty
-                // list still registers a single inert sentinel so the name is addressable for a later rebind.
                 const auto make_entry = [&](const std::vector<InputCode> &keys,
                                             const std::vector<InputCode> &modifiers) -> detail::InputBinding
                 {
@@ -462,74 +633,9 @@ namespace DetourModKit
                     return entry;
                 };
 
-                std::vector<detail::InputBinding> entries;
-                if (binding.combos.empty())
-                {
-                    entries.push_back(make_entry({}, {}));
-                }
-                else
-                {
-                    entries.reserve(binding.combos.size());
-                    for (const auto &combo : binding.combos)
-                    {
-                        entries.push_back(make_entry(combo.keys, combo.modifiers));
-                    }
-                }
+                std::vector<detail::InputBinding> entries = explode_combo_entries(binding.combos, make_entry);
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
-                        s_callback_admission_commit_seam.load(std::memory_order_acquire);
-                    seam != nullptr)
-                {
-                    seam();
-                }
-#endif
-
-                // Register: forward each entry to the live poller, or stage it for the next start(). Forward outside
-                // m_mutex so the poller's exclusive binding lock cannot AB/BA against a caller holding m_mutex.
-                std::shared_ptr<detail::InputPoller> live;
-                {
-                    std::lock_guard lock(m_impl->m_mutex);
-                    if (m_impl->m_poller)
-                    {
-                        live = m_impl->m_poller;
-                    }
-                    else
-                    {
-                        // Stage all-or-nothing. Reserve the whole batch up front so a mid-loop bad_alloc cannot leave a
-                        // subset of a multi-combo registration staged (which then goes live half-registered at the
-                        // next start()). The reserve is the only allocating step; InputBinding moves are noexcept, so
-                        // once capacity is secured the push_backs cannot throw.
-                        m_impl->m_pending.reserve(m_impl->m_pending.size() + entries.size());
-                        for (auto &entry : entries)
-                        {
-                            m_impl->m_pending.push_back(std::move(entry));
-                        }
-                        m_impl->advance_start_revision();
-                        return BindingGuard{std::move(impl)};
-                    }
-                }
-                if (!m_impl->m_running.load(std::memory_order_acquire))
-                {
-                    // shutdown() flips m_running false (under m_mutex) before it tears the captured poller down, so
-                    // observing false here means a concurrent shutdown began after we captured the poller. Return a
-                    // valid but inert guard, the same observable outcome as registering after shutdown.
-                    enabled->store(false, std::memory_order_release);
-                    return BindingGuard{std::move(impl)};
-                }
-
-                // Add multi-combo bindings as one batch. A per-entry append can leave a partially-registered consume
-                // binding behind when a later append runs out of memory, and consume suppression is driven by the
-                // engine entry's consume flag rather than the guard's enabled flag. The single-entry path keeps the
-                // existing append primitive live; the multi-entry batch path either commits every combo or none.
-                const bool added = (entries.size() == 1) ? live->add_binding(std::move(entries.front()))
-                                                         : live->add_bindings(std::move(entries));
-                if (!added)
-                {
-                    enabled->store(false, std::memory_order_release);
-                    return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
-                }
-                return BindingGuard{std::move(impl)};
+                return m_impl->commit_registration(std::move(entries), std::move(impl), enabled);
             }
             catch (...)
             {
@@ -537,66 +643,22 @@ namespace DetourModKit
             }
         }
 
-        Result<void> Input::start(Settings settings) noexcept
+        namespace
         {
-            if (is_inert())
+            /**
+             * @brief Resolves the wheel backend before start() builds the engine.
+             * @details This helper validates an ExternalHost selection against the C ABI once, so the poller only
+             *          receives a known-good host. A required host that is missing or ABI-incompatible fails start()
+             *          closed (InvalidArg). An optional one downgrades to the local MessageHook backend so a single-DLL
+             *          consumer still captures the wheel. The caller initializes @p resolved_backend from @p settings
+             *          and @p resolved_host to nullptr.
+             */
+            [[nodiscard]] Result<void> resolve_wheel_backend(
+                const Input::Settings &settings,
+                Input::WheelBackend &resolved_backend,
+                const WheelHostTable *&resolved_host
+            ) noexcept
             {
-                const ErrorCode code = m_impl ? ErrorCode::ShutdownInProgress : ErrorCode::OutOfMemory;
-                return std::unexpected(Error{code, "input::start"});
-            }
-            AdmissionCommitLease start_admission{
-                m_impl->m_callback_drain_active,
-                m_impl->m_admission_commits_inflight,
-                false
-            };
-            if (!start_admission.engaged())
-            {
-                return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
-            }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
-                    s_callback_admission_commit_seam.load(std::memory_order_acquire);
-                seam != nullptr)
-            {
-                seam();
-            }
-#endif
-
-            try
-            {
-                std::unique_lock lock(m_impl->m_mutex);
-
-                if (m_impl->m_callback_drain_active.load(std::memory_order_seq_cst) ||
-                    detail::input_callback_drain_pending())
-                {
-                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
-                }
-                if (!detail::open_input_callback_admission())
-                {
-                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
-                }
-
-                if (m_impl->m_poller)
-                {
-                    (void)log().try_log(LogLevel::Debug, "input::Input: start() called while already running; no-op.");
-                    return {};
-                }
-
-                m_impl->advance_start_revision();
-
-                if (m_impl->m_pending.empty())
-                {
-                    // No bindings to seed the engine with. Preserve the no-op; a later register_combo stages
-                    // into pending and a subsequent start() builds the poller.
-                    return {};
-                }
-
-                // Resolve the wheel backend before building the engine. An ExternalHost selection is validated against
-                // the C ABI here, once, so the poller only ever receives a known-good host. A required host that is
-                // missing or ABI-incompatible fails start() closed (InvalidArg); an optional one downgrades to the
-                // local MessageHook backend so a single-DLL consumer still captures the wheel.
-                Input::WheelBackend resolved_backend = settings.wheel_backend;
-                const WheelHostTable *resolved_host = nullptr;
                 // Reserved value 0 and every other unknown value are rejected at runtime.
                 if (settings.wheel_backend != Input::WheelBackend::MessageHook &&
                     settings.wheel_backend != Input::WheelBackend::ExternalHost)
@@ -660,15 +722,26 @@ namespace DetourModKit
                         resolved_backend = Input::WheelBackend::MessageHook;
                     }
                 }
+                return {};
+            }
 
+            /**
+             * @brief Logs the staged bindings that seed the engine.
+             * @details The caller holds Input::Impl::m_mutex, which guards @p pending.
+             */
+            void log_start_bindings(
+                const std::vector<detail::InputBinding> &pending,
+                std::chrono::milliseconds poll_interval
+            ) noexcept
+            {
                 Logger &logger = log();
                 (void)logger.try_log(
                     LogLevel::Info,
                     "input::Input: Starting with {} binding(s), poll interval {}ms",
-                    m_impl->m_pending.size(),
-                    settings.poll_interval.count()
+                    pending.size(),
+                    poll_interval.count()
                 );
-                for (const auto &binding : m_impl->m_pending)
+                for (const auto &binding : pending)
                 {
                     (void)logger.try_log(
                         LogLevel::Trace,
@@ -678,15 +751,21 @@ namespace DetourModKit
                         binding.keys.size()
                     );
                 }
+            }
 
-                // Seed the engine with a COPY of the staged bindings and clear them only after start() succeeds.
-                // InputPoller::start() throws std::system_error when the poll thread or its module reference cannot be
-                // created, and the poller (sole owner of a moved-in vector) is destroyed during unwind. Moving
-                // m_pending in before that point destroys the staged set with it, so a later retry hits the
-                // empty-pending no-op above and silently loses the bindings. The copy is confined to this cold
-                // path.
-                auto poller = std::make_shared<detail::InputPoller>(
-                    m_impl->m_pending,
+            /**
+             * @brief Builds an engine over a copy of @p pending with the resolved wheel backend and host.
+             * @details The caller holds Input::Impl::m_mutex, which guards @p pending.
+             */
+            [[nodiscard]] std::shared_ptr<detail::InputPoller> make_input_poller(
+                const std::vector<detail::InputBinding> &pending,
+                const Input::Settings &settings,
+                Input::WheelBackend resolved_backend,
+                const WheelHostTable *resolved_host
+            )
+            {
+                return std::make_shared<detail::InputPoller>(
+                    pending,
                     settings.poll_interval,
                     settings.require_focus,
                     settings.gamepad_index,
@@ -696,53 +775,118 @@ namespace DetourModKit
                     resolved_host,
                     settings.wheel_target_thread_id
                 );
+            }
+        } // namespace
+
+        Result<void> Input::Impl::prepare_external_wheel_source(
+            std::unique_lock<std::mutex> &lock,
+            std::shared_ptr<detail::InputPoller> &poller,
+            const Input::Settings &settings
+        )
+        {
+            const std::uint64_t candidate_revision = m_start_revision;
+            // The loader supplies this function pointer. [B-101] requires the call outside the facade lock.
+            lock.unlock();
+            const int32_t host_status = poller->prepare_wheel_source();
+            if (host_status != DMK_WHEELHOST_OK)
+            {
+                poller.reset();
+            }
+            lock.lock();
+            if (m_poller || m_start_revision != candidate_revision ||
+                m_callback_drain_active.load(std::memory_order_seq_cst) || detail::input_callback_drain_pending() ||
+                !detail::input_callback_admission_open())
+            {
+                lock.unlock();
+                poller.reset();
+                return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+            }
+            if (host_status != DMK_WHEELHOST_OK)
+            {
+                if (settings.wheel_host_required)
+                {
+                    const std::int64_t signed_status = host_status;
+                    const auto detail = static_cast<std::uintptr_t>(signed_status < 0 ? -signed_status : signed_status);
+                    return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
+                }
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "input::Input: optional wheel host rejected the lease; using the local "
+                    "MessageHook backend."
+                );
+                poller = make_input_poller(m_pending, settings, Input::WheelBackend::MessageHook, nullptr);
+            }
+            return {};
+        }
+
+        Result<void> Input::start(Settings settings) noexcept
+        {
+            if (is_inert())
+            {
+                const ErrorCode code = m_impl ? ErrorCode::ShutdownInProgress : ErrorCode::OutOfMemory;
+                return std::unexpected(Error{code, "input::start"});
+            }
+            AdmissionCommitLease start_admission{
+                m_impl->m_callback_drain_active,
+                m_impl->m_admission_commits_inflight,
+                false
+            };
+            if (!start_admission.engaged())
+            {
+                return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const detail::InputTestSeams::CallbackAdmissionCommitSeam seam =
+                    s_callback_admission_commit_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
+
+            try
+            {
+                std::unique_lock lock(m_impl->m_mutex);
+
+                if (m_impl->m_callback_drain_active.load(std::memory_order_seq_cst) ||
+                    detail::input_callback_drain_pending())
+                {
+                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+                }
+                if (!detail::open_input_callback_admission())
+                {
+                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+                }
+
+                if (m_impl->m_poller)
+                {
+                    (void)log().try_log(LogLevel::Debug, "input::Input: start() called while already running; no-op.");
+                    return {};
+                }
+
+                m_impl->advance_start_revision();
+
+                if (m_impl->m_pending.empty())
+                {
+                    // Preserve the no-op. A later register_combo() stages into pending, and the next start() builds
+                    // the poller.
+                    return {};
+                }
+
+                Input::WheelBackend resolved_backend = settings.wheel_backend;
+                const WheelHostTable *resolved_host = nullptr;
+                DMK_TRY_VOID(resolve_wheel_backend(settings, resolved_backend, resolved_host));
+
+                log_start_bindings(m_impl->m_pending, settings.poll_interval);
+
+                // Seed the engine with a copy of the staged bindings. Clear them only after start() succeeds.
+                // InputPoller::start() throws std::system_error when it cannot create the poll thread or its module
+                // reference, and the unwind destroys the poller. A moved-in m_pending dies with it, so a later retry
+                // hits the empty-pending no-op above and loses the bindings. Only this cold path pays for the copy.
+                auto poller = make_input_poller(m_impl->m_pending, settings, resolved_backend, resolved_host);
                 if (resolved_backend == Input::WheelBackend::ExternalHost)
                 {
-                    const std::uint64_t candidate_revision = m_impl->m_start_revision;
-                    // The loader supplies this function pointer. B-101 requires the call outside the facade lock.
-                    lock.unlock();
-                    const int32_t host_status = poller->prepare_wheel_source();
-                    if (host_status != DMK_WHEELHOST_OK)
-                    {
-                        poller.reset();
-                    }
-                    lock.lock();
-                    if (m_impl->m_poller || m_impl->m_start_revision != candidate_revision ||
-                        m_impl->m_callback_drain_active.load(std::memory_order_seq_cst) ||
-                        detail::input_callback_drain_pending() || !detail::input_callback_admission_open())
-                    {
-                        lock.unlock();
-                        poller.reset();
-                        return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
-                    }
-                    if (host_status != DMK_WHEELHOST_OK)
-                    {
-                        if (settings.wheel_host_required)
-                        {
-                            const std::int64_t signed_status = host_status;
-                            const auto detail =
-                                static_cast<std::uintptr_t>(signed_status < 0 ? -signed_status : signed_status);
-                            return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
-                        }
-                        (void)log().try_log(
-                            LogLevel::Warning,
-                            "input::Input: optional wheel host rejected the lease; using the local "
-                            "MessageHook backend."
-                        );
-                        resolved_backend = Input::WheelBackend::MessageHook;
-                        resolved_host = nullptr;
-                        poller = std::make_shared<detail::InputPoller>(
-                            m_impl->m_pending,
-                            settings.poll_interval,
-                            settings.require_focus,
-                            settings.gamepad_index,
-                            settings.trigger_threshold,
-                            settings.stick_threshold,
-                            resolved_backend,
-                            resolved_host,
-                            settings.wheel_target_thread_id
-                        );
-                    }
+                    DMK_TRY_VOID(m_impl->prepare_external_wheel_source(lock, poller, settings));
                 }
                 // Applied under the lock, so a value set during the unlocked host window also reaches this engine.
                 if (m_impl->m_pending_require_focus)
@@ -935,6 +1079,61 @@ namespace DetourModKit
             return is_inert() ? nullptr : m_impl->m_active.load(std::memory_order_acquire);
         }
 
+        void Input::Impl::rebuild_pending_bindings(
+            std::vector<std::size_t> &indices,
+            const KeyComboList &combos,
+            std::vector<detail::InputBinding> &retired,
+            std::vector<detail::InputBinding> &rebuilt
+        )
+        {
+            detail::InputBinding prototype = m_pending[indices.front()];
+            std::sort(indices.begin(), indices.end());
+
+            const std::size_t append_count = combos.empty() ? 1 : combos.size();
+            std::vector<detail::InputBinding> appended;
+            appended.reserve(append_count);
+            if (combos.empty())
+            {
+                detail::InputBinding sentinel = prototype;
+                sentinel.keys.clear();
+                sentinel.modifiers.clear();
+                appended.push_back(std::move(sentinel));
+            }
+            else
+            {
+                for (const auto &combo : combos)
+                {
+                    detail::InputBinding binding = prototype;
+                    binding.keys = combo.keys;
+                    binding.modifiers = combo.modifiers;
+                    appended.push_back(std::move(binding));
+                }
+            }
+
+            rebuilt.reserve(m_pending.size() - indices.size() + append_count);
+            retired.reserve(indices.size());
+            std::size_t cursor = 0;
+            for (std::size_t skip : indices)
+            {
+                for (std::size_t i = cursor; i < skip; ++i)
+                {
+                    rebuilt.push_back(std::move(m_pending[i]));
+                }
+                retired.push_back(std::move(m_pending[skip]));
+                cursor = skip + 1;
+            }
+            for (std::size_t i = cursor; i < m_pending.size(); ++i)
+            {
+                rebuilt.push_back(std::move(m_pending[i]));
+            }
+            for (auto &binding : appended)
+            {
+                rebuilt.push_back(std::move(binding));
+            }
+            m_pending.swap(rebuilt);
+            advance_start_revision();
+        }
+
         Result<void> Input::rebind(std::string_view name, KeyComboList combos) noexcept
         {
             if (is_inert())
@@ -994,54 +1193,7 @@ namespace DetourModKit
                         return {};
                     }
 
-                    // Cardinality change: rebuild the pending list. An empty replacement keeps one inert sentinel so
-                    // the name stays addressable for a later non-empty update.
-                    detail::InputBinding prototype = m_impl->m_pending[indices.front()];
-                    std::sort(indices.begin(), indices.end());
-
-                    const std::size_t append_count = combos.empty() ? 1 : combos.size();
-                    std::vector<detail::InputBinding> appended;
-                    appended.reserve(append_count);
-                    if (combos.empty())
-                    {
-                        detail::InputBinding sentinel = prototype;
-                        sentinel.keys.clear();
-                        sentinel.modifiers.clear();
-                        appended.push_back(std::move(sentinel));
-                    }
-                    else
-                    {
-                        for (const auto &combo : combos)
-                        {
-                            detail::InputBinding binding = prototype;
-                            binding.keys = combo.keys;
-                            binding.modifiers = combo.modifiers;
-                            appended.push_back(std::move(binding));
-                        }
-                    }
-
-                    rebuilt.reserve(m_impl->m_pending.size() - indices.size() + append_count);
-                    retired.reserve(indices.size());
-                    std::size_t cursor = 0;
-                    for (std::size_t skip : indices)
-                    {
-                        for (std::size_t i = cursor; i < skip; ++i)
-                        {
-                            rebuilt.push_back(std::move(m_impl->m_pending[i]));
-                        }
-                        retired.push_back(std::move(m_impl->m_pending[skip]));
-                        cursor = skip + 1;
-                    }
-                    for (std::size_t i = cursor; i < m_impl->m_pending.size(); ++i)
-                    {
-                        rebuilt.push_back(std::move(m_impl->m_pending[i]));
-                    }
-                    for (auto &binding : appended)
-                    {
-                        rebuilt.push_back(std::move(binding));
-                    }
-                    m_impl->m_pending.swap(rebuilt);
-                    m_impl->advance_start_revision();
+                    m_impl->rebuild_pending_bindings(indices, combos, retired, rebuilt);
                     return {};
                 }
             }
@@ -1100,8 +1252,8 @@ namespace DetourModKit
                 }
             }
 
-            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller holding
-            // m_mutex (matches register_combo).
+            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller that
+            // holds m_mutex (matches Impl::commit_registration).
             live_poller->set_consume(name, consume);
         }
 
@@ -1142,8 +1294,8 @@ namespace DetourModKit
                 }
             }
 
-            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller holding
-            // m_mutex (matches register_combo).
+            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller that
+            // holds m_mutex (matches Impl::commit_registration).
             live_poller->set_consume_by_owner(owner, consume);
         }
 

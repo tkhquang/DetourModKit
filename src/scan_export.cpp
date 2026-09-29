@@ -118,6 +118,179 @@ namespace DetourModKit
                 }
                 return *terminator == '\0';
             }
+
+            /**
+             * @brief Reads and checks the DOS and NT headers inside @p supplied_span.
+             * @details The checks cover both signatures, the PE32+ magic, and the export data-directory entry. An
+             *          invalid span or a bad header returns InvalidRange, and a missing export data-directory entry
+             *          returns ExportNotFound. On success the helper writes the NT header address to @p nt_address.
+             */
+            [[nodiscard]] Result<IMAGE_NT_HEADERS64>
+            read_nt_headers(const ModuleSpan &supplied_span, std::uintptr_t &nt_address) noexcept
+            {
+                if (!supplied_span.valid())
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                const std::uintptr_t base = supplied_span.base;
+                if (!region_in_span(supplied_span, base, sizeof(IMAGE_DOS_HEADER)))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+
+                // The library is x64-only, and an #error arch gate enforces it. The explicit PE32+ magic check on
+                // IMAGE_NT_HEADERS64 rejects a wrong-bitness image and is not a portability branch.
+                //
+                // This parse stays separate from the RTTI image walk because the error models differ. Here a bad header
+                // fails closed with an ErrorCode. The RTTI image walk returns a range count, and its caller falls back
+                // to the whole module. A shared helper couples the two subsystems and removes no real duplication.
+                const std::optional<IMAGE_DOS_HEADER> dos = guarded_read<IMAGE_DOS_HEADER>(base);
+                if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                if (dos->e_lfanew < 0)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                const std::optional<std::uintptr_t> nt_addr =
+                    checked_rva(supplied_span, static_cast<std::uint32_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64));
+                if (!nt_addr)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                const std::optional<IMAGE_NT_HEADERS64> nt = guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
+                if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
+                    nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+
+                constexpr std::size_t export_directory_end =
+                    offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) +
+                    (IMAGE_DIRECTORY_ENTRY_EXPORT + 1) * sizeof(IMAGE_DATA_DIRECTORY);
+                if (nt->FileHeader.SizeOfOptionalHeader < export_directory_end ||
+                    nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                nt_address = *nt_addr;
+                return *nt;
+            }
+
+            /**
+             * @brief Returns @p supplied_span clipped to the image size that the NT headers declare.
+             * @details The helper returns InvalidRange when SizeOfImage is zero, when the declared image end wraps, or
+             *          when the NT headers fall outside the clipped span. @p supplied_span is only an outer safety
+             *          boundary. The SizeOfImage that @p nt declares is the authoritative inner boundary for every EAT
+             *          read. Stale or oversized mapped backing therefore cannot make a declared out-of-image RVA appear
+             *          valid.
+             */
+            [[nodiscard]] Result<ModuleSpan> clip_span_to_declared_image(
+                const ModuleSpan &supplied_span,
+                const IMAGE_NT_HEADERS64 &nt,
+                std::uintptr_t nt_address
+            ) noexcept
+            {
+                const std::uintptr_t base = supplied_span.base;
+                const std::uintptr_t image_size = nt.OptionalHeader.SizeOfImage;
+                if (image_size == 0 || image_size > std::numeric_limits<std::uintptr_t>::max() - base)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                const std::uintptr_t declared_end = base + image_size;
+                const ModuleSpan span{base, declared_end < supplied_span.end ? declared_end : supplied_span.end};
+                if (!region_in_span(span, nt_address, sizeof(IMAGE_NT_HEADERS64)))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                }
+                return span;
+            }
+
+            /**
+             * @brief Reads the IMAGE_EXPORT_DIRECTORY that @p dir locates inside @p span.
+             * @details The helper returns ExportNotFound when @p dir is empty, too small, outside @p span, or
+             *          unreadable.
+             */
+            [[nodiscard]] Result<IMAGE_EXPORT_DIRECTORY>
+            read_export_directory(const ModuleSpan &span, const IMAGE_DATA_DIRECTORY &dir) noexcept
+            {
+                // A module with no exports leaves dir zeroed. That is not a fault: the module has no name for this
+                // backend to resolve.
+                if (dir.VirtualAddress == 0 || dir.Size == 0)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                const std::optional<std::uintptr_t> export_va = checked_rva(span, dir.VirtualAddress, dir.Size);
+                if (!export_va || dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY))
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                const std::optional<IMAGE_EXPORT_DIRECTORY> exports = guarded_read<IMAGE_EXPORT_DIRECTORY>(*export_va);
+                if (!exports)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                return *exports;
+            }
+
+            /**
+             * @brief Maps the matched name @p index through the ordinal and function arrays to its physical slot.
+             * @details A forwarder returns ExportForwarded. A bad ordinal, an unreadable or empty slot, or a target
+             *          outside @p span returns ExportNotFound.
+             */
+            [[nodiscard]] Result<ExportResolution> resolve_export_slot(
+                const ModuleSpan &span,
+                const IMAGE_DATA_DIRECTORY &dir,
+                std::uintptr_t ordinals_va,
+                std::uintptr_t funcs_va,
+                std::uint32_t func_count,
+                std::uint32_t index
+            ) noexcept
+            {
+                // The name index maps to the function index AddressOfNameOrdinals[index]. That WORD is a 0-based index
+                // into AddressOfFunctions. The directory's Base biases only the ordinal exposed to callers, not this
+                // array index. The helper uses the WORD as-is after the bounds check.
+                const std::optional<std::uint16_t> ordinal = guarded_read<std::uint16_t>(
+                    ordinals_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint16_t)
+                );
+                if (!ordinal || *ordinal >= func_count)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                const std::optional<std::uint32_t> func_rva = guarded_read<std::uint32_t>(
+                    funcs_va + static_cast<std::uintptr_t>(*ordinal) * sizeof(std::uint32_t)
+                );
+                if (!func_rva || *func_rva == 0)
+                {
+                    // A zero RVA in the functions array marks an unused or absent slot, not a resolvable address.
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+
+                // A function RVA inside the export directory is a forwarder. The DWORD addresses an ASCII
+                // "TargetDll.TargetFunc" string, not code in this image. Only the loader can resolve it. The helper
+                // fails closed so that a declared forwarder never becomes a code anchor to hook or read through.
+                const std::uint64_t forwarder_begin = dir.VirtualAddress;
+                const std::uint64_t forwarder_end = forwarder_begin + dir.Size;
+                if (static_cast<std::uint64_t>(*func_rva) >= forwarder_begin &&
+                    static_cast<std::uint64_t>(*func_rva) < forwarder_end)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportForwarded, "scan::resolve_export"});
+                }
+
+                const std::optional<std::uintptr_t> target = checked_rva(span, *func_rva, 1);
+                if (!target)
+                {
+                    // An RVA outside the mapped image marks a corrupt entry, not a usable code address.
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                return ExportResolution{
+                    .module_base = span.base,
+                    .function_index = *ordinal,
+                    .function_rva = *func_rva,
+                    .target = Address{*target},
+                };
+            }
         } // namespace
 
         Result<Address>
@@ -125,92 +298,32 @@ namespace DetourModKit
         {
             out = ExportResolution{};
 
-            // PE names are non-empty NUL-terminated byte strings. Reject an embedded terminator up front so a query
-            // cannot consume the real name's terminator as data and match zero padding after it.
+            // PE names are non-empty NUL-terminated byte strings. The check rejects an embedded terminator up front so
+            // that a query cannot match zero padding after the real name's terminator.
             if (export_name.empty() || export_name.find('\0') != std::string_view::npos)
             {
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
             }
 
             const ModuleSpan supplied_span = module_span(module);
-            if (!supplied_span.valid())
+            std::uintptr_t nt_address = 0;
+            const Result<IMAGE_NT_HEADERS64> nt = read_nt_headers(supplied_span, nt_address);
+            if (!nt)
             {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                return std::unexpected(nt.error());
             }
-            const std::uintptr_t base = supplied_span.base;
-            if (!region_in_span(supplied_span, base, sizeof(IMAGE_DOS_HEADER)))
+            const Result<ModuleSpan> declared_span = clip_span_to_declared_image(supplied_span, *nt, nt_address);
+            if (!declared_span)
             {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+                return std::unexpected(declared_span.error());
             }
+            const ModuleSpan &span = *declared_span;
 
-            // DOS -> NT header walk, with the same discipline as the RTTI image walk: read the DOS header, bound the NT
-            // offset inside the image, then read the 64-bit NT headers and confirm both signatures and the PE32+
-            // optional-header magic before trusting any field. The library is x64-only (an #error arch gate enforces
-            // it), so the explicit IMAGE_NT_HEADERS64 + PE32+ magic check is a defensive assertion against a
-            // wrong-bitness image, not a portability branch. The parse is kept local rather than shared with the RTTI
-            // walk: the two differ in error model (fail-closed ErrorCodes here vs a range count with a whole-module
-            // fallback there), so a shared helper would couple the two subsystems without removing real duplication.
-            const std::optional<IMAGE_DOS_HEADER> dos = guarded_read<IMAGE_DOS_HEADER>(base);
-            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-            if (dos->e_lfanew < 0)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-            const std::optional<std::uintptr_t> nt_addr =
-                checked_rva(supplied_span, static_cast<std::uint32_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64));
-            if (!nt_addr)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-            const std::optional<IMAGE_NT_HEADERS64> nt = guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
-            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-
-            constexpr std::size_t export_directory_end =
-                offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) +
-                (IMAGE_DIRECTORY_ENTRY_EXPORT + 1) * sizeof(IMAGE_DATA_DIRECTORY);
-            if (nt->FileHeader.SizeOfOptionalHeader < export_directory_end ||
-                nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT)
-            {
-                return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
-            }
-
-            // The caller's Region is only an outer safety boundary. The PE snapshot's SizeOfImage is the authoritative
-            // inner boundary for every EAT read, so stale or oversized mapped backing cannot make a declared
-            // out-of-image RVA appear valid.
-            const std::uintptr_t image_size = nt->OptionalHeader.SizeOfImage;
-            if (image_size == 0 || image_size > std::numeric_limits<std::uintptr_t>::max() - base)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-            const std::uintptr_t declared_end = base + image_size;
-            const ModuleSpan span{base, declared_end < supplied_span.end ? declared_end : supplied_span.end};
-            if (!region_in_span(span, *nt_addr, sizeof(IMAGE_NT_HEADERS64)))
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
-            }
-
-            // The export directory is data-directory entry 0. A module with no exports leaves it zeroed; that is not a
-            // fault, it simply has no name for this backend to resolve.
             const IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            if (dir.VirtualAddress == 0 || dir.Size == 0)
-            {
-                return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
-            }
-            const std::optional<std::uintptr_t> export_va = checked_rva(span, dir.VirtualAddress, dir.Size);
-            if (!export_va || dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY))
-            {
-                return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
-            }
-            const std::optional<IMAGE_EXPORT_DIRECTORY> exports = guarded_read<IMAGE_EXPORT_DIRECTORY>(*export_va);
+            const Result<IMAGE_EXPORT_DIRECTORY> exports = read_export_directory(span, dir);
             if (!exports)
             {
-                return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                return std::unexpected(exports.error());
             }
 
             const std::uint32_t name_count = exports->NumberOfNames;
@@ -275,53 +388,16 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
                 }
 
-                // Name index maps to function index AddressOfNameOrdinals[index]. That WORD is a 0-based index into
-                // AddressOfFunctions directly (the directory's Base biases only the ORDINAL exposed to callers, not
-                // this array index), so it is used as-is after the bounds check.
-                const std::optional<std::uint16_t> ordinal = guarded_read<std::uint16_t>(
-                    *ordinals_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint16_t)
-                );
-                if (!ordinal || *ordinal >= func_count)
+                const Result<ExportResolution> slot =
+                    resolve_export_slot(span, dir, *ordinals_va, *funcs_va, func_count, index);
+                if (!slot)
                 {
-                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                    return std::unexpected(slot.error());
                 }
-                const std::optional<std::uint32_t> func_rva = guarded_read<std::uint32_t>(
-                    *funcs_va + static_cast<std::uintptr_t>(*ordinal) * sizeof(std::uint32_t)
-                );
-                if (!func_rva || *func_rva == 0)
-                {
-                    // A zero RVA in the functions array is an unused / absent slot, not a resolvable address.
-                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
-                }
-
-                // A function RVA that points back inside the export directory region is a FORWARDER: the DWORD
-                // addresses an ASCII "TargetDll.TargetFunc" string, not code in this image. Following it would need the
-                // loader, and this [VirtualAddress, VirtualAddress + Size) window is exactly the loader's own forwarder
-                // test; fail closed so a declared forwarder is never handed back as a code anchor to hook or read
-                // through.
-                const std::uint64_t forwarder_begin = dir.VirtualAddress;
-                const std::uint64_t forwarder_end = forwarder_begin + dir.Size;
-                if (static_cast<std::uint64_t>(*func_rva) >= forwarder_begin &&
-                    static_cast<std::uint64_t>(*func_rva) < forwarder_end)
-                {
-                    return std::unexpected(Error{ErrorCode::ExportForwarded, "scan::resolve_export"});
-                }
-
-                const std::optional<std::uintptr_t> target = checked_rva(span, *func_rva, 1);
-                if (!target)
-                {
-                    // The RVA resolved outside the mapped image: a corrupt entry, not a usable code address.
-                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
-                }
-                match = Address{*target};
+                match = slot->target;
                 // The slot this name mapped to and the value read out of it, so a caller weighing two names can tell
                 // one physical entry point from two. A duplicate name aborts above, so this is written at most once.
-                resolution = ExportResolution{
-                    .module_base = base,
-                    .function_index = *ordinal,
-                    .function_rva = *func_rva,
-                    .target = Address{*target},
-                };
+                resolution = *slot;
             }
 
             if (match)

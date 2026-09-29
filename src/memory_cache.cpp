@@ -1437,6 +1437,128 @@ namespace DetourModKit
             }
 #endif
 
+            /**
+             * @brief Drains the closed reader population, takes the cache keepalive, and builds the shard array.
+             * @details The caller holds s_lifecycle_mutex. Each failure publishes Stopped before it returns false.
+             */
+            [[nodiscard]] bool drain_readers_and_build_shards(
+                std::size_t cache_size,
+                unsigned int expiry_ms,
+                std::size_t shard_count
+            ) noexcept
+            {
+                std::lock_guard state_lock(s_cache_state_mutex);
+                // Close every stripe before the shard array changes. Then drain the closed reader population before
+                // the deadline. Abandonment or a prior timeout can leave reader-visible state retained. Free that state
+                // only after this drain reaches zero. On expiry the start fails and retains the state under [B-73].
+                close_reader_admission();
+                s_shard_count.store(0, std::memory_order_release);
+                if (!drain_admitted_readers())
+                {
+                    record_reader_drain_timeout_retention();
+                    s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
+                    return false;
+                }
+
+                if (s_cache_self_ref == nullptr)
+                {
+                    s_cache_self_ref = acquire_cache_keepalive_ref();
+                    if (s_cache_self_ref == nullptr)
+                    {
+                        s_cache_shards.reset();
+                        s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                        s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                        s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
+                        return false;
+                    }
+                }
+
+                if (!perform_cache_initialization(cache_size, expiry_ms, shard_count))
+                {
+                    release_cache_keepalive_after_drain();
+                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                    s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
+                    return false;
+                }
+                return true;
+            }
+
+            /**
+             * @brief Starts the cleanup thread for the next generation, or falls back to on-demand cleanup.
+             * @details The caller holds s_lifecycle_mutex and calls this only after drain_readers_and_build_shards
+             *          succeeds.
+             */
+            void start_cleanup_thread() noexcept
+            {
+                const std::uint64_t generation = s_lifecycle_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+                s_cleanup_thread_running.store(true, std::memory_order_release);
+                // Hold a counted reference before cleanup thread creation. A creation failure releases it below.
+                s_cleanup_self_ref = acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
+                if (s_cleanup_self_ref == nullptr)
+                {
+                    s_cleanup_thread_running.store(false, std::memory_order_release);
+                    (void)log().try_log(
+                        LogLevel::Debug,
+                        "MemoryCache: Module reference unavailable, using on-demand cleanup instead of "
+                        "background cleanup."
+                    );
+                }
+                else
+                {
+                    try
+                    {
+                        // Publish the handle under the join mutex so this never races the loader-lock detach path. A
+                        // concurrent detach tries the mutex, fails, and returns without access to the handle. This lock
+                        // can remain held across thread creation without a deadlock.
+                        std::lock_guard join_lock(s_cleanup_join_mutex);
+                        assert(!cleanup_thread().joinable());
+                        cleanup_thread() = std::thread(cleanup_thread_func, generation);
+                    }
+                    catch (...)
+                    {
+                        release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
+                        s_cleanup_self_ref = nullptr;
+                        s_cleanup_thread_running.store(false, std::memory_order_release);
+                        (void)log().try_log(
+                            LogLevel::Debug,
+                            "MemoryCache: Background cleanup thread unavailable, using on-demand "
+                            "cleanup."
+                        );
+                    }
+                }
+            }
+
+            /**
+             * @brief Joins the cleanup thread, then frees or retains the shard array of a canceled start.
+             * @details The caller holds s_lifecycle_mutex.
+             */
+            void roll_back_cancelled_start() noexcept
+            {
+                s_cleanup_thread_running.store(false, std::memory_order_release);
+                s_cleanup_cv.notify_one();
+                (void)join_cleanup_thread();
+
+                std::lock_guard<SrwSharedMutex> state_lock(s_cache_state_mutex);
+                close_reader_admission();
+                s_shard_count.store(0, std::memory_order_release);
+                if (drain_admitted_readers())
+                {
+                    s_cache_shards.reset();
+                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
+                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
+                    release_cache_keepalive_after_drain();
+                }
+                else
+                {
+                    record_reader_drain_timeout_retention();
+                }
+#if !defined(_MSC_VER) && defined(_WIN64)
+                detail::release_guarded_engine();
+#endif
+            }
+
         } // namespace
 
         bool init_cache(std::size_t cache_size, unsigned int expiry_ms, std::size_t shard_count)
@@ -1482,81 +1604,10 @@ namespace DetourModKit
 
             s_lifecycle_state.store(LifecycleState::Starting, std::memory_order_seq_cst);
 
-            {
-                std::lock_guard state_lock(s_cache_state_mutex);
-                // Close every stripe before the shard array changes. Then drain the closed reader population before
-                // the deadline. Abandonment or a prior timeout can leave reader-visible state retained. Free that state
-                // only after this drain reaches zero. On expiry the start fails and retains the state under [B-73].
-                close_reader_admission();
-                s_shard_count.store(0, std::memory_order_release);
-                if (!drain_admitted_readers())
-                {
-                    record_reader_drain_timeout_retention();
-                    s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
-                    return false;
-                }
+            if (!drain_readers_and_build_shards(cache_size, expiry_ms, shard_count))
+                return false;
 
-                if (s_cache_self_ref == nullptr)
-                {
-                    s_cache_self_ref = acquire_cache_keepalive_ref();
-                    if (s_cache_self_ref == nullptr)
-                    {
-                        s_cache_shards.reset();
-                        s_configured_expiry_ms.store(0, std::memory_order_relaxed);
-                        s_max_entries_per_shard.store(0, std::memory_order_relaxed);
-                        s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
-                        return false;
-                    }
-                }
-
-                if (!perform_cache_initialization(cache_size, expiry_ms, shard_count))
-                {
-                    release_cache_keepalive_after_drain();
-                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
-                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
-                    s_lifecycle_state.store(LifecycleState::Stopped, std::memory_order_seq_cst);
-                    return false;
-                }
-            }
-
-            // Advance the generation this session's cleanup thread binds to, after the shards are built.
-            const std::uint64_t generation = s_lifecycle_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-            s_cleanup_thread_running.store(true, std::memory_order_release);
-            // Hold a counted reference before cleanup thread creation. A creation failure releases it below.
-            s_cleanup_self_ref = acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
-            if (s_cleanup_self_ref == nullptr)
-            {
-                s_cleanup_thread_running.store(false, std::memory_order_release);
-                (void)log().try_log(
-                    LogLevel::Debug,
-                    "MemoryCache: Module reference unavailable, using on-demand cleanup instead of "
-                    "background cleanup."
-                );
-            }
-            else
-            {
-                try
-                {
-                    // Publish the handle under the join mutex so this never races the loader-lock detach path. A
-                    // concurrent detach tries the mutex, fails, and returns without access to the handle. This lock can
-                    // remain held across thread creation without a deadlock.
-                    std::lock_guard join_lock(s_cleanup_join_mutex);
-                    assert(!cleanup_thread().joinable());
-                    cleanup_thread() = std::thread(cleanup_thread_func, generation);
-                }
-                catch (...)
-                {
-                    release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
-                    s_cleanup_self_ref = nullptr;
-                    s_cleanup_thread_running.store(false, std::memory_order_release);
-                    (void)log().try_log(
-                        LogLevel::Debug,
-                        "MemoryCache: Background cleanup thread unavailable, using on-demand "
-                        "cleanup."
-                    );
-                }
-            }
+            start_cleanup_thread();
 
             // The atexit handler is a last-resort safety net when the consumer omits shutdown_cache.
             static bool atexit_registered = false;
@@ -1591,27 +1642,7 @@ namespace DetourModKit
                     std::memory_order_seq_cst
                 ))
             {
-                s_cleanup_thread_running.store(false, std::memory_order_release);
-                s_cleanup_cv.notify_one();
-                (void)join_cleanup_thread();
-
-                std::lock_guard<SrwSharedMutex> state_lock(s_cache_state_mutex);
-                close_reader_admission();
-                s_shard_count.store(0, std::memory_order_release);
-                if (drain_admitted_readers())
-                {
-                    s_cache_shards.reset();
-                    s_configured_expiry_ms.store(0, std::memory_order_relaxed);
-                    s_max_entries_per_shard.store(0, std::memory_order_relaxed);
-                    release_cache_keepalive_after_drain();
-                }
-                else
-                {
-                    record_reader_drain_timeout_retention();
-                }
-#if !defined(_MSC_VER) && defined(_WIN64)
-                detail::release_guarded_engine();
-#endif
+                roll_back_cancelled_start();
                 return false;
             }
 

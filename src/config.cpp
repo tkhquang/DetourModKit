@@ -1173,44 +1173,41 @@ namespace DetourModKit
             );
         }
 
-        void load(std::string_view ini_filename)
+        namespace
         {
-            // Re-arm background reloads. A Logic DLL that (re)loads and calls load() must be able to hot-reload
-            // again after an unload latched them off.
-            detail::rearm_reloads();
-
-            // Declared before the pass lock, so an unwind drops setter references after that lock releases.
-            std::vector<std::function<void()>> deferred_callbacks;
-
-            // Serialize the whole pass (see internal/config_reload_lifecycle.hpp). Fail fast on same-thread re-entry.
-            detail::ReloadApplyLock apply_lock;
-            if (!apply_lock.engaged())
+            /**
+             * @brief Loads every registered item from @p ini and moves each deferred setter into @p deferred_callbacks.
+             * @details The caller holds get_config_mutex().
+             */
+            void load_items_and_collect_setters(
+                CSimpleIniA &ini,
+                detail::DeferredDiagnostics &diags,
+                std::vector<std::function<void()>> &deferred_callbacks
+            )
             {
-                (void)log().try_log(
-                    LogLevel::Error,
-                    "Config: load() re-entered from a bound setter on the same thread; ignoring to "
-                    "avoid a self-deadlock. Do not call load()/reload() from a config setter."
-                );
-                return;
+                for (const auto &item : get_registered_config_items())
+                {
+                    item->load(ini, diags);
+                    auto cb = item->take_deferred_apply();
+                    if (cb)
+                    {
+                        deferred_callbacks.push_back(std::move(cb));
+                    }
+                }
             }
 
-            std::optional<std::uint64_t> hash_to_commit;
-            std::uint64_t generation_to_commit = 0;
-
-            // The filename is a caller argument, so the whole path resolution runs before the registry lock.
-            detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
-            const std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), diags);
-            const std::string ini_path_text = DetourModKit::detail::utf8_from_wide(ini_path.native());
-
+            /**
+             * @brief Defers the load() outcome diagnostic, clears the cached hash, and stages the hash of a parsed INI
+             *        in @p hash_to_commit.
+             * @details The caller holds get_config_mutex().
+             */
+            void stage_load_outcome(
+                const IniLoadOutcome &outcome,
+                const std::string &ini_path_text,
+                detail::DeferredDiagnostics &diags,
+                std::optional<std::uint64_t> &hash_to_commit
+            )
             {
-                std::lock_guard<std::mutex> lock(get_config_mutex());
-
-                CSimpleIniA ini;
-                ini.SetUnicode(false);  // Assume ASCII/MBCS INI
-                ini.SetMultiKey(false); // Disallow duplicate keys in a section
-
-                IniLoadOutcome outcome = load_ini_into(ini_path, ini);
-
                 if (!outcome.read_succeeded)
                 {
                     detail::defer_diagnostic(
@@ -1242,17 +1239,79 @@ namespace DetourModKit
                     get_last_loaded_ini_hash().reset();
                     hash_to_commit = outcome.hash;
                 }
+            }
 
-                // Read all values under lock, but defer setter callbacks and diagnostics.
-                for (const auto &item : get_registered_config_items())
+            /**
+             * @brief Invokes each deferred load() setter and returns true when no setter throws.
+             * @details The caller holds the pass lock and does not hold get_config_mutex(). A setter that throws does
+             *          not stop the later setters.
+             */
+            [[nodiscard]] bool run_load_setters(const std::vector<std::function<void()>> &deferred_callbacks)
+            {
+                Logger &setter_logger = log();
+                bool all_setters_applied = true;
+                for (const auto &cb : deferred_callbacks)
                 {
-                    item->load(ini, diags);
-                    auto cb = item->take_deferred_apply();
-                    if (cb)
+                    try
                     {
-                        deferred_callbacks.push_back(std::move(cb));
+                        cb();
+                    }
+                    catch (const std::exception &e)
+                    {
+                        all_setters_applied = false;
+                        setter_logger.error("Config: load setter threw: {}", e.what());
+                    }
+                    catch (...)
+                    {
+                        all_setters_applied = false;
+                        setter_logger.error("Config: load setter threw unknown exception.");
                     }
                 }
+                return all_setters_applied;
+            }
+        } // anonymous namespace
+
+        void load(std::string_view ini_filename)
+        {
+            // A Logic DLL that (re)loads and calls load() must be able to hot-reload again after an unload latched
+            // background reloads off.
+            detail::rearm_reloads();
+
+            // Declare the vector before the pass lock so an unwind drops setter references after that lock releases.
+            std::vector<std::function<void()>> deferred_callbacks;
+
+            // Serialize the whole pass (see internal/config_reload_lifecycle.hpp). Fail fast on same-thread re-entry.
+            detail::ReloadApplyLock apply_lock;
+            if (!apply_lock.engaged())
+            {
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "Config: load() re-entered from a bound setter on the same thread; ignoring to "
+                    "avoid a self-deadlock. Do not call load()/reload() from a config setter."
+                );
+                return;
+            }
+
+            std::optional<std::uint64_t> hash_to_commit;
+            std::uint64_t generation_to_commit = 0;
+
+            // The filename is a caller argument, so the whole path resolution runs outside get_config_mutex().
+            detail::DeferredDiagnostics diags = detail::open_deferred_diagnostics();
+            const std::filesystem::path ini_path = detail::get_ini_file_path(std::string(ini_filename), diags);
+            const std::string ini_path_text = DetourModKit::detail::utf8_from_wide(ini_path.native());
+
+            {
+                std::lock_guard<std::mutex> lock(get_config_mutex());
+
+                CSimpleIniA ini;
+                ini.SetUnicode(false);  // Assume ASCII/MBCS INI
+                ini.SetMultiKey(false); // A duplicate key in a section keeps its last value
+
+                IniLoadOutcome outcome = load_ini_into(ini_path, ini);
+
+                stage_load_outcome(outcome, ini_path_text, diags, hash_to_commit);
+
+                load_items_and_collect_setters(ini, diags, deferred_callbacks);
                 // Snapshot the binding generation for the item set just read. Commit it with the hash.
                 generation_to_commit = get_binding_generation();
 
@@ -1272,28 +1331,9 @@ namespace DetourModKit
 
             detail::emit_deferred_diagnostics(diags);
 
-            // Invoke setters outside the config mutex under the deferred pattern. Setters can re-enter the data-plane
-            // API. The held pass lock forbids load()/reload()/disable_auto_reload()/clear() because those calls
-            // self-deadlock (see config.hpp). A per-call wrapper lets every later setter run after an exception.
-            Logger &setter_logger = log();
-            bool all_setters_applied = true;
-            for (auto &cb : deferred_callbacks)
-            {
-                try
-                {
-                    cb();
-                }
-                catch (const std::exception &e)
-                {
-                    all_setters_applied = false;
-                    setter_logger.error("Config: load setter threw: {}", e.what());
-                }
-                catch (...)
-                {
-                    all_setters_applied = false;
-                    setter_logger.error("Config: load setter threw unknown exception.");
-                }
-            }
+            // Setters can re-enter the data-plane API. The held pass lock forbids
+            // load()/reload()/disable_auto_reload()/clear() because those calls self-deadlock (see config.hpp).
+            const bool all_setters_applied = run_load_setters(deferred_callbacks);
             if (all_setters_applied && hash_to_commit.has_value())
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -1324,6 +1364,139 @@ namespace DetourModKit
                 }
             }
         }
+
+        namespace
+        {
+            /**
+             * @brief Stages the hash of parsed bytes in @p hash_to_commit unless the bytes and the binding generation
+             *        match the last successful apply.
+             * @details The caller holds get_config_mutex(). Writes the current binding generation to
+             *          @p generation_to_commit once the read succeeds. Clears the cached hash on a read failure. The
+             *          match check runs before the parse check, and an unmatched parse failure also clears the cached
+             *          hash. Clears the cached hash and the applied generation before it stages the hash.
+             * @return True when the function stages the hash and the setter pass proceeds. False on a read failure, a
+             *         parse failure, or a match with the last successful apply.
+             */
+            [[nodiscard]] bool stage_reload_outcome(
+                const IniLoadOutcome &outcome,
+                const std::string &ini_path_text,
+                detail::DeferredDiagnostics &diags,
+                std::optional<std::uint64_t> &hash_to_commit,
+                std::uint64_t &generation_to_commit
+            )
+            {
+                if (!outcome.read_succeeded)
+                {
+                    // A read can fail when another process locks the file mid-save. Clear the cached hash so an
+                    // identical-byte retry cannot hash-skip. Return false so the caller skips item->load and the
+                    // setter pass. item->load against the unpopulated CSimpleIniA replaces live state with defaults.
+                    get_last_loaded_ini_hash() = std::nullopt;
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
+                        "Config: reload() could not open '{}'; retaining last values (setters not "
+                        "re-run).",
+                        ini_path_text
+                    );
+                    return false;
+                }
+
+                // load_ini_into sets hash whenever read_succeeded, and this is the read_succeeded branch.
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+                const std::uint64_t current_hash = *outcome.hash;
+                generation_to_commit = get_binding_generation();
+                const auto &cached_hash = get_last_loaded_ini_hash();
+                const auto &applied_generation = get_applied_binding_generation();
+                if (cached_hash.has_value() && current_hash == *cached_hash && applied_generation.has_value() &&
+                    *applied_generation == generation_to_commit)
+                {
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Debug,
+                        "Config: reload content unchanged (hash {:016x}, binding gen {}); skipping "
+                        "setters.",
+                        current_hash,
+                        generation_to_commit
+                    );
+                    return false;
+                }
+
+                if (!outcome.parse_succeeded)
+                {
+                    // LoadData accepts any byte content, so a negative code is a transient SimpleIni allocation
+                    // failure, not a property of the bytes. Handle it as a read failure. Both branches retain the
+                    // last values and clear the cached hash, so the same bytes stay retryable.
+                    get_last_loaded_ini_hash() = std::nullopt;
+                    detail::defer_diagnostic(
+                        diags,
+                        LogLevel::Warning,
+                        "Config: reload() parse error on '{}' (error {}); retaining last values "
+                        "(setters not re-run).",
+                        ini_path_text,
+                        static_cast<int>(outcome.parse_rc)
+                    );
+                    return false;
+                }
+
+                // Drop the previous snapshot now. The caller commits this one only after every setter succeeds, as
+                // load() does. A setter failure or unload-latch interruption leaves partial state. A retained prior
+                // snapshot then lets old bytes hash-skip and pin that state.
+                get_last_loaded_ini_hash().reset();
+                get_applied_binding_generation().reset();
+                hash_to_commit = current_hash;
+                detail::defer_diagnostic(diags, LogLevel::Debug, "Config: Reloading from {}", ini_path_text);
+                return true;
+            }
+
+            /**
+             * @brief Invokes each deferred reload() setter until an unload latch or a stale @p background_guard
+             *        stops the pass.
+             * @details The caller holds the pass lock and does not hold get_config_mutex(). Sets @p out_setters_ran
+             *          per the reload_impl() contract. A setter that throws counts as invoked and does not stop the
+             *          later setters.
+             * @return True when every setter ran and none threw.
+             */
+            [[nodiscard]] bool run_reload_setters(
+                const std::vector<std::function<void()>> &deferred_callbacks,
+                const detail::BackgroundReloadGuard *background_guard,
+                bool &out_setters_ran
+            )
+            {
+                DetourModKit::Logger &logger = DetourModKit::log();
+                bool all_setters_applied = true;
+                bool any_setter_invoked = false;
+                for (const auto &cb : deferred_callbacks)
+                {
+                    // If a Logic DLL unload latched reloads off mid-pass, abort early. Every later setter resides in
+                    // the Logic DLL under unload. Partial application is acceptable in teardown.
+                    if (detail::background_reloads_disabled() ||
+                        (background_guard != nullptr && !background_guard->current()))
+                    {
+                        all_setters_applied = false;
+                        break;
+                    }
+                    any_setter_invoked = true;
+                    try
+                    {
+                        cb();
+                    }
+                    catch (const std::exception &e)
+                    {
+                        all_setters_applied = false;
+                        logger.error("Config: reload setter threw: {}", e.what());
+                    }
+                    catch (...)
+                    {
+                        all_setters_applied = false;
+                        logger.error("Config: reload setter threw unknown exception.");
+                    }
+                }
+                // out_setters_ran reflects actual invocation, which closes the race where a concurrent load() re-arm
+                // clears the latch between an abort and the watcher's downstream re-check.
+                out_setters_ran = any_setter_invoked;
+                return all_setters_applied;
+            }
+        } // anonymous namespace
 
         namespace detail
         {
@@ -1377,80 +1550,12 @@ namespace DetourModKit
 
                     IniLoadOutcome outcome = load_ini_into(ini_path, ini);
 
-                    if (!outcome.read_succeeded)
+                    if (!stage_reload_outcome(outcome, ini_path_text, diags, hash_to_commit, generation_to_commit))
                     {
-                        // A read can fail when another process locks the file mid-save. Clear the cached hash so an
-                        // identical-byte retry cannot hash-skip. Return before the setter pass. item->load against the
-                        // unpopulated CSimpleIniA replaces live state with defaults.
-                        get_last_loaded_ini_hash() = std::nullopt;
-                        defer_diagnostic(
-                            diags,
-                            LogLevel::Warning,
-                            "Config: reload() could not open '{}'; retaining last values (setters not "
-                            "re-run).",
-                            ini_path_text
-                        );
                         return true;
                     }
 
-                    {
-                        // load_ini_into sets hash whenever read_succeeded, and this is the read_succeeded branch.
-                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-                        const std::uint64_t current_hash = *outcome.hash;
-                        generation_to_commit = get_binding_generation();
-                        // Skip only when both bytes and binding generation match the last successful apply. A late
-                        // bind_* then forces a full setter pass and hydrates from disk.
-                        const auto &cached_hash = get_last_loaded_ini_hash();
-                        const auto &applied_generation = get_applied_binding_generation();
-                        if (cached_hash.has_value() && current_hash == *cached_hash && applied_generation.has_value() &&
-                            *applied_generation == generation_to_commit)
-                        {
-                            defer_diagnostic(
-                                diags,
-                                LogLevel::Debug,
-                                "Config: reload content unchanged (hash {:016x}, binding gen {}); skipping "
-                                "setters.",
-                                current_hash,
-                                generation_to_commit
-                            );
-                            return true;
-                        }
-
-                        if (!outcome.parse_succeeded)
-                        {
-                            // LoadData accepts any byte content, so a negative code is a transient SimpleIni
-                            // allocation failure, not a property of the bytes. Treat it like the read-failure
-                            // branch: retain last values and CLEAR the cached hash so the same bytes stay retryable.
-                            get_last_loaded_ini_hash() = std::nullopt;
-                            defer_diagnostic(
-                                diags,
-                                LogLevel::Warning,
-                                "Config: reload() parse error on '{}' (error {}); retaining last values "
-                                "(setters not re-run).",
-                                ini_path_text,
-                                static_cast<int>(outcome.parse_rc)
-                            );
-                            return true;
-                        }
-
-                        // Drop the previous snapshot now and defer this one, as load() does. A setter failure or
-                        // unload-latch interruption leaves partial state. The prior pair lets old bytes hash-skip and
-                        // pin that state.
-                        get_last_loaded_ini_hash().reset();
-                        get_applied_binding_generation().reset();
-                        hash_to_commit = current_hash;
-                        defer_diagnostic(diags, LogLevel::Debug, "Config: Reloading from {}", ini_path_text);
-                    }
-
-                    for (const auto &item : get_registered_config_items())
-                    {
-                        item->load(ini, diags);
-                        auto cb = item->take_deferred_apply();
-                        if (cb)
-                        {
-                            deferred_callbacks.push_back(std::move(cb));
-                        }
-                    }
+                    load_items_and_collect_setters(ini, diags, deferred_callbacks);
 
                     defer_diagnostic(
                         diags,
@@ -1468,40 +1573,8 @@ namespace DetourModKit
                     return *early_result;
                 }
 
-                // Setters run unlocked (the deferred pattern), each wrapped so one throw cannot block the rest.
-                DetourModKit::Logger &logger = DetourModKit::log();
-                bool all_setters_applied = true;
-                // out_setters_ran comes from the real applied count: a pass that runs none honestly reports it. A
-                // setter that throws still counts as invoked.
-                bool any_setter_invoked = false;
-                for (auto &cb : deferred_callbacks)
-                {
-                    // Abort early if a Logic DLL unload latched reloads off mid-pass. Every later setter resides in
-                    // the Logic DLL under unload. Partial application is acceptable in teardown.
-                    if (background_reloads_disabled() || (background_guard != nullptr && !background_guard->current()))
-                    {
-                        all_setters_applied = false;
-                        break;
-                    }
-                    any_setter_invoked = true;
-                    try
-                    {
-                        cb();
-                    }
-                    catch (const std::exception &e)
-                    {
-                        all_setters_applied = false;
-                        logger.error("Config: reload setter threw: {}", e.what());
-                    }
-                    catch (...)
-                    {
-                        all_setters_applied = false;
-                        logger.error("Config: reload setter threw unknown exception.");
-                    }
-                }
-                // The real applied count closes the race where a concurrent load() re-arm clears the latch between
-                // an abort and the watcher's downstream re-check.
-                out_setters_ran = any_setter_invoked;
+                const bool all_setters_applied =
+                    run_reload_setters(deferred_callbacks, background_guard, out_setters_ran);
                 if (all_setters_applied)
                 {
                     std::lock_guard<std::mutex> lock(get_config_mutex());

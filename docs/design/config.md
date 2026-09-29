@@ -73,7 +73,7 @@ The `NONE` sentinel is whole-string only by design. A `NONE` token inside a list
 
 The config watcher pump calls `on_reload` while a `ReadDirectoryChangesW` notify IRP still references the heap `WatchIoState` (its `OVERLAPPED` plus notification buffer). The `CancelIoEx` plus bounded drain that lets the kernel finish with them runs only after the pump loop. A throw that unwinds the worker body therefore frees them under the live IRP, a use-after-free that the kernel writes into. It also ends the pump.
 
-Catch at the invocation site with a noexcept handler (`try_log`, never a throwing `error()`), log, and continue. The drain is then reached on every path and the watcher keeps its pump (`ConfigWatcher`'s `fire_reload`). A docblock that states a callback's exceptions are caught must point at that site-level `try/catch` and carry a throwing-callback test.
+Catch at the invocation site with a noexcept handler (`try_log`, never a throwing `error()`), log, and continue. The drain is then reached on every path and the watcher keeps its pump (`fire_reload` in `src/internal/config_watcher.cpp`). A docblock that states a callback's exceptions are caught must point at that site-level `try/catch` and carry a throwing-callback test.
 
 ### [B-37]
 

@@ -235,6 +235,96 @@ namespace DetourModKit
                     armed ? diagnostics::HookTransition::Enabled : diagnostics::HookTransition::Disabled
                 );
             }
+
+            /**
+             * @brief Settles an enable that the backend reported as failed.
+             * @note The caller holds the call-gate lock and the target slot. An Active outcome releases both through
+             *       publish_toggle(), so the caller must read no hook state after the call.
+             */
+            template <class ImplT, class GateT>
+            [[nodiscard]] Result<void> settle_backend_enable_failure(
+                ImplT &impl,
+                GateT &gate,
+                TargetSlot &slot,
+                std::unique_lock<std::recursive_mutex> &guard,
+                DeferredToggleWarning &deferred_warning,
+                CoordinatorRefusal refusal
+            ) noexcept
+            {
+                // A backend error says nothing about the target. The patch commits inside the thread trap transaction,
+                // so an error can sit over a fully armed target. Witness the bytes before publication.
+                const bool mutation_committed =
+                    backend_value_or(impl.backend, false, [](auto &backend) noexcept { return backend.enabled(); });
+                const PatchWitness after_failure = witness_of(impl.backend);
+                if (mutation_committed && after_failure != PatchWitness::Original)
+                {
+                    // The mutation committed, so Original is the only witness that proves the hook disarmed. Retain
+                    // the conservative Active state. The returned error reports that a safe disarm is unproven.
+                    const std::uintptr_t armed_target = impl.target;
+                    publish_toggle(impl, gate, slot, guard, true);
+                    const ErrorCode code =
+                        after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
+                    return std::unexpected(Error{code, "hook::enable", armed_target});
+                }
+                // The backend committed no mutation, or the target already returned to Original. This hook is disarmed.
+                if (after_failure == PatchWitness::Original)
+                {
+                    (void)apply_backend(impl.backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
+                }
+                impl.status.store(HookState::Disabled, std::memory_order_release);
+                if (refusal == CoordinatorRefusal::LayerConflict)
+                {
+                    return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
+                }
+                if (refusal == CoordinatorRefusal::Unavailable)
+                {
+                    deferred_warning
+                        .arm("refused enable: process coordinator unavailable or timed out", impl.name, impl.target);
+                }
+                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+            }
+
+            /**
+             * @brief Settles a backend enable success that did not leave this hook's own patch armed.
+             * @note The caller holds the call-gate lock and the target slot. An Active outcome releases both through
+             *       publish_toggle(), so the caller must read no hook state after the call.
+             */
+            template <class ImplT, class GateT>
+            [[nodiscard]] Result<void> settle_unconfirmed_enable(
+                ImplT &impl,
+                GateT &gate,
+                TargetSlot &slot,
+                std::unique_lock<std::recursive_mutex> &guard
+            ) noexcept
+            {
+                // Disabled publishes only after a rollback disable leaves the prologue at its original bytes. The
+                // rollback receives the same classification as any other toggle. A third party that took the window can
+                // otherwise lose its bytes to the unconditional restore. Refusal therefore falls through to the Active
+                // publication below.
+                if (const PatchWitness rollback_before = witness_of(impl.backend);
+                    witness_permits_write(rollback_before))
+                {
+                    (void)backend_value_or(
+                        impl.backend,
+                        false,
+                        [](auto &backend) noexcept { return try_backend_disable(backend); }
+                    );
+                    if (witness_of(impl.backend) == PatchWitness::Original)
+                    {
+                        (
+                            void
+                        )apply_backend(impl.backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
+                        impl.status.store(HookState::Disabled, std::memory_order_release);
+                        return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+                    }
+                }
+
+                // A newer or uncertain owner can follow a completed restore. Retain backend reachability so
+                // is_enabled() and a later disable retry agree with the conservative Active state.
+                (void)apply_backend(impl.backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
+                publish_toggle(impl, gate, slot, guard, true);
+                return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
+            }
         } // namespace
 
         Result<void> Hook::enable() noexcept
@@ -328,73 +418,11 @@ namespace DetourModKit
                 publish_toggle(*m_impl, *gate, slot, guard, true);
                 return {};
             }
-            // A backend error says nothing about the target. The patch commits inside the thread trap transaction, so
-            // an error can sit over a fully armed target. Witness the bytes before publication.
             if (!backend_enabled)
             {
-                const bool mutation_committed =
-                    backend_value_or(m_impl->backend, false, [](auto &backend) noexcept { return backend.enabled(); });
-                const PatchWitness after_failure = witness_of(m_impl->backend);
-                if (mutation_committed && after_failure != PatchWitness::Original)
-                {
-                    // The mutation committed, so Original is the only witness that proves the hook disarmed. Retain
-                    // the conservative Active state and report that safe disarm lacks confirmation.
-                    const std::uintptr_t armed_target = m_impl->target;
-                    publish_toggle(*m_impl, *gate, slot, guard, true);
-                    const ErrorCode code =
-                        after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
-                    return std::unexpected(Error{code, "hook::enable", armed_target});
-                }
-                // The backend committed no mutation, or the target already returned to Original. This hook is disarmed.
-                if (after_failure == PatchWitness::Original)
-                {
-                    (
-                        void
-                    )apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                }
-                m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                if (refusal == CoordinatorRefusal::LayerConflict)
-                {
-                    return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", m_impl->target});
-                }
-                if (refusal == CoordinatorRefusal::Unavailable)
-                {
-                    deferred_warning.arm(
-                        "refused enable: process coordinator unavailable or timed out",
-                        m_impl->name,
-                        m_impl->target
-                    );
-                }
-                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+                return settle_backend_enable_failure(*m_impl, *gate, slot, guard, deferred_warning, refusal);
             }
-
-            // The backend reported success but the bytes are not this hook's patch. Publish Disabled only after a
-            // compensation disable leaves the prologue at its original bytes. The rollback receives the same
-            // classification as any other toggle. A third party that took the window can otherwise lose its bytes to
-            // the unconditional restore. Refusal therefore falls through to the Active publication below.
-            if (const PatchWitness rollback_before = witness_of(m_impl->backend);
-                witness_permits_write(rollback_before))
-            {
-                (void)backend_value_or(
-                    m_impl->backend,
-                    false,
-                    [](auto &backend) noexcept { return try_backend_disable(backend); }
-                );
-                if (witness_of(m_impl->backend) == PatchWitness::Original)
-                {
-                    (
-                        void
-                    )apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                    m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                    return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
-                }
-            }
-
-            // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
-            // is_enabled() and a later disable retry agree with the conservative Active state.
-            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
-            publish_toggle(*m_impl, *gate, slot, guard, true);
-            return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
+            return settle_unconfirmed_enable(*m_impl, *gate, slot, guard);
         }
 
         Result<void> Hook::disable() noexcept

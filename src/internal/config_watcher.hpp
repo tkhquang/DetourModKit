@@ -170,6 +170,19 @@ namespace DetourModKit
             // teardown and the start leak-on-timeout) share this exact dance, so it lives in one private helper.
             static void leak_impl_storage(std::unique_ptr<Impl> &impl) noexcept;
 
+            /**
+             * @brief Keeps a live worker, or joins and drops an exited worker.
+             * @note The caller must hold start_mutex.
+             * @return true when the worker body is live. @p gate then holds the release gate of that worker.
+             */
+            [[nodiscard]] bool keep_live_worker_or_drop_exited(StartGate &gate) noexcept;
+
+            /**
+             * @brief Drops the worker of a failed start, or husks the watcher after a handshake timeout.
+             * @note The caller must hold start_mutex. A true @p started makes this call a no-op.
+             */
+            void clean_up_failed_start(bool started, bool handshake_timed_out) noexcept;
+
             std::unique_ptr<Impl> m_impl;
         };
     } // namespace detail

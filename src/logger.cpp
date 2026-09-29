@@ -111,6 +111,26 @@ namespace DetourModKit
             logger.reset();
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
         }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /**
+         * @brief Fires the post-publication probe of enable_async_mode() and discards any exception it throws.
+         * @details This seam proves that a throw after publication cannot escape or disturb the published writer.
+         */
+        void fire_post_publication_probe() noexcept
+        {
+            if (auto *post_publication_probe = detail::g_logger_post_publication_probe)
+            {
+                try
+                {
+                    post_publication_probe();
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+#endif
     } // anonymous namespace
 
     std::shared_ptr<const Logger::StaticConfig> Logger::get_static_config()
@@ -871,19 +891,9 @@ namespace DetourModKit
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-        // This seam proves that a throw after publication cannot escape or disturb the published writer.
         if (activated)
         {
-            if (auto *post_publication_probe = detail::g_logger_post_publication_probe)
-            {
-                try
-                {
-                    post_publication_probe();
-                }
-                catch (...)
-                {
-                }
-            }
+            fire_post_publication_probe();
         }
 #endif
 
