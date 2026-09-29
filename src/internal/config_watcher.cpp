@@ -455,315 +455,372 @@ namespace DetourModKit
             config::detail::emit_deferred_diagnostics(late_to_emit);
         }
 
-        bool ConfigWatcher::start(config::detail::DeferredDiagnostics &diags, StartGate &gate)
+        namespace
         {
-            gate.reset();
-            if (!m_impl)
+            void settle_startup_handshake(
+                const std::shared_ptr<std::promise<bool>> &open_result,
+                bool &handshake_settled,
+                bool ok
+            ) noexcept
             {
-                // Spent watcher: a prior start() timed out and leaked the Impl (see the leak-on-timeout branch below).
-                // The instance is inert; the caller is expected to have dropped it. Fail closed rather than deref null.
-                return false;
-            }
-            std::lock_guard<std::mutex> lock(m_impl->start_mutex);
-
-            // A worker object can already exist. If its body is still live, the watcher is running. Keep it. But a
-            // post-handshake runtime failure (the watched parent removed, a GetOverlappedResultEx error, or a re-issue
-            // failure) makes the body return on its own while the StoppableWorker lingers with a finished thread; a
-            // restart must not treat that exited husk as success. Join and drop the exited worker, then fall through to
-            // a fresh worker and handshake.
-            //
-            // Liveness is tested on the same worker_thread_id slot is_running() publishes, not on
-            // StoppableWorker::is_running(). The two clear in a fixed order: WorkerThreadIdGuard is the body's
-            // first-declared local, so the slot is cleared as the body's last act, while the Exited transition is
-            // published by the StoppableWorker wrapper only after the body has returned. Testing the worker state here
-            // would leave a window in which a caller that observed is_running() == false is told the restart succeeded
-            // while this exited husk stays installed. Reading the published slot closes it: a non-null worker under
-            // start_mutex implies a settled successful handshake (every failure path resets the worker or husks the
-            // Impl), and the body stores its id before settling, so an empty slot with a live worker object means the
-            // body has already finished and reset() joins a thread that is returning. The slot is tested before the
-            // worker handle, not inside a null check on it: a stop() whose StoppableWorker::shutdown() hits the
-            // blocking-teardown veto detaches the body and drops the handle, so a null handle does not imply a finished
-            // body. That body observes only stop_requested, which the restart below clears, and resurrecting it leaves
-            // two pumps sharing one Impl. Whichever exits first publishes worker_exited and lets ~ConfigWatcher free
-            // storage the other still reads. Resetting a null handle is a no-op, so the settled-husk case is unchanged.
-            if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
-            {
-                gate = m_impl->start_gate.load(std::memory_order_acquire);
-                return true;
-            }
-            m_impl->worker.reset();
-
-            if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
-            {
-                config::detail::defer_diagnostic(
-                    diags,
-                    LogLevel::Error,
-                    "ConfigWatcher: invalid INI path '{}'; cannot start.",
-                    m_impl->ini_path_text
-                );
-                return false;
-            }
-            m_impl->stop_requested.store(false, std::memory_order_release);
-
-            // Capture everything the worker needs by value so the body can outlive the captured Impl members only in
-            // the loader-lock detach path; under normal teardown stop() joins before m_impl unwinds.
-            auto directory = m_impl->directory_wide;
-            auto filename = m_impl->filename_wide;
-            auto debounce_ms = m_impl->debounce;
-            auto callback = m_impl->on_reload;
-            auto label = m_impl->ini_path_text;
-            const LogLevel startup_threshold = diags.threshold;
-
-            // The StoppableWorker body is stored in std::function, so the lambda must stay copyable; we cannot move a
-            // non-copyable OwnedHandle into it. Instead, open the directory handle on the worker thread and
-            // synchronously report success/failure back to this thread via a shared promise. start() can then return
-            // the real status without polling is_running() in a race.
-            auto open_result = std::make_shared<std::promise<bool>>();
-            std::future<bool> open_future = open_result->get_future();
-            auto startup_gate = std::make_shared<ConfigWatcherStartGate>(diags.threshold);
-            m_impl->start_gate.store(startup_gate, std::memory_order_release);
-            gate = startup_gate;
-
-            // Pointers to the Impl's atomic slots. Raw pointers rather than a captured m_impl reference: the lambda
-            // may outlive this stack frame via the StoppableWorker detach path, and a detached body keeps reading all
-            // three. They stay valid because Impl is never freed under a live body. Every teardown that cannot join
-            // (the veto branch, and the authorized branch whose worker detached anyway) husks the watcher and leaks
-            // Impl instead, so the slots outlive the detached worker for process lifetime.
-            auto *worker_id_slot = &m_impl->worker_thread_id;
-            auto *worker_exited_slot = &m_impl->worker_exited;
-            auto *stop_requested_slot = &m_impl->stop_requested;
-
-            auto worker_body = [directory = std::move(directory),
-                                filename = std::move(filename),
-                                debounce_ms,
-                                callback = std::move(callback),
-                                label = std::move(label),
-                                open_result,
-                                startup_gate,
-                                startup_threshold,
-                                worker_id_slot,
-                                worker_exited_slot,
-                                stop_requested_slot](const std::stop_token &st) -> void
-            {
-                const WorkerExitGuard worker_exit_guard{*worker_exited_slot};
-                config::detail::DeferredDiagnostics startup_diags{
-                    .threshold = startup_threshold,
-                    .records = {},
-                };
-                // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
-                // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
-                // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
-                worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
-                const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
-
-                // start() co-owns open_result for the whole bounded wait, so a dropped body copy cannot wake the
-                // waiter through broken_promise. The body must publish the result on every exit itself. settle()
-                // records success or failure exactly once. The guard publishes a failure on any exit that has not
-                // settled, including a bad_alloc from the allocations just below, before the first read is queued.
-                // A pre-handshake throw therefore returns start() promptly with a failure instead of running the
-                // full 5s handshake timeout.
-                bool handshake_settled = false;
-                auto settle = [&](bool ok) noexcept -> void
+                if (!handshake_settled)
                 {
-                    if (!handshake_settled)
-                    {
-                        handshake_settled = true;
-                        try
-                        {
-                            open_result->set_value(ok);
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-                };
-                class SettleGuard
-                {
-                public:
-                    SettleGuard(std::shared_ptr<std::promise<bool>> promise, bool &settled) noexcept
-                        : m_promise(std::move(promise)), m_settled(settled)
-                    {
-                    }
-
-                    ~SettleGuard() noexcept
-                    {
-                        if (!m_settled)
-                        {
-                            m_settled = true;
-                            try
-                            {
-                                m_promise->set_value(false);
-                            }
-                            catch (...)
-                            {
-                            }
-                        }
-                    }
-
-                    SettleGuard(const SettleGuard &) = delete;
-                    SettleGuard &operator=(const SettleGuard &) = delete;
-
-                private:
-                    std::shared_ptr<std::promise<bool>> m_promise;
-                    bool &m_settled;
-                } settle_guard{open_result, handshake_settled};
-
-                const auto wait_for_release = [&]() noexcept
-                {
-                    auto state = startup_gate->wait.load(std::memory_order_acquire);
-                    while (state == ConfigWatcherStartWait::Pending)
-                    {
-                        startup_gate->wait.wait(ConfigWatcherStartWait::Pending, std::memory_order_acquire);
-                        state = startup_gate->wait.load(std::memory_order_acquire);
-                    }
-                };
-
-                const auto complete_startup = [&](bool ok) noexcept
-                {
-                    config::detail::DeferredDiagnostics to_emit;
-                    {
-                        std::lock_guard<std::mutex> channel_lock(startup_gate->mutex);
-                        startup_gate->diags = std::move(startup_diags);
-                        startup_gate->complete = true;
-                        if (startup_gate->wait.load(std::memory_order_acquire) == ConfigWatcherStartWait::Released &&
-                            !startup_gate->emitted)
-                        {
-                            startup_gate->emitted = true;
-                            to_emit = std::move(startup_gate->diags);
-                        }
-                    }
-                    settle(ok);
-                    config::detail::emit_deferred_diagnostics(to_emit);
-                };
-
-                const auto fail_startup = [&](std::string_view message) noexcept
-                {
+                    handshake_settled = true;
                     try
                     {
-                        config::detail::defer_diagnostic(
-                            startup_diags,
-                            LogLevel::Error,
-                            "StoppableWorker '{}': unhandled exception: {}",
-                            "ConfigWatcher",
-                            message
-                        );
+                        open_result->set_value(ok);
                     }
                     catch (...)
                     {
-                        DetourModKit::detail::LoggerDropAccess::record(log());
                     }
-                    complete_startup(false);
-                };
-
-                const auto fail_startup_unknown = [&]() noexcept
-                {
-                    try
-                    {
-                        config::detail::defer_diagnostic(
-                            startup_diags,
-                            LogLevel::Error,
-                            "StoppableWorker '{}': unknown exception escaped body.",
-                            "ConfigWatcher"
-                        );
-                    }
-                    catch (...)
-                    {
-                        DetourModKit::detail::LoggerDropAccess::record(log());
-                    }
-                    complete_startup(false);
-                };
-
-                const std::stop_callback stop_wait_callback(
-                    st,
-                    [startup_gate]() noexcept { cancel_start_wait(startup_gate); }
-                );
-
-                if (st.stop_requested() || stop_requested_slot->load(std::memory_order_acquire))
-                {
-                    complete_startup(false);
-                    return;
                 }
+            }
 
-                std::unique_ptr<WatchIoState> io;
+            void wait_for_start_release(const std::shared_ptr<ConfigWatcherStartGate> &startup_gate) noexcept
+            {
+                auto state = startup_gate->wait.load(std::memory_order_acquire);
+                while (state == ConfigWatcherStartWait::Pending)
+                {
+                    startup_gate->wait.wait(ConfigWatcherStartWait::Pending, std::memory_order_acquire);
+                    state = startup_gate->wait.load(std::memory_order_acquire);
+                }
+            }
+
+            void complete_startup_handshake(
+                const std::shared_ptr<ConfigWatcherStartGate> &startup_gate,
+                config::detail::DeferredDiagnostics &startup_diags,
+                const std::shared_ptr<std::promise<bool>> &open_result,
+                bool &handshake_settled,
+                bool ok
+            ) noexcept
+            {
+                config::detail::DeferredDiagnostics to_emit;
+                {
+                    std::lock_guard<std::mutex> channel_lock(startup_gate->mutex);
+                    startup_gate->diags = std::move(startup_diags);
+                    startup_gate->complete = true;
+                    if (startup_gate->wait.load(std::memory_order_acquire) == ConfigWatcherStartWait::Released &&
+                        !startup_gate->emitted)
+                    {
+                        startup_gate->emitted = true;
+                        to_emit = std::move(startup_gate->diags);
+                    }
+                }
+                settle_startup_handshake(open_result, handshake_settled, ok);
+                config::detail::emit_deferred_diagnostics(to_emit);
+            }
+
+            void defer_startup_exception(
+                config::detail::DeferredDiagnostics &startup_diags,
+                std::string_view message
+            ) noexcept
+            {
                 try
                 {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    if (auto *seam = g_config_watcher_prehandshake_seam)
-                    {
-                        seam();
-                    }
-#endif
-
-                    io = std::make_unique<WatchIoState>();
-                    io->buffer.resize(BUFFER_BYTES);
-
-                    io->dir_handle = OwnedHandle(
-                        ::CreateFileW(
-                            directory.c_str(),
-                            FILE_LIST_DIRECTORY,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            nullptr,
-                            OPEN_EXISTING,
-                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                            nullptr
-                        )
+                    config::detail::defer_diagnostic(
+                        startup_diags,
+                        LogLevel::Error,
+                        "StoppableWorker '{}': unhandled exception: {}",
+                        "ConfigWatcher",
+                        message
                     );
-
-                    if (!io->dir_handle.valid())
-                    {
-                        config::detail::defer_diagnostic(
-                            startup_diags,
-                            LogLevel::Error,
-                            "ConfigWatcher '{}': CreateFileW failed (GLE={}).",
-                            label,
-                            ::GetLastError()
-                        );
-                        complete_startup(false);
-                        return;
-                    }
-
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    const bool force_event_failure = g_config_watcher_create_event_failure_seam != nullptr &&
-                                                     g_config_watcher_create_event_failure_seam();
-#else
-                    constexpr bool force_event_failure = false;
-#endif
-                    if (!force_event_failure)
-                    {
-                        io->event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
-                    }
-                    if (force_event_failure || !io->event_handle.valid())
-                    {
-                        config::detail::defer_diagnostic(
-                            startup_diags,
-                            LogLevel::Error,
-                            "ConfigWatcher '{}': CreateEventW failed (GLE={}).",
-                            label,
-                            force_event_failure ? ERROR_GEN_FAILURE : ::GetLastError()
-                        );
-                        complete_startup(false);
-                        return;
-                    }
-
-                    io->overlapped.hEvent = io->event_handle.h;
-                }
-                catch (const std::exception &e)
-                {
-                    fail_startup(e.what());
-                    return;
                 }
                 catch (...)
                 {
-                    fail_startup_unknown();
-                    return;
+                    DetourModKit::detail::LoggerDropAccess::record(log());
+                }
+            }
+
+            void defer_unknown_startup_exception(config::detail::DeferredDiagnostics &startup_diags) noexcept
+            {
+                try
+                {
+                    config::detail::defer_diagnostic(
+                        startup_diags,
+                        LogLevel::Error,
+                        "StoppableWorker '{}': unknown exception escaped body.",
+                        "ConfigWatcher"
+                    );
+                }
+                catch (...)
+                {
+                    DetourModKit::detail::LoggerDropAccess::record(log());
+                }
+            }
+
+            /// Returns false after it defers the diagnostic of an open failure.
+            [[nodiscard]] bool open_watch_io_state(
+                std::unique_ptr<WatchIoState> &io,
+                const std::wstring &directory,
+                const std::string &label,
+                config::detail::DeferredDiagnostics &startup_diags
+            )
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *seam = g_config_watcher_prehandshake_seam)
+                {
+                    seam();
+                }
+#endif
+
+                io = std::make_unique<WatchIoState>();
+                io->buffer.resize(BUFFER_BYTES);
+
+                io->dir_handle = OwnedHandle(
+                    ::CreateFileW(
+                        directory.c_str(),
+                        FILE_LIST_DIRECTORY,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr,
+                        OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                        nullptr
+                    )
+                );
+
+                if (!io->dir_handle.valid())
+                {
+                    config::detail::defer_diagnostic(
+                        startup_diags,
+                        LogLevel::Error,
+                        "ConfigWatcher '{}': CreateFileW failed (GLE={}).",
+                        label,
+                        ::GetLastError()
+                    );
+                    return false;
                 }
 
-                // These aliases keep the pump unchanged while its storage remains heap-owned for the drain.
-                OwnedHandle &dir_handle = io->dir_handle;
-                OwnedHandle &event_handle = io->event_handle;
-                std::vector<BYTE> &buffer = io->buffer;
-                OVERLAPPED &overlapped = io->overlapped;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                const bool force_event_failure = g_config_watcher_create_event_failure_seam != nullptr &&
+                                                 g_config_watcher_create_event_failure_seam();
+#else
+                constexpr bool force_event_failure = false;
+#endif
+                if (!force_event_failure)
+                {
+                    io->event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+                }
+                if (force_event_failure || !io->event_handle.valid())
+                {
+                    config::detail::defer_diagnostic(
+                        startup_diags,
+                        LogLevel::Error,
+                        "ConfigWatcher '{}': CreateEventW failed (GLE={}).",
+                        label,
+                        force_event_failure ? ERROR_GEN_FAILURE : ::GetLastError()
+                    );
+                    return false;
+                }
 
+                io->overlapped.hEvent = io->event_handle.h;
+                return true;
+            }
+
+            [[nodiscard]] bool issue_directory_read(
+                WatchIoState &io,
+                bool handshake_settled,
+                config::detail::DeferredDiagnostics &startup_diags,
+                const std::string &label
+            )
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (!handshake_settled && g_config_watcher_initial_read_failure_seam != nullptr &&
+                    g_config_watcher_initial_read_failure_seam())
+                {
+                    config::detail::defer_diagnostic(
+                        startup_diags,
+                        LogLevel::Error,
+                        "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                        label,
+                        ERROR_GEN_FAILURE
+                    );
+                    return false;
+                }
+#endif
+                ::ResetEvent(io.event_handle.h);
+                DWORD bytes_returned = 0;
+                const BOOL ok = ::ReadDirectoryChangesW(
+                    io.dir_handle.h,
+                    io.buffer.data(),
+                    static_cast<DWORD>(io.buffer.size()),
+                    FALSE, // no recursion
+                    NOTIFY_FILTER,
+                    &bytes_returned,
+                    &io.overlapped,
+                    nullptr
+                );
+                if (!ok)
+                {
+                    if (!handshake_settled)
+                    {
+                        config::detail::defer_diagnostic(
+                            startup_diags,
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                            label,
+                            ::GetLastError()
+                        );
+                    }
+                    else
+                    {
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                            label,
+                            ::GetLastError()
+                        );
+                    }
+                    return false;
+                }
+                return true;
+            }
+
+            /**
+             * @brief Invokes @p callback and logs an exception that it throws.
+             * @details The callback boundary is noexcept because a thrown callback before the drain can free storage
+             *          that the pending I/O still uses. try_log keeps both catch handlers within that boundary.
+             */
+            void fire_reload(const std::function<void()> &callback, const std::string &label) noexcept
+            {
+                if (!callback)
+                {
+                    return;
+                }
+                try
+                {
+                    callback();
+                }
+                catch (const std::exception &e)
+                {
+                    (void)log()
+                        .try_log(LogLevel::Error, "ConfigWatcher '{}': reload callback threw: {}", label, e.what());
+                }
+                catch (...)
+                {
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "ConfigWatcher '{}': reload callback threw a non-std exception.",
+                        label
+                    );
+                }
+            }
+
+            /// Returns true when the completed batch names the target file or reports coalesced events.
+            [[nodiscard]] bool scan_completed_batch(
+                DWORD bytes_transferred,
+                const std::vector<BYTE> &buffer,
+                const std::wstring &filename,
+                const std::string &label,
+                bool &overflow_logged
+            ) noexcept
+            {
+                bool matched = false;
+
+                if (bytes_transferred == 0)
+                {
+                    // A successful zero-byte completion means that the notification buffer overflowed and the
+                    // kernel coalesced the events. The batch counts as a match, as ERROR_NOTIFY_ENUM_DIR does in
+                    // pump_directory_changes, so the caller marks a change pending and the debounce absorbs duplicates.
+                    if (!overflow_logged)
+                    {
+                        (void)log().try_log(
+                            LogLevel::Debug,
+                            "ConfigWatcher '{}': notification buffer "
+                            "overflowed (zero-byte completion); "
+                            "coalescing dropped events.",
+                            label
+                        );
+                        overflow_logged = true;
+                    }
+                    matched = true;
+                }
+                else
+                {
+                    // A real event batch resets the overflow latch, so the next overflow logs again at DEBUG level.
+                    overflow_logged = false;
+
+                    // The walk trusts the kernel, but it checks every kernel-supplied length and offset against
+                    // the buffer before a read or an advance. Without that check, a corrupt or malicious
+                    // FileNameLength or NextEntryOffset causes an out-of-bounds read of the heap buffer. On any
+                    // inconsistency the walk stops, so it never reads past the bytes that the kernel returned.
+                    const BYTE *cursor = buffer.data();
+                    const BYTE *const end_ptr = cursor + bytes_transferred;
+
+                    // The fixed header occupies the bytes before the variable-length FileName[] member. This offset
+                    // bounds both the header and the filename extent against end_ptr.
+                    constexpr size_t name_field_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+
+                    // (a) The entry header must fit before the walk reads any of its fields. The check compares the
+                    // remaining span before the walk forms cursor + name_field_offset, so malformed trailing bytes
+                    // cannot move the check outside the buffer.
+                    while (static_cast<size_t>(end_ptr - cursor) >= name_field_offset)
+                    {
+                        const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
+
+                        const DWORD name_bytes = info->FileNameLength;
+
+                        // (b) FileNameLength must be a whole number of WCHARs. An odd byte count is malformed.
+                        if (name_bytes % sizeof(WCHAR) != 0)
+                        {
+                            break;
+                        }
+
+                        // (c) FileName + FileNameLength must not run past the buffer end. The check compares the
+                        // available span (end_ptr - name_start), so no pointer addition can overflow.
+                        const BYTE *const name_start = cursor + name_field_offset;
+                        if (name_bytes > static_cast<size_t>(end_ptr - name_start))
+                        {
+                            break;
+                        }
+
+                        const size_t name_len = name_bytes / sizeof(WCHAR);
+                        const std::wstring_view changed_name(info->FileName, name_len);
+
+                        // A rename-swap-save (temp -> target) surfaces the target filename in the RENAMED_NEW_NAME
+                        // entry.
+                        if (iequals_w(changed_name, filename))
+                        {
+                            matched = true;
+                        }
+
+                        // A zero NextEntryOffset terminates the walk (the spec's end-of-chain marker).
+                        const DWORD next = info->NextEntryOffset;
+                        if (next == 0)
+                        {
+                            break;
+                        }
+
+                        // (d) NextEntryOffset must advance at least past this entry's header, so a bogus small value
+                        // cannot loop or alias the current entry. It must also keep the next entry's start at or
+                        // before the buffer end. The loop condition then checks that the next header fits. The
+                        // comparison uses the available span, so no pointer addition can overflow.
+                        if (next < name_field_offset || next > static_cast<size_t>(end_ptr - cursor))
+                        {
+                            break;
+                        }
+                        cursor += next;
+                    }
+                }
+                return matched;
+            }
+
+            /**
+             * @brief Runs the notification pump until a stop request or a pump failure.
+             * @details The caller settled the handshake before this call, so a read failure goes only to the log.
+             * @return true when a matching change is still pending.
+             */
+            [[nodiscard]] bool pump_directory_changes(
+                const std::stop_token &st,
+                const std::atomic<bool> *stop_requested_slot,
+                WatchIoState &io,
+                const std::wstring &filename,
+                std::chrono::milliseconds debounce_ms,
+                const std::function<void()> &callback,
+                const std::string &label,
+                bool handshake_settled,
+                config::detail::DeferredDiagnostics &startup_diags
+            )
+            {
                 // Debounce bookkeeping: once we observe a matching change, mark it pending and defer the callback
                 // until no matching change has arrived for `debounce_ms`. Using steady_clock to survive wall-clock
                 // adjustments.
@@ -774,33 +831,6 @@ namespace DetourModKit
                 // subsequent hits stay silent at DEBUG level to avoid log spam.
                 bool overflow_logged = false;
 
-                // The callback boundary is noexcept because a thrown callback before the drain can free storage that
-                // the pending I/O still uses. try_log keeps both catch handlers within that boundary.
-                auto fire_reload = [&]() noexcept
-                {
-                    if (!callback)
-                    {
-                        return;
-                    }
-                    try
-                    {
-                        callback();
-                    }
-                    catch (const std::exception &e)
-                    {
-                        (void)log()
-                            .try_log(LogLevel::Error, "ConfigWatcher '{}': reload callback threw: {}", label, e.what());
-                    }
-                    catch (...)
-                    {
-                        (void)log().try_log(
-                            LogLevel::Error,
-                            "ConfigWatcher '{}': reload callback threw a non-std exception.",
-                            label
-                        );
-                    }
-                };
-
                 // Check the debounce deadline before every wait. Foreign file events can prevent WAIT_TIMEOUT while
                 // they leave last_event unchanged. This placement fires the reload after the target quiet window.
                 auto maybe_fire_debounced = [&]() noexcept
@@ -808,87 +838,9 @@ namespace DetourModKit
                     if (pending && std::chrono::steady_clock::now() - last_event >= debounce_ms)
                     {
                         pending = false;
-                        fire_reload();
+                        fire_reload(callback, label);
                     }
                 };
-
-                auto issue_read = [&]() -> bool
-                {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    if (!handshake_settled && g_config_watcher_initial_read_failure_seam != nullptr &&
-                        g_config_watcher_initial_read_failure_seam())
-                    {
-                        config::detail::defer_diagnostic(
-                            startup_diags,
-                            LogLevel::Error,
-                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                            label,
-                            ERROR_GEN_FAILURE
-                        );
-                        return false;
-                    }
-#endif
-                    ::ResetEvent(event_handle.h);
-                    DWORD bytes_returned = 0;
-                    const BOOL ok = ::ReadDirectoryChangesW(
-                        dir_handle.h,
-                        buffer.data(),
-                        static_cast<DWORD>(buffer.size()),
-                        FALSE, // no recursion
-                        NOTIFY_FILTER,
-                        &bytes_returned,
-                        &overlapped,
-                        nullptr
-                    );
-                    if (!ok)
-                    {
-                        if (!handshake_settled)
-                        {
-                            config::detail::defer_diagnostic(
-                                startup_diags,
-                                LogLevel::Error,
-                                "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                                label,
-                                ::GetLastError()
-                            );
-                        }
-                        else
-                        {
-                            (void)log().try_log(
-                                LogLevel::Error,
-                                "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                                label,
-                                ::GetLastError()
-                            );
-                        }
-                        return false;
-                    }
-                    return true;
-                };
-
-                try
-                {
-                    if (!issue_read())
-                    {
-                        complete_startup(false);
-                        return;
-                    }
-                }
-                catch (const std::exception &e)
-                {
-                    fail_startup(e.what());
-                    return;
-                }
-                catch (...)
-                {
-                    fail_startup_unknown();
-                    return;
-                }
-
-                // First overlapped read is queued successfully; signal start() that the watcher is ready. From here
-                // on any failure is post-startup and reported only via the log.
-                complete_startup(true);
-                wait_for_release();
 
                 while (!st.stop_requested() && !stop_requested_slot->load(std::memory_order_acquire))
                 {
@@ -896,8 +848,13 @@ namespace DetourModKit
                     maybe_fire_debounced();
 
                     DWORD bytes_transferred = 0;
-                    const BOOL overlapped_ok =
-                        ::GetOverlappedResultEx(dir_handle.h, &overlapped, &bytes_transferred, PUMP_TIMEOUT_MS, FALSE);
+                    const BOOL overlapped_ok = ::GetOverlappedResultEx(
+                        io.dir_handle.h,
+                        &io.overlapped,
+                        &bytes_transferred,
+                        PUMP_TIMEOUT_MS,
+                        FALSE
+                    );
 
                     if (!overlapped_ok)
                     {
@@ -942,13 +899,13 @@ namespace DetourModKit
                             }
                             pending = true;
                             last_event = std::chrono::steady_clock::now();
-                            if (!issue_read())
+                            if (!issue_directory_read(io, handshake_settled, startup_diags, label))
                             {
                                 break;
                             }
                             // Some redirectors raise ERROR_NOTIFY_ENUM_DIR continuously under sustained event
-                            // storms. Without a sleep the worker would spin at 100% CPU re-issuing reads. Capping
-                            // at ~20 Hz keeps debounce semantics intact while bounding CPU.
+                            // storms. Without the sleep, the worker spins at 100% CPU as it re-issues reads. The
+                            // ~20 Hz cap bounds CPU and keeps the debounce semantics intact.
                             std::this_thread::sleep_for(std::chrono::milliseconds(50));
                             continue;
                         }
@@ -962,96 +919,8 @@ namespace DetourModKit
                         break;
                     }
 
-                    bool matched = false;
-
-                    if (bytes_transferred == 0)
-                    {
-                        // Successful-completion path for buffer overflow:
-                        // the kernel signals "events coalesced" by returning zero bytes. Same handling as
-                        // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
-                        if (!overflow_logged)
-                        {
-                            (void)log().try_log(
-                                LogLevel::Debug,
-                                "ConfigWatcher '{}': notification buffer "
-                                "overflowed (zero-byte completion); "
-                                "coalescing dropped events.",
-                                label
-                            );
-                            overflow_logged = true;
-                        }
-                        matched = true;
-                    }
-                    else
-                    {
-                        // Real event batch received. Reset the overflow latch so a later recurrence logs again at
-                        // the DEBUG edge rather than staying silent forever.
-                        overflow_logged = false;
-
-                        // Walk the FILE_NOTIFY_INFORMATION chain. The kernel is trusted, but every kernel-supplied
-                        // length/offset is bounds-checked against the buffer before any read or advance: trusting
-                        // FileNameLength or NextEntryOffset blindly would turn a corrupt/malicious completion into
-                        // an out-of-bounds read of the worker's heap buffer. On any inconsistency the walk stops
-                        // (fails closed) rather than reading past the bytes the kernel actually returned.
-                        const BYTE *cursor = buffer.data();
-                        const BYTE *const end_ptr = cursor + bytes_transferred;
-
-                        // Offset of the variable-length FileName[] member; the fixed header occupies the bytes
-                        // before it. Used to bound both the header and the filename extent against end_ptr.
-                        constexpr size_t name_field_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
-
-                        // (a) The entry header itself must fit before we dereference any of its fields. Compare on
-                        // the remaining span before forming cursor + name_field_offset, so malformed trailing bytes
-                        // cannot make the bounds check itself step outside the buffer.
-                        while (static_cast<size_t>(end_ptr - cursor) >= name_field_offset)
-                        {
-                            const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
-
-                            const DWORD name_bytes = info->FileNameLength;
-
-                            // (c) FileNameLength must be a whole number of WCHARs; an odd byte count is malformed.
-                            if (name_bytes % sizeof(WCHAR) != 0)
-                            {
-                                break;
-                            }
-
-                            // (b) FileName + FileNameLength must not run past the buffer end. Compare on the
-                            // available span (end_ptr - FileName) so the addition cannot overflow a pointer.
-                            const BYTE *const name_start = cursor + name_field_offset;
-                            if (name_bytes > static_cast<size_t>(end_ptr - name_start))
-                            {
-                                break;
-                            }
-
-                            const size_t name_len = name_bytes / sizeof(WCHAR);
-                            const std::wstring_view changed_name(info->FileName, name_len);
-
-                            // Match against target filename (case-insensitive). Rename-swap-save (temp -> target)
-                            // surfaces the target filename in the RENAMED_NEW_NAME entry.
-                            if (iequals_w(changed_name, filename))
-                            {
-                                matched = true;
-                            }
-
-                            // A zero NextEntryOffset terminates the walk (the spec's end-of-chain marker).
-                            const DWORD next = info->NextEntryOffset;
-                            if (next == 0)
-                            {
-                                break;
-                            }
-
-                            // (d) NextEntryOffset must advance past at least this entry's header (forward progress,
-                            // so a bogus small value cannot loop or alias the current entry) and must keep the next
-                            // entry's start at or before the buffer end; the loop condition then re-validates that
-                            // the next entry's header fully fits. Compare on the available span to avoid pointer
-                            // overflow.
-                            if (next < name_field_offset || next > static_cast<size_t>(end_ptr - cursor))
-                            {
-                                break;
-                            }
-                            cursor += next;
-                        }
-                    }
+                    const bool matched =
+                        scan_completed_batch(bytes_transferred, io.buffer, filename, label, overflow_logged);
 
                     if (matched)
                     {
@@ -1059,40 +928,45 @@ namespace DetourModKit
                         last_event = std::chrono::steady_clock::now();
                     }
 
-                    if (!issue_read())
+                    if (!issue_directory_read(io, handshake_settled, startup_diags, label))
                     {
                         break;
                     }
                 }
+                return pending;
+            }
 
-                // Cancel any in-flight I/O, then wait for the kernel to finish with our OVERLAPPED and notification
-                // buffer before they are freed. Per MSDN the OVERLAPPED and buffer must stay valid until the
-                // cancelled I/O has actually completed; freeing them early would let the kernel write into released
-                // memory.
-                //
-                // CancelIoEx normally drives the pending ReadDirectoryChangesW to completion, but if the watched
-                // directory was deleted the notify IRP can be orphaned: CancelIoEx reports success yet no
-                // completion is ever delivered. A blind GetOverlappedResult with bWait=TRUE would then wait forever
-                // and hang StoppableWorker's join (stalling the whole teardown). So every wait here is bounded and
-                // the drain escalates:
-                //   1. cancel + bounded wait for the normal case;
-                //   2. on timeout, close the directory handle. Dropping the
-                //      last handle to the directory forces the I/O Manager to
-                //      cancel and complete the outstanding IRP, and signals our
-                //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
-                //   3. if the IRP still cannot be confirmed complete, leak the
-                //      entire I/O bundle instead of freeing it, so a late
-                //      completion can never write into freed memory. Bounded to
-                //      this teardown path and mirrors the leak-on-teardown
-                //      discipline in ~ConfigWatcher and Logger::shutdown_internal.
-                ::CancelIoEx(dir_handle.h, &overlapped);
+            /**
+             * @brief Cancels the in-flight read and waits for the kernel to release the OVERLAPPED and the
+             *        notification buffer.
+             * @details Per MSDN, both must stay valid until the cancelled I/O completes. An earlier free lets the
+             *          kernel write into released memory.
+             *
+             *          If the watched directory was deleted, the notify IRP can be orphaned: CancelIoEx reports
+             *          success, but no completion arrives. An unbounded GetOverlappedResult wait then hangs the
+             *          StoppableWorker join and the whole teardown. Every wait here is therefore bounded, and the
+             *          drain escalates in three steps:
+             *            1. CancelIoEx and a bounded wait cover the normal case.
+             *            2. On a timeout, the drain closes the directory handle. The I/O Manager then cancels and
+             *               completes the outstanding IRP, and the completion signals the event.
+             *            3. If the IRP still does not complete in time, the drain leaks the I/O bundle, so a late
+             *               completion never writes into freed memory.
+             */
+            void drain_watch_io(
+                std::unique_ptr<WatchIoState> &io,
+                LogLevel startup_threshold,
+                const std::string &label,
+                const std::shared_ptr<ConfigWatcherStartGate> &startup_gate
+            ) noexcept
+            {
+                ::CancelIoEx(io->dir_handle.h, &io->overlapped);
 
                 DWORD drain_bytes = 0;
                 const BOOL drain_ok =
-                    ::GetOverlappedResultEx(dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
+                    ::GetOverlappedResultEx(io->dir_handle.h, &io->overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
 
-                // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still pending; any other status (including
-                // ERROR_OPERATION_ABORTED) means the kernel is done with the OVERLAPPED and the buffer.
+                // Only WAIT_TIMEOUT and WAIT_IO_COMPLETION mean that the IRP is still pending. Any other status,
+                // ERROR_OPERATION_ABORTED among them, means that the kernel is done with the OVERLAPPED and the buffer.
                 bool drained = drain_ok != FALSE;
                 if (!drained)
                 {
@@ -1102,10 +976,8 @@ namespace DetourModKit
 
                 if (!drained)
                 {
-                    // Force completion by releasing the directory handle, then wait on the event the IRP signals on
-                    // its way out.
-                    dir_handle.reset();
-                    drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) == WAIT_OBJECT_0;
+                    io->dir_handle.reset();
+                    drained = ::WaitForSingleObject(io->event_handle.h, DRAIN_TIMEOUT_MS) == WAIT_OBJECT_0;
                 }
 
                 if (!drained)
@@ -1143,13 +1015,357 @@ namespace DetourModKit
                     }
                     (void)io.release();
                 }
+            }
 
-                // A final pending change fires during stop() so the debounce window does not discard it.
+            /**
+             * @brief Opens the watch I/O state and queues the first read.
+             * @return false after this helper settles the handshake with a failure.
+             */
+            [[nodiscard]] bool open_watch_and_queue_first_read(
+                std::unique_ptr<WatchIoState> &io,
+                const std::wstring &directory,
+                const std::string &label,
+                const std::shared_ptr<ConfigWatcherStartGate> &startup_gate,
+                config::detail::DeferredDiagnostics &startup_diags,
+                const std::shared_ptr<std::promise<bool>> &open_result,
+                bool &handshake_settled
+            ) noexcept
+            {
+                const auto complete_startup = [&](bool ok) noexcept
+                { complete_startup_handshake(startup_gate, startup_diags, open_result, handshake_settled, ok); };
+
+                const auto fail_startup = [&](std::string_view message) noexcept
+                {
+                    defer_startup_exception(startup_diags, message);
+                    complete_startup(false);
+                };
+
+                const auto fail_startup_unknown = [&]() noexcept
+                {
+                    defer_unknown_startup_exception(startup_diags);
+                    complete_startup(false);
+                };
+
+                try
+                {
+                    if (!open_watch_io_state(io, directory, label, startup_diags))
+                    {
+                        complete_startup(false);
+                        return false;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    fail_startup(e.what());
+                    return false;
+                }
+                catch (...)
+                {
+                    fail_startup_unknown();
+                    return false;
+                }
+
+                try
+                {
+                    if (!issue_directory_read(*io, handshake_settled, startup_diags, label))
+                    {
+                        complete_startup(false);
+                        return false;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    fail_startup(e.what());
+                    return false;
+                }
+                catch (...)
+                {
+                    fail_startup_unknown();
+                    return false;
+                }
+                return true;
+            }
+
+            /**
+             * @brief Runs the StoppableWorker body of one start().
+             * @details Each parameter after @p st is one member of the body lambda's closure.
+             */
+            void run_watch_worker(
+                const std::stop_token &st,
+                const std::wstring &directory,
+                const std::wstring &filename,
+                std::chrono::milliseconds debounce_ms,
+                const std::function<void()> &callback,
+                const std::string &label,
+                const std::shared_ptr<std::promise<bool>> &open_result,
+                const std::shared_ptr<ConfigWatcherStartGate> &startup_gate,
+                LogLevel startup_threshold,
+                std::atomic<std::thread::id> *worker_id_slot,
+                std::atomic<bool> *worker_exited_slot,
+                const std::atomic<bool> *stop_requested_slot
+            )
+            {
+                const WorkerExitGuard worker_exit_guard{*worker_exited_slot};
+                config::detail::DeferredDiagnostics startup_diags{
+                    .threshold = startup_threshold,
+                    .records = {},
+                };
+                // Publish the thread id so that is_worker_thread() detects a setter-invoked self-call into
+                // disable_auto_reload(). The guard clears the slot on every exit path after the final flush callback
+                // (see WorkerThreadIdGuard).
+                worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
+                const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
+
+                // start() co-owns open_result for the whole bounded wait, so a dropped body copy cannot wake the
+                // waiter through broken_promise. The body must publish the result on every exit itself.
+                // settle_startup_handshake() records success or failure exactly once. SettleGuard publishes a failure
+                // on any exit before the handshake settles. start() therefore returns a failure promptly after a
+                // pre-handshake exit, not after the full 5s handshake timeout.
+                bool handshake_settled = false;
+                class SettleGuard
+                {
+                public:
+                    SettleGuard(std::shared_ptr<std::promise<bool>> promise, bool &settled) noexcept
+                        : m_promise(std::move(promise)), m_settled(settled)
+                    {
+                    }
+
+                    ~SettleGuard() noexcept
+                    {
+                        if (!m_settled)
+                        {
+                            m_settled = true;
+                            try
+                            {
+                                m_promise->set_value(false);
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                    }
+
+                    SettleGuard(const SettleGuard &) = delete;
+                    SettleGuard &operator=(const SettleGuard &) = delete;
+
+                private:
+                    std::shared_ptr<std::promise<bool>> m_promise;
+                    bool &m_settled;
+                } settle_guard{open_result, handshake_settled};
+
+                const auto complete_startup = [&](bool ok) noexcept
+                { complete_startup_handshake(startup_gate, startup_diags, open_result, handshake_settled, ok); };
+
+                const std::stop_callback stop_wait_callback(
+                    st,
+                    [startup_gate]() noexcept { cancel_start_wait(startup_gate); }
+                );
+
+                if (st.stop_requested() || stop_requested_slot->load(std::memory_order_acquire))
+                {
+                    complete_startup(false);
+                    return;
+                }
+
+                std::unique_ptr<WatchIoState> io;
+                if (!open_watch_and_queue_first_read(
+                        io,
+                        directory,
+                        label,
+                        startup_gate,
+                        startup_diags,
+                        open_result,
+                        handshake_settled
+                    ))
+                {
+                    return;
+                }
+
+                // The first overlapped read is queued, so the watcher reports ready. A later failure does not change
+                // the result of start().
+                complete_startup(true);
+                wait_for_start_release(startup_gate);
+
+                const bool pending = pump_directory_changes(
+                    st,
+                    stop_requested_slot,
+                    *io,
+                    filename,
+                    debounce_ms,
+                    callback,
+                    label,
+                    handshake_settled,
+                    startup_diags
+                );
+                drain_watch_io(io, startup_threshold, label, startup_gate);
+
+                // A final pending change fires before the worker exits, so the debounce window does not discard it.
                 // fire_reload contains callback exceptions after the I/O drain.
                 if (pending)
                 {
-                    fire_reload();
+                    fire_reload(callback, label);
                 }
+            }
+
+            void defer_invalid_path_error(config::detail::DeferredDiagnostics &diags, const std::string &ini_path_text)
+            {
+                config::detail::defer_diagnostic(
+                    diags,
+                    LogLevel::Error,
+                    "ConfigWatcher: invalid INI path '{}'; cannot start.",
+                    ini_path_text
+                );
+            }
+
+            /**
+             * @brief Waits a bounded time for the startup handshake and sets @p handshake_timed_out on a timeout.
+             * @details The worker settles the promise on every exit path (see SettleGuard in run_watch_worker), so a
+             *          real result arrives promptly even after a pre-handshake throw. Only a wedged worker reaches the
+             *          5s bound. A hostile hook on CreateFileW or CreateEventW that never returns wedges it. Callers
+             *          hold higher-level mutexes across start(), so an unbounded wait can stall the whole hot-reload
+             *          subsystem. On a timeout, start() must not join the worker inline (see clean_up_failed_start()).
+             */
+            [[nodiscard]] bool wait_for_start_handshake(
+                std::future<bool> &open_future,
+                config::detail::DeferredDiagnostics &diags,
+                const std::string &ini_path_text,
+                bool &handshake_timed_out
+            ) noexcept
+            {
+                bool started = false;
+                try
+                {
+                    const auto wait_status = open_future.wait_for(std::chrono::seconds(5));
+                    if (wait_status == std::future_status::ready)
+                    {
+                        started = open_future.get();
+                    }
+                    else
+                    {
+                        handshake_timed_out = true;
+                        config::detail::defer_diagnostic(
+                            diags,
+                            LogLevel::Warning,
+                            "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
+                            ini_path_text
+                        );
+                        started = false;
+                    }
+                }
+                catch (...)
+                {
+                    started = false;
+                }
+                return started;
+            }
+        } // anonymous namespace
+
+        bool ConfigWatcher::keep_live_worker_or_drop_exited(StartGate &gate) noexcept
+        {
+            // A post-handshake runtime failure makes the body return on its own while the StoppableWorker keeps a
+            // finished thread. Such failures include a removed parent directory, a GetOverlappedResultEx error, and a
+            // failed re-issue. A restart must not report that exited worker as success, so this helper joins and drops
+            // it. start() then launches a fresh worker.
+            //
+            // Liveness comes from the worker_thread_id slot that is_running() reads, not from
+            // StoppableWorker::is_running(). WorkerThreadIdGuard clears the slot before the StoppableWorker wrapper
+            // publishes its Exited state. A check on StoppableWorker::is_running() can therefore report success to a
+            // caller that already saw is_running() == false, with the exited worker still installed.
+            //
+            // A non-null worker under start_mutex implies a settled successful handshake, because every failure path
+            // resets the worker or husks the watcher. The body stores its id before it settles. An empty slot with a
+            // worker object therefore means that the body ended, and reset() joins a thread that is about to exit.
+            //
+            // The slot test also covers a null worker handle, because a null handle does not imply a finished body. A
+            // stop() whose StoppableWorker::shutdown() hits the blocking-teardown veto detaches the body and drops the
+            // handle. Without the slot test, a restart then clears stop_requested, the only signal that the detached
+            // body observes, and leaves two pumps on one Impl. Whichever exits first publishes worker_exited and lets
+            // ~ConfigWatcher free storage that the other still reads.
+            if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
+            {
+                gate = m_impl->start_gate.load(std::memory_order_acquire);
+                return true;
+            }
+            m_impl->worker.reset();
+            return false;
+        }
+
+        bool ConfigWatcher::start(config::detail::DeferredDiagnostics &diags, StartGate &gate)
+        {
+            gate.reset();
+            if (!m_impl)
+            {
+                // A prior start() timed out and leaked the Impl (see clean_up_failed_start()). The instance is inert,
+                // and the caller must drop it.
+                return false;
+            }
+            std::lock_guard<std::mutex> lock(m_impl->start_mutex);
+
+            if (keep_live_worker_or_drop_exited(gate))
+            {
+                return true;
+            }
+
+            if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
+            {
+                defer_invalid_path_error(diags, m_impl->ini_path_text);
+                return false;
+            }
+            m_impl->stop_requested.store(false, std::memory_order_release);
+
+            // Capture the worker inputs by value, so the body reads no Impl member except the three atomic slots below.
+            // Under normal teardown, stop() joins before m_impl unwinds.
+            auto directory = m_impl->directory_wide;
+            auto filename = m_impl->filename_wide;
+            auto debounce_ms = m_impl->debounce;
+            auto callback = m_impl->on_reload;
+            auto label = m_impl->ini_path_text;
+            const LogLevel startup_threshold = diags.threshold;
+
+            // StoppableWorker stores its body in std::function, so the lambda must stay copyable and cannot own a
+            // non-copyable OwnedHandle. The worker thread opens the directory handle and reports the result through a
+            // shared promise. start() then returns the real status without a racy is_running() poll.
+            auto open_result = std::make_shared<std::promise<bool>>();
+            std::future<bool> open_future = open_result->get_future();
+            auto startup_gate = std::make_shared<ConfigWatcherStartGate>(diags.threshold);
+            m_impl->start_gate.store(startup_gate, std::memory_order_release);
+            gate = startup_gate;
+
+            // The lambda captures raw pointers to the Impl atomic slots, not an m_impl reference. The lambda can
+            // outlive this stack frame through the StoppableWorker detach path, and a detached body still accesses all
+            // three slots. The slots stay valid because Impl is never freed under a live body. Every teardown that
+            // cannot join (the veto branch, and the authorized branch whose worker detached anyway) husks the watcher
+            // and leaks Impl.
+            auto *worker_id_slot = &m_impl->worker_thread_id;
+            auto *worker_exited_slot = &m_impl->worker_exited;
+            auto *stop_requested_slot = &m_impl->stop_requested;
+
+            auto worker_body = [directory = std::move(directory),
+                                filename = std::move(filename),
+                                debounce_ms,
+                                callback = std::move(callback),
+                                label = std::move(label),
+                                open_result,
+                                startup_gate,
+                                startup_threshold,
+                                worker_id_slot,
+                                worker_exited_slot,
+                                stop_requested_slot](const std::stop_token &st) -> void
+            {
+                run_watch_worker(
+                    st,
+                    directory,
+                    filename,
+                    debounce_ms,
+                    callback,
+                    label,
+                    open_result,
+                    startup_gate,
+                    startup_threshold,
+                    worker_id_slot,
+                    worker_exited_slot,
+                    stop_requested_slot
+                );
             };
 
             try
@@ -1185,57 +1401,32 @@ namespace DetourModKit
                 return false;
             }
 
-            // Wait for the worker's startup handshake with a bounded wait. The worker body settles the promise on
-            // every exit path (see SettleGuard above), so this resolves promptly with the real result even when
-            // the body throws before queuing the first read. The 5s bound only bites a genuinely wedged worker (a
-            // hostile hook on CreateFileW/CreateEventW that never returns). Callers hold higher-level mutexes across
-            // start(), so an unbounded wait would DoS the whole hot-reload subsystem. On a timeout the stale worker
-            // must NOT be joined inline: see the handshake_timed_out branch below for why joining a possibly-hung
-            // worker under start_mutex (and, via enable_auto_reload, get_watcher_mutex) would wedge the control
-            // plane, and how the leak-on-timeout discipline avoids it.
-            bool started = false;
             // Distinguishes the hung-worker case (handshake never completed) from a worker that reported failure and
             // is already returning. Only the former makes a join block; the two paths clean up differently.
             bool handshake_timed_out = false;
-            try
-            {
-                const auto wait_status = open_future.wait_for(std::chrono::seconds(5));
-                if (wait_status == std::future_status::ready)
-                {
-                    started = open_future.get();
-                }
-                else
-                {
-                    handshake_timed_out = true;
-                    config::detail::defer_diagnostic(
-                        diags,
-                        LogLevel::Warning,
-                        "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
-                        m_impl->ini_path_text
-                    );
-                    started = false;
-                }
-            }
-            catch (...)
-            {
-                started = false;
-            }
+            const bool started =
+                wait_for_start_handshake(open_future, diags, m_impl->ini_path_text, handshake_timed_out);
+            clean_up_failed_start(started, handshake_timed_out);
+            return started;
+        }
 
+        void ConfigWatcher::clean_up_failed_start(bool started, bool handshake_timed_out) noexcept
+        {
             if (!started && handshake_timed_out)
             {
                 // Leak-on-timeout, never block-on-timeout. The worker never completed its startup handshake, so it can
-                // be genuinely wedged. A hostile-hooked CreateFileW/CreateEventW that never returns is failure mode 1
-                // above. Joining it (the naive cleanup, via a local unique_ptr whose destructor joins) would block for
-                // the process lifetime while this thread holds start_mutex and, when called from enable_auto_reload(),
-                // get_watcher_mutex too, wedging every future start()/stop()/disable_auto_reload(). Instead request
-                // stop (so the worker exits once its blocking syscall finally returns) and leak the whole Impl onto the
-                // heap, mirroring ~ConfigWatcher's loader-lock branch: the detached std::jthread, its captured lambda
-                // state (the directory/filename/callback strings it still reads) and the worker_thread_id slot it still
-                // points at all live inside Impl, so Impl must outlive the detached thread. Leaking it skips ~Impl ->
-                // ~StoppableWorker entirely (no join), and the module reference the worker took at construction is left
-                // outstanding so its code pages stay mapped. A husked (null-Impl) ConfigWatcher is inert: the caller
-                // drops it immediately (enable_auto_reload calls watcher.reset()), and stop()/start() null-guard
-                // against it. The leak is bounded to one Impl per hostile start timeout, an exceptional path.
+                // be wedged. A hostile-hooked CreateFileW/CreateEventW that never returns is one such case. A join (the
+                // naive cleanup, via a local unique_ptr whose destructor joins) blocks for the process lifetime while
+                // this thread holds start_mutex. A call through enable_auto_reload() also holds get_watcher_mutex, so
+                // the join wedges every later start(), stop(), and disable_auto_reload().
+                //
+                // Instead, this branch requests stop and leaks the whole Impl, as the loader-lock branch of
+                // ~ConfigWatcher does. The worker exits once its blocked system call returns. The jthread and the three
+                // atomic slots that the body reads live inside Impl, so Impl must outlive the worker thread. The leak
+                // skips ~Impl and ~StoppableWorker, so no join runs, and the module reference of the worker keeps its
+                // code pages mapped. A husked (null-Impl) ConfigWatcher is inert: the caller drops it immediately
+                // (enable_auto_reload calls failed_watcher.reset()), and stop()/start() null-guard against it. The leak
+                // is bounded to one Impl per hostile start timeout, an exceptional path.
                 if (m_impl->worker)
                 {
                     m_impl->worker->request_stop();
@@ -1251,7 +1442,6 @@ namespace DetourModKit
                 // failure.
                 m_impl->worker.reset();
             }
-            return started;
         }
 
         void ConfigWatcher::stop() noexcept

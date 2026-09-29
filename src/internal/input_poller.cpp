@@ -395,6 +395,47 @@ namespace DetourModKit
                     }
                 }
             }
+
+            /**
+             * @brief Adds one rundown for each distinct lifecycle of the bindings at @p indices.
+             * @details The caller holds the binding lock exclusive.
+             */
+            void collect_rundowns(
+                std::vector<BindingRundown> &rundowns,
+                const std::vector<InputBinding> &bindings,
+                const std::vector<std::size_t> &indices
+            )
+            {
+                rundowns.reserve(indices.size());
+                for (size_t idx : indices)
+                {
+                    add_rundown(rundowns, bindings[idx].lifecycle);
+                }
+            }
+
+            /**
+             * @brief Stages the release callback of each Hold binding at @p indices that a reshape drops.
+             * @details The caller holds the binding lock exclusive. An idempotent release always stages. Any other
+             *          release stages only while its binding is active.
+             */
+            void stage_hold_releases(
+                std::vector<HoldRelease> &hold_releases,
+                const std::vector<InputBinding> &bindings,
+                const std::unique_ptr<std::atomic<uint8_t>[]> &active_states,
+                const std::vector<std::size_t> &indices
+            )
+            {
+                hold_releases.reserve(indices.size());
+                for (size_t idx : indices)
+                {
+                    if (bindings[idx].trigger == input::Trigger::Hold && bindings[idx].on_state_change &&
+                        (bindings[idx].release_is_idempotent ||
+                         active_states[idx].load(std::memory_order_relaxed) != 0))
+                    {
+                        hold_releases.emplace_back(bindings[idx].on_state_change, bindings[idx].name);
+                    }
+                }
+            }
         } // anonymous namespace
 
 #ifdef DMK_ENABLE_TEST_SEAMS
@@ -1319,37 +1360,8 @@ namespace DetourModKit
             m_owner_keepalive.reset();
         }
 
-        void InputPoller::poll_loop(std::stop_token stop_token)
+        namespace
         {
-            const int trigger_thresh = m_trigger_threshold;
-            const int stick_thresh = m_stick_threshold;
-
-            constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
-            bool gamepad_was_connected = false;
-            auto last_gamepad_poll = std::chrono::steady_clock::time_point{};
-
-            // Interception state persists across cycles and remains private to the poll thread.
-            WheelPulseState wheel_pulse{};
-            GamepadSuppressState gp_suppress{};
-
-            // External-host counts drained in a cycle whose binding generation moved before evaluation. Drained
-            // notches have no physical equivalent to repeat, so the cycle parks them here and the next drain merges
-            // them instead of dropping them. Private to the poll thread.
-            std::array<int, 4> external_wheel_carry{};
-
-            // This flag tracks whether the previous cycle published live gamepad suppression. The disarm below runs
-            // exactly once on the arm->disarm transition, which includes removal of the last consume gamepad binding. A
-            // plain flag gate skips that transition.
-            bool gamepad_suppress_active = false;
-
-            // This state remains private to the poll thread. is_code_pressed reads it only when
-            // gamepad_connected is true, which holds only after a successful poll overwrites it.
-            XINPUT_STATE gamepad_state{};
-
-            // The per-cycle keyboard and mouse state cache lives for the poll thread's lifetime. See
-            // input_key_cache.hpp.
-            KeyStateCache key_cache;
-
             struct PendingCallback
             {
                 // The lease appears first, so destruction occurs after both std::function members and their capture
@@ -1380,52 +1392,25 @@ namespace DetourModKit
                 {
                 }
             };
-            std::vector<PendingCallback> pending;
 
-            while (!stop_token.stop_requested())
+            /**
+             * @brief Polls the gamepad state once per connected cycle.
+             * @details Call only from the poll thread. Throttles reconnection attempts on empty slots. A read through
+             *          the saved trampoline gives the poll the true, unmasked controller state.
+             * @return true when @p poll_enabled is true and the gamepad is connected this cycle.
+             */
+            [[nodiscard]] bool poll_gamepad_state(
+                bool poll_enabled,
+                int gamepad_index,
+                std::uint64_t intercept_owner,
+                XINPUT_STATE &gamepad_state,
+                bool &gamepad_was_connected,
+                std::chrono::steady_clock::time_point &last_gamepad_poll
+            ) noexcept
             {
-                pending.clear();
-                key_cache.reset();
-                const bool process_focused =
-                    !m_require_focus.load(std::memory_order_relaxed) || is_process_foreground();
-
-                // Install the active-input hooks on demand. Each call is idempotent and fails cheaply until its target
-                // appears. The XInput call runs every cycle, not only while coverage is absent. An installed pair
-                // can still lose an entry point to a rival writer. A skip based on the published flag hides that loss.
-                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed))
-                {
-                    (void)install_xinput(m_gamepad_index, m_intercept_owner);
-                }
-                const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
-                if (has_wheel_bindings)
-                {
-                    // Route maintenance every cycle: mount an absent route, migrate a moved one, and latch health.
-                    // A ready route on the selected thread is a cheap liveness recheck.
-                    wheel_source_maintain();
-                }
-
-                // An install can publish ownership during this cycle. Check it before the rule publication.
-                if (m_consume_rules_unpublished.load(std::memory_order_acquire) &&
-                    intercept_owned_by(m_intercept_owner))
-                {
-                    DeferredDiagnostics diagnostics;
-                    {
-                        std::unique_lock rules_lock(m_bindings_rw_mutex);
-                        publish_consume_rules_locked(diagnostics);
-                    }
-                    diagnostics.emit();
-                }
-
-                // Accumulate bits that active consume bindings claim this cycle, then publish them after the binding
-                // loop. A consume binding masks only what it owns. "Ctrl+WheelUp" contributes Up only while Ctrl is
-                // held. Publication each cycle also disarms the mask after the last binding leaves.
-                uint16_t gamepad_owned = 0;
-                uint8_t wheel_owned = 0;
-
-                // Poll gamepad state once per connected cycle. Throttle reconnection attempts on empty slots.
-                // A read through the saved trampoline gives the poll the true, unmasked controller state.
+                constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
                 bool gamepad_connected = false;
-                if (m_has_gamepad_bindings.load(std::memory_order_relaxed) && process_focused)
+                if (poll_enabled)
                 {
                     const auto now = std::chrono::steady_clock::now();
                     if (gamepad_was_connected || (now - last_gamepad_poll) >= gamepad_reconnect_interval)
@@ -1436,331 +1421,276 @@ namespace DetourModKit
                         // Therefore, a non-owner calls XInputGetState. One fresh check suffices because this thread
                         // cannot lose its own ownership mid-cycle.
                         const XInputGetStateFn xinput_original =
-                            intercept_owned_by(m_intercept_owner) ? xinput_trampoline() : nullptr;
+                            intercept_owned_by(intercept_owner) ? xinput_trampoline() : nullptr;
                         const DWORD xinput_result =
                             (xinput_original != nullptr)
-                                ? xinput_original(static_cast<DWORD>(m_gamepad_index), &gamepad_state)
-                                : XInputGetState(static_cast<DWORD>(m_gamepad_index), &gamepad_state);
+                                ? xinput_original(static_cast<DWORD>(gamepad_index), &gamepad_state)
+                                : XInputGetState(static_cast<DWORD>(gamepad_index), &gamepad_state);
                         gamepad_was_connected = xinput_result == ERROR_SUCCESS;
                     }
                     gamepad_connected = gamepad_was_connected;
                 }
+                return gamepad_connected;
+            }
 
-                // Stage this cycle's edge callbacks, then dispatch after release of the binding lock so user code can
-                // re-enter update_combos(). One catch treats the whole pass as a transaction. A failed pass restores
-                // staged mutations and owes no callback. The next cycle derives the same edges from unchanged physical
-                // input. A binding without a staged edge commits immediately, so a release and press before the next
-                // cycle still produces its press.
-                WheelPulseState wheel_pulse_staged = wheel_pulse;
-
-                // Arm the swallow mask only for a cycle that also drains the wheel counters. A rebuild failure stops
-                // the drain while the consume wheel binding stays in m_bindings. An armed mask then swallows every
-                // notch without delivery. That state cannot lapse on its own.
-                bool wheel_drained = false;
-                std::array<int, 4> external_wheel_counts{};
-                std::uint64_t external_wheel_generation = 0;
-                bool external_wheel_counts_taken = false;
-                // Drained host counts that neither the pulse rollback point nor the carry holds yet. A failed pass
-                // parks them, because a drained notch has no physical equivalent to repeat ([B-92]).
-                bool external_wheel_counts_owed = false;
-                if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+            /**
+             * @brief Returns true when the exact modifier set of @p binding and one of its keys are held this cycle.
+             * @details While the exact modifier set is held, adds each consume bit of @p binding to @p gamepad_owned
+             *          or @p wheel_owned.
+             */
+            [[nodiscard]] bool evaluate_binding_press(
+                const InputBinding &binding,
+                const std::vector<InputCode> &known_modifiers,
+                KeyStateCache &key_cache,
+                const XINPUT_STATE &gamepad_state,
+                bool gamepad_connected,
+                int trigger_threshold,
+                int stick_threshold,
+                uint8_t wheel_pulse_mask,
+                uint16_t &gamepad_owned,
+                uint8_t &wheel_owned
+            ) noexcept
+            {
+                bool any_pressed = false;
+                bool modifiers_held = true;
+                for (const auto &mod : binding.modifiers)
                 {
+                    if (!is_code_pressed(
+                            mod,
+                            key_cache,
+                            gamepad_state,
+                            gamepad_connected,
+                            trigger_threshold,
+                            stick_threshold,
+                            wheel_pulse_mask
+                        ))
                     {
-                        std::shared_lock generation_lock(m_bindings_rw_mutex);
-                        if (m_has_wheel_bindings.load(std::memory_order_relaxed))
-                        {
-                            external_wheel_generation = m_binding_generation;
-                        }
-                    }
-                    if (external_wheel_generation != 0)
-                    {
-                        if (m_external_wheel_discard_pending.exchange(false, std::memory_order_acq_rel))
-                        {
-                            // The no-wheel -> wheel transition discards the unowned backlog, parked carry included.
-                            external_wheel_carry = {};
-                            (void)wheel_source_take_counts();
-                        }
-                        external_wheel_counts = wheel_source_take_counts();
-                        for (std::size_t dir = 0; dir < external_wheel_counts.size(); ++dir)
-                        {
-                            external_wheel_counts[dir] += std::exchange(external_wheel_carry[dir], 0);
-                        }
-                        external_wheel_counts_taken = true;
-                        external_wheel_counts_owed = true;
-#ifdef DMK_ENABLE_TEST_SEAMS
-                        if (g_input_external_wheel_post_drain_probe)
-                        {
-                            g_input_external_wheel_post_drain_probe(external_wheel_counts);
-                        }
-#endif
+                        modifiers_held = false;
+                        break;
                     }
                 }
-                try
+
+                if (modifiers_held)
                 {
-                    // Re-reserve to the current binding count before acquisition of the evaluation lock. This keeps
-                    // the growth allocation outside the critical section. The catch still covers the residual race
-                    // where a concurrent add_binding grows the set first.
-                    size_t reserve_hint = 0;
+                    // Enforce an exact modifier set. If a held known modifier is absent from the required set of the
+                    // binding, reject the binding.
+                    for (const auto &km : known_modifiers)
                     {
-                        std::shared_lock count_lock(m_bindings_rw_mutex);
-                        reserve_hint = m_bindings.size();
-                    }
-                    pending.reserve(reserve_hint);
-
-                    std::shared_lock lock(m_bindings_rw_mutex);
-                    const size_t count = m_bindings.size();
-                    const auto &known_mods = m_known_modifiers;
-
-                    // Snapshot the accumulated wheel notches into a per-cycle pulse mask so each notch maps to
-                    // exactly one Press edge. The poll drains it while unfocused, so a background notch is discarded.
-                    // The flag read, drain, and m_bindings snapshot share one shared-lock epoch. No reshape can split
-                    // that epoch.
-                    uint8_t wheel_pulse_mask = 0;
-                    if (m_has_wheel_bindings.load(std::memory_order_relaxed))
-                    {
-                        const bool external_generation_matches =
-                            m_wheel_backend != input::Input::WheelBackend::ExternalHost ||
-                            (external_wheel_counts_taken && m_binding_generation == external_wheel_generation);
-                        if (external_generation_matches)
-                        {
-                            const auto taken = m_wheel_backend == input::Input::WheelBackend::ExternalHost
-                                                   ? external_wheel_counts
-                                                   : wheel_source_take_counts();
-                            add_wheel_notches(wheel_pulse, taken);
-                            // Take the rollback point after the drain. Restoration reverses the staged pulse step but
-                            // preserves drained notches, which have no physical equivalent to repeat.
-                            wheel_pulse_staged = wheel_pulse;
-                            wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
-                            wheel_drained = true;
-                            external_wheel_counts_owed = false;
-                        }
-                        else if (external_wheel_counts_taken)
-                        {
-                            // A reshape moved the generation between the drain and this evaluation. Park the drained
-                            // counts so the next cycle's drain merges them.
-                            external_wheel_carry = external_wheel_counts;
-                            external_wheel_counts_owed = false;
-                        }
-                    }
-
-                    for (size_t i = 0; i < count; ++i)
-                    {
-                        const auto &binding = m_bindings[i];
-                        if (binding.keys.empty())
+                        if (!is_code_pressed(
+                                km,
+                                key_cache,
+                                gamepad_state,
+                                gamepad_connected,
+                                trigger_threshold,
+                                stick_threshold,
+                                wheel_pulse_mask
+                            ))
                         {
                             continue;
                         }
-
-                        bool any_pressed = false;
-
-                        if (process_focused)
+                        bool is_required = false;
+                        for (const auto &mod : binding.modifiers)
                         {
-                            bool modifiers_held = true;
-                            for (const auto &mod : binding.modifiers)
+                            if (modifier_satisfies(mod, km))
                             {
-                                if (!is_code_pressed(
-                                        mod,
-                                        key_cache,
-                                        gamepad_state,
-                                        gamepad_connected,
-                                        trigger_thresh,
-                                        stick_thresh,
-                                        wheel_pulse_mask
-                                    ))
-                                {
-                                    modifiers_held = false;
-                                    break;
-                                }
-                            }
-
-                            if (modifiers_held)
-                            {
-                                // Enforce an exact modifier set. Reject any known modifier absent from this binding's
-                                // required set when it is held.
-                                for (const auto &km : known_mods)
-                                {
-                                    if (!is_code_pressed(
-                                            km,
-                                            key_cache,
-                                            gamepad_state,
-                                            gamepad_connected,
-                                            trigger_thresh,
-                                            stick_thresh,
-                                            wheel_pulse_mask
-                                        ))
-                                    {
-                                        continue;
-                                    }
-                                    bool is_required = false;
-                                    for (const auto &mod : binding.modifiers)
-                                    {
-                                        if (modifier_satisfies(mod, km))
-                                        {
-                                            is_required = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!is_required)
-                                    {
-                                        modifiers_held = false;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (modifiers_held)
-                            {
-                                for (const auto &key : binding.keys)
-                                {
-                                    const bool key_pressed = is_code_pressed(
-                                        key,
-                                        key_cache,
-                                        gamepad_state,
-                                        gamepad_connected,
-                                        trigger_thresh,
-                                        stick_thresh,
-                                        wheel_pulse_mask
-                                    );
-
-                                    // Pre-arm the consume bit while the modifiers are held, before the trigger is
-                                    // pressed. The mask trails physical state by one cycle. A claim only on a pressed
-                                    // trigger leaks its initial edge to the faster game poll.
-                                    // A mask for a still-up bit is a no-op, and the consume-until-release latch still
-                                    // trails the trigger.
-                                    if (binding.consume && key.source == InputSource::Gamepad && key.code > 0 &&
-                                        key.code < GamepadCode::LeftTrigger)
-                                    {
-                                        gamepad_owned =
-                                            static_cast<uint16_t>(gamepad_owned | static_cast<uint16_t>(key.code));
-                                    }
-
-                                    // Pre-arm the wheel-consume bit while the modifiers are held. The queue hook
-                                    // decides whether to swallow as soon as a message arrives. The mask must reflect
-                                    // "modifiers currently satisfied", not the derived wheel_pulse_mask. This mirrors
-                                    // the gamepad pre-arm above.
-                                    if (binding.consume && key.source == InputSource::MouseWheel &&
-                                        key.code >= WheelCode::Up && key.code <= WheelCode::Right)
-                                    {
-                                        wheel_owned = static_cast<uint8_t>(
-                                            wheel_owned | static_cast<uint8_t>(1u << (key.code - WheelCode::Up))
-                                        );
-                                    }
-
-                                    // Activation still keys off the real press: a non-consume binding fires on the
-                                    // first pressed key and stops. A consume binding continues its scan so the
-                                    // pre-arm above sees every owned bit.
-                                    if (!key_pressed)
-                                    {
-                                        continue;
-                                    }
-                                    any_pressed = true;
-                                    if (!binding.consume)
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        const bool was_active = m_active_states[i].load(std::memory_order_relaxed) != 0;
-                        const std::uint8_t next_state = any_pressed ? 1 : 0;
-
-                        switch (binding.trigger)
-                        {
-                        case input::Trigger::Press:
-                        {
-                            if (any_pressed && !was_active && binding.on_press)
-                            {
-                                const std::uint64_t generation =
-                                    binding.lifecycle ? binding.lifecycle->generation() : 0;
-                                StagedCallbackLease lease{binding.lifecycle, generation};
-                                if (!lease.engaged())
-                                {
-                                    continue;
-                                }
-                                pending.emplace_back(
-                                    std::move(lease),
-                                    binding.name,
-                                    binding.on_press,
-                                    std::function<void(bool)>{},
-                                    false,
-                                    i,
-                                    next_state
-                                );
+                                is_required = true;
                                 break;
                             }
-                            m_active_states[i].store(next_state, std::memory_order_relaxed);
-                            break;
                         }
-                        case input::Trigger::Hold:
+                        if (!is_required)
                         {
-                            if (any_pressed != was_active && binding.on_state_change)
-                            {
-                                const std::uint64_t generation =
-                                    binding.lifecycle ? binding.lifecycle->generation() : 0;
-                                StagedCallbackLease lease{binding.lifecycle, generation};
-                                if (!lease.engaged())
-                                {
-                                    continue;
-                                }
-                                pending.emplace_back(
-                                    std::move(lease),
-                                    binding.name,
-                                    std::function<void()>{},
-                                    binding.on_state_change,
-                                    any_pressed,
-                                    i,
-                                    next_state
-                                );
-                                break;
-                            }
-                            m_active_states[i].store(next_state, std::memory_order_relaxed);
+                            modifiers_held = false;
                             break;
                         }
-                        }
-                    }
-
-                    // Commit: atomic stores only, still under the shared lock, so this cannot fail.
-                    for (const auto &staged : pending)
-                    {
-                        m_active_states[staged.state_index].store(staged.state_value, std::memory_order_relaxed);
                     }
                 }
-                catch (...)
+
+                if (modifiers_held)
                 {
-                    // Roll back every source that a staged edge needs. Return the drained notches to the backlog. Drop
-                    // the partial consume masks so suppression disarms wholly. The drain merge emptied the carry, so
-                    // owed host counts replace it.
-                    pending.clear();
-                    wheel_pulse = wheel_pulse_staged;
-                    if (external_wheel_counts_owed)
+                    for (const auto &key : binding.keys)
                     {
-                        external_wheel_carry = external_wheel_counts;
-                    }
-                    gamepad_owned = 0;
-                    wheel_owned = 0;
-                    (void)log().try_log(
-                        LogLevel::Error,
-                        "InputPoller: failed staging poll-cycle callbacks; cycle rolled back"
-                    );
-                }
+                        const bool key_pressed = is_code_pressed(
+                            key,
+                            key_cache,
+                            gamepad_state,
+                            gamepad_connected,
+                            trigger_threshold,
+                            stick_threshold,
+                            wheel_pulse_mask
+                        );
 
-                // Publish the gamepad suppression mask. The consume-until-release latch keeps a trigger masked until
-                // release plus a grace window. Modifier release first cannot leak a bare trigger.
-                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) && process_focused &&
-                    gamepad_connected)
+                        // Pre-arm the consume bit while the modifiers are held, before the trigger is
+                        // pressed. The mask trails physical state by one cycle. A claim only on a pressed
+                        // trigger leaks its initial edge to the faster game poll.
+                        // A mask for a still-up bit is a no-op, and the consume-until-release latch still
+                        // trails the trigger.
+                        if (binding.consume && key.source == InputSource::Gamepad && key.code > 0 &&
+                            key.code < GamepadCode::LeftTrigger)
+                        {
+                            gamepad_owned = static_cast<uint16_t>(gamepad_owned | static_cast<uint16_t>(key.code));
+                        }
+
+                        // Pre-arm the wheel-consume bit while the modifiers are held. The queue hook
+                        // decides whether to swallow as soon as a message arrives. The mask must reflect
+                        // "modifiers currently satisfied", not the derived wheel_pulse_mask. This mirrors
+                        // the gamepad pre-arm above.
+                        if (binding.consume && key.source == InputSource::MouseWheel && key.code >= WheelCode::Up &&
+                            key.code <= WheelCode::Right)
+                        {
+                            wheel_owned = static_cast<uint8_t>(
+                                wheel_owned | static_cast<uint8_t>(1u << (key.code - WheelCode::Up))
+                            );
+                        }
+
+                        // Activation still keys off the real press: a non-consume binding fires on the
+                        // first pressed key and stops. A consume binding continues its scan so the
+                        // pre-arm above sees every owned bit.
+                        if (!key_pressed)
+                        {
+                            continue;
+                        }
+                        any_pressed = true;
+                        if (!binding.consume)
+                        {
+                            break;
+                        }
+                    }
+                }
+                return any_pressed;
+            }
+
+            /**
+             * @brief Evaluates every binding against this cycle's input sample and stages each edge callback.
+             * @details The caller holds the binding lock shared. A binding that stages no callback commits its state
+             *          here, unless callback admission refuses its lease. The caller commits each staged edge after
+             *          the pass.
+             */
+            void stage_binding_edges(
+                const std::vector<InputBinding> &bindings,
+                const std::unique_ptr<std::atomic<uint8_t>[]> &active_states,
+                const std::vector<InputCode> &known_modifiers,
+                bool process_focused,
+                KeyStateCache &key_cache,
+                const XINPUT_STATE &gamepad_state,
+                bool gamepad_connected,
+                int trigger_threshold,
+                int stick_threshold,
+                uint8_t wheel_pulse_mask,
+                uint16_t &gamepad_owned,
+                uint8_t &wheel_owned,
+                std::vector<PendingCallback> &pending
+            )
+            {
+                const size_t count = bindings.size();
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const auto &binding = bindings[i];
+                    if (binding.keys.empty())
+                    {
+                        continue;
+                    }
+
+                    bool any_pressed = false;
+                    if (process_focused)
+                    {
+                        any_pressed = evaluate_binding_press(
+                            binding,
+                            known_modifiers,
+                            key_cache,
+                            gamepad_state,
+                            gamepad_connected,
+                            trigger_threshold,
+                            stick_threshold,
+                            wheel_pulse_mask,
+                            gamepad_owned,
+                            wheel_owned
+                        );
+                    }
+
+                    const bool was_active = active_states[i].load(std::memory_order_relaxed) != 0;
+                    const std::uint8_t next_state = any_pressed ? 1 : 0;
+
+                    switch (binding.trigger)
+                    {
+                    case input::Trigger::Press:
+                    {
+                        if (any_pressed && !was_active && binding.on_press)
+                        {
+                            const std::uint64_t generation = binding.lifecycle ? binding.lifecycle->generation() : 0;
+                            StagedCallbackLease lease{binding.lifecycle, generation};
+                            if (!lease.engaged())
+                            {
+                                continue;
+                            }
+                            pending.emplace_back(
+                                std::move(lease),
+                                binding.name,
+                                binding.on_press,
+                                std::function<void(bool)>{},
+                                false,
+                                i,
+                                next_state
+                            );
+                            break;
+                        }
+                        active_states[i].store(next_state, std::memory_order_relaxed);
+                        break;
+                    }
+                    case input::Trigger::Hold:
+                    {
+                        if (any_pressed != was_active && binding.on_state_change)
+                        {
+                            const std::uint64_t generation = binding.lifecycle ? binding.lifecycle->generation() : 0;
+                            StagedCallbackLease lease{binding.lifecycle, generation};
+                            if (!lease.engaged())
+                            {
+                                continue;
+                            }
+                            pending.emplace_back(
+                                std::move(lease),
+                                binding.name,
+                                std::function<void()>{},
+                                binding.on_state_change,
+                                any_pressed,
+                                i,
+                                next_state
+                            );
+                            break;
+                        }
+                        active_states[i].store(next_state, std::memory_order_relaxed);
+                        break;
+                    }
+                    }
+                }
+            }
+
+            /**
+             * @brief Steps and publishes the gamepad suppression mask, or disarms it once on exit from the armed state.
+             * @details The consume-until-release latch keeps a trigger masked until release plus a grace window.
+             *          A modifier release before the trigger release cannot leak a bare trigger.
+             */
+            void update_gamepad_suppression(
+                bool suppression_eligible,
+                uint16_t gamepad_owned,
+                const XINPUT_STATE &gamepad_state,
+                std::uint64_t intercept_owner,
+                GamepadSuppressState &gamepad_suppress_state,
+                bool &gamepad_suppress_active
+            ) noexcept
+            {
+                if (suppression_eligible)
                 {
                     const uint16_t suppress = step_gamepad_suppress(
-                        gp_suppress,
+                        gamepad_suppress_state,
                         gamepad_owned,
                         gamepad_state.Gamepad.wButtons,
                         GetTickCount64(),
                         GAMEPAD_SUPPRESS_GRACE_MS
                     );
-                    (void)publish_gamepad_suppress(suppress, m_intercept_owner);
+                    (void)publish_gamepad_suppress(suppress, intercept_owner);
                     // The rule list and its TTL survive focus changes, so the detour needs this explicit gate to
                     // stop suppression after the mod enters the background.
-                    (void)set_gamepad_rule_suppress_enabled(true, m_intercept_owner);
+                    (void)set_gamepad_rule_suppress_enabled(true, intercept_owner);
                     gamepad_suppress_active = true;
                 }
                 else if (gamepad_suppress_active)
@@ -1768,18 +1698,19 @@ namespace DetourModKit
                     // On exit from armed state due to focus loss, disconnect, or removal of the last consume binding,
                     // disarm once. The game regains the buttons next cycle instead of after the TTL lapses. Publication
                     // only on this edge keeps the idle path free of a per-cycle clock read.
-                    gp_suppress = GamepadSuppressState{};
-                    (void)publish_gamepad_suppress(0, m_intercept_owner);
-                    (void)set_gamepad_rule_suppress_enabled(false, m_intercept_owner);
+                    gamepad_suppress_state = GamepadSuppressState{};
+                    (void)publish_gamepad_suppress(0, intercept_owner);
+                    (void)set_gamepad_rule_suppress_enabled(false, intercept_owner);
                     gamepad_suppress_active = false;
                 }
+            }
 
-                // Publish the per-direction wheel-swallow mask every cycle. Tie it to the drain instead of wheel_owned
-                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows. While wheel
-                // bindings exist, capture_enabled stays true, so the external host counts notches between drains. The
-                // local backend ignores that argument. Its capture follows ownership and wheel_capture_armable_locked.
-                wheel_source_publish_consume(wheel_drained ? wheel_owned : 0, has_wheel_bindings);
-
+            /**
+             * @brief Invokes each staged callback that its lifecycle still admits and logs each callback exception.
+             * @details Call off the binding lock. The staged leases stay alive until the caller clears @p pending.
+             */
+            void dispatch_pending_callbacks(const std::vector<PendingCallback> &pending)
+            {
 #ifdef DMK_ENABLE_TEST_SEAMS
                 // Between the stage pass and dispatch, a test reshapes the binding set here. The check below refuses a
                 // staged callback after this reshape advances its generation or tombstones its binding.
@@ -1840,6 +1771,255 @@ namespace DetourModKit
                         );
                     }
                 }
+            }
+        } // anonymous namespace
+
+        bool InputPoller::maintain_interception_sources() noexcept
+        {
+            // Each install call is idempotent and fails cheaply until its target appears. The XInput call runs every
+            // cycle, not only while coverage is absent. An installed pair can still lose an entry point to a rival
+            // writer. A skip based on the published flag hides that loss.
+            if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed))
+            {
+                (void)install_xinput(m_gamepad_index, m_intercept_owner);
+            }
+            const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
+            if (has_wheel_bindings)
+            {
+                // Maintain the route every cycle: mount an absent route, migrate a moved one, and latch health.
+                // A ready route on the selected thread is a cheap liveness recheck.
+                wheel_source_maintain();
+            }
+
+            // An install can publish ownership during this cycle. Check it before the rule publication.
+            if (m_consume_rules_unpublished.load(std::memory_order_acquire) && intercept_owned_by(m_intercept_owner))
+            {
+                DeferredDiagnostics diagnostics;
+                {
+                    std::unique_lock rules_lock(m_bindings_rw_mutex);
+                    publish_consume_rules_locked(diagnostics);
+                }
+                diagnostics.emit();
+            }
+            return has_wheel_bindings;
+        }
+
+        bool InputPoller::drain_external_wheel_counts(
+            std::array<int, 4> &external_wheel_counts,
+            std::uint64_t &external_wheel_generation,
+            std::array<int, 4> &external_wheel_carry
+        )
+        {
+            {
+                std::shared_lock generation_lock(m_bindings_rw_mutex);
+                if (m_has_wheel_bindings.load(std::memory_order_relaxed))
+                {
+                    external_wheel_generation = m_binding_generation;
+                }
+            }
+            if (external_wheel_generation == 0)
+            {
+                return false;
+            }
+            if (m_external_wheel_discard_pending.exchange(false, std::memory_order_acq_rel))
+            {
+                // The no-wheel -> wheel transition discards the unowned backlog, parked carry included.
+                external_wheel_carry = {};
+                (void)wheel_source_take_counts();
+            }
+            external_wheel_counts = wheel_source_take_counts();
+            for (std::size_t dir = 0; dir < external_wheel_counts.size(); ++dir)
+            {
+                external_wheel_counts[dir] += std::exchange(external_wheel_carry[dir], 0);
+            }
+#ifdef DMK_ENABLE_TEST_SEAMS
+            if (g_input_external_wheel_post_drain_probe)
+            {
+                g_input_external_wheel_post_drain_probe(external_wheel_counts);
+            }
+#endif
+            return true;
+        }
+
+        void InputPoller::poll_loop(std::stop_token stop_token)
+        {
+            const int trigger_thresh = m_trigger_threshold;
+            const int stick_thresh = m_stick_threshold;
+
+            bool gamepad_was_connected = false;
+            auto last_gamepad_poll = std::chrono::steady_clock::time_point{};
+
+            // Interception state persists across cycles and remains private to the poll thread.
+            WheelPulseState wheel_pulse{};
+            GamepadSuppressState gp_suppress{};
+
+            // This carry parks drained external-host counts that the pulse state did not take because the binding
+            // generation moved or the pass failed. Drained notches have no physical equivalent to repeat, so the next
+            // drain merges them. The carry stays private to the poll thread.
+            std::array<int, 4> external_wheel_carry{};
+
+            // This flag tracks whether the previous cycle published live gamepad suppression. The disarm in
+            // update_gamepad_suppression runs exactly once on the arm->disarm transition, which includes removal of the
+            // last consume gamepad binding. A plain flag gate skips that transition.
+            bool gamepad_suppress_active = false;
+
+            // This state remains private to the poll thread. is_code_pressed reads it only when
+            // gamepad_connected is true, which holds only after a successful poll overwrites it.
+            XINPUT_STATE gamepad_state{};
+
+            // The per-cycle keyboard and mouse state cache lives for the poll thread's lifetime. See
+            // input_key_cache.hpp.
+            KeyStateCache key_cache;
+
+            std::vector<PendingCallback> pending;
+
+            while (!stop_token.stop_requested())
+            {
+                pending.clear();
+                key_cache.reset();
+                const bool process_focused =
+                    !m_require_focus.load(std::memory_order_relaxed) || is_process_foreground();
+                const bool has_wheel_bindings = maintain_interception_sources();
+
+                // Accumulate bits that active consume bindings claim this cycle, then publish them after the binding
+                // pass. A consume binding masks only what it owns. "Ctrl+WheelUp" contributes Up only while Ctrl is
+                // held. Publication each cycle also disarms the mask after the last binding leaves.
+                uint16_t gamepad_owned = 0;
+                uint8_t wheel_owned = 0;
+
+                const bool gamepad_connected = poll_gamepad_state(
+                    m_has_gamepad_bindings.load(std::memory_order_relaxed) && process_focused,
+                    m_gamepad_index,
+                    m_intercept_owner,
+                    gamepad_state,
+                    gamepad_was_connected,
+                    last_gamepad_poll
+                );
+
+                // Stage this cycle's edge callbacks, then dispatch after release of the binding lock so user code can
+                // re-enter update_combos(). One catch treats the whole pass as a transaction. A failed pass restores
+                // staged mutations and owes no callback. The next cycle derives the same edges from unchanged physical
+                // input. The immediate commit in stage_binding_edges lets a release and press before the next cycle
+                // still produce a press edge.
+                WheelPulseState wheel_pulse_staged = wheel_pulse;
+
+                // Arm the swallow mask only for a cycle that also drains the wheel counters. A rebuild failure stops
+                // the drain while the consume wheel binding stays in m_bindings. An armed mask then swallows every
+                // notch without delivery. That state cannot lapse on its own.
+                bool wheel_drained = false;
+                std::array<int, 4> external_wheel_counts{};
+                std::uint64_t external_wheel_generation = 0;
+                const bool external_wheel_counts_taken =
+                    m_wheel_backend == input::Input::WheelBackend::ExternalHost &&
+                    drain_external_wheel_counts(external_wheel_counts, external_wheel_generation, external_wheel_carry);
+                // This flag marks drained host counts that neither the pulse rollback point nor the carry holds yet. A
+                // failed pass parks them, because a drained notch has no physical equivalent to repeat ([B-92]).
+                bool external_wheel_counts_owed = external_wheel_counts_taken;
+                try
+                {
+                    // Re-reserve to the current binding count before acquisition of the evaluation lock. This keeps
+                    // the growth allocation outside the critical section. The catch still covers the residual race
+                    // where a concurrent add_binding grows the set first.
+                    size_t reserve_hint = 0;
+                    {
+                        std::shared_lock count_lock(m_bindings_rw_mutex);
+                        reserve_hint = m_bindings.size();
+                    }
+                    pending.reserve(reserve_hint);
+
+                    std::shared_lock lock(m_bindings_rw_mutex);
+
+                    // Snapshot the accumulated wheel notches into a per-cycle pulse mask so each notch maps to
+                    // exactly one Press edge. The poll drains it while unfocused, so a background notch is discarded.
+                    // The flag read, the local-backend drain, and the m_bindings snapshot share one shared-lock epoch
+                    // that no reshape can split. The external-host drain precedes the epoch, so the generation check
+                    // below catches a reshape in between.
+                    uint8_t wheel_pulse_mask = 0;
+                    if (m_has_wheel_bindings.load(std::memory_order_relaxed))
+                    {
+                        const bool external_generation_matches =
+                            m_wheel_backend != input::Input::WheelBackend::ExternalHost ||
+                            (external_wheel_counts_taken && m_binding_generation == external_wheel_generation);
+                        if (external_generation_matches)
+                        {
+                            const auto taken = m_wheel_backend == input::Input::WheelBackend::ExternalHost
+                                                   ? external_wheel_counts
+                                                   : wheel_source_take_counts();
+                            add_wheel_notches(wheel_pulse, taken);
+                            // Take the rollback point after the drain. Restoration reverses the staged pulse step but
+                            // preserves drained notches, which have no physical equivalent to repeat.
+                            wheel_pulse_staged = wheel_pulse;
+                            wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
+                            wheel_drained = true;
+                            external_wheel_counts_owed = false;
+                        }
+                        else if (external_wheel_counts_taken)
+                        {
+                            // A reshape moved the generation between the drain and this evaluation. Park the drained
+                            // counts so the next cycle's drain merges them.
+                            external_wheel_carry = external_wheel_counts;
+                            external_wheel_counts_owed = false;
+                        }
+                    }
+
+                    stage_binding_edges(
+                        m_bindings,
+                        m_active_states,
+                        m_known_modifiers,
+                        process_focused,
+                        key_cache,
+                        gamepad_state,
+                        gamepad_connected,
+                        trigger_thresh,
+                        stick_thresh,
+                        wheel_pulse_mask,
+                        gamepad_owned,
+                        wheel_owned,
+                        pending
+                    );
+
+                    // The commit uses only atomic stores under the shared lock, so it cannot fail.
+                    for (const auto &staged : pending)
+                    {
+                        m_active_states[staged.state_index].store(staged.state_value, std::memory_order_relaxed);
+                    }
+                }
+                catch (...)
+                {
+                    // Roll back every source that a staged edge needs. Return the drained notches to the backlog. Drop
+                    // the partial consume masks so suppression disarms wholly. The drain merge emptied the carry, so
+                    // owed host counts replace it.
+                    pending.clear();
+                    wheel_pulse = wheel_pulse_staged;
+                    if (external_wheel_counts_owed)
+                    {
+                        external_wheel_carry = external_wheel_counts;
+                    }
+                    gamepad_owned = 0;
+                    wheel_owned = 0;
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: failed staging poll-cycle callbacks; cycle rolled back"
+                    );
+                }
+
+                update_gamepad_suppression(
+                    m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) && process_focused &&
+                        gamepad_connected,
+                    gamepad_owned,
+                    gamepad_state,
+                    m_intercept_owner,
+                    gp_suppress,
+                    gamepad_suppress_active
+                );
+
+                // Publish the per-direction wheel-swallow mask every cycle. Tie it to the drain instead of wheel_owned
+                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows. While wheel
+                // bindings exist, capture_enabled stays true, so the external host counts notches between drains. The
+                // local backend ignores that argument. Its capture follows ownership and wheel_capture_armable_locked.
+                wheel_source_publish_consume(wheel_drained ? wheel_owned : 0, has_wheel_bindings);
+
+                dispatch_pending_callbacks(pending);
 
                 // Destroy staged callable copies before the poll wait. A teardown then observes lease completion
                 // immediately instead of one poll interval later.
@@ -1854,6 +2034,142 @@ namespace DetourModKit
                 );
             }
         }
+
+        namespace
+        {
+            /**
+             * @brief Invokes each staged release with false and logs each callback exception.
+             * @details Call off the binding lock.
+             */
+            void dispatch_hold_releases(const std::vector<HoldRelease> &hold_releases) noexcept
+            {
+                for (auto &[callback, binding_name] : hold_releases)
+                {
+                    try
+                    {
+                        callback(false);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "InputPoller: Exception in hold release callback \"{}\": {}",
+                            binding_name,
+                            e.what()
+                        );
+                    }
+                    catch (...)
+                    {
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "InputPoller: Unknown exception in hold release callback \"{}\"",
+                            binding_name
+                        );
+                    }
+                }
+            }
+
+            /**
+             * @brief Copies @p bindings into @p staged_bindings and gives each binding at @p indices the keys and
+             *        modifiers of the matching combo.
+             * @details The caller holds the binding lock exclusive. @p combos holds one combo for each index in
+             *          @p indices.
+             */
+            void stage_combo_replacements(
+                std::vector<InputBinding> &staged_bindings,
+                const std::vector<InputBinding> &bindings,
+                const std::vector<std::size_t> &indices,
+                const input::KeyComboList &combos
+            )
+            {
+                staged_bindings = bindings;
+                for (size_t i = 0; i < indices.size(); ++i)
+                {
+                    const size_t idx = indices[i];
+                    staged_bindings[idx].keys = combos[i].keys;
+                    staged_bindings[idx].modifiers = combos[i].modifiers;
+                }
+            }
+
+            /// Builds the replacement bindings of a cardinality change from @p prototype.
+            void stage_appended_bindings(
+                std::vector<InputBinding> &appended,
+                const InputBinding &prototype,
+                const input::KeyComboList &combos,
+                std::size_t append_count
+            )
+            {
+                // An empty replacement yields one inert sentinel, so the name stays addressable across a bound ->
+                // unbound -> bound INI reload cycle.
+                appended.reserve(append_count);
+                if (combos.empty())
+                {
+                    InputBinding sentinel = prototype;
+                    sentinel.keys.clear();
+                    sentinel.modifiers.clear();
+                    appended.push_back(std::move(sentinel));
+                }
+                else
+                {
+                    for (const auto &combo : combos)
+                    {
+                        InputBinding binding = prototype;
+                        binding.keys = combo.keys;
+                        binding.modifiers = combo.modifiers;
+                        appended.push_back(std::move(binding));
+                    }
+                }
+            }
+
+            /**
+             * @brief Stages each retained binding with its prior state, then moves in each @p appended binding at
+             *        state 0.
+             * @details The caller holds the binding lock exclusive. @p indices names the dropped bindings in ascending
+             *          order. A retained held binding stays active after the commit.
+             */
+            void stage_rebuilt_bindings(
+                std::vector<InputBinding> &staged_bindings,
+                std::vector<uint8_t> &rebuilt_states,
+                const std::vector<InputBinding> &bindings,
+                const std::unique_ptr<std::atomic<uint8_t>[]> &active_states,
+                const std::vector<std::size_t> &indices,
+                std::vector<InputBinding> &appended
+            )
+            {
+                size_t cursor = 0;
+                for (size_t skip : indices)
+                {
+                    for (size_t i = cursor; i < skip; ++i)
+                    {
+                        rebuilt_states.push_back(active_states[i].load(std::memory_order_relaxed));
+                        staged_bindings.push_back(bindings[i]);
+                    }
+                    cursor = skip + 1;
+                }
+                for (size_t i = cursor; i < bindings.size(); ++i)
+                {
+                    rebuilt_states.push_back(active_states[i].load(std::memory_order_relaxed));
+                    staged_bindings.push_back(bindings[i]);
+                }
+                for (auto &binding : appended)
+                {
+                    staged_bindings.push_back(std::move(binding));
+                    rebuilt_states.push_back(0);
+                }
+            }
+
+            /// Stores each of @p rebuilt_states into the unpublished @p new_states array.
+            void store_rebuilt_states(
+                const std::unique_ptr<std::atomic<uint8_t>[]> &new_states,
+                const std::vector<uint8_t> &rebuilt_states
+            ) noexcept
+            {
+                for (size_t i = 0; i < rebuilt_states.size(); ++i)
+                {
+                    new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
+                }
+            }
+        } // anonymous namespace
 
         InputPoller::ComboUpdate
         InputPoller::update_combos(std::string_view name, const input::KeyComboList &combos) noexcept
@@ -1879,13 +2195,7 @@ namespace DetourModKit
                 // Stage every fallible binding and cache allocation before any member-state commit.
                 if (indices.size() == combos.size())
                 {
-                    staged_bindings = m_bindings;
-                    for (size_t i = 0; i < indices.size(); ++i)
-                    {
-                        const size_t idx = indices[i];
-                        staged_bindings[idx].keys = combos[i].keys;
-                        staged_bindings[idx].modifiers = combos[i].modifiers;
-                    }
+                    stage_combo_replacements(staged_bindings, m_bindings, indices, combos);
 
                     std::optional<ModifierCaches> caches = build_modifier_caches(staged_bindings);
                     if (!caches)
@@ -1898,11 +2208,7 @@ namespace DetourModKit
                         return ComboUpdate::ResourceFailure;
                     }
 
-                    rundowns.reserve(indices.size());
-                    for (size_t idx : indices)
-                    {
-                        add_rundown(rundowns, m_bindings[idx].lifecycle);
-                    }
+                    collect_rundowns(rundowns, m_bindings, indices);
 
                     m_bindings.swap(staged_bindings);
                     for (auto &rundown : rundowns)
@@ -1926,27 +2232,8 @@ namespace DetourModKit
                 const size_t append_count = combos.empty() ? 1 : combos.size();
                 const size_t new_size = m_bindings.size() - indices.size() + append_count;
 
-                // An empty replacement yields one inert sentinel, so the name stays addressable across a bound ->
-                // unbound -> bound INI reload cycle.
                 std::vector<InputBinding> appended;
-                appended.reserve(append_count);
-                if (combos.empty())
-                {
-                    InputBinding sentinel = prototype;
-                    sentinel.keys.clear();
-                    sentinel.modifiers.clear();
-                    appended.push_back(std::move(sentinel));
-                }
-                else
-                {
-                    for (const auto &combo : combos)
-                    {
-                        InputBinding binding = prototype;
-                        binding.keys = combo.keys;
-                        binding.modifiers = combo.modifiers;
-                        appended.push_back(std::move(binding));
-                    }
-                }
+                stage_appended_bindings(appended, prototype, combos, append_count);
 
                 staged_bindings.reserve(new_size);
                 std::vector<uint8_t> rebuilt_states;
@@ -1958,44 +2245,11 @@ namespace DetourModKit
                 // release. Therefore, a gate-backed hold always synthesizes the compensatory false, as remove and clear
                 // do. The gate deduplicates, so an unheld drop is a no-op and the prototype's already-admitted release
                 // is not doubled.
-                hold_releases.reserve(indices.size());
-                for (size_t idx : indices)
-                {
-                    if (m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change &&
-                        (m_bindings[idx].release_is_idempotent ||
-                         m_active_states[idx].load(std::memory_order_relaxed) != 0))
-                    {
-                        hold_releases.emplace_back(m_bindings[idx].on_state_change, m_bindings[idx].name);
-                    }
-                }
+                stage_hold_releases(hold_releases, m_bindings, m_active_states, indices);
 
-                rundowns.reserve(indices.size());
-                for (size_t idx : indices)
-                {
-                    add_rundown(rundowns, m_bindings[idx].lifecycle);
-                }
+                collect_rundowns(rundowns, m_bindings, indices);
 
-                // Stage retained entries and their prior atomic states. A held binding stays active after the commit.
-                size_t cursor = 0;
-                for (size_t skip : indices)
-                {
-                    for (size_t i = cursor; i < skip; ++i)
-                    {
-                        rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
-                        staged_bindings.push_back(m_bindings[i]);
-                    }
-                    cursor = skip + 1;
-                }
-                for (size_t i = cursor; i < m_bindings.size(); ++i)
-                {
-                    rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
-                    staged_bindings.push_back(m_bindings[i]);
-                }
-                for (auto &binding : appended)
-                {
-                    staged_bindings.push_back(std::move(binding));
-                    rebuilt_states.push_back(0);
-                }
+                stage_rebuilt_bindings(staged_bindings, rebuilt_states, m_bindings, m_active_states, indices, appended);
 
                 std::optional<ModifierCaches> caches = build_modifier_caches(staged_bindings);
                 if (!caches)
@@ -2008,10 +2262,7 @@ namespace DetourModKit
                     return ComboUpdate::ResourceFailure;
                 }
 
-                for (size_t i = 0; i < rebuilt_states.size(); ++i)
-                {
-                    new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
-                }
+                store_rebuilt_states(new_states, rebuilt_states);
 
                 m_bindings.swap(staged_bindings);
                 m_active_states = std::move(new_states);
@@ -2036,30 +2287,7 @@ namespace DetourModKit
 
             // Fire the captured release callbacks outside the writer lock. This path runs from a user-driven INI
             // reshape, never a DllMain detach, so synchronous dispatch is safe.
-            for (auto &[callback, binding_name] : hold_releases)
-            {
-                try
-                {
-                    callback(false);
-                }
-                catch (const std::exception &e)
-                {
-                    (void)log().try_log(
-                        LogLevel::Error,
-                        "InputPoller: Exception in hold release callback \"{}\": {}",
-                        binding_name,
-                        e.what()
-                    );
-                }
-                catch (...)
-                {
-                    (void)log().try_log(
-                        LogLevel::Error,
-                        "InputPoller: Unknown exception in hold release callback \"{}\"",
-                        binding_name
-                    );
-                }
-            }
+            dispatch_hold_releases(hold_releases);
 
             return ComboUpdate::Updated;
         }
@@ -2192,16 +2420,7 @@ namespace DetourModKit
                 // A raw callback keeps the m_active_states gate.
                 if (invoke_callbacks)
                 {
-                    hold_releases.reserve(indices.size());
-                    for (size_t idx : indices)
-                    {
-                        if (m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change &&
-                            (m_bindings[idx].release_is_idempotent ||
-                             m_active_states[idx].load(std::memory_order_relaxed) != 0))
-                        {
-                            hold_releases.emplace_back(m_bindings[idx].on_state_change, m_bindings[idx].name);
-                        }
-                    }
+                    stage_hold_releases(hold_releases, m_bindings, m_active_states, indices);
                 }
 
                 // A flat skip-mask lets every retained binding inherit its prior atomic state, so a held binding
@@ -2232,11 +2451,7 @@ namespace DetourModKit
                 retired.reserve(indices.size());
                 staged.reserve(survivor_count);
 
-                rundowns.reserve(indices.size());
-                for (size_t idx : indices)
-                {
-                    add_rundown(rundowns, m_bindings[idx].lifecycle);
-                }
+                collect_rundowns(rundowns, m_bindings, indices);
                 for (auto &rundown : rundowns)
                 {
                     rundown.generation = rundown.lifecycle->tombstone();

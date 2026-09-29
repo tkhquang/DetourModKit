@@ -791,3 +791,32 @@ TEST(WheelHostLoader, OptionalHostMissingDowngradesToLocalFallback)
 
     mgr.shutdown();
 }
+
+TEST(WheelHostLoader, OptionalHostLeaseRejectionDowngradesToLocalFallback)
+{
+    auto &mgr = input::Input::instance();
+    mgr.shutdown();
+    reset_stub_counters();
+    g_open_status.store(DMK_WHEELHOST_ERR_BUSY);
+
+    Result<input::BindingGuard> guard = stage_wheel_binding("wheelhost_optional_busy");
+    ASSERT_TRUE(guard.has_value()) << guard.error().message();
+    guard->release();
+
+    const WheelHostTable table = make_stub_table();
+    input::Input::Settings settings;
+    settings.wheel_backend = input::Input::WheelBackend::ExternalHost;
+    settings.wheel_host = &table;
+    settings.wheel_host_required = false;
+    settings.poll_interval = 5ms;
+    ASSERT_TRUE(mgr.start(settings).has_value())
+        << "an optional host that refuses the lease must downgrade, not refuse";
+    EXPECT_TRUE(mgr.is_running());
+    // The host refused the one lease request. The rebuilt engine uses the local backend, so no other host
+    // callback fires, and shutdown has no lease to close.
+    EXPECT_EQ(g_open_calls.load(), 1);
+
+    mgr.shutdown();
+    EXPECT_EQ(g_drain_calls.load(), 0);
+    EXPECT_EQ(g_close_calls.load(), 0);
+}

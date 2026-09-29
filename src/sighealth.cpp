@@ -167,6 +167,67 @@ namespace DetourModKit
                     add_finding(findings, FindingKind::ShortAnchorText, Severity::Warning);
                 }
             }
+
+            /// Returns the expected-match estimate by the formula in docs/guides/scanning/signature-health.md.
+            [[nodiscard]] double estimate_expected_matches(
+                double selectivity_bits,
+                const detail::PatternBuffer &buffer,
+                const HealthPolicy &policy
+            ) noexcept
+            {
+                double gap_multiplier = 1.0;
+                for (std::size_t index = 0; index < buffer.jump_count; ++index)
+                {
+                    gap_multiplier *=
+                        static_cast<double>(buffer.jumps[index].max_skip - buffer.jumps[index].min_skip + 1);
+                }
+                return static_cast<double>(policy.nominal_haystack_bytes) * std::exp2(-selectivity_bits) *
+                       gap_multiplier;
+            }
+
+            /**
+             * @brief Appends the pattern findings to @p health, the most structural first.
+             * @details A pattern with no fixed byte cannot drive the memchr prefilter. NoFixedAnchor therefore replaces
+             *          the ShortestAnchorRun finding, which needs at least one fixed byte.
+             */
+            void add_pattern_findings(PatternHealth &health, const HealthPolicy &policy)
+            {
+                if (health.fixed_bytes == 0)
+                {
+                    add_finding(health.findings, FindingKind::NoFixedAnchor, Severity::Critical);
+                }
+                else if (health.longest_atom < policy.min_longest_atom)
+                {
+                    add_finding(health.findings, FindingKind::ShortestAnchorRun, Severity::Warning);
+                }
+                if (health.length < policy.min_pattern_bytes)
+                {
+                    add_finding(health.findings, FindingKind::ShortPattern, Severity::Warning);
+                }
+                if (health.common_bytes_only)
+                {
+                    add_finding(health.findings, FindingKind::CommonBytesOnly, Severity::Warning);
+                }
+                if (health.wildcard_ratio > policy.max_wildcard_ratio)
+                {
+                    add_finding(health.findings, FindingKind::HighWildcardRatio, Severity::Warning);
+                }
+                // Entropy is meaningful only with enough fixed bytes to distribute. A short 2-3 byte anchor has few
+                // samples, not low entropy, so the check requires a minimum sample size.
+                constexpr std::size_t min_entropy_sample = 4;
+                if (health.fixed_bytes >= min_entropy_sample && health.byte_entropy_bits < policy.min_byte_entropy_bits)
+                {
+                    add_finding(health.findings, FindingKind::LowByteEntropy, Severity::Warning);
+                }
+                if (health.expected_matches > policy.fail_expected_matches)
+                {
+                    add_finding(health.findings, FindingKind::WeakSelectivity, Severity::Critical);
+                }
+                else if (health.expected_matches > policy.warn_expected_matches)
+                {
+                    add_finding(health.findings, FindingKind::WeakSelectivity, Severity::Warning);
+                }
+            }
         } // namespace
 
         PatternHealth analyze_pattern(const scan::Pattern &pattern, const HealthPolicy &policy)
@@ -257,60 +318,8 @@ namespace DetourModKit
             health.byte_entropy_bits = shannon_entropy_bits(value_counts, health.fixed_bytes);
             health.common_bytes_only = (health.fixed_bytes > 0) && !any_rare_fixed;
 
-            // expected_matches models the pattern against an independent-byte haystack: each position multiplies the
-            // per-position match probability, and selectivity_bits is the sum of the per-position -log2 probabilities,
-            // so N * 2^(-selectivity_bits) is the expected count of matching windows. It is an order-of-magnitude
-            // heuristic, not a promise (the runtime resolver still verifies uniqueness), but it cleanly separates a
-            // few-rare-byte anchor (effectively unique) from a short or common one (thousands of hits).
-            // A bounded jump multiplies the match opportunities: each of its (max_skip - min_skip + 1) widths is a
-            // distinct place the following segment can sit, so a variable-gap signature is less unique than its fixed
-            // bytes alone imply. Fold that widening in so health does not over-rate a gapped pattern as if its segments
-            // were adjacent. A jump-free pattern keeps a multiplier of 1.
-            double gap_multiplier = 1.0;
-            for (std::size_t index = 0; index < buffer.jump_count; ++index)
-            {
-                gap_multiplier *= static_cast<double>(buffer.jumps[index].max_skip - buffer.jumps[index].min_skip + 1);
-            }
-            health.expected_matches = static_cast<double>(policy.nominal_haystack_bytes) *
-                                      std::exp2(-health.selectivity_bits) * gap_multiplier;
-
-            // Findings, most structural first. A pattern with no fully-known byte cannot drive the memchr prefilter at
-            // all; every other check assumes at least one fixed byte exists.
-            if (health.fixed_bytes == 0)
-            {
-                add_finding(health.findings, FindingKind::NoFixedAnchor, Severity::Critical);
-            }
-            else if (health.longest_atom < policy.min_longest_atom)
-            {
-                add_finding(health.findings, FindingKind::ShortestAnchorRun, Severity::Warning);
-            }
-            if (health.length < policy.min_pattern_bytes)
-            {
-                add_finding(health.findings, FindingKind::ShortPattern, Severity::Warning);
-            }
-            if (health.common_bytes_only)
-            {
-                add_finding(health.findings, FindingKind::CommonBytesOnly, Severity::Warning);
-            }
-            if (health.wildcard_ratio > policy.max_wildcard_ratio)
-            {
-                add_finding(health.findings, FindingKind::HighWildcardRatio, Severity::Warning);
-            }
-            // Entropy is only meaningful with enough fixed bytes to distribute; a legitimately short 2-3 byte anchor is
-            // not "low entropy", it simply has few samples, so gate the check on a minimum sample size.
-            constexpr std::size_t min_entropy_sample = 4;
-            if (health.fixed_bytes >= min_entropy_sample && health.byte_entropy_bits < policy.min_byte_entropy_bits)
-            {
-                add_finding(health.findings, FindingKind::LowByteEntropy, Severity::Warning);
-            }
-            if (health.expected_matches > policy.fail_expected_matches)
-            {
-                add_finding(health.findings, FindingKind::WeakSelectivity, Severity::Critical);
-            }
-            else if (health.expected_matches > policy.warn_expected_matches)
-            {
-                add_finding(health.findings, FindingKind::WeakSelectivity, Severity::Warning);
-            }
+            health.expected_matches = estimate_expected_matches(health.selectivity_bits, buffer, policy);
+            add_pattern_findings(health, policy);
 
             health.grade = grade_from(health.findings);
             return health;
@@ -385,21 +394,12 @@ namespace DetourModKit
             return health;
         }
 
-        RecordHealth analyze_record(const manifest::SignatureRecord &record, const HealthPolicy &policy)
+        namespace
         {
-            RecordHealth health{};
-            health.label = record.label;
-            health.kind = record.kind;
-
-            switch (record.kind)
+            /// Grades every ladder rung for diagnostics and seeds the grade of @p health from the first declared rung.
+            void
+            grade_byte_ladder(RecordHealth &health, const manifest::SignatureRecord &record, const HealthPolicy &policy)
             {
-            case anchor::AnchorKind::RipGlobal:
-            case anchor::AnchorKind::CodeOperand:
-            {
-                // Grade every rung for diagnostics, but seed the record verdict from the first declared rung. Static
-                // lint cannot prove that a weak compilable rung will miss in the live scope. This is only the starting
-                // verdict: the record-level findings folded in below and the compilability ceiling at function end can
-                // still worsen it (down to Unusable), never raise it.
                 health.ladder.reserve(record.ladder.size());
                 Grade effective_grade = Grade::Robust;
                 bool have_byte_estimate = false;
@@ -451,6 +451,42 @@ namespace DetourModKit
                     }
                 }
                 health.grade = worse_grade(effective_grade, grade_from(health.findings));
+            }
+
+            /**
+             * @brief Sets the grade of @p health to Unusable when Signature::compile rejects @p record.
+             * @details The resolver sees only a record that Signature::compile accepts. Signature::compile enforces
+             *          constraints that the rung analysis cannot model: a RIP-relative rung's (displacement_at,
+             *          instruction_length) layout, a RipGlobal's page class, and the non-serializable composite kinds.
+             *          It rejects the WHOLE record when any one rung is malformed, so a ladder whose graded rung reads
+             *          Robust can still be uncompilable. When the grade is Unusable before the check, the report names
+             *          a specific reason, so the ceiling adds no UncompilableRecord finding.
+             */
+            void apply_compilability_ceiling(RecordHealth &health, const manifest::SignatureRecord &record)
+            {
+                if (const Result<manifest::Signature> compiled = manifest::Signature::compile(record); !compiled)
+                {
+                    if (health.grade != Grade::Unusable)
+                    {
+                        add_finding(health.findings, FindingKind::UncompilableRecord, Severity::Critical);
+                    }
+                    health.grade = worse_grade(health.grade, Grade::Unusable);
+                }
+            }
+        } // namespace
+
+        RecordHealth analyze_record(const manifest::SignatureRecord &record, const HealthPolicy &policy)
+        {
+            RecordHealth health{};
+            health.label = record.label;
+            health.kind = record.kind;
+
+            switch (record.kind)
+            {
+            case anchor::AnchorKind::RipGlobal:
+            case anchor::AnchorKind::CodeOperand:
+            {
+                grade_byte_ladder(health, record, policy);
                 break;
             }
             case anchor::AnchorKind::StringXref:
@@ -500,25 +536,7 @@ namespace DetourModKit
             }
             }
 
-            // Compilability ceiling. The per-rung analysis grades a byte record by its first declared rung, but the
-            // resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the rung
-            // analysis cannot model: a RIP-relative rung's (displacement_at, instruction_length) layout, a RipGlobal's
-            // page class, the non-serializable composite kinds. Because compile rejects the WHOLE record when any one
-            // rung is malformed, a ladder whose graded rung reads Robust can still be uncompilable, so grading Robust
-            // would certify a signature the trust gate could never build. Re-check compilability here so the grade
-            // cannot EXCEED it: a record compile would reject is floored to Unusable however strong a rung looks in
-            // isolation. compile() only ever fails a superset of what the analysis flags Unusable (empty text or
-            // ladder, an uncompilable pattern), so folding it in can only worsen a grade, never inflate one. When the
-            // grade is already Unusable the specific reason is reported, so the generic finding is suppressed to
-            // avoid noise while the Unusable floor still holds.
-            if (const Result<manifest::Signature> compiled = manifest::Signature::compile(record); !compiled)
-            {
-                if (health.grade != Grade::Unusable)
-                {
-                    add_finding(health.findings, FindingKind::UncompilableRecord, Severity::Critical);
-                }
-                health.grade = worse_grade(health.grade, Grade::Unusable);
-            }
+            apply_compilability_ceiling(health, record);
 
             return health;
         }

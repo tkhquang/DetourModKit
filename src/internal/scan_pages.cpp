@@ -359,6 +359,88 @@ namespace DetourModKit
 #endif
         }
 
+        /**
+         * @brief Adds to @p engine_owned the engine buffers that a sweep must never match.
+         * @details The compiled pattern keeps its byte and mask buffers in readable heap memory. Without these
+         *          exclusions, a readable sweep matches the pattern against its own buffers and can return the query
+         *          storage instead of the intended target. This floor guarantee holds whatever the caller declares.
+         *          Caller-owned copies of the query belong in query.exclusions on top of it.
+         *
+         *          When the query captures evidence or an instruction snapshot, the corresponding @p tally buffer
+         *          joins the floor for the same reason. Each buffer holds a verbatim copy of match bytes, so after one
+         *          capture the sweep can count that copy as another occurrence. The exclusion ranges record buffer
+         *          addresses, so @p tally must keep its address for the whole sweep.
+         */
+        void add_engine_owned_exclusions(
+            detail::ScanExclusions &engine_owned,
+            const detail::EnginePattern &pattern,
+            const detail::ScanQuery &query,
+            const ScanTally &tally
+        ) noexcept
+        {
+            detail::add_engine_pattern_storage(engine_owned, pattern);
+            if (query.capture_evidence)
+            {
+                engine_owned.add(
+                    reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
+                    tally.nth_evidence.bytes.size()
+                );
+            }
+            if (query.instruction_snapshot_length != 0)
+            {
+                engine_owned.add(
+                    reinterpret_cast<std::uintptr_t>(tally.nth_instruction.bytes.data()),
+                    tally.nth_instruction.bytes.size()
+                );
+            }
+        }
+
+        void
+        report_faulted_regions(std::size_t faulted_regions, std::uintptr_t window_lo, std::uintptr_t window_hi) noexcept
+        {
+            try
+            {
+                (void)log().try_log(
+                    LogLevel::Debug,
+                    "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
+                    faulted_regions
+                );
+            }
+            catch (...)
+            {
+            }
+
+            // The dispatcher is lazy and can allocate on first use. A failed allocation must never change the sweep
+            // result.
+            try
+            {
+                diagnostics::scanner_faults().emit_safe(
+                    diagnostics::ScannerFaultEvent{
+                        .faulted_regions = faulted_regions,
+                        .window_low = window_lo,
+                        .window_high = window_hi,
+                    }
+                );
+            }
+            catch (...)
+            {
+            }
+        }
+
+        [[nodiscard]] detail::MatchResult
+        build_sweep_result(const ScanTally &tally, std::size_t faulted_regions, bool budget_exhausted_total) noexcept
+        {
+            return detail::MatchResult{
+                tally.nth_point,
+                tally.nth_span,
+                tally.nth_evidence,
+                tally.nth_instruction,
+                tally.seen,
+                faulted_regions > 0,
+                budget_exhausted_total
+            };
+        }
+
         // Region-walking AOB scan shared by the whole-process and module-scoped entry points. Walks the committed
         // regions of [window_lo, window_hi) via VirtualQuery and runs the per-region scan (behind the fault guard)
         // against every region whose base protection is present in accept_mask. The whole-process scanners pass
@@ -389,30 +471,8 @@ namespace DetourModKit
         {
             ScanTally tally;
 
-            // The compiled pattern's own bytes and mask buffers live in readable heap memory, so a readable sweep would
-            // otherwise match the needle against itself and could return the query's storage instead of the intended
-            // target. This floor guarantee holds regardless of what the caller declared; caller-owned copies of the
-            // query ride query.exclusions on top of it.
-            //
-            // When evidence capture is on, the tally buffer joins that floor for the same reason and is strictly worse
-            // if left out: it holds a verbatim copy of a MATCHED span, so once one match is captured the sweep would
-            // count that copy as a further occurrence.
             detail::ScanExclusions engine_owned;
-            detail::add_engine_pattern_storage(engine_owned, pattern);
-            if (query.capture_evidence)
-            {
-                engine_owned.add(
-                    reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
-                    tally.nth_evidence.bytes.size()
-                );
-            }
-            if (query.instruction_snapshot_length != 0)
-            {
-                engine_owned.add(
-                    reinterpret_cast<std::uintptr_t>(tally.nth_instruction.bytes.data()),
-                    tally.nth_instruction.bytes.size()
-                );
-            }
+            add_engine_owned_exclusions(engine_owned, pattern, query, tally);
             const ExclusionSet exclusions{engine_owned, query.exclusions};
 
             const std::size_t target = query.occurrence;
@@ -521,44 +581,12 @@ namespace DetourModKit
 
             if (faulted_regions != 0)
             {
-                // Best-effort diagnosis only; the sweep already skipped each faulted region and continued, and the
-                // skipped bytes are what the incomplete flag below makes the caller fail closed on.
-                try
-                {
-                    (void)log().try_log(
-                        LogLevel::Debug,
-                        "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
-                        faulted_regions
-                    );
-                }
-                catch (...)
-                {
-                }
-
-                // The dispatcher is lazy and can allocate on first use, so diagnostics must never change the result.
-                try
-                {
-                    diagnostics::scanner_faults().emit_safe(
-                        diagnostics::ScannerFaultEvent{
-                            .faulted_regions = faulted_regions,
-                            .window_low = window_lo,
-                            .window_high = window_hi,
-                        }
-                    );
-                }
-                catch (...)
-                {
-                }
+                // This report is best-effort diagnosis only. The sweep already skipped each faulted region and
+                // continued. The incomplete flag that build_sweep_result sets from faulted_regions makes the caller
+                // fail closed on the skipped bytes.
+                report_faulted_regions(faulted_regions, window_lo, window_hi);
             }
-            return detail::MatchResult{
-                tally.nth_point,
-                tally.nth_span,
-                tally.nth_evidence,
-                tally.nth_instruction,
-                tally.seen,
-                faulted_regions > 0,
-                budget_exhausted_total
-            };
+            return build_sweep_result(tally, faulted_regions, budget_exhausted_total);
         }
 
         // Base protections accepted by the executable-only sweeps: the three page variants that grant execute *and*

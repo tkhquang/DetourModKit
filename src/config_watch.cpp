@@ -590,6 +590,46 @@ namespace DetourModKit
                 }
                 return AutoReloadStatus::Started;
             }
+
+            /**
+             * @brief Stores @p guard under @p binding_name and releases any guard that it replaces.
+             * @details Takes get_watcher_mutex(), so the caller must not hold it.
+             * @return false if background reloads are disabled. @p guard then stays with the caller.
+             */
+            [[nodiscard]] bool store_reload_hotkey_guard(input::BindingGuard &guard, std::string_view binding_name)
+            {
+                input::BindingGuard replaced_guard;
+                bool replaced_existing = false;
+
+                // Release the replaced guard outside the watcher mutex. A release under this mutex can wait on an
+                // unload drain whose callable disposal joins a worker that needs the same mutex.
+                {
+                    std::lock_guard<std::mutex> lock(get_watcher_mutex());
+                    if (detail::background_reloads_disabled())
+                    {
+                        return false;
+                    }
+                    auto &guards = get_reload_hotkey_guards();
+                    for (auto it = guards.begin(); it != guards.end(); ++it)
+                    {
+                        if (it->name() == binding_name)
+                        {
+                            replaced_guard = std::move(*it);
+                            replaced_existing = true;
+                            guards.erase(it);
+                            break;
+                        }
+                    }
+                    guards.emplace_back(std::move(guard));
+                }
+                if (replaced_existing)
+                {
+                    run_reload_hotkey_guard_disposal_probe();
+                    replaced_guard.release();
+                }
+
+                return true;
+            }
         } // anonymous namespace
 
         namespace detail
@@ -1023,38 +1063,7 @@ namespace DetourModKit
             {
                 return false;
             }
-            input::BindingGuard replaced_guard;
-            bool replaced_existing = false;
-
-            // Store the guard under the watcher mutex so its destructor does not disable the binding. Replace any
-            // prior guard for the same INI key. Release the replaced guard outside the mutex. A release under this
-            // mutex can wait on an unload drain whose callable disposal joins a worker that needs the same mutex.
-            {
-                std::lock_guard<std::mutex> lock(get_watcher_mutex());
-                if (detail::background_reloads_disabled())
-                {
-                    return false;
-                }
-                auto &guards = get_reload_hotkey_guards();
-                for (auto it = guards.begin(); it != guards.end(); ++it)
-                {
-                    if (it->name() == binding_name)
-                    {
-                        replaced_guard = std::move(*it);
-                        replaced_existing = true;
-                        guards.erase(it);
-                        break;
-                    }
-                }
-                guards.emplace_back(std::move(guard));
-            }
-            if (replaced_existing)
-            {
-                run_reload_hotkey_guard_disposal_probe();
-                replaced_guard.release();
-            }
-
-            return true;
+            return store_reload_hotkey_guard(guard, binding_name);
         }
     } // namespace config
 

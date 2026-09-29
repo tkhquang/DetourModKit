@@ -152,6 +152,54 @@ namespace DetourModKit
                 return fresh_site && *fresh_site == decoded_site;
             }
 
+            /// Extracts the requested visible operand constant from the instruction decoded at @p site.
+            [[nodiscard]] Result<std::int64_t> extract_operand_constant(
+                const CodeConstant &code_constant,
+                const ZydisDecodedInstruction &insn,
+                const ZydisDecodedOperand (&operands)[ZYDIS_MAX_OPERAND_COUNT],
+                std::uintptr_t site
+            ) noexcept
+            {
+                // Index the VISIBLE operands, the ones that a human counts in a disassembler. operand_count also counts
+                // hidden operands (flags, implicit registers, stack writes), so a bound on operand_count admits a
+                // hidden operand whose position differs between mnemonics.
+                if (code_constant.operand_index >= insn.operand_count_visible)
+                {
+                    return std::unexpected(Error{ErrorCode::OperandOutOfRange, "scan::read_code_constant"});
+                }
+                const ZydisDecodedOperand &operand = operands[code_constant.operand_index];
+
+                if (code_constant.kind == OperandKind::Immediate)
+                {
+                    if (operand.type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+                    {
+                        return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
+                    }
+                    return narrow_signed(static_cast<std::int64_t>(operand.imm.value.s), code_constant.byte_width);
+                }
+
+                // For MemoryDisplacement, a register-indirect operand without a displacement (for example `[rcx]`)
+                // carries no constant to read.
+                if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || !operand.mem.disp.has_displacement)
+                {
+                    return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
+                }
+
+                if (operand.mem.base == ZYDIS_REGISTER_RIP)
+                {
+                    // A RIP-relative displacement is relative to the next instruction. Return the absolute target that
+                    // the caller wants, not the raw relative offset.
+                    ZyanU64 absolute = 0;
+                    if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(site), &absolute)))
+                    {
+                        return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                    }
+                    return static_cast<std::int64_t>(absolute);
+                }
+
+                return narrow_signed(static_cast<std::int64_t>(operand.mem.disp.value), code_constant.byte_width);
+            }
+
             Result<std::int64_t> read_code_constant_impl(
                 const CodeConstant &code_constant,
                 Region scope,
@@ -268,47 +316,7 @@ namespace DetourModKit
                     *instruction_span = Region{Address{site}, static_cast<std::size_t>(insn.length)};
                 }
 
-                // Index the VISIBLE operands - the ones a human counts in a disassembler. operand_count includes
-                // implicit/hidden operands (flags, implicit registers, stack writes), which would make a fixed
-                // operand_index drift between mnemonics.
-                if (code_constant.operand_index >= insn.operand_count_visible)
-                {
-                    return std::unexpected(Error{ErrorCode::OperandOutOfRange, "scan::read_code_constant"});
-                }
-                const ZydisDecodedOperand &operand = operands[code_constant.operand_index];
-
-                if (code_constant.kind == OperandKind::Immediate)
-                {
-                    if (operand.type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
-                    {
-                        return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
-                    }
-                    // imm.value.s is already 64-bit sign-extended by Zydis.
-                    return narrow_signed(static_cast<std::int64_t>(operand.imm.value.s), code_constant.byte_width);
-                }
-
-                // MemoryDisplacement. A register-indirect operand with no displacement (for example plain `[rcx]`)
-                // carries no constant to read.
-                if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || !operand.mem.disp.has_displacement)
-                {
-                    return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
-                }
-
-                if (operand.mem.base == ZYDIS_REGISTER_RIP)
-                {
-                    // RIP-relative: the raw displacement is measured from the next instruction, not the absolute
-                    // constant the caller wants. Resolve it to the absolute target so the return value is meaningful
-                    // rather than a misleading relative offset.
-                    ZyanU64 absolute = 0;
-                    if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(site), &absolute)))
-                    {
-                        return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-                    }
-                    return static_cast<std::int64_t>(absolute);
-                }
-
-                // disp.value is already 64-bit sign-extended.
-                return narrow_signed(static_cast<std::int64_t>(operand.mem.disp.value), code_constant.byte_width);
+                return extract_operand_constant(code_constant, insn, operands, site);
             }
         } // namespace
 

@@ -514,38 +514,37 @@ namespace DetourModKit
             const std::size_t n = static_cast<std::size_t>(end - begin + 1);
             return static_cast<const std::byte *>(dmk_memchr(begin, target, n, use_avx2));
         }
-    } // anonymous namespace
 
-    // Flat single-segment matcher: the memchr-anchored SIMD body, returning the match START (no offset applied).
-    // Every jump-free pattern dispatches here, so the overwhelmingly common case runs the direct fixed-width fast path.
-    DMK_NO_SANITIZE_ADDRESS
-    static const std::byte *find_pattern_flat_start(
-        const std::byte *start_address,
-        std::size_t region_size,
-        const detail::EnginePattern &pattern
-    ) noexcept
-    {
-        const std::size_t pattern_size = pattern.size();
-
-        if (pattern_size == 0 || !start_address || region_size < pattern_size)
+        /**
+         * @brief Returns the scan anchor index, or pattern_size when segment 0 has no fully-known byte.
+         * @details parse_aob() pre-populates pattern.anchor, so the common path is a single load. A manually
+         *          constructed pattern falls back to inline selection, which does not mutate the input and keeps the
+         *          const-by-design contract. The caller guarantees pattern_size == pattern.size().
+         */
+        [[nodiscard]] std::size_t
+        select_flat_anchor(const detail::EnginePattern &pattern, std::size_t pattern_size) noexcept
         {
-            return nullptr;
+            return (pattern.anchor <= pattern_size) ? pattern.anchor : select_pattern_anchor(pattern);
         }
 
-        // Anchor selection: parse_aob() pre-populates pattern.anchor, so the common path is a single load. Manually
-        // constructed patterns fall back to inline selection without mutating the input (preserves the const-by-design
-        // contract).
-        const std::size_t best_anchor =
-            (pattern.anchor <= pattern_size) ? pattern.anchor : select_pattern_anchor(pattern);
-
-        // No fully-known byte to anchor on. Two sub-cases:
-        //   - The pattern is entirely wildcards (no mask bit set anywhere): the search degenerates to
-        //     "always match at region start", the defined result for an all-wildcard pattern.
-        //   - The pattern carries only partially-masked (nibble) bytes: there is no exact byte for the
-        //     memchr / SIMD prefilter, so fall back to a masked compare at every candidate position. This
-        //     path is rare (a real signature almost always carries at least one full literal byte), so a
-        //     scalar verify is acceptable; correctness, not throughput, is the concern here.
-        if (best_anchor == pattern_size)
+        /**
+         * @brief Scans the region for a pattern with no fully-known byte to anchor on.
+         * @details The caller guarantees pattern_size == pattern.size(), a non-null start_address, and
+         *          region_size >= pattern_size. Two sub-cases apply:
+         *          - The pattern is entirely wildcards (no mask bit set anywhere): the search degenerates to
+         *            "always match at region start", the defined result.
+         *          - The pattern carries partially-masked (nibble) bytes, possibly mixed with wildcards: no
+         *            fully-known byte exists for the memchr / SIMD prefilter. The scan falls back to a masked compare
+         *            at every candidate position. This path is rare (a real signature almost always carries at least
+         *            one fully-known byte), so a scalar verify is acceptable.
+         */
+        DMK_NO_SANITIZE_ADDRESS
+        const std::byte *find_unanchored_pattern_start(
+            const std::byte *start_address,
+            std::size_t region_size,
+            const detail::EnginePattern &pattern,
+            std::size_t pattern_size
+        ) noexcept
         {
             if (!pattern_has_literal_byte(pattern))
             {
@@ -572,6 +571,32 @@ namespace DetourModKit
                 }
             }
             return nullptr;
+        }
+    } // anonymous namespace
+
+    /**
+     * @brief Matches a jump-free pattern over the region and returns the match START (no offset applied).
+     * @details Every jump-free pattern dispatches here, so the common case runs the memchr-anchored SIMD fast path.
+     */
+    DMK_NO_SANITIZE_ADDRESS
+    static const std::byte *find_pattern_flat_start(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern
+    ) noexcept
+    {
+        const std::size_t pattern_size = pattern.size();
+
+        if (pattern_size == 0 || !start_address || region_size < pattern_size)
+        {
+            return nullptr;
+        }
+
+        const std::size_t best_anchor = select_flat_anchor(pattern, pattern_size);
+
+        if (best_anchor == pattern_size)
+        {
+            return find_unanchored_pattern_start(start_address, region_size, pattern, pattern_size);
         }
 
         const std::byte target_byte = pattern.bytes[best_anchor];
