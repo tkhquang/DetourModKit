@@ -1298,6 +1298,11 @@ namespace DetourModKit::manifest
                     ));
                     record->ladder.push_back(std::move(*rung));
                 }
+                // Reject a rung on a kind without a ladder as MalformedLine, as an unread key is rejected.
+                if (!kind_uses_ladder(record->kind) && !record->ladder.empty())
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
 
                 // Reject a past-gap orphan or noncanonical index such as `rung.00`. Otherwise, the parser silently
                 // drops that rung-shaped section.
@@ -1340,8 +1345,9 @@ namespace DetourModKit::manifest
     {
         [[nodiscard]] Result<std::string> serialize_impl(const Manifest &manifest, const ManifestLimits &limits)
         {
-            // Validate fields and enums before insertion into the bounded INI store. The builder checks every section,
-            // key, and decoded value before insertion. The output writer caps encoded bytes at emission.
+            // Validate each record before insertion into the bounded INI store: the size caps, then Signature::compile,
+            // then the label identity. The builder checks every section, key, and decoded value before insertion. The
+            // output writer caps encoded bytes at emission.
             if (manifest.records.size() > limits.max_records)
             {
                 return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
@@ -1353,25 +1359,7 @@ namespace DetourModKit::manifest
             {
                 if (field_exceeds_limit(record.label) || field_exceeds_limit(record.module) ||
                     field_exceeds_limit(record.mangled) || field_exceeds_limit(record.xref_text) ||
-                    field_exceeds_limit(record.export_name))
-                {
-                    return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
-                }
-                if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
-                    value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
-                    value_is_unserializable(record.export_name) ||
-                    xref_evidence_is_malformed(record.xref_text, record.xref_encoding) ||
-                    !record_policy_domains_are_valid(record) || !binding_structure_is_valid(record.binding) ||
-                    !image_identity_is_valid(record.expected_image_identity) ||
-                    !winning_bytes_are_valid(record.expected_winning_bytes))
-                {
-                    return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
-                }
-                if (!seen_labels.insert(to_lower(record.label)).second)
-                {
-                    return fail(ErrorCode::ManifestIdentityCollision, "manifest::serialize_checked");
-                }
-                if (record.ladder.size() > limits.max_rungs_per_record)
+                    field_exceeds_limit(record.export_name) || record.ladder.size() > limits.max_rungs_per_record)
                 {
                     return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
                 }
@@ -1382,28 +1370,16 @@ namespace DetourModKit::manifest
                     {
                         return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
                     }
-                    if (value_is_unserializable(spec.name) || value_is_unserializable(spec.pattern) ||
-                        value_is_unserializable(spec.mangled) || value_is_unserializable(spec.string_text) ||
-                        xref_evidence_is_malformed(spec.string_text, spec.string_encoding))
-                    {
-                        return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
-                    }
-                    // save() truncates its destination first. Reject a rung that parse_rung's RipRelative gate refuses.
-                    // This preserves the last-known-good file because load() cannot accept the invalid replacement.
-                    if (spec.mode == scan::Mode::RipRelative)
-                    {
-                        const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
-                        if (spec.displacement_at < 0 ||
-                            !scan::is_valid_rip_relative_layout(
-                                static_cast<std::size_t>(spec.displacement_at),
-                                spec.instruction_length
-                            ) ||
-                            (pattern &&
-                             !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at))))
-                        {
-                            return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
-                        }
-                    }
+                }
+                // save() truncates its target. A record that compile rejects falls back to its in-code default on the
+                // next overlay and loses its baselines. This check runs before save() opens the file.
+                if (const Result<Signature> compiled = Signature::compile(record); !compiled)
+                {
+                    return fail(compiled.error().code, "manifest::serialize_checked");
+                }
+                if (!seen_labels.insert(to_lower(record.label)).second)
+                {
+                    return fail(ErrorCode::ManifestIdentityCollision, "manifest::serialize_checked");
                 }
             }
 

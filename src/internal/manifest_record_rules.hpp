@@ -4,8 +4,10 @@
 /**
  * @file internal/manifest_record_rules.hpp
  * @brief Shared record validation rules for the manifest sibling TUs.
- * @details src/manifest.cpp (checked serialization) and src/manifest_overlay.cpp (Signature compile/adopt) enforce
- *          the same record, label, value, binding, and baseline rules, so each rule is stated exactly once here.
+ * @details src/manifest_overlay.cpp (Signature compile/adopt) enforces these record, label, value, binding, and
+ *          baseline rules, so each rule is stated exactly once here. Checked serialization in src/manifest.cpp applies
+ *          them through Signature::compile. parse shares only the rung-section grammar, the Utf16le rule, the
+ *          RipRelative span rule, and kind_uses_ladder.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -101,10 +103,10 @@ namespace DetourModKit::manifest
         return !parse_rung_section_name(std::format("sig.{}", label)).has_value();
     }
 
-    // Validates every free-text value before compile, adopt, or checked serialization. Reject embedded NUL or '\r'
-    // because reload changes the contract. Reject a whitespace-prefixed "<<<" because raw output opens a heredoc.
-    // Reject a heredoc body line equal to "END_OF_TEXT" because the store truncates there. Apply the terminator
-    // scan only to values that use a heredoc. Raw values round-trip verbatim.
+    // Validates every free-text value before compile or checked serialization, and each record string before adopt.
+    // Reject embedded NUL or '\r' because reload changes the contract. Reject a whitespace-prefixed "<<<" because raw
+    // output opens a heredoc. Reject a heredoc body line equal to "END_OF_TEXT" because the store truncates there.
+    // Apply the terminator scan only to values that use a heredoc. Raw values round-trip verbatim.
     [[nodiscard]] inline bool value_is_unserializable(std::string_view value) noexcept
     {
         if (value.find('\0') != std::string_view::npos || value.find('\r') != std::string_view::npos)
@@ -208,6 +210,13 @@ namespace DetourModKit::manifest
             return false;
         }
         return false;
+    }
+
+    // Only RipGlobal and CodeOperand resolve, fingerprint, and corroborate through a candidate ladder. A rung on any
+    // other kind is state that nothing reads.
+    [[nodiscard]] constexpr bool kind_uses_ladder(anchor::AnchorKind kind) noexcept
+    {
+        return kind == anchor::AnchorKind::RipGlobal || kind == anchor::AnchorKind::CodeOperand;
     }
 
     [[nodiscard]] constexpr bool is_valid_scan_mode(scan::Mode mode) noexcept
