@@ -63,7 +63,27 @@ vmt_index = 7
 
 The `kind` token is one of the six serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `export_name`, `manual`). The composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively. Integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE. An `export_name` record additionally uses that shared `module` key as the module whose Export Address Table holds its `export_name` symbol (an empty `module` resolves the export within the fallback scope). A `rip_global` record can set `pages = executable` when all of its byte rungs identify code. An omitted key uses the compatibility default, `readable`.
 
-Each kind's evidence keys are mandatory, not silently defaulted. A silently-defaulted key that resolved to a trusted zero is worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`. The field offset must be non-negative, its four-byte disp32 must fit inside the instruction and inside the pattern suffix from the result marker, and the instruction cannot exceed x86-64's 15-byte maximum. Trailing instruction bytes can extend beyond the pattern because the resolver snapshots them privately during the guarded sweep. Otherwise the rung authorizes a target from bytes its evidence never witnessed. A `code_operand` record accepts `byte_width = 0` to preserve the decoded value, or 1 through 8 to narrow a non-RIP constant's low bytes and sign-extend. 9 through 255 is `MalformedLine` in a file and `InvalidArg` at compile, adopt, or checked-serialization boundaries. RIP-relative memory operands still resolve to an absolute target without narrowing. A `manual` record must carry `manual_value`, and `manual_value = 0` is accepted when explicit. Binding compilation rejects an invalid binding kind, an empty pointer chain, a chain width outside 1/2/4/8 bytes, a general or XMM register outside the captured register file, and a VMT index outside 0..4095. It also rejects any non-default value in a field the declared binding kind never reads (an inert edit folds into the drift fingerprint yet never serializes). The parser applies the same scoping to keys. A binding key beside a kind that never reads it, a `walk_back` on a `rip_relative` rung, or a decode offset on a `direct` rung is `MalformedLine`. A `direct` rung legitimately omits decode keys. `Signature::compile` also rejects empty required text evidence. The `SignatureRecord::xref_encoding` contract defines the `Utf16le` validity rule and its errors. Resolution converts that text (see [Anchors](anchors.md)). The `Utf8` route remains byte-transparent. A post-resolve `validator` cannot be serialized, but `SignatureRecord` carries the validator fields for programmatic use and threads them through `compile` and `adopt`.
+Each kind's evidence keys are mandatory, not silently defaulted. A silently-defaulted key that resolved to a trusted zero is worse than a clean parse failure.
+
+A `rip_relative` rung must carry both `displacement_at` and `instruction_length`. The field offset must be non-negative. Its four-byte disp32 must fit inside the instruction and inside the pattern suffix from the result marker. Otherwise the rung authorizes a target from bytes its evidence never witnessed. Trailing instruction bytes can extend beyond the pattern, because the resolver snapshots them privately during the guarded sweep. The instruction cannot exceed the x86-64 maximum of 15 bytes.
+
+A `code_operand` record accepts `byte_width = 0` to preserve the decoded value, or 1 through 8 to narrow a non-RIP constant's low bytes and sign-extend. 9 through 255 is `MalformedLine` in a file and `InvalidArg` at compile, adopt, or checked-serialization boundaries. RIP-relative memory operands still resolve to an absolute target without narrowing.
+
+A `manual` record must carry `manual_value`, and `manual_value = 0` is accepted when explicit.
+
+Binding compilation rejects these values:
+
+- an invalid binding kind,
+- an empty pointer chain,
+- a chain width outside 1/2/4/8 bytes,
+- a general or XMM register outside the captured register file,
+- a VMT index outside 0..4095.
+
+It also rejects any non-default value in a field the declared binding kind never reads (an inert edit folds into the drift fingerprint yet never serializes). The parser applies the same scoping to keys. A binding key beside a kind that never reads it, a `walk_back` on a `rip_relative` rung, or a decode offset on a `direct` rung is `MalformedLine`. A `direct` rung legitimately omits decode keys.
+
+`Signature::compile` also rejects empty required text evidence on a record or on an `rtti_vtable` or `string_xref` rung. The `SignatureRecord::xref_encoding` contract defines the `Utf16le` validity rule and its errors. Resolution converts that text (see [Anchors](anchors.md)). The `Utf8` route remains byte-transparent.
+
+A post-resolve `validator` cannot be serialized, but `SignatureRecord` carries the validator fields for programmatic use and threads them through `compile` and `adopt`.
 
 ### Casing and naming conventions
 
@@ -76,7 +96,7 @@ The reserved keys (`kind`, `binding`, `pattern`, ...) and the `manifest` / `sig.
 
 A key the parser never reads for its section also fails closed (`MalformedLine`). That covers a wholly-unknown key, or an evidence key inert for the record's kind (`xref_text` on a `vtable_identity` record, a `walk_back` on a non-`direct` rung, a binding sub-key for the wrong `binding`). Such a key keeps no state and vanishes on the next `save`, so a silent ignore of it lets a hand-edited file drift from what DetourModKit acts on. The `manifest::parse` contract also covers raw key-line errors. A dropped separator can silently restore its in-code default. Rejection keeps the file and the resolved contract in agreement.
 
-A section other than `[manifest]` or a `sig.`-prefixed section fails the same way (`MalformedLine`), and so does a key line before the first section header. Neither holds state that `parse` reads.
+A section other than `[manifest]` or a `sig.`-prefixed section fails the same way (`MalformedLine`), and so does a key line before the first section header. Neither holds state that `parse` reads. A rung under a record whose kind is not `rip_global` or `code_operand` also fails as `MalformedLine`, because no resolver reads it.
 
 The manifest is a separate file from the settings INI that a mod loads through `config.hpp`, whose keys are the mod author's own vocabulary. By convention its name is `<Mod>.signatures.ini`, but `manifest::load` accepts any path.
 
@@ -175,10 +195,12 @@ Before a read of a `Binding` field, check that `binding->kind` is the kind that 
 
 ## Author side: capture the fingerprints once
 
-Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text, see [Anchor fingerprints](anchors.md#anchor-fingerprints)). It also folds the consumer binding, record label, and module scope, so a retargeted or relabeled record drifts even when its locate evidence is untouched. `recapture_fingerprint()` adopts the live value as the trusted baseline.
+Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text, see [Anchor fingerprints](anchors.md#anchor-fingerprints)). It also folds the consumer binding, record label, and module scope, so a retargeted or relabeled record drifts even when its locate evidence is untouched. `recapture_fingerprint()` makes the live value the trusted baseline.
+
+When `overlay` adopts a `rip_global` or `code_operand` default, its record holds each candidate as a rung. A byte rung holds its pattern in canonical AOB text, and a text rung holds its mangled name or string. The saved record reloads as the same candidates with the same fingerprint.
 
 ```cpp
-// From a known-good build: adopt each live fingerprint, then serialize the records.
+// From a known-good build: capture each live fingerprint, then save the records.
 for (auto &sig : sigs)
     sig.recapture_fingerprint();
 
@@ -193,9 +215,11 @@ if (auto saved = mf::save("MyMod.signatures.ini",
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 
-`recapture_fingerprint()` adopts the declaration baseline only. A manifest that authorizes writes needs `recapture()` instead, which also adopts the image and content baselines. See [Reading versus writing](#reading-versus-writing).
+`recapture_fingerprint()` captures the declaration baseline only. A manifest that authorizes writes needs `recapture()` instead, which also captures the image and content baselines. See [Reading versus writing](#reading-versus-writing).
 
-`save` emits the canonical form of every record. Hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path (unit tests, an embedded default), `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`. `serialize_checked` returns a `Result<std::string>`, validates the whole manifest, and refuses anything that cannot round-trip before it emits a byte.
+`save` emits the canonical form of every record. Hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path (unit tests, an embedded default), `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`.
+
+`serialize_checked` returns a `Result<std::string>` and validates the whole manifest before it emits a byte. A record that `Signature::compile` rejects fails with the code that `compile` returns, and a record over a `ManifestLimits` cap fails with `SizeTooLarge`. A manifest that fails several checks returns the code of the first failed check. One rejected record fails the whole save and leaves the file unchanged.
 
 ## Repair side: after a game update
 
@@ -288,7 +312,7 @@ They answer different questions, and neither covers for the other:
 
 Only a byte-signature rung witnesses a span. An RTTI, export, string-xref, or `Manual` entry resolves through a structure rather than a literal run, so it carries no content baseline and cannot be trusted for mutation under the strict preset. `scan::MAX_MUTATION_WITNESS_BYTES` (256) bounds the capture. A longer winning span is still perfectly valid for read-only resolution, but it reports `truncated` and carries no bytes. That is deliberate. A stored prefix compares equal to a prefix of the live span, and a prefix match must not authorize a write on partial evidence.
 
-Capture all three baselines with `Signature::recapture(scope)`, which re-resolves in the scope the gate will use and adopts the fingerprint, image identity, and winning bytes together. It computes every baseline before it stores any, so a failure leaves the record exactly as it was rather than a gate of one build's content against another build's identity. It returns `ErrorCode::NoMatch` when the signature does not resolve and `ErrorCode::UnexpectedShape` when the rung witnesses no usable content span.
+Capture all three baselines with `Signature::recapture(scope)`. It re-resolves in the scope that the gate will use and captures the fingerprint, image identity, and winning bytes together. It computes every baseline before it stores any. A failure therefore leaves the record unchanged, never a gate of one build's content against another build's identity. It returns `ErrorCode::NoMatch` when the signature does not resolve and `ErrorCode::UnexpectedShape` when the rung witnesses no usable content span.
 
 ```cpp
 std::vector<mf::SignatureRecord> recaptured;
@@ -297,7 +321,7 @@ for (mf::Signature &sig : sigs)
 {
     if (const auto captured = sig.recapture(dmk::Region::host()); !captured)
     {
-        // Read-only entries (RTTI, export, string-xref, Manual) land here and simply carry no mutation baseline.
+        // Read-only entries (RTTI, export, string-xref, code-operand, Manual) land here and carry no mutation baseline.
         log().warning("no mutation baseline for {}: {}", sig.label(), captured.error().message());
     }
     recaptured.push_back(sig.record());
