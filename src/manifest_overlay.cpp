@@ -17,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <span>
 #include <string>
 #include <string_view>
@@ -70,9 +71,17 @@ namespace DetourModKit::manifest
                 );
             }
             case scan::Mode::RttiVtable:
+                if (spec.mangled.empty())
+                {
+                    return fail(ErrorCode::InvalidArg, "manifest::compile");
+                }
                 return scan::Candidate::rtti_vtable(spec.name, spec.mangled);
             case scan::Mode::StringXref:
             {
+                if (spec.string_text.empty())
+                {
+                    return fail(ErrorCode::InvalidArg, "manifest::compile");
+                }
                 const scan::StringRefQuery query{
                     .text = spec.string_text,
                     .encoding = spec.string_encoding,
@@ -84,6 +93,85 @@ namespace DetourModKit::manifest
             }
             }
             return fail(ErrorCode::BadPattern, "manifest::compile");
+        }
+
+        // Writes a compiled pattern as canonical AOB text that detail::parse_pattern reads back into the same buffer.
+        // parse gives each pair of spellings one buffer. So a jump renders before a marker at the same position, and
+        // a marker at position 0 renders as none.
+        [[nodiscard]] std::string render_pattern(const scan::Pattern &pattern)
+        {
+            constexpr std::string_view hex_digits = "0123456789ABCDEF";
+            const DetourModKit::detail::PatternBuffer &buffer = DetourModKit::detail::pattern_buffer(pattern);
+            std::string text;
+            const auto append_token = [&text](std::string_view token)
+            {
+                if (!text.empty())
+                {
+                    text += ' ';
+                }
+                text += token;
+            };
+            std::size_t next_jump = 0;
+            for (std::size_t index = 0; index < buffer.length; ++index)
+            {
+                if (next_jump < buffer.jump_count && buffer.jumps[next_jump].position == index)
+                {
+                    const DetourModKit::detail::PatternJump &jump = buffer.jumps[next_jump];
+                    append_token(
+                        jump.min_skip == jump.max_skip ? std::format("[{}]", jump.min_skip)
+                                                       : std::format("[{}-{}]", jump.min_skip, jump.max_skip)
+                    );
+                    ++next_jump;
+                }
+                if (index != 0 && index == buffer.offset)
+                {
+                    append_token("|");
+                }
+                const auto value = std::to_integer<unsigned>(buffer.bytes[index]);
+                const auto mask = std::to_integer<unsigned>(buffer.mask[index]);
+                const std::array<char, 2> byte_token{
+                    (mask & 0xF0U) != 0 ? hex_digits[value >> 4] : '?',
+                    (mask & 0x0FU) != 0 ? hex_digits[value & 0x0FU] : '?',
+                };
+                append_token(std::string_view{byte_token.data(), byte_token.size()});
+            }
+            if (buffer.offset == buffer.length)
+            {
+                append_token("|");
+            }
+            return text;
+        }
+
+        // Writes one in-code candidate as the file rung that compile_rung turns back into the same candidate.
+        [[nodiscard]] CandidateSpec render_rung(const scan::Candidate &candidate)
+        {
+            CandidateSpec spec;
+            spec.name = candidate.name();
+            spec.mode = candidate.mode();
+            if (const scan::DirectPattern *direct = candidate.as_direct())
+            {
+                spec.pattern = render_pattern(direct->pattern);
+                spec.walk_back = direct->walk_back;
+            }
+            else if (const scan::RipRelativePattern *rip = candidate.as_rip_relative())
+            {
+                spec.pattern = render_pattern(rip->pattern);
+                spec.displacement_at = rip->displacement_at;
+                spec.instruction_length = rip->instruction_length;
+            }
+            else if (const scan::RttiVtable *rtti = candidate.as_rtti_vtable())
+            {
+                spec.mangled = rtti->mangled;
+            }
+            else if (const scan::StringXref *xref = candidate.as_string_xref())
+            {
+                spec.string_text = xref->text;
+                spec.string_encoding = xref->encoding;
+                spec.string_return = xref->return_mode;
+                spec.string_require_terminator = xref->require_terminator;
+                spec.string_broad_match = xref->broad_match;
+            }
+            return spec;
         }
 
         // Reports whether a binding can authorize a write against a resolved typed domain. MidHook needs an executable
@@ -256,9 +344,14 @@ namespace DetourModKit::manifest
         }
 
         std::vector<scan::Candidate> ladder;
-        const bool uses_ladder =
-            record.kind == anchor::AnchorKind::RipGlobal || record.kind == anchor::AnchorKind::CodeOperand;
-        if (uses_ladder)
+        if (!kind_uses_ladder(record.kind))
+        {
+            if (!record.ladder.empty())
+            {
+                return fail(ErrorCode::InvalidArg, "manifest::compile");
+            }
+        }
+        else
         {
             if (record.ladder.empty())
             {
@@ -329,8 +422,7 @@ namespace DetourModKit::manifest
                 return fail(ErrorCode::InvalidArg, "manifest::adopt");
             }
         }
-        if ((record.kind == anchor::AnchorKind::RipGlobal || record.kind == anchor::AnchorKind::CodeOperand) &&
-            source.site.empty())
+        if (kind_uses_ladder(record.kind) && source.site.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
@@ -347,8 +439,15 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
 
-        // An adopted Signature has no captured baseline. Its record.ladder source text stays empty because a compiled
-        // Pattern cannot recover source AOB text. The anchor view uses the copied candidates.
+        // An adopted Signature has no captured baseline. The anchor view uses the copied candidates.
+        if (kind_uses_ladder(record.kind))
+        {
+            record.ladder.reserve(source.site.size());
+            for (const scan::Candidate &candidate : source.site)
+            {
+                record.ladder.push_back(render_rung(candidate));
+            }
+        }
         std::vector<scan::Candidate> ladder(source.site.begin(), source.site.end());
         return Signature(std::move(record), std::move(ladder));
     }

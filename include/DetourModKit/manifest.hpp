@@ -188,13 +188,17 @@ namespace DetourModKit
         public:
             /**
              * @brief Compiles a file record into a resolvable signature.
-             * @return The Signature, BadPattern for a bad rung AOB, EmptyCandidates for a RipGlobal or CodeOperand
-             *         record with no ladder, or InvalidArg. InvalidArg means a Quorum, CallArgHome, or Unset kind,
-             *         empty required evidence, or an out-of-range persisted policy field such as CodeOperand
-             *         byte_width. It also means a label or string field that cannot round-trip. It also means a nonzero
-             *         image baseline with a zero size_of_image, or a truncated or over-long content baseline. It also
-             *         means Utf16le evidence that breaks the @ref SignatureRecord::xref_encoding rule, a @ref Binding
-             *         that breaks a field rule, or a RipRelative rung that @ref scan::Candidate::rip_relative rejects.
+             * @return The Signature, or one of these errors:
+             *         - BadPattern: a rung AOB that does not compile.
+             *         - EmptyCandidates: a RipGlobal or CodeOperand record with no ladder.
+             *         - InvalidArg: a Quorum, CallArgHome, or Unset kind, or empty required evidence of the record or
+             *           of an RttiVtable or StringXref rung. It also means a ladder on a kind other than RipGlobal or
+             *           CodeOperand, or an out-of-range persisted policy field such as CodeOperand byte_width. It also
+             *           means a label or string field that cannot round-trip, or a nonzero image baseline with a zero
+             *           size_of_image. It also means a truncated or over-long content baseline, Utf16le evidence that
+             *           breaks the @ref SignatureRecord::xref_encoding rule, or a @ref Binding that breaks a field
+             *           rule. It also means a RipRelative rung that @ref scan::Candidate::rip_relative rejects.
+             * @details A record that meets several conditions returns the code of the first failed check.
              * @note Setup/control-plane only.
              */
             [[nodiscard]] static Result<Signature> compile(SignatureRecord record);
@@ -204,8 +208,11 @@ namespace DetourModKit
              * @return The Signature, or InvalidArg for a @ref compile InvalidArg condition outside the ladder, or a
              *         RipGlobal or CodeOperand anchor without candidates. It checks each candidate only against the
              *         @ref SignatureRecord::xref_encoding rule.
-             * @details The adopted record has no ladder text, so @ref serialize_checked output omits the ladder. For a
-             *          RipGlobal or CodeOperand kind, a reload of that output fails @ref compile with EmptyCandidates.
+             * @details For a RipGlobal or CodeOperand kind, the record holds each candidate as a rung. A byte rung
+             *          holds its pattern in canonical AOB text, and a text rung holds its mangled name or string. A
+             *          @ref compile of that record rebuilds the same candidates and fingerprint, which
+             *          `ManifestAdoptTest.RenderedLadderCompilesToTheSameCandidates` proves. A candidate that
+             *          @ref compile rejects makes @ref serialize_checked reject the record.
              * @note Setup/control-plane only.
              */
             [[nodiscard]] static Result<Signature> adopt(const anchor::Anchor &source);
@@ -346,7 +353,8 @@ namespace DetourModKit
          *         - MalformedLine: an unparsable line, field, or enum token, a noncomment key line without `=`, or an
          *           empty key. It also covers a non-canonical section or key spelling, a section that is neither
          *           `[manifest]` nor `sig.`-prefixed, and a key line before the first header. It also covers a key that
-         *           its record's kind, binding kind, or rung mode does not read, and Utf16le evidence that breaks the
+         *           its record's kind, binding kind, or rung mode does not read. It also covers a rung under a kind
+         *           other than RipGlobal or CodeOperand, and Utf16le evidence that breaks the
          *           @ref SignatureRecord::xref_encoding rule.
          *         - ManifestIdentityCollision: a case-, whitespace-, or exactly-duplicated section, or a
          *           whitespace-variant or exactly-duplicated key. A miscased key returns MalformedLine instead.
@@ -362,14 +370,15 @@ namespace DetourModKit
         parse(std::string_view text, const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
-         * @brief Serializes a manifest to INI text that @ref parse reads back.
+         * @brief Serializes a manifest to INI text that @ref parse reads back and @ref Signature::compile accepts.
          * @return The text, OutOfMemory, or one of these errors:
-         *         - InvalidArg: a record that meets a @ref Signature::compile InvalidArg condition other than empty
-         *           required evidence.
+         *         - InvalidArg, EmptyCandidates, or BadPattern: a record that @ref Signature::compile rejects, with the
+         *           code that compile returns.
          *         - ManifestIdentityCollision: two record labels that fold to one section, or a label that folds into
          *           another record's rung section.
          *         - SizeTooLarge: encoded text, a record, rung, field, or aggregate that exceeds @p limits.
-         * @details It writes `revision` only if non-zero, and `schema` is always @ref SCHEMA_VERSION.
+         * @details A manifest that fails several checks returns the code of the first failed check. It writes
+         *          `revision` only if non-zero, and `schema` is always @ref SCHEMA_VERSION.
          * @note Setup/control-plane only.
          */
         [[nodiscard]] Result<std::string>

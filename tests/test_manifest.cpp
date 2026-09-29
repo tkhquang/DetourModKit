@@ -16,6 +16,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -786,6 +787,31 @@ TEST(ManifestParseTest, OrphanRungSectionIsMalformed)
     EXPECT_EQ(short_parent.error().code, dmk::ErrorCode::MalformedLine);
 }
 
+TEST(ManifestParseTest, RungUnderAKindWithoutALadderIsMalformed)
+{
+    // No resolver reads a rung under a flat kind, so the section fails closed like an unread key. The same rung under
+    // rip_global is the control.
+    constexpr std::string_view rung = "[sig.x.rung.0]\nmode = direct\npattern = 48 8B 05 ?? ?? ?? ??\n";
+    for (const std::string_view record :
+         {std::string_view{"kind = vtable_identity\nmangled = .?AVCameraManager@@\n"},
+          std::string_view{"kind = string_xref\nxref_text = camera\n"},
+          std::string_view{"kind = export_name\nexport_name = CreateFileW\n"},
+          std::string_view{"kind = manual\nmanual_value = 0x10\n"}})
+    {
+        const std::string head = std::format("[manifest]\nschema = 1\n[sig.x]\n{}", record);
+        const auto without_rung = mf::parse(head);
+        EXPECT_TRUE(without_rung.has_value()) << record;
+
+        const auto with_rung = mf::parse(head + std::string{rung});
+        ASSERT_FALSE(with_rung.has_value()) << record;
+        EXPECT_EQ(with_rung.error().code, dmk::ErrorCode::MalformedLine);
+    }
+
+    const auto control = mf::parse(std::format("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n{}", rung));
+    ASSERT_TRUE(control.has_value()) << control.error().message();
+    EXPECT_EQ(control->records[0].ladder.size(), 1u);
+}
+
 TEST(ManifestParseTest, GappedRungSectionIsMalformed)
 {
     const auto parsed =
@@ -833,6 +859,109 @@ TEST(ManifestCompileTest, EmptyLadderForByteKindFailsClosed)
     const auto compiled = mf::Signature::compile(std::move(record));
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::EmptyCandidates);
+}
+
+TEST(ManifestCompileTest, EmptyTextRungFailsClosed)
+{
+    // A text rung carries its evidence as a flat VtableIdentity or StringXref record does. So compile rejects an empty
+    // value at the rung as at the record. The non-empty twins are the control.
+    for (const sc::Mode mode : {sc::Mode::RttiVtable, sc::Mode::StringXref})
+    {
+        mf::SignatureRecord record;
+        record.label = "x";
+        record.kind = an::AnchorKind::CodeOperand;
+        mf::CandidateSpec rung;
+        rung.mode = mode;
+        record.ladder = {rung};
+
+        const auto empty = mf::Signature::compile(record);
+        ASSERT_FALSE(empty.has_value()) << static_cast<int>(mode);
+        EXPECT_EQ(empty.error().code, dmk::ErrorCode::InvalidArg);
+
+        if (mode == sc::Mode::RttiVtable)
+        {
+            record.ladder[0].mangled = ".?AVCameraManager@@";
+        }
+        else
+        {
+            record.ladder[0].string_text = "camera";
+        }
+        const auto filled = mf::Signature::compile(record);
+        EXPECT_TRUE(filled.has_value()) << static_cast<int>(mode) << ": " << filled.error().message();
+    }
+
+    // The file path: parse reads a blank rung value as empty, compile rejects it, and overlay keeps the default.
+    const sc::Candidate site[] = {sc::Candidate::direct("default", sc::Pattern::literal("48 8B 05 ?? ?? ?? ??"))};
+    an::Anchor anchor{};
+    anchor.label = "x";
+    anchor.kind = an::AnchorKind::RipGlobal;
+    anchor.site = site;
+    const std::array<an::Anchor, 1> defaults{anchor};
+    for (const std::string_view rung : {
+             std::string_view{"mode = rtti_vtable\nmangled = \n"},
+             std::string_view{"mode = string_xref\nstring_text = \n"},
+         })
+    {
+        const auto parsed =
+            mf::parse(std::format("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n[sig.x.rung.0]\n{}", rung));
+        ASSERT_TRUE(parsed.has_value()) << rung << ": " << parsed.error().message();
+        ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
+        EXPECT_TRUE(parsed->records[0].ladder[0].mangled.empty());
+        EXPECT_TRUE(parsed->records[0].ladder[0].string_text.empty());
+
+        const auto compiled = mf::Signature::compile(parsed->records[0]);
+        ASSERT_FALSE(compiled.has_value()) << rung;
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+
+        const auto merged = mf::overlay(defaults, parsed->records);
+        ASSERT_TRUE(merged.has_value());
+        ASSERT_EQ(merged->size(), 1u);
+        ASSERT_EQ((*merged)[0].record().ladder.size(), 1u);
+        EXPECT_EQ((*merged)[0].record().ladder[0].name, "default") << rung;
+    }
+}
+
+TEST(ManifestCompileTest, LadderOnAKindWithoutALadderFailsClosed)
+{
+    // Only RipGlobal and CodeOperand read a ladder. A rung on any other kind never resolves or folds into the
+    // fingerprint, so a compiled record must not carry it.
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::Direct;
+    rung.pattern = "48 8B 05 ?? ?? ?? ??";
+
+    std::vector<mf::SignatureRecord> records;
+    records.push_back(manual_record("manual", 0x10));
+    {
+        mf::SignatureRecord record;
+        record.label = "vtable";
+        record.kind = an::AnchorKind::VtableIdentity;
+        record.mangled = ".?AVCameraManager@@";
+        records.push_back(std::move(record));
+    }
+    {
+        mf::SignatureRecord record;
+        record.label = "string";
+        record.kind = an::AnchorKind::StringXref;
+        record.xref_text = "camera";
+        records.push_back(std::move(record));
+    }
+    {
+        mf::SignatureRecord record;
+        record.label = "export";
+        record.kind = an::AnchorKind::ExportName;
+        record.module = "kernel32.dll";
+        record.export_name = "CreateFileW";
+        records.push_back(std::move(record));
+    }
+    for (mf::SignatureRecord &record : records)
+    {
+        EXPECT_TRUE(mf::Signature::compile(record).has_value()) << record.label;
+
+        record.ladder = {rung};
+        const auto compiled = mf::Signature::compile(record);
+        ASSERT_FALSE(compiled.has_value()) << record.label;
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+    }
 }
 
 TEST(ManifestCompileTest, NonSerializableKindFailsClosed)
@@ -1149,9 +1278,41 @@ TEST(ManifestPageClassTest, CompileAndAdoptRejectInvalidPageClass)
     EXPECT_EQ(adopted.error().code, dmk::ErrorCode::InvalidArg);
 }
 
-// A RipRelative rung whose disp32 window falls outside an architecturally valid instruction is refused by parse
-// and compile; the checked encoder must refuse it too, or save() would truncate a last-known-good file and write
-// output its own load() rejects.
+namespace
+{
+    // Saves @p manifest over a sentinel file and requires the @p expected rejection with the sentinel intact.
+    [[nodiscard]] ::testing::AssertionResult save_rejects_and_keeps_file(
+        const std::filesystem::path &path,
+        const mf::Manifest &manifest,
+        dmk::ErrorCode expected
+    )
+    {
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << "last-known-good";
+        }
+        const auto saved = mf::save(path, manifest);
+        if (saved.has_value())
+        {
+            return ::testing::AssertionFailure() << "save accepted the manifest";
+        }
+        if (saved.error().code != expected)
+        {
+            return ::testing::AssertionFailure() << "save returned " << saved.error().message();
+        }
+        std::ifstream retained_stream(path, std::ios::binary);
+        const std::string retained{std::istreambuf_iterator<char>(retained_stream), std::istreambuf_iterator<char>()};
+        if (retained != "last-known-good")
+        {
+            return ::testing::AssertionFailure() << "save changed the file";
+        }
+        return ::testing::AssertionSuccess();
+    }
+} // namespace
+
+// parse and compile reject a RipRelative rung whose disp32 window falls outside an architecturally valid instruction.
+// The checked encoder rejects it too. Otherwise save() truncates a last-known-good file and writes output that its
+// own load() rejects.
 TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
 {
     mf::CandidateSpec rung;
@@ -1176,8 +1337,7 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 
-    // The gate covers every emitted rung, including a ladder rung on a kind compile never reads: the emitter writes
-    // the rung section regardless of record kind, and parse_rung gates it by the rung's own mode on reload.
+    // A rung on a kind that reads no ladder fails the ladder-kind check before the layout gate.
     mf::SignatureRecord stray = record;
     stray.label = "stray-rung";
     stray.kind = an::AnchorKind::ExportName;
@@ -1191,22 +1351,14 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     ASSERT_FALSE(stray_encoded.has_value());
     EXPECT_EQ(stray_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
-    ScopedManifestFile rejected_save("rip_layout_save");
-    {
-        std::ofstream out(rejected_save.path(), std::ios::binary);
-        out << "last-known-good";
-    }
-    const auto saved = mf::save(
+    const ScopedManifestFile rejected_save("rip_layout_save");
+    EXPECT_TRUE(save_rejects_and_keeps_file(
         rejected_save.path(),
         mf::Manifest{
             .records = {record},
-        }
-    );
-    ASSERT_FALSE(saved.has_value());
-    EXPECT_EQ(saved.error().code, dmk::ErrorCode::InvalidArg);
-    std::ifstream retained_stream(rejected_save.path(), std::ios::binary);
-    const std::string retained{std::istreambuf_iterator<char>(retained_stream), std::istreambuf_iterator<char>()};
-    EXPECT_EQ(retained, "last-known-good");
+        },
+        dmk::ErrorCode::InvalidArg
+    ));
 
     // Acceptance control: evidence through the disp32 is sufficient even when an immediate trails it.
     rung.pattern = "C7 05 ?? ?? ?? ??";
@@ -1240,6 +1392,176 @@ TEST(ManifestSerializeTest, RipRelativePatternMustSpanDisplacement)
     );
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// A RipGlobal or CodeOperand record with no rung parses, but compile rejects it and overlay keeps the in-code default.
+// save() must reject it before it truncates a last-known-good file.
+TEST(ManifestSerializeTest, LadderlessRipGlobalAndCodeOperandFailClosed)
+{
+    mf::SignatureRecord rip_global;
+    rip_global.label = "rip";
+    rip_global.kind = an::AnchorKind::RipGlobal;
+    mf::SignatureRecord code_operand = code_operand_record(4);
+    code_operand.ladder.clear();
+
+    const ScopedManifestFile file("ladderless");
+    for (const mf::SignatureRecord &record : {rip_global, code_operand})
+    {
+        const auto compiled = mf::Signature::compile(record);
+        ASSERT_FALSE(compiled.has_value()) << record.label;
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::EmptyCandidates);
+
+        const mf::Manifest manifest{
+            .records = {manual_record("kept", 0x10), record},
+        };
+        const auto encoded = mf::serialize_checked(manifest);
+        ASSERT_FALSE(encoded.has_value()) << record.label;
+        EXPECT_EQ(encoded.error().code, dmk::ErrorCode::EmptyCandidates);
+        EXPECT_TRUE(save_rejects_and_keeps_file(file.path(), manifest, dmk::ErrorCode::EmptyCandidates))
+            << record.label;
+    }
+
+    // Control: one rung makes each record compile, save, load, and compile again.
+    rip_global.ladder = code_operand_record(4).ladder;
+    code_operand.ladder = rip_global.ladder;
+    const mf::Manifest laddered{
+        .records = {rip_global, code_operand},
+    };
+    const auto saved = mf::save(file.path(), laddered);
+    ASSERT_TRUE(saved.has_value()) << saved.error().message();
+    const auto loaded = mf::load(file.path());
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
+    ASSERT_EQ(loaded->records.size(), 2u);
+    for (const mf::SignatureRecord &record : loaded->records)
+    {
+        EXPECT_EQ(record.ladder.size(), 1u) << record.label;
+        EXPECT_TRUE(mf::Signature::compile(record).has_value()) << record.label;
+    }
+}
+
+// serialize_checked rejects every record that Signature::compile rejects, with the code that compile returns. save()
+// therefore never writes a record that the next overlay cannot compile.
+TEST(ManifestSerializeTest, RecordsThatCompileRejectsFailClosed)
+{
+    struct RejectedRecord
+    {
+        mf::SignatureRecord record;
+        dmk::ErrorCode code;
+    };
+    const auto ladder_record = [](sc::Mode mode, std::string pattern)
+    {
+        mf::SignatureRecord record;
+        record.label = "ladder";
+        record.kind = an::AnchorKind::RipGlobal;
+        mf::CandidateSpec rung;
+        rung.mode = mode;
+        rung.pattern = std::move(pattern);
+        if (mode == sc::Mode::RipRelative)
+        {
+            rung.displacement_at = 3;
+            rung.instruction_length = 7;
+        }
+        record.ladder = {rung};
+        return record;
+    };
+
+    std::vector<RejectedRecord> rejected;
+    {
+        mf::SignatureRecord record;
+        record.label = "vtable";
+        record.kind = an::AnchorKind::VtableIdentity;
+        rejected.push_back({record, dmk::ErrorCode::InvalidArg});
+    }
+    {
+        mf::SignatureRecord record;
+        record.label = "string";
+        record.kind = an::AnchorKind::StringXref;
+        rejected.push_back({record, dmk::ErrorCode::InvalidArg});
+    }
+    {
+        mf::SignatureRecord record;
+        record.label = "export";
+        record.kind = an::AnchorKind::ExportName;
+        record.module = "kernel32.dll";
+        rejected.push_back({record, dmk::ErrorCode::InvalidArg});
+    }
+    rejected.push_back({ladder_record(sc::Mode::Direct, "ZZ QQ"), dmk::ErrorCode::BadPattern});
+    rejected.push_back({ladder_record(sc::Mode::RipRelative, "48 8B 05 ?? ?? ?? GG"), dmk::ErrorCode::BadPattern});
+    rejected.push_back({ladder_record(sc::Mode::RttiVtable, ""), dmk::ErrorCode::InvalidArg});
+    rejected.push_back({ladder_record(sc::Mode::StringXref, ""), dmk::ErrorCode::InvalidArg});
+    {
+        mf::SignatureRecord record = ladder_record(sc::Mode::Direct, "48 8B 05 ?? ?? ?? ??");
+        record.kind = an::AnchorKind::ExportName;
+        record.module = "kernel32.dll";
+        record.export_name = "CreateFileW";
+        rejected.push_back({record, dmk::ErrorCode::InvalidArg});
+    }
+    // A record with two faults takes the code of the first check that compile fails.
+    {
+        mf::SignatureRecord record = ladder_record(sc::Mode::RipRelative, "48 8B 05 ?? ?? ?? GG");
+        record.ladder[0].displacement_at = -1;
+        rejected.push_back({record, dmk::ErrorCode::BadPattern});
+    }
+    {
+        mf::SignatureRecord record = ladder_record(sc::Mode::Direct, "ZZ QQ");
+        record.ladder.push_back(ladder_record(sc::Mode::RttiVtable, "").ladder[0]);
+        rejected.push_back({record, dmk::ErrorCode::BadPattern});
+    }
+    {
+        mf::SignatureRecord record = ladder_record(sc::Mode::Direct, "48 8B 05 ?? ?? ?? ??");
+        mf::CandidateSpec rung = ladder_record(sc::Mode::RipRelative, "48 8B 05 ?? ?? ?? ??").ladder[0];
+        rung.instruction_length = 5;
+        record.ladder.push_back(rung);
+        rejected.push_back({record, dmk::ErrorCode::InvalidArg});
+    }
+
+    const ScopedManifestFile file("compile_parity");
+    for (std::size_t index = 0; index < rejected.size(); ++index)
+    {
+        const RejectedRecord &entry = rejected[index];
+        const auto compiled = mf::Signature::compile(entry.record);
+        ASSERT_FALSE(compiled.has_value()) << "case " << index;
+        EXPECT_EQ(compiled.error().code, entry.code) << "case " << index;
+
+        const mf::Manifest manifest{
+            .records = {entry.record},
+        };
+        const auto encoded = mf::serialize_checked(manifest);
+        ASSERT_FALSE(encoded.has_value()) << "case " << index;
+        EXPECT_EQ(encoded.error().code, entry.code) << "case " << index;
+        EXPECT_TRUE(save_rejects_and_keeps_file(file.path(), manifest, entry.code)) << "case " << index;
+    }
+
+    // The field-size caps run before compile, and compile runs before the label identity check.
+    mf::SignatureRecord oversized = ladder_record(sc::Mode::Direct, "ZZ QQ");
+    oversized.ladder[0].name = std::string(mf::ManifestLimits{}.max_field_bytes + 1, 'n');
+    const auto size_first = mf::serialize_checked(
+        mf::Manifest{
+            .records = {oversized},
+        }
+    );
+    ASSERT_FALSE(size_first.has_value());
+    EXPECT_EQ(size_first.error().code, dmk::ErrorCode::SizeTooLarge);
+
+    mf::SignatureRecord colliding;
+    colliding.label = "KEPT";
+    colliding.kind = an::AnchorKind::VtableIdentity;
+    const auto compile_first = mf::serialize_checked(
+        mf::Manifest{
+            .records = {manual_record("kept", 0x10), colliding},
+        }
+    );
+    ASSERT_FALSE(compile_first.has_value());
+    EXPECT_EQ(compile_first.error().code, dmk::ErrorCode::InvalidArg);
+
+    colliding.mangled = ".?AVCameraManager@@";
+    const auto collision = mf::serialize_checked(
+        mf::Manifest{
+            .records = {manual_record("kept", 0x10), colliding},
+        }
+    );
+    ASSERT_FALSE(collision.has_value());
+    EXPECT_EQ(collision.error().code, dmk::ErrorCode::ManifestIdentityCollision);
 }
 
 TEST(ManifestParseTest, RipRelativeRungMissingInstructionLengthIsMalformed)
@@ -1731,6 +2053,244 @@ TEST(ManifestAdoptTest, AdoptsByteKindAndOutlivesSourceLadder)
     const an::ResolvedAnchor resolved = adopted->resolve(page.range());
     EXPECT_EQ(resolved.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(0x200));
+}
+
+namespace
+{
+    [[nodiscard]] std::uint64_t next_pattern_seed(std::uint64_t &state) noexcept
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    }
+
+    // Builds a valid AOB text that exercises every token spelling, jump form, and marker position of the grammar.
+    [[nodiscard]] std::string random_pattern_text(std::uint64_t &state)
+    {
+        static constexpr std::string_view hex_digits = "0123456789abcdefABCDEF";
+        const auto digit = [&state]() { return hex_digits[next_pattern_seed(state) % hex_digits.size()]; };
+        const std::size_t byte_count = 1 + (next_pattern_seed(state) % dmk::detail::MAX_PATTERN_BYTES);
+        const std::size_t marker_at = next_pattern_seed(state) % (byte_count + 2);
+        std::size_t jump_count = 0;
+        std::string text;
+        for (std::size_t index = 0; index <= byte_count; ++index)
+        {
+            std::string jump;
+            if (index != 0 && index != byte_count && jump_count < dmk::detail::MAX_PATTERN_JUMPS &&
+                next_pattern_seed(state) % 6 == 0)
+            {
+                const std::size_t low = next_pattern_seed(state) % (dmk::detail::MAX_JUMP_SPAN + 1);
+                const std::size_t high = low + (next_pattern_seed(state) % (dmk::detail::MAX_JUMP_SPAN + 1 - low));
+                const bool exact = next_pattern_seed(state) % 2 == 0;
+                jump = exact ? std::format("[{}] ", low) : std::format("[{}-{}] ", low, high);
+                ++jump_count;
+            }
+            const std::string marker = index == marker_at ? "| " : "";
+            text += next_pattern_seed(state) % 2 == 0 ? jump + marker : marker + jump;
+            if (index == byte_count)
+            {
+                break;
+            }
+            switch (next_pattern_seed(state) % 5)
+            {
+            case 0:
+                text += {digit(), digit()};
+                break;
+            case 1:
+                text += "??";
+                break;
+            case 2:
+                text += "?";
+                break;
+            case 3:
+                text += {digit(), '?'};
+                break;
+            default:
+                text += {'?', digit()};
+                break;
+            }
+            text += ' ';
+        }
+        return text;
+    }
+
+    [[nodiscard]] ::testing::AssertionResult same_pattern_buffer(const sc::Pattern &expected, const sc::Pattern &actual)
+    {
+        const dmk::detail::PatternBuffer &left = dmk::detail::pattern_buffer(expected);
+        const dmk::detail::PatternBuffer &right = dmk::detail::pattern_buffer(actual);
+        if (left.length != right.length || left.offset != right.offset || left.anchor != right.anchor ||
+            left.jump_count != right.jump_count)
+        {
+            return ::testing::AssertionFailure() << "length, offset, anchor, or jump count differs";
+        }
+        for (std::size_t index = 0; index < left.length; ++index)
+        {
+            if (left.bytes[index] != right.bytes[index] || left.mask[index] != right.mask[index])
+            {
+                return ::testing::AssertionFailure() << "byte " << index << " differs";
+            }
+        }
+        for (std::size_t index = 0; index < left.jump_count; ++index)
+        {
+            if (left.jumps[index].position != right.jumps[index].position ||
+                left.jumps[index].min_skip != right.jumps[index].min_skip ||
+                left.jumps[index].max_skip != right.jumps[index].max_skip)
+            {
+                return ::testing::AssertionFailure() << "jump " << index << " differs";
+            }
+        }
+        return ::testing::AssertionSuccess();
+    }
+
+    // Returns the rung text that Signature::adopt records for a one-candidate RipGlobal anchor over @p pattern.
+    [[nodiscard]] std::string adopted_pattern_text(const sc::Pattern &pattern)
+    {
+        const sc::Candidate site[] = {sc::Candidate::direct("rung", pattern)};
+        an::Anchor anchor{};
+        anchor.label = "rendered";
+        anchor.kind = an::AnchorKind::RipGlobal;
+        anchor.site = site;
+        const auto adopted = mf::Signature::adopt(anchor);
+        if (!adopted.has_value() || adopted->record().ladder.size() != 1)
+        {
+            ADD_FAILURE() << "adopt did not record one rung";
+            return std::string{};
+        }
+        return adopted->record().ladder[0].pattern;
+    }
+} // namespace
+
+TEST(ManifestAdoptTest, RenderedLadderCompilesToTheSameCandidates)
+{
+    // Every valid pattern renders to a text that compiles into the same buffer, and that text is a fixed point.
+    std::vector<std::string> texts = {
+        "48",
+        "| 48",
+        "48 |",
+        "48 | [0] 8B",
+        "48 [0] | 8B",
+        "48 [2-5] | 8B",
+        "4? ?5 ? ?? de ad BE ef",
+        "48 [3-3] 8B",
+        "48 [256] 8B [0-256] C3 |",
+        "01 [1] 02 [2] 03 [3] 04 [4] 05 [5] 06 [6] 07 [7] 08 [8] 09",
+    };
+    std::uint64_t state = 0x9E3779B97F4A7C15ULL;
+    for (int i = 0; i < 10000; ++i)
+    {
+        texts.push_back(random_pattern_text(state));
+    }
+    for (const std::string &text : texts)
+    {
+        const auto original = sc::Pattern::compile(text);
+        ASSERT_TRUE(original.has_value()) << text;
+        const std::string rendered = adopted_pattern_text(*original);
+        const auto rebuilt = sc::Pattern::compile(rendered);
+        ASSERT_TRUE(rebuilt.has_value()) << text << " rendered as " << rendered;
+        ASSERT_TRUE(same_pattern_buffer(*original, *rebuilt)) << text << " rendered as " << rendered;
+        ASSERT_EQ(adopted_pattern_text(*rebuilt), rendered) << text;
+    }
+
+    // Every rung mode keeps its fields, and a saved record compiles back to the adopted fingerprint.
+    const sc::Candidate site[] = {
+        sc::Candidate::direct("direct", sc::Pattern::compile("48 8b 05 ? ?? ?? ?? | 4? ?5 [2-5] C3").value(), -3),
+        sc::Candidate::rip_relative("rip", sc::Pattern::compile("48 8B 05 ?? ?? ?? ??").value(), 3, 7),
+        sc::Candidate::rtti_vtable("rtti", ".?AVCameraManager@@"),
+        sc::Candidate::string_xref(
+            "xref",
+            sc::StringRefQuery{
+                .text = "camera",
+                .encoding = sc::StringEncoding::Utf16le,
+                .require_terminator = false,
+                .return_mode = sc::XrefReturn::EnclosingFunction,
+                .broad_match = true,
+            }
+        ),
+    };
+    for (const an::AnchorKind kind : {an::AnchorKind::RipGlobal, an::AnchorKind::CodeOperand})
+    {
+        an::Anchor anchor{};
+        anchor.label = "ladder";
+        anchor.kind = kind;
+        anchor.site = site;
+        anchor.operand_kind = sc::OperandKind::MemoryDisplacement;
+        anchor.operand_index = 1;
+        anchor.byte_width = 4;
+        const auto adopted = mf::Signature::adopt(anchor);
+        ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
+        const std::vector<mf::CandidateSpec> &ladder = adopted->record().ladder;
+        ASSERT_EQ(ladder.size(), std::size(site));
+        EXPECT_EQ(ladder[0].name, "direct");
+        EXPECT_EQ(ladder[0].mode, sc::Mode::Direct);
+        EXPECT_EQ(ladder[0].walk_back, -3);
+        EXPECT_EQ(ladder[1].mode, sc::Mode::RipRelative);
+        EXPECT_EQ(ladder[1].pattern, "48 8B 05 ?? ?? ?? ??");
+        EXPECT_EQ(ladder[1].displacement_at, 3);
+        EXPECT_EQ(ladder[1].instruction_length, 7u);
+        EXPECT_EQ(ladder[2].mode, sc::Mode::RttiVtable);
+        EXPECT_EQ(ladder[2].mangled, ".?AVCameraManager@@");
+        EXPECT_EQ(ladder[3].mode, sc::Mode::StringXref);
+        EXPECT_EQ(ladder[3].string_text, "camera");
+        EXPECT_EQ(ladder[3].string_encoding, sc::StringEncoding::Utf16le);
+        EXPECT_FALSE(ladder[3].string_require_terminator);
+        EXPECT_EQ(ladder[3].string_return, sc::XrefReturn::EnclosingFunction);
+        EXPECT_TRUE(ladder[3].string_broad_match);
+
+        const auto parsed = mf::parse(serialize_ok(
+            mf::Manifest{
+                .records = {adopted->record()},
+            }
+        ));
+        ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+        const auto compiled = mf::Signature::compile(parsed->records[0]);
+        ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+        EXPECT_EQ(compiled->current_fingerprint(), adopted->current_fingerprint());
+    }
+
+    // A kind that reads no ladder records no rung, so its record still compiles.
+    an::Anchor flat{};
+    flat.label = "export";
+    flat.kind = an::AnchorKind::ExportName;
+    flat.export_module = "kernel32.dll";
+    flat.export_name = "CreateFileW";
+    flat.site = site;
+    const auto adopted_flat = mf::Signature::adopt(flat);
+    ASSERT_TRUE(adopted_flat.has_value()) << adopted_flat.error().message();
+    EXPECT_TRUE(adopted_flat->record().ladder.empty());
+    EXPECT_TRUE(mf::Signature::compile(adopted_flat->record()).has_value());
+}
+
+TEST(ManifestAdoptTest, AdoptedCandidateThatCompileRejectsFailsTheSave)
+{
+    // adopt accepts an in-code default whose only candidate has empty text. Its record cannot compile, so a save that
+    // carries it fails whole and leaves the file unchanged.
+    const sc::Candidate site[] = {
+        sc::Candidate::rtti_vtable("rtti", ""),
+        sc::Candidate::string_xref("xref", std::string{}),
+    };
+    const ScopedManifestFile file("adopted_rejected");
+    for (const an::AnchorKind kind : {an::AnchorKind::RipGlobal, an::AnchorKind::CodeOperand})
+    {
+        for (const sc::Candidate &candidate : site)
+        {
+            an::Anchor anchor{};
+            anchor.label = "rejected";
+            anchor.kind = kind;
+            anchor.site = std::span<const sc::Candidate>{&candidate, 1};
+            const auto adopted = mf::Signature::adopt(anchor);
+            ASSERT_TRUE(adopted.has_value()) << candidate.name() << ": " << adopted.error().message();
+
+            const mf::Manifest manifest{
+                .records = {manual_record("kept", 0x10), adopted->record()},
+            };
+            const auto encoded = mf::serialize_checked(manifest);
+            ASSERT_FALSE(encoded.has_value()) << candidate.name();
+            EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
+            EXPECT_TRUE(save_rejects_and_keeps_file(file.path(), manifest, dmk::ErrorCode::InvalidArg))
+                << candidate.name();
+        }
+    }
 }
 
 TEST(ManifestAdoptTest, StrayExportModuleKeepsTheFallbackScope)
@@ -3225,10 +3785,10 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
     }
 
-    // Write side: the one validator guards every string-bearing record and rung field on compile, adopt, and checked
-    // serialization, so a framing-poisoned value cannot ride into the file through any single field the record or
-    // ladder loop would otherwise wave through. Each poison sits alone with the rest of the record clean, so dropping
-    // that one field's term regresses it to fail-open with a failing arm here.
+    // Write side: the one validator guards every string-bearing record and rung field on compile and checked
+    // serialization, and every record field on adopt. A framing-poisoned value therefore cannot ride into the file
+    // through any single field. Each poison sits alone with the rest of the record clean, so a dropped term for that
+    // one field fails its arm here.
     const auto record_rejects = [](const mf::SignatureRecord &rec, std::string_view what)
     {
         const auto compiled = mf::Signature::compile(rec);
@@ -3830,8 +4390,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_TRUE(retry.has_value()) << retry.error().message();
         EXPECT_EQ(retry->records.size(), 2u);
 
+        // The laddered record makes some budgets fail inside the Signature::compile check of each record.
         const mf::Manifest manifest{
-            .records = {manual_record("a", 1), manual_record("b", 2)},
+            .records = {manual_record("a", 1), manual_record("b", 2), code_operand_record(4)},
         };
         // Stabilize library-managed lazy initialization before measuring repeat-call allocations.
         ASSERT_TRUE(mf::serialize_checked(manifest).has_value());
@@ -3865,7 +4426,7 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_TRUE(encode_retry.has_value()) << encode_retry.error().message();
         const auto reparsed = mf::parse(*encode_retry);
         ASSERT_TRUE(reparsed.has_value()) << reparsed.error().message();
-        EXPECT_EQ(reparsed->records.size(), 2u);
+        EXPECT_EQ(reparsed->records.size(), 3u);
     }
 
     // A failed reload never replaces a caller's trusted generation, and the same input is retryable.
@@ -4634,6 +5195,58 @@ TEST(ManifestMutationEvidenceTest, RecaptureCapturesAllThreeBaselinesAndIsTruste
     const EvidenceGateOutcome gated = gate_evidence(record, mf::GatePolicy::mutation_strict(), 7);
     EXPECT_TRUE(gated.trusted.has_value());
     EXPECT_FALSE(gated.rejected.has_value());
+}
+
+TEST(ManifestMutationEvidenceTest, AdoptedDefaultSurvivesSaveAndReload)
+{
+    // The author recipe: with no file, overlay adopts the in-code default, recapture fills its baselines, and save
+    // writes the record. The next load must compile that record as an override that keeps every baseline.
+    fill_evidence_site();
+    const sc::Candidate site[] = {sc::Candidate::direct("evidence", sc::Pattern::compile(evidence_aob()).value())};
+    an::Anchor anchor{};
+    anchor.label = "data.evidence";
+    anchor.kind = an::AnchorKind::RipGlobal;
+    anchor.site = site;
+    const std::array<an::Anchor, 1> defaults{anchor};
+    const mf::ManifestHeader header{
+        .schema = mf::SCHEMA_VERSION,
+        .revision = 7,
+    };
+
+    auto adopted = mf::overlay(defaults, {});
+    ASSERT_TRUE(adopted.has_value());
+    ASSERT_EQ(adopted->size(), 1u);
+    const dmk::Result<void> captured = (*adopted)[0].recapture(dmk::Region::host());
+    ASSERT_TRUE(captured.has_value()) << captured.error().message();
+    const mf::SignatureRecord record = (*adopted)[0].record();
+    ASSERT_EQ(record.ladder.size(), 1u);
+
+    const ScopedManifestFile file("adopted_default");
+    const auto saved = mf::save(
+        file.path(),
+        mf::Manifest{
+            .header = header,
+            .records = {record},
+        }
+    );
+    ASSERT_TRUE(saved.has_value()) << saved.error().message();
+    const auto loaded = mf::load(file.path());
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
+    const auto merged = mf::overlay(defaults, loaded->records);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+
+    const mf::Signature &reloaded = (*merged)[0];
+    EXPECT_EQ(reloaded.record().ladder.size(), 1u);
+    EXPECT_EQ(reloaded.record().expected_fingerprint, record.expected_fingerprint);
+    EXPECT_EQ(reloaded.fingerprint_state(), mf::FingerprintState::Match);
+    EXPECT_EQ(reloaded.record().expected_image_identity, record.expected_image_identity);
+    EXPECT_EQ(reloaded.record().expected_winning_bytes, record.expected_winning_bytes);
+    const mf::GateResult gated =
+        mf::resolve_and_gate(*merged, header, 7, mf::GatePolicy::mutation_strict(), dmk::Region::host());
+    const mf::GatedSignature *trusted = gated.find("data.evidence");
+    ASSERT_NE(trusted, nullptr);
+    EXPECT_EQ(trusted->address.raw(), reinterpret_cast<std::uintptr_t>(g_evidence_site));
 }
 
 TEST(ManifestMutationEvidenceTest, EqualImageLayoutWithChangedContentIsSafeDisabled)
