@@ -196,4 +196,4 @@ for (auto *obj : candidate_objects)
 ## 9. Further reading
 
 - [`hook.hpp`](../../../include/DetourModKit/hook.hpp): `VmtOptions`, `vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`, `VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`, and `Options` for the inline-side equivalent.
-- `tests/test_hook.cpp`: the `HookVmt` tests pin the default-off behavior, the double-create guard, the pre-flight on `int3` slots, and the apply no-op. The `HookVmtMethod` tests pin per-method redirect + `original`, duplicate-slot refusal, single-method removal, drop-restores-method, and the apply-inherits-the-method-hook case.
+- `tests/test_hook_vmt.cpp`: the `HookVmt` tests pin the default-off behavior, the double-create guard, the pre-flight on `int3` slots, and the apply no-op. The `HookVmtMethod` tests pin the per-method redirect and `original`, the duplicate-slot refusal, the single-method removal, the drop-restores-method case, and the apply-inherits-the-method-hook case.

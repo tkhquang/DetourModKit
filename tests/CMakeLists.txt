@@ -143,11 +143,12 @@ if(DMK_BUILD_TESTS)
   list(SORT TEST_SOURCES)
 
   # psapi serves the cross-module hook tests; other Win32 dependencies propagate from DetourModKit.
+  # hook_fixture.cpp defines the hook targets that several hook suites share, once for the whole binary.
   dmk_add_gtest_proof(
     TARGET DetourModKit_tests
-    SOURCES ${TEST_SOURCES}
+    SOURCES ${TEST_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hook_fixture.cpp"
     LINK psapi
-    INCLUDE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src
+    INCLUDE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests
     SYSTEM_INCLUDE ${PROJECT_SOURCE_DIR}/external/simpleini ${DIRECTXMATH_INCLUDE_DIR}
     DEPENDS hook_target_lib dmk_rtti_generation_fixture
     LABELS "unit")

@@ -37,6 +37,10 @@ Class headers own each multi-lock order. These headers state the current orders:
 
 The subsystem notes describe the related concurrency models.
 
+## Paths without an automated proof
+
+Two paths have no automated proof: a clear of the `wButtons` of a physically connected pad, and the physical wheel routes in the real game. The `GamepadSuppressTest` cases and the `apply_xinput_suppress_for_test` assertions in the `xinput_*` lifecycle hosts verify the suppression mask on a synthetic state. Manual play tests cover the physical pad.
+
 ## Rules
 
 ### Test seams compile out of shipping builds
@@ -52,7 +56,12 @@ A raw host therefore owns the order structurally rather than repeats it at each 
 - A callback parked on another callback's flag never returns, so a join without the unblock wedges instead of fails.
 - `Input::shutdown()` reached from a binding callback hands its rundown to the process reaper and returns before the rundown is delivered. "The engine reads as stopped" is therefore not evidence that a callback cannot still run.
 
-Each affected host carries a bounded negative control that abandons a premise on purpose and asserts released, still-installed, stopped, then cleared. The control reads the seam from inside the parked callback, the only vantage point that observes the order rather than the outcome.
+Each affected host carries a bounded negative control that abandons a premise on purpose and asserts released, still-installed, stopped, then cleared. The control reads the seam from inside the parked callback, the only vantage point that observes the order rather than the outcome. These cases are the controls:
+
+- `InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing`
+- `InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing`
+- `InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing`
+- `Lifecycle.ControlThreadShutdownAbandonedPremiseRunsDownBeforeClearing`
 
 Prefer no seam when a concurrency-stress test, a `tests/fault` / `tests/lifecycle` proof, or a real- `LoadLibrary` /subprocess host can reach the behavior. The seams in `config.cpp`, `input_intercept.*`, and `session.cpp` are all gated. `scripts/check_no_test_seams.py` scans the shipped MinGW and MSVC archives in the release workflow and fails the release if a `*_for_test`, `*_test_hook`, `g_*_override`, or `g_*_probe` symbol survives. Review, not that gate, catches an injection point named outside those shapes, so prefer one of those shapes when you must add a seam.
 
@@ -64,7 +73,7 @@ A "must fault" test needs a committed `PAGE_NOACCESS` page held until teardown, 
 
 Fault-injection fixtures do NOT go in the `tests/test_*.cpp` glob. A source added there forces a `CONFIGURE_DEPENDS` reconfigure that rebuilds the main C++23 test target. Put them in `tests/fault/test_*.cpp`. `tests/fault/CMakeLists.txt` compiles them into the `fault_tests` proof target linked against the archive. `gtest_discover_tests` registers each case as its own ctest test under the `fault-proof` label with a real execution timeout. `CONFIGURE_DEPENDS` picks up a new fault TU without an entry in the monolithic target.
 
-Build and run the complete target set with `bash scripts/run_fault_tests.sh` (any configured tests-ON tree, MinGW or MSVC), or build the `dmk_fault_proof_hosts` aggregate and run `ctest -L fault-proof` directly. The aggregate in `tests/fault/CMakeLists.txt` is the single build-target owner, and each host registers on it beside its declaration.
+The [test coverage guide](../tests/README.md#run) owns the run commands. The `dmk_fault_proof_hosts` aggregate in `tests/fault/CMakeLists.txt` is the single build-target owner, and each host registers on it beside its declaration.
 
 `tests/fault/CMakeLists.txt` carries no toolchain gate. MSVC contains a fault in a frame-based `__try` / `__except` and MinGW x64 in the process-wide vectored handler. A gate around the directory leaves whichever mechanism it excludes unproven. Give the case a per-compiler arm instead, and state the expectation that each arm proves. MSVC's frame nesting is a structural property of SEH. MinGW's is the thread-local guard slot restored rather than cleared. A shared body with one expectation silently asserts only the MinGW mechanism.
 
@@ -72,7 +81,7 @@ A proof whose subject is an escaping fault (one the guard must NOT claim) cannot
 
 ### Lifecycle standalone fixtures live in tests/lifecycle/
 
-Lifecycle standalone fixtures do NOT go in the `tests/test_*.cpp` glob either. A fixture that needs a real loader transition (`LoadLibrary` / `FreeLibrary` reference-count behavior, `DLL_PROCESS_DETACH`) cannot run inside the monolithic GoogleTest process. Neither can a controlled static-teardown ordering, where one fixture replaces global `operator new` / `delete` for the whole process. Put it in `tests/lifecycle/`. `tests/lifecycle/CMakeLists.txt` builds the CMake-owned targets and registers each as a `lifecycle-proof` -labeled ctest whose verdict is the process exit code. The mod-shaped probe DLL links the archive. The loader host and the profiler use-after-free driver link no library, and that driver compiles `src/profiler.cpp` directly so its poisoning allocator governs the ring buffer. Build and run with `bash scripts/run_lifecycle_proofs.sh`, or build the `dmk_lifecycle_proof_hosts` aggregate and run `ctest -L lifecycle-proof` directly. The aggregate is the single build-target owner, and each host registers on it beside its declaration.
+Lifecycle standalone fixtures do NOT go in the `tests/test_*.cpp` glob either. A fixture that needs a real loader transition (`LoadLibrary` / `FreeLibrary` reference-count behavior, `DLL_PROCESS_DETACH`) cannot run inside the monolithic GoogleTest process. Neither can a controlled static-teardown ordering, where one fixture replaces global `operator new` / `delete` for the whole process. Put it in `tests/lifecycle/`. `tests/lifecycle/CMakeLists.txt` builds the CMake-owned targets and registers each as a `lifecycle-proof` -labeled ctest whose verdict is the process exit code. The mod-shaped probe DLL links the archive. The loader host and the profiler use-after-free driver link no library, and that driver compiles `src/profiler.cpp` directly so its poisoning allocator governs the ring buffer. The [test coverage guide](../tests/README.md#run) owns the run commands. The `dmk_lifecycle_proof_hosts` aggregate is the single build-target owner, and each host registers on it beside its declaration.
 
 A fixture that proves language, allocation, or OS behavior runs on both toolchains: static-destruction order, first-use OOM, and the `LoadLibrary` / `FreeLibrary` reference-count and `DLL_PROCESS_DETACH` proofs. Loader reference counting is an OS property, and the archive links into a SHARED target under both toolchains. `tests/lifecycle/CMakeLists.txt` therefore has no toolchain gate at all, and neither does `tests/fault/CMakeLists.txt`. A fixture whose subject is genuinely toolchain-specific (MinGW emulated-TLS behavior, for example) needs its own per-compiler arm or a separate counterpart. It never gets a gate that removes the case from the other toolchain.
 
@@ -120,6 +129,19 @@ Mark each inline or mid hook target that test code defines in its own image with
 
 The macro places the function in the private `.proof` code section. A toggle transaction temporarily removes execute access from the target page. If a backend handler or its helpers share that page, the handler can fault under its own lock and deadlock. An incremental MSVC link puts its jump table in the first code section, which can be `.proof`. `tests/CMakeLists.txt` therefore links each MSVC test target with `/INCREMENTAL:NO`. `Lifecycle.ProofSectionHoldsOnlyItsTargets` verifies that no other code precedes the targets in `.proof`.
 
+### A split suite shares one fixture header
+
+A GoogleTest suite whose cases span several files needs one fixture class. GoogleTest fails each case whose fixture class differs from the fixture class of the first case in its suite. A fixture class in an anonymous namespace is a different class in each file.
+
+- Define the fixture class of such a suite once in `tests/fixtures/<module>_fixture.hpp`, outside any anonymous namespace.
+- Put the helpers that several files of one module share in that header, in namespace `dmk_test::<module>_fixture`.
+- Bring that namespace into each file with a using-directive.
+- If several hook files patch one target, define that target once in `tests/fixtures/hook_fixture.cpp`. Declare it with `DMK_PROOF_TARGET` in `tests/fixtures/hook_fixture.hpp`.
+
+`hook_fixture.cpp` includes `hook_fixture.hpp` before it defines the targets. On MSVC, a `DMK_PROOF_TARGET` definition that follows a declaration without the macro encodes `.proof` in its decorated name. A caller in another file then does not link. One definition also gives every file the same target address.
+
+The per-suite table in [the test coverage guide](../tests/README.md) lists each file and the surface that it owns.
+
 ### CTest execution timeouts
 
 `CTestTimeoutControl` is the proof pointer. [The test coverage guide](../tests/README.md) owns the CTest timeout contract.
@@ -140,7 +162,11 @@ A `VmtHook` restores the object's vptr in its destructor. Declare the handle AFT
 
 A poll-loop `std::function` seam is installed only while the poller is stopped and cleared only after it is joined. `g_input_key_state_probe`, `g_input_post_stage_probe`, and `g_input_pre_dispatch_probe` are plain globals that the poll loop reads and calls every cycle with no synchronization. Assign them before `poller.start()`, and arm whatever phase the probe parks on through a separate atomic afterwards. Clear them only once the poll thread is joined.
 
-The probe's captures are the case's barrier atomics. Declare those BEFORE the poller and the cleanup owner AFTER it. Every exit path then opens any parked dispatch, joins, and only then destroys the probe. Exit paths include a fatal `ASSERT_`, a premise failure, and the end of the case. A mistake here writes over a `std::function` that the poll loop is executing and frees a parked frame's barriers. That surfaces as an intermittent native access violation, not as a failed expectation. The GoogleTest launcher renders it as a CMake diagnostic that must never be normalized as a CMake-only failure. `tests/test_input.cpp`'s `StagedProbeCleanup` is the shared owner and `InputLifecycleProof.StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures` is its control.
+Declare the barrier atomics that the probe captures BEFORE the poller. Declare the cleanup owner AFTER the poller.
+
+Every exit path then opens any parked dispatch, joins, and only then destroys the probe. Exit paths include a fatal `ASSERT_`, a premise failure, and the end of the case. A wrong order writes over a `std::function` while the poll loop runs it, and frees the barriers of a parked frame. The result is an intermittent native access violation instead of a failed expectation. CTest reports that access violation as `***Exception: SegFault`. `StagedProbeCleanup` in `tests/test_input_lifecycle.cpp` is the shared owner, and `InputLifecycleProof.StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures` is its control.
+
+Do not treat a `SegFault` status of such a case as an infrastructure failure. A wrong cleanup order can produce that status.
 
 ### No fatal GoogleTest assertion off the main thread
 

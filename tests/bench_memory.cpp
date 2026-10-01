@@ -80,7 +80,7 @@ namespace
     // below stay readable.
     // ANTI-PATTERN: these wrappers resurrect the removed (pointer, size) call shape so the bench bodies did not have to
     // change. Treat them as a temporary scaffold: rewrite the call sites to build a Region directly and remove these.
-    // (The same scaffold exists in test_memory.cpp.)
+    // (The same scaffold exists in fixtures/memory_fixture.hpp.)
     inline bool is_readable(const void *p, std::size_t n) noexcept
     {
         return Mem::is_readable(Region{Address{p}, n});

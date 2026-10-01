@@ -6,6 +6,8 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 
+#include "fixtures/proof_section.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -15,15 +17,9 @@
 #include <optional>
 #include <utility>
 
-#if defined(_MSC_VER)
-#define DMK_PROOF_NOINLINE __declspec(noinline)
-#else
-#define DMK_PROOF_NOINLINE __attribute__((noinline))
-#endif
-
 // The seed type keeps external linkage and dispatches through an out-of-line helper. An internal-linkage hierarchy
 // with one implementation lets a Release build devirtualize the call, which never reads the cloned slot and makes the
-// proof vacuous. tests/test_hook.cpp uses this same shape for the same reason.
+// proof vacuous. tests/fixtures/hook_fixture.hpp uses this same shape for the same reason.
 class LateInterface
 {
 public:
@@ -37,7 +33,7 @@ public:
     int transform(int x) override { return x * 2; }
 };
 
-DMK_PROOF_NOINLINE int call_unfolded(LateInterface *object, int value)
+DMK_TEST_NOINLINE int call_unfolded(LateInterface *object, int value)
 {
     return object->transform(value);
 }

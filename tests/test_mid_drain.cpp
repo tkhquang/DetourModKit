@@ -26,6 +26,7 @@
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
+using dmk_test::call_unfolded;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
 namespace DetourModKit::detail
@@ -41,14 +42,6 @@ namespace DetourModKit::detail
 
 namespace
 {
-    // This indirection forces the call to reach the patched entry when the optimizer sees the callee.
-    // It gives Release and Debug the same proof.
-    template <class Fn, class... Args> auto call_unfolded(Fn *fn, Args... args)
-    {
-        Fn *const volatile indirect = fn;
-        return indirect(args...);
-    }
-
     DMK_PROOF_TARGET int callback_expiry_site(int a)
     {
         volatile int result = a;
