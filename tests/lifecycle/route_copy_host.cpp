@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <span>
 #include <string_view>
 #include <thread>
 
@@ -127,94 +128,167 @@ namespace
         return 0;
     }
 
-    // The transaction window covers the page that holds the coordinator's own wait stub. The page target is an unused
-    // export on that page. The export target is the wait stub itself, so its teardown waits through its own route.
-    // A fresh teardown thread first touches the participant's emulated TLS during that teardown.
-    int toggle_on_wait_stub(Participant &participant, bool hook_wait_export, bool fresh_thread)
+    // Fails the process unless destroyed within WAIT_MS. The watch thread waits and terminates through ntdll exports.
+    // An open transaction window or a closed route parks each caller of a kernel32 export on the target page.
+    class Watchdog
+    {
+    public:
+        explicit Watchdog(const char *failure) : m_failure{failure}
+        {
+            const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            m_wait =
+                reinterpret_cast<NtWaitFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "NtWaitForSingleObject")));
+            m_terminate =
+                reinterpret_cast<NtTerminateFn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "NtTerminateProcess")));
+            m_thread = std::thread([this]() -> void { watch(); });
+            WaitForSingleObject(m_started, WAIT_MS);
+        }
+
+        ~Watchdog() noexcept
+        {
+            SetEvent(m_disarmed);
+            m_thread.join();
+            CloseHandle(m_started);
+            CloseHandle(m_disarmed);
+        }
+
+        Watchdog(const Watchdog &) = delete;
+        Watchdog &operator=(const Watchdog &) = delete;
+
+    private:
+        using NtWaitFn = LONG(NTAPI *)(HANDLE, BOOLEAN, PLARGE_INTEGER);
+        using NtTerminateFn = LONG(NTAPI *)(HANDLE, LONG);
+
+        void watch() noexcept
+        {
+            constexpr LONGLONG intervals_per_millisecond = 10'000;
+            SetEvent(m_started);
+            LARGE_INTEGER timeout{};
+            timeout.QuadPart = -static_cast<LONGLONG>(WAIT_MS) * intervals_per_millisecond;
+            if (m_wait(m_disarmed, FALSE, &timeout) != static_cast<LONG>(STATUS_TIMEOUT))
+                return;
+            fail(m_failure);
+            std::fflush(stderr);
+            m_terminate(m_process, 1);
+        }
+
+        const char *m_failure;
+        HANDLE m_process{GetCurrentProcess()};
+        HANDLE m_started{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        HANDLE m_disarmed{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        NtWaitFn m_wait{};
+        NtTerminateFn m_terminate{};
+        std::thread m_thread;
+    };
+
+    constexpr std::array<const char *, 1> WAIT_EXPORT{"WaitForSingleObject"};
+    constexpr std::array<const char *, 6> WAIT_STUB_NEIGHBORS{
+        "CreateSemaphoreW",
+        "OpenSemaphoreW",
+        "ReleaseSemaphore",
+        "OpenMutexW",
+        "OpenEventW",
+        "ResetEvent",
+    };
+    // MinGW emulated TLS calls these exports on each access.
+    constexpr std::array<const char *, 3> TLS_LOOKUP_EXPORTS{
+        "GetLastError",
+        "SetLastError",
+        "TlsGetValue",
+    };
+    constexpr std::array<const char *, 4> TLS_LOOKUP_NEIGHBORS{
+        "GetExitCodeProcess",
+        "SortGetHandle",
+        "Process32Next",
+        "Process32NextW",
+    };
+
+    // Hooks the first candidate kernel32 export that shares a page with an anchor export, then tears it down. Each
+    // transaction window then covers the anchor code.
+    int toggle_on_anchor_page(
+        Participant &participant,
+        std::span<const char *const> anchors,
+        std::span<const char *const> candidates,
+        bool call_wait,
+        bool fresh_thread
+    )
     {
         const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
         SYSTEM_INFO system{};
         GetSystemInfo(&system);
         const auto page_mask = ~static_cast<std::uintptr_t>(system.dwPageSize - 1);
-        const auto page_of = [kernel, page_mask](const char *name) noexcept -> std::uintptr_t
-        {
-            return reinterpret_cast<std::uintptr_t>(reinterpret_cast<void *>(GetProcAddress(kernel, name))) & page_mask;
-        };
-        const std::uintptr_t stub_page = page_of("WaitForSingleObject");
+        const auto address_of = [kernel](const char *name) noexcept -> unsigned char *
+        { return reinterpret_cast<unsigned char *>(reinterpret_cast<void *>(GetProcAddress(kernel, name))); };
+        const auto page_of = [page_mask](const void *address) noexcept -> std::uintptr_t
+        { return reinterpret_cast<std::uintptr_t>(address) & page_mask; };
+        const char *anchor = nullptr;
         unsigned char *target = nullptr;
-        for (const char *name :
-             {"WaitForSingleObject",
-              "CreateSemaphoreW",
-              "OpenSemaphoreW",
-              "ReleaseSemaphore",
-              "OpenMutexW",
-              "OpenEventW",
-              "ResetEvent"})
+        for (const char *anchor_name : anchors)
         {
-            if ((std::string_view{name} == "WaitForSingleObject") == hook_wait_export && page_of(name) == stub_page)
+            for (const char *candidate : candidates)
             {
-                target = reinterpret_cast<unsigned char *>(reinterpret_cast<void *>(GetProcAddress(kernel, name)));
-                break;
+                if (target == nullptr && address_of(anchor_name) != nullptr && address_of(candidate) != nullptr &&
+                    page_of(address_of(candidate)) == page_of(address_of(anchor_name)))
+                {
+                    anchor = anchor_name;
+                    target = address_of(candidate);
+                }
             }
         }
         if (target == nullptr)
         {
-            std::fprintf(stderr, "SKIP: no unused export shares the wait stub page.\n");
+            std::fprintf(stderr, "SKIP: no listed export shares a page with a listed anchor.\n");
             return 77;
         }
-        const auto last_page = (reinterpret_cast<std::uintptr_t>(target) + 15) & page_mask;
+        const auto first_page = page_of(target);
+        const auto last_page = page_of(target + 15);
         for (const char *name : {"VirtualProtect", "FlushInstructionCache", "GetCurrentProcess"})
         {
-            if (page_of(name) == stub_page || page_of(name) == last_page)
+            if (page_of(address_of(name)) == first_page || page_of(address_of(name)) == last_page)
             {
                 std::fprintf(stderr, "SKIP: %s shares the target window, so the backend refuses it.\n", name);
                 return 77;
             }
         }
+        std::fprintf(stderr, "The target shares the page of %s.\n", anchor);
         std::array<unsigned char, 16> original{};
         std::memcpy(original.data(), target, original.size());
-        if (participant.run(Command::Install, target) == 0)
-            return fail("a hook on the coordinator wait stub did not install");
-        if (hook_wait_export)
-        {
-            using WaitFn = DWORD(WINAPI *)(HANDLE, DWORD);
-            WaitFn volatile wait = reinterpret_cast<WaitFn>(reinterpret_cast<void *>(target));
-            const HANDLE signaled = CreateEventW(nullptr, TRUE, TRUE, nullptr);
-            const auto hits = participant.run(Command::Hits);
-            const bool fired =
-                signaled != nullptr && wait(signaled, 0) == WAIT_OBJECT_0 && participant.run(Command::Hits) > hits;
-            if (signaled != nullptr)
-                CloseHandle(signaled);
-            if (!fired)
-                return fail("the hook on the coordinator wait stub did not execute");
-        }
-        // A teardown parked in its own closed route or transaction window parks every caller of the hooked export, so
-        // the watchdog polls.
-        std::atomic<bool> finished{false};
-        std::thread watchdog(
-            [&finished]() -> void
-            {
-                const auto deadline = GetTickCount64() + WAIT_MS;
-                while (!finished && GetTickCount64() < deadline)
-                    Sleep(1);
-                if (!finished)
-                {
-                    (void)fail("the teardown parked on the page of the coordinator wait stub");
-                    std::fflush(stderr);
-                    TerminateProcess(GetCurrentProcess(), 1);
-                }
-            }
-        );
         std::uintptr_t leaks = 0;
-        if (fresh_thread)
-            std::thread([&participant, &leaks]() -> void { leaks = participant.run(Command::Reset); }).join();
-        else
-            leaks = participant.run(Command::Reset);
-        finished = true;
-        watchdog.join();
+        {
+            const Watchdog watchdog{"a transaction or route parked on the target page"};
+            if (participant.run(Command::Install, target) == 0)
+                return fail("a hook on the target export did not install");
+            if (call_wait)
+            {
+                using WaitFn = DWORD(WINAPI *)(HANDLE, DWORD);
+                WaitFn volatile wait = reinterpret_cast<WaitFn>(reinterpret_cast<void *>(target));
+                const HANDLE signaled = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+                const auto hits = participant.run(Command::Hits);
+                const bool fired =
+                    signaled != nullptr && wait(signaled, 0) == WAIT_OBJECT_0 && participant.run(Command::Hits) > hits;
+                if (signaled != nullptr)
+                    CloseHandle(signaled);
+                if (!fired)
+                    return fail("the hook on the wait export did not execute");
+            }
+            if (fresh_thread)
+                std::thread([&participant, &leaks]() -> void { leaks = participant.run(Command::Reset); }).join();
+            else
+                leaks = participant.run(Command::Reset);
+        }
         if (leaks != 0 || std::memcmp(original.data(), target, original.size()) != 0)
-            return fail("a hook on the coordinator wait stub did not toggle and restore");
+            return fail("a hook on the target export did not toggle and restore");
         return 0;
+    }
+
+    // The transaction window covers the page that holds the coordinator's own wait stub. The page target is an unused
+    // export on that page. The export target is the wait stub itself, so its teardown waits through its own route.
+    // A fresh teardown thread first touches the participant's emulated TLS during that teardown.
+    int toggle_on_wait_stub(Participant &participant, bool hook_wait_export, bool fresh_thread)
+    {
+        return hook_wait_export
+                   ? toggle_on_anchor_page(participant, WAIT_EXPORT, WAIT_EXPORT, true, fresh_thread)
+                   : toggle_on_anchor_page(participant, WAIT_EXPORT, WAIT_STUB_NEIGHBORS, false, fresh_thread);
     }
 
     // The second participant makes its first coordinator connection while the first participant holds it.
@@ -418,7 +492,7 @@ int main(int argc, char **argv)
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
         scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "stale-layer-conflict" &&
         scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
-        scenario != "teardown-retry" && scenario != "teardown-retry-armed")
+        scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -450,6 +524,8 @@ int main(int argc, char **argv)
         return serialize(first, second, false);
     if (scenario == "stub-page" || scenario == "wait-export" || scenario == "stub-thread")
         return toggle_on_wait_stub(first, scenario == "wait-export", scenario == "stub-thread");
+    if (scenario == "tls-page")
+        return toggle_on_anchor_page(first, TLS_LOOKUP_EXPORTS, TLS_LOOKUP_NEIGHBORS, false, false);
     if (scenario == "capacity")
     {
         if (first.run(Command::Fill) != 512 || second.run(Command::Install, page) != 0)

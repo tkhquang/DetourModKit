@@ -65,6 +65,14 @@ def test_backend_retention_tls_import_is_rejected() -> None:
     expect_offenders("libsafetyhook.a:inline_hook.cpp.obj:    U __emutls_get_address\n", 1)
 
 
+def test_backend_trap_transaction_tls_is_rejected() -> None:
+    expect_offenders(
+        "libsafetyhook.a:os.windows.cpp.obj:    U __emutls_get_address\n"
+        "libsafetyhook.a:os.windows.cpp.obj:0000 D __emutls_v._ZN10safetyhook31g_instruction_cache_flush_traceE\n",
+        2,
+    )
+
+
 def test_unrelated_tls_is_out_of_scope() -> None:
     expect_offenders("lib.a:worker.cpp.obj:0000 D __emutls_v._ZN6worker5depthE\n", 0)
 

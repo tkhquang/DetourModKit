@@ -187,7 +187,7 @@ That primitive is not infallible either. An index past the TEB's inline slots is
 
 Either way the failure needs an allocation-free identity to fall back on. Use `GetCurrentThreadId` and not `std::this_thread::get_id`, whose winpthreads `pthread_self` path allocates on a foreign thread.
 
-This rule governs the mechanism, not the spelling, and the spellings are not interchangeable here. On the toolchain the presets select (`x86_64-w64-mingw32`, thread model posix), function-local `thread_local`, namespace-scope `thread_local`, and `__thread` all lower to emutls. `__declspec(thread)` is ignored with only a `-Wattributes` warning and silently degrades to a plain shared global. Source review therefore cannot establish compliance. Prove it from the emitted symbols, per compiler: `scripts/check_emit_tls.py` scans the dispatcher, input-delivery marker, and routed-retention backend objects.
+This rule governs the mechanism, not the spelling, and the spellings are not interchangeable here. On the toolchain the presets select (`x86_64-w64-mingw32`, thread model posix), function-local `thread_local`, namespace-scope `thread_local`, and `__thread` all lower to emutls. `__declspec(thread)` is ignored with only a `-Wattributes` warning and silently degrades to a plain shared global. Source review therefore cannot establish compliance. Prove it from the emitted symbols, per compiler: `scripts/check_emit_tls.py` scans the objects that its docstring names.
 
 ### [B-92]
 
