@@ -541,6 +541,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub
     Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait
     Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread
+    Lifecycle.RouteCopiesToggleOnTlsLookupPage
     Lifecycle.RouteCopiesRejectUncoordinatedReclamation
     Lifecycle.RouteCopiesRejectIncompatibleCoordination
     Lifecycle.RouteCopiesRetainAfterCoordinatorTimeout

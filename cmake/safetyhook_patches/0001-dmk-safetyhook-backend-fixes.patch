@@ -588,7 +588,7 @@ index 68e44fd..950fd6b 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..50c4101 100644
+index 8cb1fbe..032111f 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -2,9 +2,12 @@
@@ -812,9 +812,9 @@ index 8cb1fbe..50c4101 100644
 +    size_t protect_calls_before;
 +    bool succeeded;
 +};
-+/// @brief Clears the instruction-cache flush trace for the current thread.
++/// @brief Clears the instruction-cache flush trace and makes the current thread its only recorder.
 +void SAFETYHOOK_API reset_instruction_cache_flush_trace_for_test() noexcept;
-+/// @brief Returns the instruction-cache flush trace size for the current thread.
++/// @brief Returns the trace size for the recording thread, or zero for any other thread.
 +[[nodiscard]] size_t SAFETYHOOK_API instruction_cache_flush_trace_size_for_test() noexcept;
 +/// @brief Returns one instruction-cache flush trace record, or a zero record for an invalid index.
 +[[nodiscard]] InstructionCacheFlushObservation SAFETYHOOK_API instruction_cache_flush_trace_for_test(
@@ -3156,7 +3156,7 @@ index d3f37f0..15a3cfd 100644
  
  #endif
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..91943c1 100644
+index 64eb0bb..6fa6324 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,13 @@
@@ -3493,7 +3493,7 @@ index 64eb0bb..91943c1 100644
  std::expected<uint8_t*, OsError> vm_allocate(uint8_t* address, size_t size, VmAccess access) {
      DWORD protect = 0;
  
-@@ -157,33 +464,213 @@ SystemInfo system_info() {
+@@ -157,33 +464,215 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -3502,17 +3502,17 @@ index 64eb0bb..91943c1 100644
 +std::atomic<bool> g_unwind_unregistration_failure{false};
 +std::atomic<size_t> g_trap_protect_calls{0};
 +std::atomic<size_t> g_instruction_cache_flush_failure_call{0};
-+thread_local std::array<InstructionCacheFlushObservation, 16> g_instruction_cache_flush_trace{};
-+thread_local size_t g_instruction_cache_flush_trace_size{0};
 +
 +namespace {
-+// Emulated TLS allocates each variable on the first touch from a thread, and that allocation can call an export on a
-+// trapped page. trap_threads touches the trace before its first protection change.
-+void prime_instruction_cache_flush_trace() noexcept {
-+    size_t* volatile size = &g_instruction_cache_flush_trace_size;
-+    InstructionCacheFlushObservation* volatile trace = g_instruction_cache_flush_trace.data();
-+    (void)size;
-+    (void)trace;
++// A flush inside a trap window must not execute a kernel32 export that can share the trapped page. MinGW lowers
++// thread_local to emulated TLS, and each emulated access calls kernel32. The trace therefore uses process storage, and
++// the inline TEB address identifies its one recording thread.
++std::atomic<const void*> g_instruction_cache_flush_recorder{nullptr};
++std::array<InstructionCacheFlushObservation, 16> g_instruction_cache_flush_trace{};
++size_t g_instruction_cache_flush_trace_size{0};
++
++bool records_instruction_cache_flushes() noexcept {
++    return g_instruction_cache_flush_recorder.load(std::memory_order_acquire) == NtCurrentTeb();
 +}
 +} // namespace
 +#endif
@@ -3537,7 +3537,8 @@ index 64eb0bb..91943c1 100644
 +        FlushInstructionCache(GetCurrentProcess(), address, size) != FALSE;
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+    if (g_instruction_cache_flush_trace_size < g_instruction_cache_flush_trace.size()) {
++    if (records_instruction_cache_flushes() &&
++        g_instruction_cache_flush_trace_size < g_instruction_cache_flush_trace.size()) {
 +        g_instruction_cache_flush_trace[g_instruction_cache_flush_trace_size++] = InstructionCacheFlushObservation{
 +            address,
 +            size,
@@ -3552,15 +3553,16 @@ index 64eb0bb..91943c1 100644
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +void reset_instruction_cache_flush_trace_for_test() noexcept {
 +    g_instruction_cache_flush_trace_size = 0;
++    g_instruction_cache_flush_recorder.store(NtCurrentTeb(), std::memory_order_release);
 +}
 +
 +size_t instruction_cache_flush_trace_size_for_test() noexcept {
-+    return g_instruction_cache_flush_trace_size;
++    return records_instruction_cache_flushes() ? g_instruction_cache_flush_trace_size : 0;
 +}
 +
 +InstructionCacheFlushObservation instruction_cache_flush_trace_for_test(size_t index) noexcept {
-+    return index < g_instruction_cache_flush_trace_size ? g_instruction_cache_flush_trace[index]
-+                                                        : InstructionCacheFlushObservation{};
++    return index < instruction_cache_flush_trace_size_for_test() ? g_instruction_cache_flush_trace[index]
++                                                                 : InstructionCacheFlushObservation{};
 +}
 +#endif
 +
@@ -3721,7 +3723,7 @@ index 64eb0bb..91943c1 100644
          });
  
          if (search == m_traps.end()) {
-@@ -213,115 +700,893 @@ public:
+@@ -213,115 +702,890 @@ public:
          return nullptr;
      }
  
@@ -4064,11 +4066,8 @@ index 64eb0bb..91943c1 100644
 +
 +private:
 +    TrapRuntime* m_runtime;
- };
- 
--std::mutex TrapManager::mutex;
--std::unique_ptr<TrapManager> TrapManager::instance;
--bool TrapManager::is_destructed = false;
++};
++
 +[[nodiscard]] static TrapRuntime* trap_runtime() noexcept {
 +    static TrapRuntime* const runtime = new (std::nothrow) TrapRuntime{};
 +    static TrapShutdown shutdown{runtime};
@@ -4138,8 +4137,11 @@ index 64eb0bb..91943c1 100644
 +private:
 +    std::array<HANDLE, MAX_SCANNED_THREADS> m_handles{};
 +    size_t m_count{0};
-+};
-+
+ };
+ 
+-std::mutex TrapManager::mutex;
+-std::unique_ptr<TrapManager> TrapManager::instance;
+-bool TrapManager::is_destructed = false;
 +// Opens every other thread of this process from one snapshot. A thread that exited after the snapshot was taken cannot
 +// be inside any code range, so it is skipped. Every other failure leaves the set incomplete.
 +[[nodiscard]] bool open_other_threads(HANDLE snapshot, ThreadHandleSet& handles) noexcept {
@@ -4323,12 +4325,12 @@ index 64eb0bb..91943c1 100644
 +void reset_trap_restore_trace_for_test() noexcept {
 +    g_trap_restore_trace_size.store(0, std::memory_order_release);
 +}
-+
+ 
+-void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +size_t trap_restore_trace_size_for_test() noexcept {
 +    return g_trap_restore_trace_size.load(std::memory_order_acquire);
 +}
- 
--void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++
 +uint8_t* trap_restore_trace_address_for_test(size_t index) noexcept {
 +    if (index >= trap_restore_trace_size_for_test() || index >= g_trap_restore_trace.size()) {
 +        return nullptr;
@@ -4415,9 +4417,6 @@ index 64eb0bb..91943c1 100644
 +    if (new_protect == PAGE_EXECUTE_READWRITE && original_size > 1) {
 +        return std::unexpected{OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE};
 +    }
-+#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+    prime_instruction_cache_flush_trace();
-+#endif
 +
 +    // The transaction state and both SRW locks live in a never-destroyed cell. Shutdown takes this same lock, so a
 +    // transaction either completes under the registered stable gateway or loses the race and refuses here, before the

@@ -84,7 +84,7 @@ Foreign libraries outside this protocol remain outside its guarantee. The existi
 
 - serialization and layered dependencies,
 - retention after a callback or adapter drain failure,
-- targets on the wait stub page and on the wait export,
+- targets on the wait stub page, on the wait export, and on a page that holds a TLS lookup export,
 - refusals and their reported causes,
 - registration capacity, acquisition timeout, and a retried first connection,
 - refusal of a foreign or incompatible mapping.
@@ -187,7 +187,11 @@ A page classification taken outside the process coordinator carries the same tra
 
 ### [B-81]
 
-The record exists only while the target and trampoline pages are temporarily non-executable during one patch transaction. While that transaction is active, an execute fault elsewhere on either affected page must retry until protection returns. A continued exception search exposes an artificial backend-created fault to the host. After every success or failure path, remove the record before the return. Otherwise later reuse of the same virtual address turns an unrelated fault into an infinite retry loop. Query and protection failures must return a status, restore only the protections acquired, and never run the patch callback after a failed acquisition. DMK still independently witnesses target bytes before it publishes Active or Disabled state.
+The record exists only while the target and trampoline pages are temporarily non-executable during one patch transaction. While that transaction is active, an execute fault elsewhere on either affected page must retry until protection returns. A continued exception search exposes an artificial backend-created fault to the host. After every success or failure path, remove the record before the return. Otherwise later reuse of the same virtual address turns an unrelated fault into an infinite retry loop.
+
+The transaction thread must not execute other code on either affected page before the restore, because that thread then retries its own fault forever. The backend refuses a multi-byte window that covers its own transaction code. Its test seams do not use MinGW emulated TLS, because each emulated access calls kernel32. `Lifecycle.RouteCopiesToggleOnTlsLookupPage` and `EmitPathHasNoEmulatedTls` verify the TLS part.
+
+Query and protection failures must return a status, restore only the protections acquired, and never run the patch callback after a failed acquisition. DMK still independently witnesses target bytes before it publishes Active or Disabled state.
 
 ### [B-83]
 
