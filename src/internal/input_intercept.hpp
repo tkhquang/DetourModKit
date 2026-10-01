@@ -253,6 +253,8 @@ namespace DetourModKit::detail
 
     /**
      * @brief Samples the current export without suppression by compatible DMK copies.
+     * @details A refused scope skips the provider call and leaves state unchanged.
+     *          Trampolines can traverse another compatible copy's suppression.
      * @param user_index Controller to sample.
      * @param state Receives the raw controller state.
      * @param owner The poller's interception owner.
