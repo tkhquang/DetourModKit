@@ -1744,7 +1744,8 @@ endwhile()
 set(route_copy_stub_proofs
   Lifecycle.RouteCopiesToggleOnCoordinatorWaitStub stub-page
   Lifecycle.RouteCopiesTearDownHookOnCoordinatorWait wait-export
-  Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread stub-thread)
+  Lifecycle.RouteCopiesToggleOnWaitStubFromFreshThread stub-thread
+  Lifecycle.RouteCopiesToggleOnTlsLookupPage tls-page)
 while(route_copy_stub_proofs)
   list(POP_FRONT route_copy_stub_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}
