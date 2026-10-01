@@ -2014,8 +2014,7 @@ TEST(ManifestAdoptTest, AdoptsManualAnchor)
 TEST(ManifestAdoptTest, AdoptsExportNameAnchor)
 {
     // A fully-formed ExportName anchor adopts and round-trips the export symbol and its owning module through the
-    // record's shared module field. Resolution against a real module is covered in test_anchor.cpp against the fixture
-    // DLL.
+    // record's shared module field. test_anchor_export.cpp resolves an ExportName anchor against the fixture DLL.
     an::Anchor anchor{};
     anchor.label = "timer";
     anchor.kind = an::AnchorKind::ExportName;

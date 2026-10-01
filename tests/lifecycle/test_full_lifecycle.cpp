@@ -66,12 +66,7 @@ namespace
         return x + 41;
     }
 
-    /// Calls through a volatile indirection so the optimizer cannot fold the call past the patched entry.
-    int call_unfolded(int (*function)(int), int value)
-    {
-        int (*const volatile indirect)(int) = function;
-        return indirect(value);
-    }
+    using dmk_test::call_unfolded;
 
     /// Owns a unique scenario INI and removes it when normally destroyed.
     class ScratchIni

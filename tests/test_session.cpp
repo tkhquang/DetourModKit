@@ -51,14 +51,6 @@ namespace DetourModKit::detail
     void memory_cache_abandon_for_test() noexcept;
 } // namespace DetourModKit::detail
 
-#if defined(_MSC_VER)
-#define DMK_TEST_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_TEST_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_TEST_NOINLINE
-#endif
-
 namespace
 {
     constexpr auto kTestTimeout = 5s;

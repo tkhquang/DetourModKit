@@ -463,7 +463,7 @@ The smoke project includes the installed headers and links the installed `Detour
 
 ## Test Suite
 
-Every module has unit test coverage under GoogleTest, gated in CI at 80% minimum line coverage. See the [Test Coverage Guide](docs/tests/README.md) for suite layout and test architecture.
+Every module has unit test coverage under GoogleTest, gated in CI at 80% minimum line coverage. See the [Test Coverage Guide](docs/tests/README.md) for the per-suite table, the run commands, and the coverage tooling.
 
 ## Running Unit Tests
 

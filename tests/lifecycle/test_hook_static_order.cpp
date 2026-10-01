@@ -33,12 +33,7 @@ namespace
         return x + 7;
     }
 
-    /// Calls through a volatile indirection so the optimizer cannot fold the call past the patched entry.
-    int call_unfolded(int (*function)(int), int value)
-    {
-        int (*const volatile indirect)(int) = function;
-        return indirect(value);
-    }
+    using dmk_test::call_unfolded;
 
     bool s_armed = false;
     // Set when the teardown emits its Removed transition. ~Hook emits AFTER restoring, through

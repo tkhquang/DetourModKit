@@ -27,14 +27,6 @@ using namespace DetourModKit;
 using DetourModKit::diagnostics::LeakSubsystem;
 namespace diag = DetourModKit::diagnostics;
 
-#if defined(_MSC_VER)
-#define DMK_TEST_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_TEST_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_TEST_NOINLINE
-#endif
-
 namespace
 {
     /** @brief Holds one counted test reference and balances its typed count at scope exit. */

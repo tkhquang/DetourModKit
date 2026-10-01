@@ -29,14 +29,6 @@
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
 
-#if defined(_MSC_VER)
-#define DMK_TEST_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_TEST_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_TEST_NOINLINE
-#endif
-
 namespace
 {
     // Real, hookable targets: DMK_PROOF_TARGET plus a volatile result forces a real call with a patchable prologue.

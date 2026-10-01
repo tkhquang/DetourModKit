@@ -35,12 +35,6 @@ namespace DetourModKit::detail
 
 namespace
 {
-#if defined(_MSC_VER)
-#define DMK_PROOF_NOINLINE __declspec(noinline)
-#else
-#define DMK_PROOF_NOINLINE __attribute__((noinline))
-#endif
-
     constexpr int CYCLES = 5;
     constexpr int HOOKS = 6;
     constexpr int PARK_VALUE = 41;
@@ -93,12 +87,7 @@ namespace
 
     constexpr int SEEDS[HOOKS] = {3, 5, 7, 11, 13, 17};
 
-    /// Calls through a volatile indirection so the optimizer cannot fold the call past the patched entry.
-    int call_unfolded(TargetFn function, int value)
-    {
-        TargetFn const volatile indirect = function;
-        return indirect(value);
-    }
+    using dmk_test::call_unfolded;
 
     struct ExecutableWalk
     {
@@ -155,7 +144,7 @@ namespace
     std::atomic<DetourModKit::hook::HookStack *> s_teardown_from_callee{nullptr};
     std::chrono::steady_clock::duration s_self_teardown_elapsed{};
 
-    DMK_PROOF_NOINLINE int call_site_callee()
+    DMK_TEST_NOINLINE int call_site_callee()
     {
         s_callee_entered.store(true, std::memory_order_release);
         while (s_callee_hold.load(std::memory_order_acquire))

@@ -26,14 +26,7 @@ using namespace DetourModKit;
 // resume_stack_pointer / instruction_pointer / flags / xmm). The SafetyHook backend is confined to the library, so a
 // detour names only these DMK types, exactly as a shipping consumer would.
 using namespace DetourModKit::hook;
-
-#if defined(_MSC_VER)
-#define DMK_TEST_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_TEST_NOINLINE [[gnu::noinline]]
-#else
-#define DMK_TEST_NOINLINE
-#endif
+using dmk_test::call_unfolded;
 
 // Mid-hook captured-context save/restore semantics.
 //
@@ -492,14 +485,6 @@ TEST(MidContextXmmViewTest, AllSixteenAccessorsReadTheirOwnSlot)
 
 namespace
 {
-    // Forces the call to reach the patched entry even where the optimizer can see the callee, so a Release build proves
-    // the same thing a Debug build does.
-    template <class Fn, class... Args> auto call_unfolded(Fn *fn, Args... args)
-    {
-        Fn *const volatile indirect = fn;
-        return indirect(args...);
-    }
-
     DMK_PROOF_TARGET int throwing_site(int a)
     {
         volatile int result = a;

@@ -178,7 +178,7 @@ The project builds the main static library and the standalone wheel-host static 
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.
 - `src/wheel_host/` contains the always-built `DetourModKit::WheelHost` target behind the `wheel_host.h` C ABI. It links neither the DetourModKit archive nor SafetyHook. A process-lifetime loader can link it explicitly. Its source stays outside the `src/*.cpp` archive glob and the source manifest.
-- `tests/` contains one GoogleTest `test_*.cpp` per module. CMake owns the proof targets under `tests/fault/` and `tests/lifecycle/`. The [test note](docs/design/testing.md) explains their roles.
+- `tests/` contains the GoogleTest `test_*.cpp` files. The split rule in [Testing](#testing) maps each tested surface to its file. `tests/fixtures/` contains fixtures that two or more test files share. CMake owns the proof targets under `tests/fault/` and `tests/lifecycle/`. The [test note](docs/design/testing.md) explains their roles.
 - `examples/` contains compile-only reference samples. The Debug presets build them through `DMK_BUILD_EXAMPLES`. The install excludes them. [examples/README.md](examples/README.md) states the no-promise contract.
 - `external/` contains submodules.
 - `scripts/` contains tools and CI gates.
@@ -446,7 +446,7 @@ Required proofs must use DMK-owned tests and fixtures. No real game, deployed mo
 - Include `_getpid()` and a counter in each temporary file name for a test. See [docs/design/testing.md](docs/design/testing.md).
 - Maintain at least 80% line coverage in CI.
 
-The [test note](docs/design/testing.md) contains every non-obvious test rule. [docs/tests/README.md](docs/tests/README.md) contains full per-suite coverage.
+The [test note](docs/design/testing.md) contains every non-obvious test rule. [docs/tests/README.md](docs/tests/README.md) owns the suite table, commands, labels, timeout contract, and coverage tools.
 
 ## Git workflow
 

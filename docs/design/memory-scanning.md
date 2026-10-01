@@ -122,4 +122,4 @@ A non-owning view is trivially copyable. A mutable `std::span<std::byte>`, or an
 
 Constrain the typed form with `!detail::is_non_owning_view_v<std::remove_cvref_t<T>>`, true for every `std::ranges::view` and every `std::initializer_list`. A byte span or another contiguous byte view then routes to the byte-span overload ( `write_in_place(span)`). A view with no conversion to that sink is a deliberate compile error rather than a scalar bit-copy. `write`, which has no view sink at all, rejects every view. Inspect `std::remove_cvref_t<T>` at the constraint site so an explicit cv/ref-qualified argument type cannot slip past the bare trait. Add a compile-and-run test whenever a `T` -taking and a view-taking overload coexist.
 
-Proofs: `MemoryTest.WriteInPlace_ByteRangeViewsWriteViewedBytes` and the template-scoped constraint set beside it in `tests/test_memory.cpp`.
+Proofs: `MemoryTest.WriteInPlace_ByteRangeViewsWriteViewedBytes` and the template-scoped constraint set beside it in `tests/test_memory_write.cpp`.
