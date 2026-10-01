@@ -1,0 +1,10 @@
+EXPORTS
+    dmk_xinput_copy_start
+    dmk_xinput_copy_active
+    dmk_xinput_copy_installed
+    dmk_xinput_copy_module_refs
+    dmk_xinput_copy_evidence
+    dmk_xinput_copy_edges
+    dmk_xinput_copy_start_rules
+    dmk_xinput_copy_refresh_rules
+    dmk_xinput_copy_stop

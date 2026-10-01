@@ -130,6 +130,8 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_input_consume.cpp` | The consume flag |
 | `test_input_gate.cpp` | `PressGate`, `HoldGate`, delivery marker |
 | `test_input_intercept.cpp` | Wheel and XInput interception, live OS hooks |
+| `test_xinput_raw_scope.cpp` | Shared raw depth, original buttons, expected returns, poison, descriptor validation, faults, and final release |
+| `test_xinput_route_probe.cpp` | Exact receipt identity, nested numeric tokens, epoch and thread rejection, and lease rundown |
 | `test_input_lifecycle.cpp` | Binding teardown, unload drain, poller shutdown |
 | `test_input_loader.cpp` | Input loader-lock boundary |
 | `test_input_pending.cpp` | Bindings staged before `start()` |
@@ -214,7 +216,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `veh_*.cpp` | MinGW guarded-read handler after an unmap |
 | `tls_*`, `process_exit_release_dll.cpp`, `input_tls_exhaustion.cpp` | TLS index return, input delivery with no TLS index |
 | `input_reshape_retirement.cpp`, `test_input_gate_abba.cpp`, `input_control_thread_shutdown.cpp`, `input_self_shutdown.cpp`, `*input_loader_detach*`, `input_seam_cleanup.hpp` | Reshape disposal, gate teardown, shutdown from a callback, loader detach |
-| `xinput_*` | XInput hook lifetime, ordinal-100 coverage |
+| `xinput_*` | Hook lifetime, paired exact and observed routes, raw samples across ten independent copies |
 | `cache_shutdown_stall.cpp` | Cache shutdown with a stalled reader |
 | `*bootstrap*`, `session_detach_terminal.cpp`, `test_full_lifecycle.cpp`, `test_config_servicer_self_retire.cpp` | Bootstrap module reference, detach after a drain, full lifecycles, servicer self-retirement |
 | `*logic_*` | Logic-DLL unmap after typed teardown |

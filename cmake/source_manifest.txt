@@ -58,6 +58,8 @@ src/internal/image_identity.cpp
 src/internal/input_delivery_scope.cpp
 src/internal/input_intercept.cpp
 src/internal/input_poller.cpp
+src/internal/xinput_raw_scope.cpp
+src/internal/xinput_route_probe.cpp
 src/internal/lifecycle_context.cpp
 src/internal/lifecycle_reaper.cpp
 src/internal/manifest_grammar.cpp

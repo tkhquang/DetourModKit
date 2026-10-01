@@ -11,10 +11,9 @@ namespace-scope ``thread_local`` and ``__thread`` all lower to emutls here, whil
 ignored with only a warning and degrades to a plain shared global. Only the emitted symbols say which one happened,
 which is what this script reads.
 
-The check covers EventDispatcher, the reserved input-delivery marker, and SafetyHook's routed-retention control path,
-including an ``__emutls_get_address`` import reached through an out-of-line helper. It also rejects ``pthread_self``
-from input.cpp, where the binding teardown gate needs exact allocation-free identity. The scope is deliberately narrow
-because the archives legitimately carry these symbols in control-plane-only subsystems.
+The check covers EventDispatcher, input interception, input delivery, XInput receipt and raw scopes, and SafetyHook's
+routed-retention path. It rejects implicit TLS symbols and ``pthread_self`` from input callback objects and input.cpp.
+Other archive objects can use these symbols on control paths.
 
 The mid-hook adapter table must share one object with its slot and TLS accessors. This preserves direct access in the
 callback path.
@@ -29,12 +28,16 @@ import sys
 # GCC emits one control symbol per emulated-TLS variable and imports __emutls_get_address at each use site.
 EMUTLS_SYMBOL = re.compile(r"__emutls_(?:get_address|[vt]\.)")
 CALLBACK_TLS_SCOPE = re.compile(
-    r"(?:EventDispatcher|event_dispatcher(?:\.cpp)?\.(?:obj|o)|input_delivery_scope\.cpp\.(?:obj|o)|"
+    r"(?:EventDispatcher|event_dispatcher(?:\.cpp)?\.(?:obj|o)|"
+    r"(?:input_delivery_scope|input_intercept|xinput_route_probe|xinput_raw_scope)\.cpp\.(?:obj|o)|"
     r"inline_hook\.cpp\.(?:obj|o))",
     re.IGNORECASE,
 )
 PTHREAD_SELF_SYMBOL = re.compile(r"(?:__imp_)?pthread_self\b")
-INPUT_GATE_SCOPE = re.compile(r"(?:^|:)input\.cpp\.(?:obj|o):", re.IGNORECASE)
+INPUT_GATE_SCOPE = re.compile(
+    r"(?:^|:)(?:input|input_delivery_scope|input_intercept|xinput_route_probe|xinput_raw_scope)\.cpp\.(?:obj|o):",
+    re.IGNORECASE,
+)
 OBJECT_RECORD = re.compile(r"^(?P<object>.*\.(?:obj|o)):(?P<record>.*)$", re.IGNORECASE)
 MID_ADAPTER_DEFINITION = re.compile(
     r"\b[TtWw]\s+void DetourModKit::detail::mid_adapter<\d+(?:ull|ul)>\("
@@ -116,8 +119,8 @@ def main() -> int:
     if offenders:
         print(
             "check_emit_tls: a callback path reaches allocation-capable implicit thread identity on MinGW.\n"
-            "EventDispatcher and input delivery must use reserved Win32 TLS/native thread identity, SafetyHook's\n"
-            "route credit must be explicit, and input teardown must avoid winpthreads pthread_self. AGENTS [B-86].\n"
+            "Input callbacks and EventDispatcher must use reserved Win32 TLS and native thread identity.\n"
+            "SafetyHook route credit must be explicit. Input callbacks must avoid pthread_self. AGENTS [B-86].\n"
             "Offending records:",
             file=sys.stderr,
         )

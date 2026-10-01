@@ -9,6 +9,8 @@
 #include "input_intercept.hpp"
 #include "internal/drain_backoff.hpp"
 #include "internal/hook_patch_witness.hpp"
+#include "internal/xinput_raw_scope.hpp"
+#include "internal/xinput_route_probe.hpp"
 #include "platform.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
@@ -23,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -61,6 +64,12 @@ namespace DetourModKit::detail
         // neither lock.
         SRWLOCK s_data_plane_mutex = SRWLOCK_INIT;
         std::atomic<std::uint64_t> s_intercept_owner{0};
+        std::atomic<std::uint64_t> s_xinput_hook_epoch{1};
+        bool s_xinput_raw_owner{false};
+        bool s_xinput_observed_pair{false};
+        bool s_xinput_primary_observed{false};
+        bool s_xinput_ex_observed{false};
+        bool s_xinput_route_warned{false};
         std::atomic<std::uint64_t> s_next_intercept_owner{STANDALONE_INTERCEPT_OWNER + 1};
         constexpr unsigned WHEEL_COUNT_BITS = 11;
         constexpr std::uint64_t WHEEL_COUNT_MASK = (std::uint64_t{1} << WHEEL_COUNT_BITS) - 1;
@@ -143,6 +152,16 @@ namespace DetourModKit::detail
                 {
                     ReleaseSRWLockExclusive(&m_mutex);
                     m_locked = false;
+                }
+            }
+
+            /// Reacquires the lock after an upstream call returns.
+            void relock() noexcept
+            {
+                if (!m_locked)
+                {
+                    AcquireSRWLockExclusive(&m_mutex);
+                    m_locked = true;
                 }
             }
 
@@ -242,6 +261,14 @@ namespace DetourModKit::detail
         {
             const bool arm = wheel_capture_armable_locked();
             const DataPlaneLockGuard data_lock;
+            if (s_intercept_owner.load(std::memory_order_relaxed) != owner)
+            {
+                s_xinput_hook_epoch.fetch_add(1, std::memory_order_seq_cst);
+                s_xinput_observed_pair = false;
+                s_xinput_primary_observed = false;
+                s_xinput_ex_observed = false;
+                s_xinput_route_warned = false;
+            }
             s_intercept_owner.store(owner, std::memory_order_release);
             if (arm)
             {
@@ -256,6 +283,12 @@ namespace DetourModKit::detail
          */
         void revoke_owner_and_clear_data() noexcept
         {
+            s_xinput_hook_epoch.fetch_add(1, std::memory_order_seq_cst);
+            close_xinput_route_probes();
+            s_xinput_observed_pair = false;
+            s_xinput_primary_observed = false;
+            s_xinput_ex_observed = false;
+            s_xinput_route_warned = false;
             const std::uint64_t wheel_epoch = close_wheel_capture_and_advance_epoch();
             const DataPlaneLockGuard data_lock;
             clear_data_plane_locked(wheel_epoch);
@@ -292,8 +325,6 @@ namespace DetourModKit::detail
         std::atomic<XInputGetStateFn> s_xinput_original{nullptr};
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
-        // This flag is true while the layer is claimed but a required entry point lacks its patch. Both detours pass
-        // through. This flag still lets the owner poll loop read the primary trampoline directly.
         std::atomic<bool> s_xinput_pair_degraded{false};
         // This flag is true after a timeout or unproved restore latches the XInput hooks in process-lifetime storage. A
         // later Input start re-arms only through the retained primary entry, never over uncertain storage.
@@ -481,6 +512,13 @@ namespace DetourModKit::detail
             }
             if (!retain)
             {
+                if (s_xinput_raw_owner)
+                {
+                    release_xinput_raw_scope_owner();
+                    s_xinput_raw_owner = false;
+                }
+                close_xinput_route_probes();
+                (void)release_xinput_route_probe_if_idle();
                 DetourModKit::detail::release_module_ref(
                     s_xinput_permanent_hooks->ex_target_ref,
                     diagnostics::ModulePinReason::XInputTarget
@@ -925,6 +963,19 @@ namespace DetourModKit::detail
             (void)log().log_noexcept(LogLevel::Warning, attribution);
         }
 
+        /** @brief Changes the controller and invalidates receipts for its prior binding under s_intercept_mutex. */
+        void bind_xinput_user(int user_index) noexcept
+        {
+            if (s_bound_user_index.load(std::memory_order_relaxed) != user_index)
+            {
+                s_xinput_hook_epoch.fetch_add(1, std::memory_order_seq_cst);
+                s_xinput_observed_pair = false;
+                s_xinput_primary_observed = false;
+                s_xinput_ex_observed = false;
+            }
+            s_bound_user_index.store(user_index, std::memory_order_relaxed);
+        }
+
         /**
          * @brief Requires s_intercept_mutex. Commits a complete XInput pair and activates suppression.
          * @details Both detours read s_xinput_installed, so suppression can never be live for one member of the
@@ -932,11 +983,12 @@ namespace DetourModKit::detail
          */
         void publish_complete_xinput_pair(int user_index, std::uint64_t owner) noexcept
         {
-            s_bound_user_index.store(user_index, std::memory_order_relaxed);
+            bind_xinput_user(user_index);
             xinput_recovery_reset();
             s_xinput_pair_degraded.store(false, std::memory_order_release);
             s_xinput_installed.store(true, std::memory_order_release);
             publish_owner(owner);
+            s_xinput_route_warned = false;
         }
 
         /**
@@ -983,9 +1035,8 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Requires s_intercept_mutex. Publishes complete coverage only when a final witness proves both members.
-         * @details If an owned patch disappears, complete state clears first. No detour masks while the other entry
-         *          point bypasses. The layer remains claimed and degraded.
+         * @brief Publishes exact-patch coverage under s_intercept_mutex.
+         * @details Foreign entries require a separate unlocked route check. An unavailable member disarms both detours.
          * @return true when coverage was published.
          */
         [[nodiscard]] bool publish_xinput_pair_if_whole(
@@ -997,14 +1048,22 @@ namespace DetourModKit::detail
         {
             const bool primary_covered = xinput_member_covers_entry(primary, true);
             const bool ex_covered = xinput_member_covers_entry(ex, static_cast<bool>(ex));
-            if (primary_covered && ex_covered)
+            if (primary_covered && ex_covered && xinput_consume_context_healthy())
             {
+                s_xinput_observed_pair = false;
+                s_xinput_primary_observed = false;
+                s_xinput_ex_observed = false;
                 publish_complete_xinput_pair(user_index, owner);
                 return true;
             }
-            s_bound_user_index.store(user_index, std::memory_order_relaxed);
-            s_xinput_installed.store(false, std::memory_order_release);
-            s_xinput_pair_degraded.store(true, std::memory_order_release);
+            bind_xinput_user(user_index);
+            if (!s_xinput_observed_pair ||
+                (xinput_patch_witness(primary) != PatchWitness::Foreign && !primary_covered) ||
+                (ex && xinput_patch_witness(ex) != PatchWitness::Foreign && !ex_covered))
+            {
+                s_xinput_installed.store(false, std::memory_order_release);
+                s_xinput_pair_degraded.store(true, std::memory_order_release);
+            }
             publish_owner(owner);
             return false;
         }
@@ -1109,8 +1168,7 @@ namespace DetourModKit::detail
         std::atomic<uint32_t> s_consume_rule_count{0};
         std::atomic<uint32_t> s_consume_rules_seq{0};
 
-        // This gate controls detour-side rule suppression and refreshes every poll cycle. The rule list and its TTL
-        // survive focus changes. Without this gate, apply_suppress continues suppression while the mod is unfocused.
+        // The focus gate disables same-frame rules while their published table and deadline survive focus changes.
         std::atomic<bool> s_rule_suppress_enabled{false};
 
         /**
@@ -1485,51 +1543,83 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Clears the suppressed button bits from a game-bound XINPUT_STATE.
+         * @brief Computes the returned buttons from the current state and this copy's consume rules.
          * @details dwPacketNumber and the success return stay untouched, so the game sees a connected controller with
          *          packet progress. The cleared bits combine the reactive mask with the consume rules. A TTL guard
          *          drops all suppression after poll refreshes stop.
          */
-        void apply_suppress(XINPUT_STATE *state, DWORD user_index) noexcept
+        [[nodiscard]] WORD
+        suppressed_xinput_buttons(const XINPUT_STATE *state, DWORD user_index, WORD original_buttons) noexcept
         {
             // A retained primary route can remain physically reachable before recovery completes for its Ex partner.
             // Keep both routes fail-open until the complete logical installation is published.
-            if (!s_xinput_installed.load(std::memory_order_acquire) || state == nullptr)
+            if (is_xinput_raw_call() || !xinput_consume_context_healthy() ||
+                !s_xinput_installed.load(std::memory_order_acquire) || state == nullptr)
             {
-                return;
+                return state != nullptr ? state->Gamepad.wButtons : 0;
             }
-            if (static_cast<int>(user_index) != s_bound_user_index.load(std::memory_order_relaxed))
+            if (user_index > 3 || static_cast<int>(user_index) != s_bound_user_index.load(std::memory_order_relaxed))
             {
-                return;
+                return state->Gamepad.wButtons;
             }
             // The acquire load of the mask orders the relaxed deadline read below (the writer stores the deadline
             // first), even when the mask reads as 0.
             const uint16_t reactive = s_suppress_mask.load(std::memory_order_acquire);
 
-            // raw is the true, unmasked state because this detour runs after the trampoline call. A chord pressed
-            // within one poll interval masks on the frame when the game reads it. The focus gate suppresses rule
-            // evaluation while unfocused or disconnected, because the rule list and deadline survive those
-            // transitions.
-            const uint16_t raw = state->Gamepad.wButtons;
-            const uint16_t rule_mask =
-                s_rule_suppress_enabled.load(std::memory_order_relaxed) ? evaluate_published_consume_rules(raw) : 0;
+            // Original-button context preserves modifiers that another compatible copy already consumed.
+            const uint16_t rule_mask = s_rule_suppress_enabled.load(std::memory_order_relaxed)
+                                           ? evaluate_published_consume_rules(original_buttons)
+                                           : 0;
             const uint16_t mask = static_cast<uint16_t>(reactive | rule_mask);
             if (mask == 0)
             {
-                return;
+                return state->Gamepad.wButtons;
             }
             // A stalled poll thread lets the deadline lapse and stops all suppression. The game regains its input
             // instead of a permanent latch.
             if (GetTickCount64() >= s_suppress_deadline_ms.load(std::memory_order_relaxed))
             {
+                return state->Gamepad.wButtons;
+            }
+            return static_cast<WORD>(state->Gamepad.wButtons & static_cast<WORD>(~mask));
+        }
+
+        /** @brief Applies this copy's mask only after a successful original-button context restore. */
+        void finish_xinput_consume_scope(
+            std::optional<XInputConsumeScope> &scope,
+            XINPUT_STATE *state,
+            DWORD user_index,
+            DWORD result
+        ) noexcept
+        {
+            if (!scope)
+                return;
+            WORD original_buttons = 0;
+            const bool sampled = result == ERROR_SUCCESS && state != nullptr && scope->admitted() &&
+                                 scope->original_buttons(state->Gamepad.wButtons, original_buttons);
+            if (!sampled)
+            {
+                (void)scope->finish();
                 return;
             }
-            state->Gamepad.wButtons = static_cast<WORD>(raw & static_cast<WORD>(~mask));
+            const WORD returned_buttons = suppressed_xinput_buttons(state, user_index, original_buttons);
+            if (scope->finish(returned_buttons) && xinput_consume_context_healthy())
+                state->Gamepad.wButtons = returned_buttons;
         }
 
         DWORD WINAPI xinput_get_state_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
+            std::optional<XInputConsumeScope> consume_scope;
+            if (state != nullptr && !is_xinput_raw_call())
+                consume_scope.emplace(user_index, state);
+            xinput_route_probe_record({
+                .owner = s_intercept_owner.load(std::memory_order_acquire),
+                .hook_epoch = s_xinput_hook_epoch.load(std::memory_order_acquire),
+                .member = XInputRouteMember::Primary,
+                .user_index = user_index,
+                .state_address = reinterpret_cast<std::uintptr_t>(state),
+            });
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *seam = s_xinput_detour_body_seam.load(std::memory_order_acquire))
             {
@@ -1539,23 +1629,27 @@ namespace DetourModKit::detail
             // This seq_cst load forms the detour side of the Dekker drain pair. See InflightGuard.
             const XInputGetStateFn original = s_xinput_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
-            if (result == ERROR_SUCCESS)
-            {
-                apply_suppress(state, user_index);
-            }
+            finish_xinput_consume_scope(consume_scope, state, user_index, result);
             return result;
         }
 
         DWORD WINAPI xinput_get_state_ex_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
+            std::optional<XInputConsumeScope> consume_scope;
+            if (state != nullptr && !is_xinput_raw_call())
+                consume_scope.emplace(user_index, state);
+            xinput_route_probe_record({
+                .owner = s_intercept_owner.load(std::memory_order_acquire),
+                .hook_epoch = s_xinput_hook_epoch.load(std::memory_order_acquire),
+                .member = XInputRouteMember::Ex,
+                .user_index = user_index,
+                .state_address = reinterpret_cast<std::uintptr_t>(state),
+            });
             // This seq_cst load serves the same Dekker-pair reason as xinput_get_state_detour above.
             const XInputGetStateFn original = s_xinput_ex_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
-            if (result == ERROR_SUCCESS)
-            {
-                apply_suppress(state, user_index);
-            }
+            finish_xinput_consume_scope(consume_scope, state, user_index, result);
             return result;
         }
 
@@ -1938,6 +2032,12 @@ namespace DetourModKit::detail
         };
     }
 
+    XInputPairCoverage xinput_pair_observation_for_test() noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        return XInputPairCoverage{s_xinput_primary_observed, s_xinput_ex_observed};
+    }
+
     std::size_t xinput_recovery_attempts_for_test() noexcept
     {
         return s_xinput_recovery_attempts.load(std::memory_order_relaxed);
@@ -2160,6 +2260,190 @@ namespace DetourModKit::detail
         }
     } // anonymous namespace
 
+    namespace
+    {
+        [[nodiscard]] DWORD
+        invoke_xinput_export(XInputGetStateFn target, DWORD user_index, XINPUT_STATE &state) noexcept
+        {
+            try
+            {
+                return target(user_index, &state);
+            }
+            catch (...)
+            {
+                return ERROR_INVALID_FUNCTION;
+            }
+        }
+    } // anonymous namespace
+
+    namespace
+    {
+        struct XInputMemberSnapshot
+        {
+            XInputGetStateFn target{nullptr};
+            XInputGetStateFn original{nullptr};
+            std::array<std::uint8_t, BACKEND_MAX_STEAL_WINDOW> bytes{};
+            std::size_t byte_count{0};
+            PatchWitness witness{PatchWitness::Original};
+            bool enabled{false};
+            bool readable{true};
+
+            [[nodiscard]] bool operator==(const XInputMemberSnapshot &) const noexcept = default;
+        };
+
+        [[nodiscard]] XInputMemberSnapshot capture_xinput_member(const safetyhook::InlineHook &hook) noexcept
+        {
+            XInputMemberSnapshot snapshot;
+            if (!hook)
+                return snapshot;
+            snapshot.target = reinterpret_cast<XInputGetStateFn>(hook.target());
+            snapshot.original = hook.original<XInputGetStateFn>();
+            snapshot.byte_count = hook.original_bytes().size();
+            snapshot.enabled = hook.enabled();
+            snapshot.witness = xinput_patch_witness(hook);
+            snapshot.readable = snapshot.byte_count != 0 && snapshot.byte_count <= snapshot.bytes.size() &&
+                                guarded_read_bytes(hook.target_address(), snapshot.bytes.data(), snapshot.byte_count);
+            return snapshot;
+        }
+
+        [[nodiscard]] bool observed_route_candidate(const XInputMemberSnapshot &member, bool required) noexcept
+        {
+            if (member.target == nullptr)
+                return !required;
+            return member.enabled && member.readable &&
+                   (member.witness == PatchWitness::OwnedPatch || member.witness == PatchWitness::Foreign);
+        }
+
+        void degrade_observed_xinput_pair(
+            bool was_complete,
+            const XInputMemberSnapshot &failed,
+            bool ex,
+            std::string_view route_result,
+            InterceptLockGuard &lock
+        ) noexcept
+        {
+            s_xinput_observed_pair = false;
+            s_xinput_primary_observed = false;
+            s_xinput_ex_observed = false;
+            s_xinput_installed.store(false, std::memory_order_release);
+            s_xinput_pair_degraded.store(true, std::memory_order_release);
+            const bool warn = was_complete && !s_xinput_route_warned;
+            std::array<char, 256> message{};
+            std::size_t length = 0;
+            if (warn)
+            {
+                s_xinput_route_warned = true;
+                append_text(message, length, "InputIntercept: XInput paired suppression stopped: ");
+                append_text(message, length, ex ? "XInputGetStateEx: " : "XInputGetState: ");
+                append_text(message, length, witness_description(failed.witness));
+                append_text(message, length, ", ");
+                append_text(message, length, route_result);
+                append_text(message, length, ".");
+            }
+            lock.unlock();
+            if (warn)
+            {
+                (void)log().log_noexcept(LogLevel::Warning, std::string_view{message.data(), length});
+            }
+        }
+
+        [[nodiscard]] bool
+        observe_xinput_pair(int user_index, std::uint64_t owner, bool was_complete, InterceptLockGuard &lock) noexcept
+        {
+            const std::uint64_t epoch = s_xinput_hook_epoch.load(std::memory_order_seq_cst);
+            if (s_intercept_owner.load(std::memory_order_acquire) != owner)
+                return false;
+            const XInputMemberSnapshot primary = capture_xinput_member(s_xinput_permanent_hooks->primary);
+            const XInputMemberSnapshot ex = capture_xinput_member(s_xinput_permanent_hooks->ex);
+            if (user_index < 0 || user_index >= XUSER_MAX_COUNT || !reserve_xinput_route_probe())
+            {
+                degrade_observed_xinput_pair(was_complete, primary, false, "probe admission failed", lock);
+                return false;
+            }
+            const bool ex_required = ex.target != nullptr;
+            if (!observed_route_candidate(primary, true) || !observed_route_candidate(ex, ex_required))
+            {
+                const bool failed_ex = observed_route_candidate(primary, true);
+                degrade_observed_xinput_pair(
+                    was_complete,
+                    failed_ex ? ex : primary,
+                    failed_ex,
+                    "route is unavailable",
+                    lock
+                );
+                return false;
+            }
+
+            XINPUT_STATE primary_state{};
+            XINPUT_STATE ex_state{};
+            XInputRawScope raw_scope;
+            XInputRouteProbe primary_probe({
+                .owner = owner,
+                .hook_epoch = epoch,
+                .member = XInputRouteMember::Primary,
+                .user_index = static_cast<std::uint32_t>(user_index),
+                .state_address = reinterpret_cast<std::uintptr_t>(&primary_state),
+            });
+            std::optional<XInputRouteProbe> ex_probe;
+            if (ex_required)
+            {
+                ex_probe.emplace(
+                    XInputRouteProbeIdentity{
+                        .owner = owner,
+                        .hook_epoch = epoch,
+                        .member = XInputRouteMember::Ex,
+                        .user_index = static_cast<std::uint32_t>(user_index),
+                        .state_address = reinterpret_cast<std::uintptr_t>(&ex_state),
+                    }
+                );
+            }
+            const bool admitted =
+                raw_scope.admitted() && primary_probe.admitted() && (!ex_required || ex_probe->admitted());
+            lock.unlock();
+            DWORD ex_result = ERROR_SUCCESS;
+            bool ex_received = !ex_required;
+            if (ex_required)
+            {
+                if (admitted)
+                    ex_result = invoke_xinput_export(ex.target, static_cast<DWORD>(user_index), ex_state);
+                ex_received = ex_probe->finish();
+            }
+            const DWORD primary_result =
+                admitted ? invoke_xinput_export(primary.target, static_cast<DWORD>(user_index), primary_state)
+                         : ERROR_INVALID_FUNCTION;
+            const bool primary_received = primary_probe.finish();
+            const bool raw_restored = raw_scope.finish();
+            lock.relock();
+
+            // A successor owns its publication. An old receipt cannot revoke or refresh that owner's state.
+            if (s_intercept_owner.load(std::memory_order_acquire) != owner ||
+                s_xinput_hook_epoch.load(std::memory_order_seq_cst) != epoch)
+                return false;
+            const bool unchanged = s_bound_user_index.load(std::memory_order_relaxed) == user_index &&
+                                   primary == capture_xinput_member(s_xinput_permanent_hooks->primary) &&
+                                   ex == capture_xinput_member(s_xinput_permanent_hooks->ex);
+            if (admitted && primary_received && ex_received && primary_result == ERROR_SUCCESS &&
+                ex_result == ERROR_SUCCESS && raw_restored && unchanged && xinput_consume_context_healthy())
+            {
+                publish_complete_xinput_pair(user_index, owner);
+                s_xinput_observed_pair = true;
+                s_xinput_primary_observed = true;
+                s_xinput_ex_observed = ex_required;
+                return true;
+            }
+            const bool failed_ex =
+                primary_received && primary_result == ERROR_SUCCESS && (!ex_received || ex_result != ERROR_SUCCESS);
+            degrade_observed_xinput_pair(
+                was_complete,
+                failed_ex ? ex : primary,
+                failed_ex,
+                unchanged ? "scoped route check failed" : "route snapshot changed",
+                lock
+            );
+            return false;
+        }
+    } // anonymous namespace
+
     bool install_xinput(int user_index, std::uint64_t owner) noexcept
     {
         InterceptLockGuard lock{s_intercept_mutex};
@@ -2172,14 +2456,18 @@ namespace DetourModKit::detail
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
-            return maintain_retained_xinput_pair(user_index, owner);
+            const bool was_complete = s_xinput_installed.load(std::memory_order_acquire);
+            return maintain_retained_xinput_pair(user_index, owner) ||
+                   observe_xinput_pair(user_index, owner, was_complete, lock);
         }
 
         // A live pair uses one transaction for health maintenance and recovery. A second hook over its prologue
         // captures the first hook's jmp as its original and corrupts the trampoline chain.
         if (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary))
         {
-            return maintain_live_xinput_pair(user_index, owner);
+            const bool was_complete = s_xinput_installed.load(std::memory_order_acquire);
+            return maintain_live_xinput_pair(user_index, owner) ||
+                   observe_xinput_pair(user_index, owner, was_complete, lock);
         }
 
         const HMODULE module = find_loaded_xinput_module();
@@ -2210,6 +2498,13 @@ namespace DetourModKit::detail
         {
             return false;
         }
+
+        if (!reserve_xinput_route_probe() || !acquire_xinput_raw_scope_owner())
+        {
+            retire_xinput_module_refs();
+            return false;
+        }
+        s_xinput_raw_owner = true;
 
         // Reserve the worst case for BOTH members before either creation. A primary charge followed by an Ex refusal
         // strands the primary-only coverage that this transaction prevents.
@@ -2273,12 +2568,13 @@ namespace DetourModKit::detail
             return false;
         }
 
-        return arm_ex_member_and_publish_xinput_pair(ex_is_distinct_member, user_index, owner);
+        return arm_ex_member_and_publish_xinput_pair(ex_is_distinct_member, user_index, owner) ||
+               observe_xinput_pair(user_index, owner, false, lock);
     }
 
     bool xinput_installed() noexcept
     {
-        return s_xinput_installed.load(std::memory_order_acquire);
+        return s_xinput_installed.load(std::memory_order_acquire) && xinput_consume_context_healthy();
     }
 
     XInputGetStateFn xinput_trampoline() noexcept
@@ -2289,6 +2585,31 @@ namespace DetourModKit::detail
             return nullptr;
         }
         return s_xinput_original.load(std::memory_order_acquire);
+    }
+
+    bool sample_xinput_raw_state(DWORD user_index, XINPUT_STATE &state, std::uint64_t owner) noexcept
+    {
+        XInputRawScope raw_scope;
+        if (!raw_scope.admitted())
+            return false;
+        XInputGetStateFn target = nullptr;
+        {
+            const InterceptLockGuard lock{s_intercept_mutex};
+            if (s_xinput_permanent_hooks != nullptr && s_xinput_permanent_hooks->primary &&
+                s_intercept_owner.load(std::memory_order_acquire) == owner)
+            {
+                target = reinterpret_cast<XInputGetStateFn>(s_xinput_permanent_hooks->primary.target());
+            }
+            else if (const HMODULE module = find_loaded_xinput_module(); module != nullptr)
+            {
+                target = reinterpret_cast<XInputGetStateFn>(
+                    reinterpret_cast<void (*)()>(GetProcAddress(module, "XInputGetState"))
+                );
+            }
+        }
+        const DWORD result = invoke_xinput_export(target != nullptr ? target : &XInputGetState, user_index, state);
+        const bool restored = raw_scope.finish();
+        return result == ERROR_SUCCESS && restored;
     }
 
     bool publish_gamepad_suppress(uint16_t suppress_bits, std::uint64_t owner) noexcept
@@ -2650,7 +2971,8 @@ namespace DetourModKit::detail
 
     void apply_xinput_suppress_for_test(XINPUT_STATE *state, DWORD user_index) noexcept
     {
-        apply_suppress(state, user_index);
+        if (state != nullptr)
+            state->Gamepad.wButtons = suppressed_xinput_buttons(state, user_index, state->Gamepad.wButtons);
     }
 
     int xinput_bound_user_index() noexcept
@@ -2772,16 +3094,16 @@ namespace DetourModKit::detail
             // teardown must still progress.
             constexpr uint64_t xinput_quiesce_timeout_ms = 10;
             const uint64_t quiesce_deadline_ms = GetTickCount64() + xinput_quiesce_timeout_ms;
-            while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
-                    s_xinput_permanent_hooks->primary.route_entries() != 0 ||
+            while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 || xinput_route_probe_inflight() != 0 ||
+                    active_xinput_raw_scopes() != 0 || s_xinput_permanent_hooks->primary.route_entries() != 0 ||
                     s_xinput_permanent_hooks->ex.route_entries() != 0) &&
                    GetTickCount64() < quiesce_deadline_ms)
             {
                 std::this_thread::yield();
             }
 
-            return s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
-                   s_xinput_permanent_hooks->primary.route_entries() != 0 ||
+            return s_xinput_inflight.load(std::memory_order_seq_cst) != 0 || xinput_route_probe_inflight() != 0 ||
+                   active_xinput_raw_scopes() != 0 || s_xinput_permanent_hooks->primary.route_entries() != 0 ||
                    s_xinput_permanent_hooks->ex.route_entries() != 0;
         }
 

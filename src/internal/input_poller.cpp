@@ -14,6 +14,7 @@
 #include "input_key_cache.hpp"
 #include "lifecycle_context.hpp"
 #include "platform.hpp"
+#include "xinput_raw_scope.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
@@ -1062,6 +1063,7 @@ namespace DetourModKit
                 );
             }
 
+            m_xinput_raw_owner = acquire_xinput_raw_scope_owner();
             m_running.store(true, std::memory_order_release);
             try
             {
@@ -1070,6 +1072,11 @@ namespace DetourModKit
             catch (...)
             {
                 m_running.store(false, std::memory_order_release);
+                if (m_xinput_raw_owner)
+                {
+                    release_xinput_raw_scope_owner();
+                    m_xinput_raw_owner = false;
+                }
                 release_module_ref(self_ref, diagnostics::ModulePinReason::InputPoller);
                 throw;
             }
@@ -1264,6 +1271,11 @@ namespace DetourModKit
                 if (!m_requires_abandonment.load(std::memory_order_acquire))
                 {
                     wheel_source_close();
+                    if (m_xinput_raw_owner)
+                    {
+                        release_xinput_raw_scope_owner();
+                        m_xinput_raw_owner = false;
+                    }
                     m_owner_keepalive.reset();
                 }
                 return;
@@ -1344,7 +1356,7 @@ namespace DetourModKit
             // on_state_change(false) callbacks is race-free.
             m_running.store(false, std::memory_order_release);
 
-            // The poll thread is the sole mask publisher and trampoline reader, so hook teardown now is race-free.
+            // The stopped poll thread cannot publish masks or enter a raw sample during hook teardown.
             // Skipped on the loader-lock path above: hook removal must not run under the loader lock, so the detours
             // stay installed there. The owner id makes a superseded poller's teardown a no-op. Close the external-host
             // lease before the local uninstall. A close proves the host holds no pointer from this generation; it is a
@@ -1352,6 +1364,11 @@ namespace DetourModKit
             // the layer owner.
             wheel_source_close();
             uninstall(m_intercept_owner);
+            if (m_xinput_raw_owner)
+            {
+                release_xinput_raw_scope_owner();
+                m_xinput_raw_owner = false;
+            }
 
             release_active_holds();
 
@@ -1396,7 +1413,7 @@ namespace DetourModKit
             /**
              * @brief Polls the gamepad state once per connected cycle.
              * @details Call only from the poll thread. Throttles reconnection attempts on empty slots. A read through
-             *          the saved trampoline gives the poll the true, unmasked controller state.
+             *          the shared raw scope preserves controller state through compatible DMK copies.
              * @return true when @p poll_enabled is true and the gamepad is connected this cycle.
              */
             [[nodiscard]] bool poll_gamepad_state(
@@ -1416,17 +1433,8 @@ namespace DetourModKit
                     if (gamepad_was_connected || (now - last_gamepad_poll) >= gamepad_reconnect_interval)
                     {
                         last_gamepad_poll = now;
-                        // Dereference the saved trampoline only while this poller owns the layer. A non-owner call is
-                        // invisible to the detour in-flight drain. It can traverse memory that owner removal frees.
-                        // Therefore, a non-owner calls XInputGetState. One fresh check suffices because this thread
-                        // cannot lose its own ownership mid-cycle.
-                        const XInputGetStateFn xinput_original =
-                            intercept_owned_by(intercept_owner) ? xinput_trampoline() : nullptr;
-                        const DWORD xinput_result =
-                            (xinput_original != nullptr)
-                                ? xinput_original(static_cast<DWORD>(gamepad_index), &gamepad_state)
-                                : XInputGetState(static_cast<DWORD>(gamepad_index), &gamepad_state);
-                        gamepad_was_connected = xinput_result == ERROR_SUCCESS;
+                        gamepad_was_connected =
+                            sample_xinput_raw_state(static_cast<DWORD>(gamepad_index), gamepad_state, intercept_owner);
                     }
                     gamepad_connected = gamepad_was_connected;
                 }

@@ -593,6 +593,7 @@ namespace DetourModKit
             int m_stick_threshold;
             // Stable across poll-thread installation and off-thread teardown so only this poller can remove its hooks.
             const std::uint64_t m_intercept_owner;
+            bool m_xinput_raw_owner{false};
             std::atomic<bool> m_has_gamepad_bindings{false};
 
             // Wheel-capture backend chosen at construction. MessageHook installs a local source and shares the
