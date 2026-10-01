@@ -764,7 +764,7 @@ TEST(HookTeardownFaultProof, SyncExceptionDuringTeardownIsContainedAndPins)
 // publishes through a guarded atomic compare-exchange. Every invalid state must fail before a backend clone is exposed.
 namespace
 {
-    /// @brief Sets the x86-64 base page size for separate hostile object words.
+    /** @brief Sets the x86-64 base page size for separate hostile object words. */
     constexpr std::size_t OBJECT_WORD_PAGE_BYTES = 0x1000;
 
     // NoAccess, Reserved and Guarded fault a read, so the guarded capture refuses them. ReadOnly is the odd one out:
