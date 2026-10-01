@@ -94,6 +94,12 @@ void *operator new[](std::size_t size, const std::nothrow_t &tag) noexcept
     return ::operator new(size, tag);
 }
 
+// These delete forms match malloc-backed replacement new. GCC misclassifies the pair after optimizer expansion.
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void operator delete(void *p) noexcept
 {
     std::free(p);
@@ -123,5 +129,9 @@ void operator delete[](void *p, const std::nothrow_t &) noexcept
 {
     std::free(p);
 }
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 #endif // DETOURMODKIT_LIFECYCLE_FIRST_USE_OOM_POISON_HPP

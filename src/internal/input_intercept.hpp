@@ -4,28 +4,13 @@
 /**
  * @file input_intercept.hpp
  * @brief Internal active-input layer driven by InputPoller.
- * @details Two opt-in capabilities that the observational poll loop cannot provide on its own:
- *            1. Gamepad passthrough suppression: an inline hook on XInputGetState masks owned button bits out of
- *               the state the game reads, so a binding the mod claims is not also acted on by the game (e.g. an
- *               "LB + D-pad" zoom that must not open the map).
- *            2. Mouse-wheel capture: the wheel is an event with no virtual-key code, so it is invisible to
- *               GetAsyncKeyState. A thread-scoped WH_GETMESSAGE hook observes WM_MOUSEWHEEL / WM_MOUSEHWHEEL
- *               retrieval on one UI-thread queue and latches each notch for the poll loop to consume.
+ * @details The layer masks digital gamepad buttons and captures wheel events for InputPoller.
+ *          It owns both XInput hooks, code-provider references, and shared atomic data.
+ *          Retained hooks keep their executable chains and native TLS owners until process exit.
  *
- *          Ownership: this module owns its safetyhook InlineHook objects directly. This ownership ties hook lifetime
- *          to the poll thread that reads the XInput trampoline every cycle. State that the detours read lives in
- *          file-scope statics. The loader-lock teardown path (InputPoller leaked, poll thread detached) therefore
- *          leaves no detour with access to freed object state. The detours run on the game's threads. All shared state
- *          is atomic, and every detour body allocates nothing and throws nothing.
- *
- *          Authorization (`[B-95]`): every state write or drain takes an owner id. The operation fails unless that id
- *          equals the live layer owner when the write occurs. Owner publication, owner revocation, and every
- *          data-plane write serialize on one lock. A superseded owner therefore observes the revocation and writes
- *          nothing, even if it entered publication before it lost the layer. The lock order is
- *          s_intercept_mutex then the data-plane lock. The detours take neither lock and read plain atomics plus the
- *          rule seqlock.
- *
- *          Windows-only internal header (mirrors platform.hpp); not installed.
+ *          [B-95] serializes owner changes and data writes. Lock order: s_intercept_mutex, then the data-plane lock.
+ *          Detours take neither lock. They use atomics, numeric native TLS, and the rule seqlock.
+ *          This Windows-only header remains private.
  */
 
 #include <windows.h>
@@ -234,51 +219,53 @@ namespace DetourModKit::detail
 
     /**
      * @brief Installs the XInputGetState hook pair for the given controller index under @p owner.
-     * @details Idempotent for the current owner. A creation failure or a primary arm failure before its route becomes
-     *          reachable publishes neither ownership nor a controller-index change; ambiguous target bytes retain any
-     *          potentially reachable trampoline.
+     * @details Both required exports form one transaction. An absent or aliased ordinal 100 needs no second hook.
+     *          Both hooks start disabled. Target modules and retained storage receive references before publication.
+     *          Creation failure leaves ownership unchanged. Ambiguous target bytes retain any reachable chain.
      *
-     *          The primary export and every distinct ordinal-100 export are one coverage transaction. Both hooks are
-     *          created disabled before either prologue is patched, so a creation failure rolls the pair back.
-     *          Complete coverage is published only after a final witness reads both prologues. An unpatched required
-     *          export is degraded coverage, not success. This function returns false, and both detours stay
-     *          pass-through until the pair is whole. The layer stays claimed because a live route needs an owner. An
-     *          absent or aliased ordinal-100 export is complete coverage. A target that a proxy forwards into another
-     *          module receives its own hook and pre-acquired module keepalive.
+     *          Exact patch witnesses authorize owned entries. Foreign entries require scoped calls through both
+     *          exports, matching detour receipts, successful controller samples, and an unchanged final snapshot.
+     *          A receipt proves only its invocation. A conditional foreign handler can bypass other callers.
+     *          Every maintenance call checks both members. A failed check disarms both detours.
      *
-     *          A call after coverage publication re-witnesses both members, so a lost entry point degrades the pair.
-     *          Recovery re-arms the missing member through its
-     *          existing hook object, never a new hook over uncertain storage. Recovery is deadline-gated. Each failed
-     *          re-arm grows the delay toward a cap and retries continue. A target module, owner, or member-reachability
-     *          change drops the accumulated delay.
-     * @param user_index The XInput controller index whose state may be masked.
+     *          Recovery uses each member's existing hook. Failed re-arms receive a bounded retry delay.
+     *          Owner, target, or member changes reset that delay. Foreign calls run outside every DMK lock.
+     * @param user_index Controller whose state can receive a mask.
      * @param owner Nonzero interception-layer owner id.
-     * @return true only when coverage is complete for this owner; false when not ready, owned elsewhere, or degraded.
-     * @note Installation acquires references to this module, the primary target module, and any distinct forwarded
-     *       target module before publication. It also reserves storage for retained hook objects ([B-89]).
-     *       A failed reference acquisition fails installation. uninstall() releases the references only after the
-     *       detours drain and both backend chains reclaim.
-     *       The backend preserves executable route pages and counts closed bypass calls through provider completion.
-     *       Lifecycle.RoutedBypassSurvivesDormantFiber verifies the provider lifetime after teardown.
+     * @return True when both required routes have exact or observed evidence for this owner. Otherwise false.
+     * @note Best-effort. An upstream handler has no execution deadline. Revoked probe leases retain executable
+     *       chains when the teardown deadline expires. Exact witnesses still govern every byte mutation.
      */
     [[nodiscard]] bool install_xinput(int user_index, std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /**
-     * @brief Returns whether XInput suppression is armed, which requires complete pair coverage.
-     * @details False while any required member is unpatched, whether the pair is live or retained, and false again
-     *          once maintenance observes a member lost after publication. A caller that treats false as "retry the
-     *          install" is what drives the deadline-gated recovery.
+     * @brief Returns whether paired route evidence currently authorizes XInput suppression.
+     * @details False after a failed paired check or logical teardown. Maintenance can restore authorization.
      */
     [[nodiscard]] bool xinput_installed() noexcept;
 
     /**
-     * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
-     * @details The poll thread uses this path to observe unmasked state. Non-null while a primary chain is published,
-     *          including the degraded state, so a poller never has to reach raw controller state by calling the export
-     *          it may itself have patched. Null once the layer is logically disarmed, even when retained storage still
-     *          needs the trampoline.
+     * @brief Returns the published original XInputGetState chain, or nullptr after logical teardown.
+     * @details A degraded live pair retains its chain. The caller must hold the provider's lifetime.
+     *          Pollers use sample_xinput_raw_state instead, so every compatible copy receives raw controller state.
      */
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
+
+    /**
+     * @brief Samples the current export without suppression by compatible DMK copies.
+     * @details A refused scope skips the provider call and leaves state unchanged.
+     *          Trampolines can traverse another compatible copy's suppression.
+     * @param user_index Controller to sample.
+     * @param state Receives the raw controller state.
+     * @param owner The poller's interception owner.
+     * @return False after a failed scope, disconnected controller, or TLS restore failure.
+     * @note The poller must retain a raw-scope owner across its complete worker lifetime.
+     */
+    [[nodiscard]] bool sample_xinput_raw_state(
+        DWORD user_index,
+        XINPUT_STATE &state,
+        std::uint64_t owner = STANDALONE_INTERCEPT_OWNER
+    ) noexcept;
 
     /**
      * @brief Publishes the set of button bits the XInput detour should suppress, if @p owner still holds the layer.
@@ -424,7 +411,7 @@ namespace DetourModKit::detail
      *          Idempotent.
      * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
      * @warning Never call under the loader lock, and never before the poll thread has been joined: that thread reads
-     *          the XInput trampoline directly, and raw hook teardown registers VEH state and rewrites executable
+     *          the current XInput export, and raw hook teardown registers VEH state and rewrites executable
      *          pages.
      */
     void uninstall(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
@@ -494,15 +481,14 @@ namespace DetourModKit::detail
      */
     void set_xinput_arm_seam(XInputArmSeam seam) noexcept;
 
-    /// Reports whether the layer is claimed with at least one required entry point no longer patched.
+    /// Reports whether a claimed layer lacks paired route authorization.
     [[nodiscard]] bool xinput_pair_degraded_for_test() noexcept;
 
     /**
      * @struct XInputPairCoverage
-     * @brief Which members of the pair currently cover their entry point.
-     * @details Either member can be the missing one, so a proof has to name the direction it drove rather than infer
-     *          it from the degraded flag alone. An absent or aliased ordinal-100 export reports covered: it has no
-     *          separate entry point to mask.
+     * @brief Separates evidence for each required pair member.
+     * @details The exact witness query treats an absent or aliased ordinal 100 as covered.
+     *          The observation query reports receipts only for required members.
      */
     struct XInputPairCoverage
     {
@@ -512,6 +498,9 @@ namespace DetourModKit::detail
 
     /// Re-witnesses both pair members' target bytes without changing published state.
     [[nodiscard]] XInputPairCoverage xinput_pair_coverage_for_test() noexcept;
+
+    /** @brief Returns scoped route observations separately from exact-patch coverage. Test-only. */
+    [[nodiscard]] XInputPairCoverage xinput_pair_observation_for_test() noexcept;
 
     /**
      * @brief Counts backend re-arm transactions the recovery gate has let through.

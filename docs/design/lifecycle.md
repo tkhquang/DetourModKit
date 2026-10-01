@@ -118,6 +118,7 @@ A close is legal only once no live thread can still be inside the use. That is e
 - If a newer layer remains live, retain the older backend and keep the target tracked as hooked.
 - Preallocate the aligned XInput retention cell before hook publication.
 - If the 10 ms XInput drain expires, transfer the hooks and keepalives into that cell.
+- Retain receipt TLS and shared scope ownership with reachable XInput chains.
 - Use the same transfer when either restore lacks an `Original` witness.
 - Republish the required trampoline chain after that transfer.
 - Leave logical XInput interception disarmed after that transfer.

@@ -1158,6 +1158,56 @@ set_target_properties(xinput_forwarding_proxy_local PROPERTIES PREFIX "" OUTPUT_
 dmk_static_runtime(xinput_forwarding_proxy_local SHARED)
 add_dependencies(xinput_detour_rundown xinput_forwarding_proxy_local)
 
+add_executable(xinput_layered_consume xinput_layered_consume.cpp)
+target_link_libraries(xinput_layered_consume PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(xinput_layered_consume PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
+target_compile_definitions(xinput_layered_consume PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(xinput_layered_consume)
+add_dependencies(xinput_layered_consume xinput_forwarding_proxy_local)
+add_dependencies(dmk_lifecycle_proof_hosts xinput_layered_consume)
+
+foreach(copy_index RANGE 0 9)
+  add_library(xinput_consume_copy_${copy_index} SHARED xinput_consume_copy_dll.cpp xinput_consume_copy.def)
+  target_link_libraries(xinput_consume_copy_${copy_index} PRIVATE DetourModKit dmk_coverage psapi)
+  target_include_directories(xinput_consume_copy_${copy_index} PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_compile_definitions(xinput_consume_copy_${copy_index} PRIVATE DMK_ENABLE_TEST_SEAMS)
+  set_target_properties(xinput_consume_copy_${copy_index} PROPERTIES
+    PREFIX "" OUTPUT_NAME "dmk_xinput_consume_copy_${copy_index}")
+  dmk_static_runtime(xinput_consume_copy_${copy_index} SHARED)
+  add_dependencies(xinput_layered_consume xinput_consume_copy_${copy_index})
+endforeach()
+
+set(xinput_layered_proof_cases
+  "ForwardingPrimaryKeepsPairConsume|forwarding-primary"
+  "ForwardingExKeepsPairConsume|forwarding-ex"
+  "ForwardingBothKeepPairConsume|forwarding-both"
+  "NonforwardingPrimaryDisarmsPair|nonforwarding-primary"
+  "NonforwardingExDisarmsPair|nonforwarding-ex"
+  "ConditionalPrimaryLimitsObservedCoverage|conditional-primary"
+  "ConditionalExLimitsObservedCoverage|conditional-ex"
+  "TenCopiesKeepRawSamplesAndConsume|ten-copies-forward"
+  "TenCopiesKeepRawSamplesAndConsumeInReverseOrder|ten-copies-reverse"
+  "TwoCopiesPreserveFirstFrameModifiers|two-copies-first-frame-forward"
+  "TwoCopiesPreserveFirstFrameModifiersInReverseOrder|two-copies-first-frame-reverse"
+  "TransformingForwardersPreserveUpperModifierRules|two-copies-transforming-forwarder"
+  "ProbeBeforeAdmissionSurvivesTeardown|probe-before-admission"
+  "StaleProbeCannotPublishOverSuccessor|epoch-race"
+  "RouteDiagnosticsStayLatchedOutsideLocks|route-diagnostics")
+foreach(proof_case IN LISTS xinput_layered_proof_cases)
+  string(REPLACE "|" ";" proof_fields "${proof_case}")
+  list(GET proof_fields 0 proof_name)
+  list(GET proof_fields 1 proof_scenario)
+  dmk_add_raw_proof(NAME Lifecycle.XInput${proof_name}
+    COMMAND $<TARGET_FILE:xinput_layered_consume> ${proof_scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_layered_consume>
+    TEST_TIMEOUT 60 LABELS "lifecycle-proof")
+endforeach()
+dmk_add_raw_proof(NAME Lifecycle.XInputLayeredProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:xinput_layered_consume> unknown-scenario
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_layered_consume>
+  TEST_TIMEOUT 60 LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.XInputLayeredProofRejectsAnUnknownScenario PROPERTIES WILL_FAIL TRUE)
+
 # Ordinal 100 forwards to the local proxy so GetProcAddress resolves it in another module. GNU ld reads the forwarder
 # from the .def. MSVC LINK does not honor a .def or /EXPORT "name = othermodule.func" as a cross-module forwarder
 # unless it already knows the target module: without that it resolves XInputGetStateExLocal as a local symbol and fails
@@ -1491,6 +1541,13 @@ target_include_directories(staged_generation_dll PRIVATE
 target_compile_definitions(staged_generation_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
 add_dependencies(staged_generation_dll hook_target_lib xinput_forwarding_proxy_local)
 dmk_static_runtime(staged_generation_dll SHARED)
+
+if(MINGW)
+  # The staged file loop needs runtime sections and exports. Remove symbol metadata from the MinGW proof DLL.
+  add_custom_command(TARGET staged_generation_dll POST_BUILD
+    COMMAND "${CMAKE_STRIP}" --strip-all "$<TARGET_FILE:staged_generation_dll>"
+    VERBATIM)
+endif()
 
 # The host links a separate archive instance for the clear-bindings proof.
 add_executable(staged_generation_soak staged_generation_soak.cpp)

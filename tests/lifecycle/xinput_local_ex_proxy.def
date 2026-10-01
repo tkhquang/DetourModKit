@@ -1,3 +1,5 @@
 EXPORTS
     XInputGetState @1
     XInputGetStateExLocal @100
+    dmk_xinput_set_success_state
+    dmk_xinput_set_buttons

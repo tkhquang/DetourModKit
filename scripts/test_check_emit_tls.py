@@ -43,6 +43,24 @@ def test_input_delivery_tls_import_is_rejected() -> None:
     expect_offenders("lib.a:input_delivery_scope.cpp.obj:     U __emutls_get_address\n", 1)
 
 
+def test_xinput_callback_tls_imports_are_rejected() -> None:
+    output = "\n".join(
+        f"lib.a:{name}.cpp.{suffix}: U __emutls_get_address"
+        for name in ("input_intercept", "xinput_route_probe", "xinput_raw_scope")
+        for suffix in ("obj", "o")
+    )
+    expect_offenders(output, 6)
+
+
+def test_xinput_callback_tls_control_symbols_are_rejected() -> None:
+    output = "\n".join(
+        f"lib.a:{name}.cpp.obj:0000 D __emutls_{kind}.depth"
+        for name in ("input_intercept", "xinput_route_probe", "xinput_raw_scope")
+        for kind in ("v", "t")
+    )
+    expect_offenders(output, 6)
+
+
 def test_backend_retention_tls_import_is_rejected() -> None:
     expect_offenders("libsafetyhook.a:inline_hook.cpp.obj:    U __emutls_get_address\n", 1)
 
@@ -57,6 +75,15 @@ def test_unrelated_import_is_out_of_scope() -> None:
 
 def test_input_gate_pthread_identity_is_rejected() -> None:
     expect_offenders("lib.a:input.cpp.obj:                 U pthread_self\n", 1)
+
+
+def test_input_callback_pthread_identity_is_rejected() -> None:
+    output = "\n".join(
+        f"lib.a:{name}.cpp.obj: U {prefix}pthread_self"
+        for name in ("input_delivery_scope", "input_intercept", "xinput_route_probe", "xinput_raw_scope")
+        for prefix in ("", "__imp_")
+    )
+    expect_offenders(output, 8)
 
 
 def test_unrelated_pthread_identity_is_out_of_scope() -> None:
