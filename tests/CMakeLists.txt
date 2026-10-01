@@ -424,6 +424,22 @@ if(DMK_BUILD_TESTS)
     Lifecycle.XInputPrimaryDisableExceptionCompensatesThePair
     Lifecycle.XInputInstallRecoversTheRetainedExMember
     Lifecycle.XInputNewerLayerSurvivesRawTeardown
+    Lifecycle.XInputForwardingPrimaryKeepsPairConsume
+    Lifecycle.XInputForwardingExKeepsPairConsume
+    Lifecycle.XInputForwardingBothKeepPairConsume
+    Lifecycle.XInputNonforwardingPrimaryDisarmsPair
+    Lifecycle.XInputNonforwardingExDisarmsPair
+    Lifecycle.XInputConditionalPrimaryLimitsObservedCoverage
+    Lifecycle.XInputConditionalExLimitsObservedCoverage
+    Lifecycle.XInputTenCopiesKeepRawSamplesAndConsume
+    Lifecycle.XInputTenCopiesKeepRawSamplesAndConsumeInReverseOrder
+    Lifecycle.XInputTwoCopiesPreserveFirstFrameModifiers
+    Lifecycle.XInputTwoCopiesPreserveFirstFrameModifiersInReverseOrder
+    Lifecycle.XInputTransformingForwardersPreserveUpperModifierRules
+    Lifecycle.XInputProbeBeforeAdmissionSurvivesTeardown
+    Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks
+    Lifecycle.XInputStaleProbeCannotPublishOverSuccessor
+    Lifecycle.XInputLayeredProofRejectsAnUnknownScenario
     Lifecycle.XInputNewerLayerRetainsExPair
     Lifecycle.XInputCommittedArmInversionRetainsTrampoline
     Lifecycle.XInputUnownedExportDoesNotStrandThePair
@@ -579,7 +595,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 251)
+    --minimum 267)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

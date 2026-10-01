@@ -22,7 +22,7 @@ Hot-path mechanism: The read is an `atomic<shared_ptr<detail::InputPoller>>` acq
 
 ### detail::InputPoller
 
-State lives in an atomic `m_active_states[]` array.
+State lives in an atomic `m_active_states[]` array. The poll thread owns the consume latch and wheel-pulse state.
 
 - The poll thread re-reserves its deferred-callback staging vector to the live binding count each cycle and stages under one catch. Runtime binding growth past the startup reserve therefore cannot reallocate-then-throw out of the `jthread` body.
 - The cycle is a transaction. Each staged edge carries its own `m_active_states` transition, and a non-throwing store loop commits the whole batch after the pass. The drained wheel backlog rolls back, and the accumulated consume masks clear. A failed pass therefore owes no callback whose state it already consumed. The next cycle re-derives every such edge from the unchanged physical input, with no physical release and repress needed.
@@ -50,19 +50,34 @@ Hot-path mechanism: A `shared_lock` (uncontended SRWLOCK reader) guards the `m_a
 
 ### InputIntercept
 
-File-scope atomics are shared between the poll thread and the game's threads (XInput callers, the window message thread). The layer owns its safetyhook InlineHooks directly, not through a DMK Hook handle. The poll thread reads the trampoline, and the hook lifetime is coupled to the poll thread. The consume-until-release latch and wheel-pulse state are poll-thread-private.
+File-scope atomics connect the poll thread and game callers. The layer owns both XInput hooks and their code-provider references.
 
-- `install_xinput` takes both keepalives and constructs the never-destroyed retention cell before any prologue is patched. It contains allocator, create, and toggle exceptions, and it reconciles toggles through `hook_patch_witness.hpp`.
-- Complete pair coverage is published only after a FINAL witness reads both prologues back, immediately before the store that makes masking possible. It is never published on the strength of the arm results alone. A member that a competing writer restored during the other member's arm window then degrades the pair. The alternative masks one entry point while the other bypasses.
-- The same witness runs on every maintenance call rather than a short-circuit on the published flag, so a post-publication loss is detected rather than hidden.
-- Degradation is symmetric and fail-open. Either member can be the missing one, both detours go pass-through, and both forwarding chains stay published for already-admitted callers. Recovery re-arms the missing member through that member's OWN existing hook object. It never layers a new hook over a prologue that the pair already patched.
-- Teardown retires and drains, classifies both raw hooks before either restore, and frees only after both witness `Original`. Otherwise it moves the pair and keepalives into the reserved cell, so a newer layer and its original chain stay callable.
+- `install_xinput` reserves retention storage, receipt TLS, and a shared raw-sample owner before any prologue patch.
+- Exact patch witnesses authorize owned entry points. Foreign entries require successful scoped calls through both exports and matching detour receipts.
+- Receipts identify the owner, hook epoch, member, controller, state address, native thread, and nonce. Publication also requires an unchanged final snapshot.
+- A receipt proves its invocation. A conditional handler can bypass other callers without a byte change. Consume retains its public best-effort contract.
+- Maintenance checks both required members. A failed check disarms both routes. Recovery uses the existing hooks and preserves foreign bytes.
+- Compatible DMK copies share one versioned native TLS descriptor. Raw poll calls bypass every compatible copy's suppression and preserve upstream handlers.
+- Compatible game calls also share numeric original-button context keyed by controller and state address. Same-frame rules retain modifiers that another copy consumes.
+- Each compatible return records its expected buttons. A visible foreign change replaces prior modifier evidence with the observed buttons.
+- A failed context restore poisons shared consume authorization until every descriptor owner drains.
+- The descriptor owns numeric thread depth. Nested scopes preserve prior depth and last-error state without C++ allocations or application locks.
+- Probe leases span the complete foreign call and final snapshot. Owner revocation invalidates old receipts before teardown.
+- Teardown drains detours, raw samples, and probes under its existing deadline. A timeout retains hook chains, code-provider references, and native TLS ownership.
+- Release requires exact `Original` witnesses for both members. Observed route evidence never authorizes a byte write or restore.
+- `Lifecycle.XInputForwarding*`, `Lifecycle.XInputNonforwarding*`, and `Lifecycle.XInputConditional*` verify the evidence contract.
+- `Lifecycle.XInputTenCopies*` verifies fresh raw poll edges and combined consume in both load orders.
+- `Lifecycle.XInputTwoCopiesPreserveFirstFrameModifiers*` verifies overlapping modifiers without any reactive poll mask.
+- `Lifecycle.XInputTransformingForwardersPreserveUpperModifierRules` verifies modifier removal by a foreign handler between compatible copies.
+- `Lifecycle.XInputProbeBeforeAdmissionSurvivesTeardown` and `Lifecycle.XInputStaleProbeCannotPublishOverSuccessor` verify probe lifetime and epoch rejection.
+- `Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks` verifies one warning per episode and logger reentry after lock release.
+
 - Each raw-hook reset reads the backend retention verdict. Each retained chain adds one Input leak event and one warning after the interception lock releases. A retained chain keeps the install-time code-provider references for the process lifetime. Clean reset releases those references and adds no event or warning. Install rollback follows the same rule, while pair retention remains one separate event. `Lifecycle.XInput*Reports*` and `Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention` verify attribution and lock release.
 - Routed transactions preserve executable generated pages under the [hook contract](hooking.md#concurrency-model). Non-mid bypass ownership spans the complete provider call, including a dormant fiber. Each raw-hook reset waits up to one second for bypass calls that the restore released. `Lifecycle.RoutedBypassSurvivesDormantFiber` verifies provider retention, `Lifecycle.RoutedBypassCleanRoutesReclaim` verifies clean reset, and `Lifecycle.RoutedBypassDrainsBeforeReclaim` verifies the bypass wait.
 - The wheel hook removes itself with `UnhookWindowsHookEx`. The poll thread installs it, so the OS reclaims the thread-owned hook when that thread exits. A later control-thread removal that reports an invalid handle is a successful removal, not a live-thread cleanup failure.
 - Teardown is skipped under loader lock.
 
-Hot-path mechanism: Each detour runs lock-free atomic loads with an allocation-free, non-throwing body.
+Hot-path mechanism: DMK's XInput callback work uses native TLS, atomic loads, and counted atomic updates, without C++ allocation or application locks.
 
 ### Gamepad backend
 

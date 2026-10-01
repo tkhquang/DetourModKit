@@ -116,14 +116,13 @@ namespace DetourModKit
             KeyComboList combos = {};
 
             /**
-             * @brief Opt-in passthrough suppression that hides the trigger from the game while the guard is held.
-             * @details Suppression covers only digital gamepad buttons (through an XInputGetState hook) and the mouse
-             *          wheel. The engine masks the trigger of a gamepad chord from the poll cycle that sees the chord.
-             *          A chord shape in the same-frame table (see Input::consume_capacity) masks its trigger from its
-             *          first frame, with no poll-interval delay. If any pad entry point loses coverage, gamepad
-             *          suppression stops on all of them until full coverage returns.
-             * @note Best-effort: suppression may lapse without notice, and a later hook can restore a consumed wheel
-             *       message. A binding must tolerate game access to its trigger.
+             * @brief Hides consumed digital gamepad triggers and wheel events while the guard remains held.
+             * @details The poll cycle masks active gamepad triggers. Same-frame chord rules remove that delay
+             *          within Input::consume_capacity. Compatible DMK copies share unsuppressed poll samples.
+             *          A failed paired XInput route check stops suppression on both exports.
+             * @note Best-effort. Suppression can lapse without notice. A route probe proves its own call.
+             *       Foreign handlers can bypass other callers or rewrite controller state. Later hooks can restore
+             *       wheel events. A binding must tolerate game access to its trigger.
              */
             bool consume = false;
 
