@@ -252,13 +252,13 @@ namespace DetourModKit
             bool succeeded{false};
         };
 
-        /// @brief Clears the backend flush trace and makes the current thread its only recorder.
+        /** @brief Clears the backend flush trace and makes the current thread its only recorder. */
         void reset_backend_instruction_flush_trace_for_test() noexcept;
 
         /// Forces one upcoming backend instruction-cache flush call to fail, or disables failure with zero.
         void set_backend_instruction_flush_failure_call_for_test(std::size_t call) noexcept;
 
-        /// @brief Returns the trace size for the recorder, or zero for any other thread.
+        /** @brief Returns the trace size for the recorder, or zero for any other thread. */
         [[nodiscard]] std::size_t backend_instruction_flush_trace_size_for_test() noexcept;
 
         /// Returns one backend instruction-cache flush trace record.
