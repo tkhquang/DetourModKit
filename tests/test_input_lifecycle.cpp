@@ -694,9 +694,19 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
             }
         }
     );
-    while (!s_callback_commit_parked.load(std::memory_order_acquire))
+    const auto commit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!s_callback_commit_parked.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < commit_deadline)
     {
         std::this_thread::yield();
+    }
+    if (!s_callback_commit_parked.load(std::memory_order_acquire))
+    {
+        s_release_callback_commit.store(true, std::memory_order_release);
+        starter.join();
+        detail::InputTestSeams::set_callback_admission_commit_seam_for_test(nullptr);
+        manager.shutdown();
+        FAIL() << "start() did not reach callback admission before the deadline";
     }
 
     EXPECT_EQ(
@@ -713,8 +723,11 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
             .on_press = [] {},
         }
     );
-    ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
+    EXPECT_FALSE(rejected.has_value());
+    if (!rejected)
+    {
+        EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
+    }
 
     s_release_callback_commit.store(true, std::memory_order_release);
     starter.join();

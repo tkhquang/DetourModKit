@@ -229,12 +229,16 @@ namespace dmk_test::hook_fixture
     {
     public:
         explicit HookPublishProbeScope(void (*probe)(DetourModKit::detail::HookPublishStep)) noexcept
+            : m_previous_probe(DetourModKit::detail::g_hook_publish_probe)
         {
             DetourModKit::detail::g_hook_publish_probe = probe;
         }
-        ~HookPublishProbeScope() noexcept { DetourModKit::detail::g_hook_publish_probe = nullptr; }
+        ~HookPublishProbeScope() noexcept { DetourModKit::detail::g_hook_publish_probe = m_previous_probe; }
         HookPublishProbeScope(const HookPublishProbeScope &) = delete;
         HookPublishProbeScope &operator=(const HookPublishProbeScope &) = delete;
+
+    private:
+        void (*m_previous_probe)(DetourModKit::detail::HookPublishStep){nullptr};
     };
 
     // Offsets are spaced well past the longest body so no case can decode into its neighbour. The page is prefilled

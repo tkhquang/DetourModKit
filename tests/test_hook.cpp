@@ -1055,6 +1055,21 @@ namespace
     }
 } // namespace
 
+TEST(HookPublicationProof, NestedProbeScopesRestoreThePreviousProbe)
+{
+    const auto previous_probe = DetourModKit::detail::g_hook_publish_probe;
+    {
+        const HookPublishProbeScope outer(&observe_target_from_foreign_thread);
+        EXPECT_EQ(DetourModKit::detail::g_hook_publish_probe, &observe_target_from_foreign_thread);
+        {
+            const HookPublishProbeScope inner(&observe_mid_target_from_foreign_thread);
+            EXPECT_EQ(DetourModKit::detail::g_hook_publish_probe, &observe_mid_target_from_foreign_thread);
+        }
+        EXPECT_EQ(DetourModKit::detail::g_hook_publish_probe, &observe_target_from_foreign_thread);
+    }
+    EXPECT_EQ(DetourModKit::detail::g_hook_publish_probe, previous_probe);
+}
+
 TEST(HookPublicationProof, DisabledUntilCallerPublishesContext)
 {
     s_publication_detour_calls.store(0, std::memory_order_relaxed);

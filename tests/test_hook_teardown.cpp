@@ -251,12 +251,13 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
     std::atomic<int> readers_ready{0};
     std::atomic<int> saw_enabled{0};
     std::atomic<int> saw_disabled{0};
+    std::atomic<int> unexpected_result{5};
 
     std::vector<std::thread> readers;
     for (int i = 0; i < k_readers; ++i)
     {
         readers.emplace_back(
-            [&]
+            [&hook, &stop, &readers_ready, &saw_enabled, &saw_disabled, &unexpected_result]() -> void
             {
                 readers_ready.fetch_add(1, std::memory_order_release);
                 while (!stop.load(std::memory_order_relaxed))
@@ -271,7 +272,10 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
                     }
                     // Concurrent target calls must observe a coherent state during each toggle.
                     const int observed = call_unfolded(&gate_query_target, 5);
-                    ASSERT_TRUE(observed == 5 || observed == 305) << "observed " << observed;
+                    if (observed != 5 && observed != 305)
+                    {
+                        unexpected_result.store(observed, std::memory_order_relaxed);
+                    }
                 }
             }
         );
@@ -283,10 +287,14 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
         std::this_thread::yield();
     }
 
+    bool toggle_operations_ok = true;
     for (int i = 0; i < k_iterations; ++i)
     {
-        ASSERT_TRUE(hook.disable().has_value());
-        ASSERT_TRUE(hook.enable().has_value());
+        if (!hook.disable().has_value() || !hook.enable().has_value())
+        {
+            toggle_operations_ok = false;
+            break;
+        }
     }
 
     const auto wait_for_observation = [](const std::atomic<int> &count)
@@ -323,6 +331,8 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
     }
 
     // Each state reached a reader. The check distinguishes coherent observations from torn state.
+    EXPECT_TRUE(toggle_operations_ok);
+    EXPECT_EQ(unexpected_result.load(std::memory_order_relaxed), 5);
     EXPECT_TRUE(convergence_operations_ok);
     EXPECT_TRUE(observed_enabled);
     EXPECT_TRUE(observed_disabled);
@@ -808,9 +818,16 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
 
     // Thread A parks inside the original while call() retains its guard.
     std::thread caller([&h]() { (void)h.call<int>(7); });
-    while (!s_original_parked.load(std::memory_order_acquire))
+    const auto park_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!s_original_parked.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < park_deadline)
     {
         std::this_thread::yield();
+    }
+    if (!s_original_parked.load(std::memory_order_acquire))
+    {
+        s_release_original.store(true, std::memory_order_release);
+        caller.join();
+        FAIL() << "the original call did not reach its park before the deadline";
     }
 
     // Thread B attempts disable() while the call is parked. disable() acquires the SAME guard, so it MUST block until
@@ -825,16 +842,22 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
             disable_returned.store(true, std::memory_order_release);
         }
     );
-    while (!disable_started.load(std::memory_order_acquire))
+    const auto disable_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!disable_started.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < disable_deadline)
     {
         std::this_thread::yield();
     }
+    const bool disable_began = disable_started.load(std::memory_order_acquire);
 
     // The parked original retains the guard. An early disable result detects trampoline disposal before the drain.
+    bool disable_returned_early = false;
     for (int spin = 0; spin < 1000; ++spin)
     {
-        ASSERT_FALSE(disable_returned.load(std::memory_order_acquire))
-            << "disable() completed while a guarded call() was still in flight (drain violated)";
+        if (disable_returned.load(std::memory_order_acquire))
+        {
+            disable_returned_early = true;
+            break;
+        }
         std::this_thread::yield();
     }
 
@@ -842,6 +865,10 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     s_release_original.store(true, std::memory_order_release);
     disabler.join();
     caller.join();
+    ASSERT_TRUE(disable_began) << "disable() did not start before the deadline";
+    EXPECT_FALSE(
+        disable_returned_early
+    ) << "disable() completed while a guarded call() was still in flight (drain violated)";
     EXPECT_TRUE(disable_returned.load(std::memory_order_acquire));
     EXPECT_FALSE(h.is_enabled());
 }
