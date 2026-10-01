@@ -55,7 +55,8 @@ add_executable(vmt_late_static_owner vmt_late_static_owner.cpp)
 target_link_libraries(vmt_late_static_owner PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(vmt_late_static_owner PRIVATE
   ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src)
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(vmt_late_static_owner PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(vmt_late_static_owner)
 add_dependencies(dmk_lifecycle_proof_hosts vmt_late_static_owner)
@@ -604,7 +605,7 @@ set_tests_properties(Lifecycle.InputGateProofRejectsAnUnknownScenario PROPERTIES
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
   LABELS "lifecycle-proof")
 
-# Run T-DISPATCH-COW in isolated processes. See docs/tests/README.md for the proof contract.
+# Run the [B-101] dispatcher re-entry proofs in isolated processes. test_dispatch_cow.cpp states the proof contract.
 add_executable(dispatch_cow test_dispatch_cow.cpp)
 target_link_libraries(dispatch_cow PRIVATE DetourModKit dmk_coverage)
 target_include_directories(dispatch_cow PRIVATE ${PROJECT_SOURCE_DIR}/include)
@@ -634,8 +635,7 @@ set_tests_properties(Lifecycle.DispatchCowProofRejectsAnUnknownScenario PROPERTI
   WORKING_DIRECTORY $<TARGET_FILE_DIR:dispatch_cow>
   LABELS "lifecycle-proof")
 
-# Each mode runs in a separate process because a lock-held capture destructor deadlocks. CTest uses the timeout as its
-# oracle.
+# Run each mode in a separate process. input_reshape_retirement.cpp states the proof contract.
 add_executable(input_reshape_retirement input_reshape_retirement.cpp)
 target_link_libraries(input_reshape_retirement PRIVATE DetourModKit dmk_coverage)
 target_include_directories(input_reshape_retirement PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)

@@ -31,8 +31,14 @@ namespace dmk_test
         /**
          * @brief Points the process logger at a new capture file in synchronous mode.
          * @param level The lowest level to capture. The destructor restores the prior level.
+         * @param timestamp_format The record stamp format. An allocation sweep over a logging path passes
+         *        DetourModKit::DEFAULT_TIMESTAMP_FORMAT. The short default stamp fits the inline string buffer and
+         *        allocates nothing.
          */
-        explicit LoggerFileCapture(DetourModKit::LogLevel level = DetourModKit::LogLevel::Trace)
+        explicit LoggerFileCapture(
+            DetourModKit::LogLevel level = DetourModKit::LogLevel::Trace,
+            std::string_view timestamp_format = "%H:%M:%S"
+        )
         {
             static std::atomic<int> s_counter{0};
             const int n = s_counter.fetch_add(1, std::memory_order_relaxed);
@@ -44,7 +50,7 @@ namespace dmk_test
             {
                 logger.disable_async_mode();
             }
-            DetourModKit::Logger::configure("CAPTURE", m_capture_file.string(), "%H:%M:%S");
+            DetourModKit::Logger::configure("CAPTURE", m_capture_file.string(), timestamp_format);
             m_previous_level = logger.get_log_level();
             logger.set_log_level(level);
         }

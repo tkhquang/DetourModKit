@@ -62,7 +62,7 @@ These notes document subsystem designs. Each note supports the `AGENTS.md` bound
 
 ## Testing
 
-- [Test Coverage Guide](tests/README.md). Suite layout, per-module coverage, and the concurrency and fixture patterns.
+- [Test Coverage Guide](tests/README.md). Per-suite table, run commands, CTest labels, CTest timeout contract, and coverage tooling.
 
 ## Benchmarks (archive)
 

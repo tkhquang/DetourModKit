@@ -3,8 +3,9 @@
 
 /**
  * @file proof_section.hpp
- * @brief Places each hook target that a test patches in its own image in the private `.proof` code section.
- * @details docs/design/testing.md owns the rule under "In-image hook targets live in their own section".
+ * @brief Defines the noinline markers for in-image test functions and a call helper that always reaches the entry
+ *        of a hook target.
+ * @details docs/design/testing.md owns the `.proof` rule under "In-image hook targets live in their own section".
  */
 
 #include <cstdint>
@@ -17,6 +18,15 @@
 #define DMK_PROOF_TARGET __declspec(noinline) __declspec(code_seg(".proof"))
 #else
 #define DMK_PROOF_TARGET __attribute__((noinline, section(".proof")))
+#endif
+
+/** @brief Marks a noinline function that no test patches, such as a detour. Hook targets use DMK_PROOF_TARGET. */
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
 #endif
 
 /**
@@ -36,5 +46,15 @@
         }                                                                                                              \
         return static_cast<int>(accumulator & 0xFFFFu) + (SEED);                                                       \
     }
+
+namespace dmk_test
+{
+    /** @brief Reaches the patched entry through volatile indirection even when the optimizer sees the callee. */
+    template <class Fn, class... Args> auto call_unfolded(Fn *fn, Args... args)
+    {
+        Fn *const volatile indirect = fn;
+        return indirect(args...);
+    }
+} // namespace dmk_test
 
 #endif // DETOURMODKIT_TESTS_FIXTURES_PROOF_SECTION_HPP

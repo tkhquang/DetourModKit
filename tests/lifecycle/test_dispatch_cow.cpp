@@ -1,7 +1,10 @@
 /**
  * @file test_dispatch_cow.cpp
- * @brief Provides re-entrant EventDispatcher process cases for T-DISPATCH-COW.
- * @details See docs/tests/README.md for the proof contract.
+ * @brief Provides re-entrant EventDispatcher process cases for [B-101].
+ * @details Each mode installs a handler whose copy constructor or destructor calls clear(). A regression that copies
+ *          or destroys a handler under the writer mutex relocks that std::mutex on the same thread. On MinGW, the
+ *          relock deadlocks, so the CTest timeout is the oracle. On MSVC, the relock throws, and clear() contains the
+ *          throw. DispatchCow.* verifies the copy and destruction counts in process.
  */
 
 #include "DetourModKit/detail/event_dispatcher.hpp"

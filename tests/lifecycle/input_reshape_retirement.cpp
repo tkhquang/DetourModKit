@@ -1,7 +1,10 @@
 /**
  * @file input_reshape_retirement.cpp
  * @brief Provides isolated input reshape lifetime proofs.
- * @details See docs/tests/README.md for the proof contract.
+ * @details Each mode leaves a reshape entry as the sole owner of a consumer callable, then runs one reshape verb. The
+ *          pending-* modes run before start() and prove disposal outside the facade mutex. The live-* modes run on a
+ *          started engine and prove disposal outside the poller binding lock. The capture destructor calls
+ *          Input::binding_count(), so a lock-held disposal hangs into the CTest timeout or terminates the process.
  */
 
 #include "DetourModKit/input.hpp"
@@ -98,8 +101,7 @@ namespace
     /**
      * @brief Reports the outcome every mode shares: the reshape destroyed the callable and the reentry ran.
      * @details The window flag and the caller-thread check together bound the disposal to the reshape call. The
-     *          calling thread runs nothing else between the two flag stores. A lock-held destruction deadlocks
-     *          instead of reporting.
+     *          caller thread runs nothing else between the two flag stores.
      */
     [[nodiscard]] int
     report(const char *token, const std::weak_ptr<ReenterOnDestroy> &observer, std::size_t expected_bindings)

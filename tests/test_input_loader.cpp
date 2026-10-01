@@ -20,16 +20,16 @@
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "fixtures/loader_lock_scope.hpp"
+#include "fixtures/input_fixture.hpp"
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;
+using namespace dmk_test::input_fixture;
 
 namespace
 {
     std::atomic<bool> s_witness_armed{false};
     std::atomic<int> s_witness_destructions{0};
-    std::atomic<bool> s_commit_seam_entered{false};
-    std::atomic<bool> s_release_commit_seam{false};
 
     /// Counts destructions only while armed, so registration-time temporary copies never pollute the count.
     class DestructionWitness
@@ -60,15 +60,6 @@ namespace
                 .on_press = [witness = DestructionWitness{}] {},
             }
         );
-    }
-
-    void park_admission_commit() noexcept
-    {
-        s_commit_seam_entered.store(true, std::memory_order_release);
-        while (!s_release_commit_seam.load(std::memory_order_acquire))
-        {
-            std::this_thread::yield();
-        }
     }
 } // namespace
 
@@ -212,9 +203,9 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
     auto &mgr = input::Input::instance();
     mgr.shutdown();
 
-    s_commit_seam_entered.store(false, std::memory_order_release);
-    s_release_commit_seam.store(false, std::memory_order_release);
-    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(&park_admission_commit);
+    s_callback_commit_parked.store(false, std::memory_order_release);
+    s_release_callback_commit.store(false, std::memory_order_release);
+    detail::InputTestSeams::set_callback_admission_commit_seam_for_test(&park_callback_commit);
 
     std::unique_ptr<Result<input::BindingGuard>> registration;
     std::thread registrar(
@@ -232,18 +223,18 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
     );
 
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (!s_commit_seam_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    while (!s_callback_commit_parked.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
     {
         std::this_thread::yield();
     }
-    const bool entry_parked = s_commit_seam_entered.load(std::memory_order_acquire);
+    const bool entry_parked = s_callback_commit_parked.load(std::memory_order_acquire);
     if (entry_parked)
     {
         const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
         mgr.shutdown();
     }
 
-    s_release_commit_seam.store(true, std::memory_order_release);
+    s_release_callback_commit.store(true, std::memory_order_release);
     registrar.join();
     detail::InputTestSeams::set_callback_admission_commit_seam_for_test(nullptr);
 
