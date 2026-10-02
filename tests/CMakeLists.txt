@@ -470,6 +470,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RoutedBypassSurvivesDormantFiber
     Lifecycle.RoutedBypassCleanRoutesReclaim
     Lifecycle.RoutedBypassDrainsBeforeReclaim
+    Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan
     Lifecycle.RoutedBypassProofRejectsUnknownScenario
     Lifecycle.MidRouteStaleSlotRefusesCreation
     Lifecycle.MidRouteBypassDuringIdleScanRetains
@@ -562,6 +563,11 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesReportCoordinatorRefusal
     Lifecycle.RouteCoordinatorSurvivesParticipantUnload
     Lifecycle.StagedGenerationResourcesStayWithinBudget
+    Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls
+    Lifecycle.StagedGenerationResourcesExcludeHostBreakpointTls
+    Lifecycle.StagedGenerationResourcesExcludeHostLoadTls
+    Lifecycle.StagedGenerationResourcesRejectLoadTlsLeak
+    Lifecycle.WerControlClearsInheritedErrorMode
     Lifecycle.MidEntryTlsIndexReturnsWithTheLastSlot
     Lifecycle.MidEntryTlsIndexStaysWithARetainedSlot
     Lifecycle.MidEntryTlsIndexRefusalReleasesItsClaim
@@ -588,6 +594,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedExampleBudgetsStopBeforeTeardown
     Lifecycle.StagedExampleFailedInitRollsBack
     Lifecycle.StagedExampleMissingShutdownRequiresRestart
+    Lifecycle.StagedExampleExistingDirectoryUsesFreshName
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception
@@ -608,7 +615,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 279)
+    --minimum 286)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

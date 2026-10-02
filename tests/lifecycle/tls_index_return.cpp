@@ -22,6 +22,7 @@
 #include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
+#include "tls_allocation_failure.hpp"
 #include "tls_census.hpp"
 
 #include <process.h>
@@ -196,17 +197,12 @@ namespace
         if (!mid_cycle(&tls_target_3))
             return fail(90, "the warm-up mid hook did not fire");
         const std::size_t leaks = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
-        std::vector<DWORD> taken;
-        taken.reserve(4096);
-        for (DWORD index = TlsAlloc(); index != TLS_OUT_OF_INDEXES; index = TlsAlloc())
-            taken.push_back(index);
-        // No thread starts or ends while every index is taken.
+        dmk_lifecycle::TlsAllocationFailure allocation_failure;
+        if (!allocation_failure.isolated())
+            return fail(91, "TLS refusal escaped the proof executable or did not reach its import");
         const auto refused = enabled_mid_hook(&tls_target_5, &count_mid);
         const bool typed = !refused && refused.error().code == ErrorCode::SystemCallFailed;
-        for (const DWORD index : taken)
-            (void)TlsFree(index);
-        if (taken.empty())
-            return fail(91, "the process had no TLS index to take");
+        allocation_failure.restore();
         if (!typed)
             return fail(92, "mid_at did not refuse with SystemCallFailed while no TLS index was free");
         const std::size_t baseline = dmk_lifecycle::free_tls_indices();

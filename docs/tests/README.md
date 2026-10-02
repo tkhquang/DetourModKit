@@ -8,6 +8,18 @@ This guide owns the per-suite table, the run commands, the CTest labels and thei
 - [docs/design/lifecycle.md](../design/lifecycle.md): the lifecycle rules and the loader-lock proof inventory.
 - `lifecycle_proof_cases` in [tests/CMakeLists.txt](../../tests/CMakeLists.txt): the authoritative list of lifecycle cases.
 
+`Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls` verifies the resource census after first-use host exception state. Its six generations retain the exact TLS and executable-byte limits. The process timeout is 300 seconds.
+
+`Lifecycle.StagedGenerationResourcesExcludeHostBreakpointTls` applies the same limits to native breakpoint initialization. `Lifecycle.StagedExampleExistingDirectoryUsesFreshName` verifies fresh directory allocation after a process ID recurs. Its timeout is 60 seconds.
+
+The resource host records each generation's successful `TlsAlloc` and `TlsFree` calls through fixture import cells. It transfers pre-Init ownership and preserves the host ledger after image unload. The PEB census verifies that each retained index remains allocated. Executable-byte limits remain exact.
+
+- `Lifecycle.StagedGenerationResourcesExcludeHostLoadTls` verifies three host allocations after the baseline.
+- `Lifecycle.StagedGenerationResourcesRejectLoadTlsLeak` rejects a DLL load leak that an unrelated host release masks from the process count.
+- `Lifecycle.WerControlClearsInheritedErrorMode` verifies removal of process and thread WER suppression before the native crash control.
+
+The two TLS controls use six generations and a 300-second timeout. The WER mode control uses a 30-second timeout.
+
 ## Run
 
 After you build the tree, run the commands from the repository root.
@@ -224,6 +236,10 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `logger_generation_log.cpp`, `legacy_acp*` | Log file across generations, paths outside the ANSI code page |
 | `test_dispatch_cow.cpp` | Re-entrant `EventDispatcher` writer |
 | `raw_proof_error_mode.hpp` | Fault dialog suppression for raw hosts |
+
+TLS refusal proofs override only the executable import cell. Windows DLLs retain their native allocator. Each failure window verifies late CoreMessaging initialization and native TLS use on a new host thread. Delivery refusal, consume disarm, hook error, and recovery assertions remain mandatory.
+
+`Lifecycle.RoutedBypassDrainsBeforeReclaim` keeps both workers alive outside generated code until the idle proof completes. `Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan` verifies native suspension refusal and route retention after a snapshotted caller exits. Both routes keep the 30-second timeout.
 
 The XInput diagnostic routes use `xinput_layered_consume` as separate required `lifecycle-proof` processes. Each route has a 60-second timeout.
 

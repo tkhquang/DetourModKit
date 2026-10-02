@@ -13,8 +13,10 @@
 #include "internal/input_intercept.hpp"
 
 #include "staged_generation_protocol.hpp"
+#include "staged_generation_tls.hpp"
 #include "tls_census.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -48,6 +50,8 @@ namespace
     constexpr int SKIP_EXIT_CODE = 77;
     constexpr int SETUP_FAILURE = 2;
     constexpr int SOAK_CYCLES = 100;
+    constexpr int TLS_OWNERSHIP_FAILURE = 3;
+    constinit staged_gen::TlsLedger s_tls_ledger;
     constexpr unsigned STAGED_COPY_CANDIDATE_LIMIT = 1024;
 
     constexpr DWORD UNLOAD_POLL_BUDGET_MS = 3000;
@@ -517,7 +521,51 @@ namespace
         return objects;
     }
 
-    int run_resource_soak()
+    [[nodiscard]] bool host_exception_matches(int expected) noexcept
+    {
+        try
+        {
+            throw expected;
+        }
+        catch (int observed)
+        {
+            return observed == expected;
+        }
+    }
+
+    constexpr ULONG_PTR HOST_BREAKPOINT_COOKIE = 0x444D4B;
+    std::atomic<bool> s_host_breakpoint_seen{false};
+
+    LONG CALLBACK host_breakpoint_probe(EXCEPTION_POINTERS *exception) noexcept
+    {
+        const auto &record = *exception->ExceptionRecord;
+        if (record.ExceptionCode != EXCEPTION_BREAKPOINT || record.NumberParameters != 1 ||
+            record.ExceptionInformation[0] != HOST_BREAKPOINT_COOKIE)
+            return EXCEPTION_CONTINUE_SEARCH;
+        s_host_breakpoint_seen.store(true, std::memory_order_relaxed);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    [[nodiscard]] bool initialize_host_breakpoint_path() noexcept
+    {
+        s_host_breakpoint_seen.store(false, std::memory_order_relaxed);
+        const auto remove_handler = [](void *handler) noexcept -> void { RemoveVectoredExceptionHandler(handler); };
+        const std::unique_ptr<void, decltype(remove_handler)> handler{
+            AddVectoredExceptionHandler(0, &host_breakpoint_probe),
+            remove_handler
+        };
+        if (!handler)
+            return false;
+        const ULONG_PTR cookie = HOST_BREAKPOINT_COOKIE;
+        RaiseException(EXCEPTION_BREAKPOINT, 0, 1, &cookie);
+        return s_host_breakpoint_seen.load(std::memory_order_relaxed);
+    }
+
+    int run_resource_soak(
+        [[maybe_unused]] int clean_cycles = SOAK_CYCLES,
+        [[maybe_unused]] bool host_load_tls = false,
+        [[maybe_unused]] bool generation_tls_leak = false
+    )
     {
 #if defined(__SANITIZE_ADDRESS__)
         std::fprintf(
@@ -547,27 +595,78 @@ namespace
             return fail("resources", "the host did not stage the warm-up copy");
         std::error_code removed;
         (void)std::filesystem::remove(warm_up, removed);
+        // The first mid hook enters the native vectored breakpoint path. Exclude its host setup from the census.
+        if (!initialize_host_breakpoint_path())
+            return fail("resources", "the host breakpoint probe did not execute");
+        // The post-unmap exception check can initialize host TLS. Initialize it before the generation census.
+        if (!host_exception_matches(-1))
+            return fail("resources", "the host exception warm-up changed its value");
         SYSTEM_INFO system{};
         GetSystemInfo(&system);
         std::uint64_t previous_bytes = private_executable_bytes();
+        std::size_t previous_owned_tls = 0;
+        std::array<DWORD, 3> host_indices{
+            TLS_OUT_OF_INDEXES,
+            TLS_OUT_OF_INDEXES,
+            TLS_OUT_OF_INDEXES,
+        };
+        const auto release_host_indices = [&host_indices](void *) noexcept -> void
+        {
+            for (const DWORD index : host_indices)
+            {
+                if (index != TLS_OUT_OF_INDEXES)
+                    (void)TlsFree(index);
+            }
+        };
+        const std::unique_ptr<void, decltype(release_host_indices)> host_indices_guard{
+            host_indices.data(),
+            release_host_indices
+        };
+        if (generation_tls_leak)
+        {
+            host_indices[0] = TlsAlloc();
+            if (host_indices[0] == TLS_OUT_OF_INDEXES)
+                return fail("resources", "the leak control did not reserve its host index");
+        }
         std::size_t previous_tls = dmk_lifecycle::free_tls_indices();
+        if (previous_tls == 0)
+            return fail("resources", "the host TLS census is unavailable");
         std::uintptr_t coordinator_identity = 0;
-        // The clean series ends at SOAK_CYCLES. The next generation retains one route explicitly. The one after it
-        // keeps a diagnostics subscription live across ~Session, and two clean generations follow.
-        constexpr int RETAINED_CYCLE = SOAK_CYCLES + 1;
-        constexpr int DIAGNOSTICS_RETAINED_CYCLE = RETAINED_CYCLE + 1;
-        constexpr int LAST_CYCLE = DIAGNOSTICS_RETAINED_CYCLE + 2;
+        // After the clean series, one generation retains a route and another keeps a diagnostics subscription across
+        // ~Session. Two clean generations follow.
+        const int retained_cycle = clean_cycles + 1;
+        const int diagnostics_retained_cycle = retained_cycle + 1;
+        const int last_cycle = diagnostics_retained_cycle + 2;
         // Seven hooks each emit Created and Enabled during Init and Removed during Shutdown.
         constexpr std::uint64_t INIT_LIFECYCLE_EVENTS = 14;
         constexpr std::uint64_t SHUTDOWN_LIFECYCLE_EVENTS = 21;
-        for (int cycle = 0; cycle <= LAST_CYCLE; ++cycle)
+        for (int cycle = 0; cycle <= last_cycle; ++cycle)
         {
-            const bool retain = cycle == RETAINED_CYCLE;
-            const bool retain_diagnostics = cycle == DIAGNOSTICS_RETAINED_CYCLE;
-            const std::size_t retained_routes = cycle >= RETAINED_CYCLE ? 1 : 0;
+            const bool retain = cycle == retained_cycle;
+            const bool retain_diagnostics = cycle == diagnostics_retained_cycle;
+            const std::size_t retained_routes = cycle >= retained_cycle ? 1 : 0;
             Generation generation;
+            if (host_load_tls && cycle == 0)
+            {
+                for (DWORD &index : host_indices)
+                {
+                    index = TlsAlloc();
+                    if (index == TLS_OUT_OF_INDEXES)
+                        return fail("resources", "the host load control did not reserve each index");
+                }
+            }
+            if (generation_tls_leak && cycle == 0 && !SetEnvironmentVariableW(L"DMK_STAGED_GENERATION_LEAK_TLS", L"1"))
+                return fail("resources", "the load leak control could not set its environment");
             if (!load_generation("RESOURCE" + std::to_string(cycle), generation))
                 return fail("resources", "the generation did not load");
+            if (generation_tls_leak && cycle == 0 &&
+                !SetEnvironmentVariableW(L"DMK_STAGED_GENERATION_LEAK_TLS", nullptr))
+                return fail("resources", "the load leak control could not clear its environment");
+            const auto bind_tls = resolve<staged_gen::BindTlsLedgerFn>(generation.module, "dmk_staged_bind_tls_ledger");
+            if (bind_tls == nullptr)
+                return fail("resources", "the generation has no TLS ownership ledger");
+            bind_tls(&s_tls_ledger);
+            const std::size_t loaded_tls = dmk_lifecycle::free_tls_indices();
             const std::string log_name = make_log_name("staged_gen_resources");
             staged_gen::InitOptions options{};
             options.enable_mid = 1;
@@ -581,9 +680,11 @@ namespace
                 generation.read_status().dispatched != 1 ||
                 generation.read_status().lifecycle_events != INIT_LIFECYCLE_EVENTS)
                 return fail("resources", "six mid callbacks, one dispatched event, and 14 hook events did not execute");
+            const std::size_t initialized_tls = dmk_lifecycle::free_tls_indices();
             // A retained route refuses the reload verdict and books one HookManager leak. A diagnostics subscription
             // that outlives ~Session refuses it with one Diagnostics leak.
             const int verdict = generation.shutdown();
+            const std::size_t shutdown_tls = dmk_lifecycle::free_tls_indices();
             const auto status = generation.read_status();
             if (status.lifecycle_events != SHUTDOWN_LIFECYCLE_EVENTS)
                 return fail("resources", "the diagnostics subscription did not observe every hook removal");
@@ -620,28 +721,36 @@ namespace
                 return fail("resources", "the generation did not unmap");
             if (!retain && !retain_diagnostics)
                 remove_unmapped_staged_file_best_effort(generation);
+            if (generation_tls_leak && cycle == 0)
+            {
+                // An unrelated host release hides the DLL leak from a process-wide count.
+                if (!TlsFree(host_indices[0]))
+                    return fail("resources", "the leak control did not release its host index");
+                host_indices[0] = TLS_OUT_OF_INDEXES;
+            }
+            const std::size_t unloaded_tls = dmk_lifecycle::free_tls_indices();
+            if (!initialize_host_breakpoint_path())
+                return fail("resources", "the post-unmap breakpoint probe did not execute");
             // A throw after each unmap faults if a handler from the unmapped image remains registered.
-            try
-            {
-                throw cycle;
-            }
-            catch (int observed)
-            {
-                if (observed != cycle)
-                    return fail("resources", "the post-unmap exception changed");
-            }
+            if (!host_exception_matches(cycle))
+                return fail("resources", "the post-unmap exception changed");
+            const std::size_t exception_tls = dmk_lifecycle::free_tls_indices();
             const CoordinatorObjects objects = coordinator_objects(coordinator_identity);
             if (objects.views != 1 || objects.mutex_handles != 1 || objects.mapping_handles != 1)
                 return fail("resources", "the process holds other than one coordinator view and two handles");
             const std::uint64_t bytes = private_executable_bytes();
-            const std::size_t tls = dmk_lifecycle::free_tls_indices();
+            std::array<bool, staged_gen::TlsLedger::INDEX_COUNT> allocated{};
+            const std::size_t tls = dmk_lifecycle::free_tls_indices(&allocated);
+            if (tls == 0)
+                return fail("resources", "the generation TLS census is unavailable");
             std::fprintf(
                 stderr,
-                "resources cycle=%d retained=%d executable_delta=%lld tls_delta=%lld\n",
+                "resources cycle=%d retained=%d executable_delta=%lld tls_delta=%lld owned_tls=%zu\n",
                 cycle,
                 (retain || retain_diagnostics) ? 1 : 0,
                 static_cast<long long>(bytes) - static_cast<long long>(previous_bytes),
-                static_cast<long long>(previous_tls) - static_cast<long long>(tls)
+                static_cast<long long>(previous_tls) - static_cast<long long>(tls),
+                s_tls_ledger.live.load(std::memory_order_relaxed)
             );
             // A retained route keeps the one near block that holds its generated ranges.
             const std::uint64_t retained_bytes = retain ? system.dwAllocationGranularity : 0;
@@ -651,13 +760,95 @@ namespace
             // claimed mid slot and its namespace-scope dispatcher each keep one index. The refused diagnostics
             // generation keeps the one emit index that its live subscription and that dispatcher share.
             const std::size_t retained_tls = retain ? 2 : (retain_diagnostics ? 1 : 0);
-            if (tls + retained_tls != previous_tls)
-                return fail("resources", "TLS consumption differs from the retained owner count");
+            const std::size_t owned_tls = s_tls_ledger.live.load(std::memory_order_relaxed);
+            bool owned_indices_allocated = true;
+            std::size_t recorded_indices = 0;
+            for (std::size_t i = 0; i < allocated.size(); ++i)
+            {
+                if (s_tls_ledger.owned[i].load(std::memory_order_relaxed))
+                {
+                    ++recorded_indices;
+                    owned_indices_allocated = owned_indices_allocated && allocated[i];
+                }
+            }
+            if (s_tls_ledger.invalid.load(std::memory_order_relaxed) || !owned_indices_allocated ||
+                recorded_indices != owned_tls || owned_tls != previous_owned_tls + retained_tls)
+            {
+                std::fprintf(
+                    stderr,
+                    "TLS checkpoints: baseline=%zu loaded=%zu initialized=%zu shutdown=%zu "
+                    "unloaded=%zu exception=%zu census=%zu\n",
+                    previous_tls,
+                    loaded_tls,
+                    initialized_tls,
+                    shutdown_tls,
+                    unloaded_tls,
+                    exception_tls,
+                    tls
+                );
+                (void)fail("resources", "generation TLS ownership differs from the retained owner count");
+                return TLS_OWNERSHIP_FAILURE;
+            }
             previous_bytes = bytes;
             previous_tls = tls;
+            previous_owned_tls = owned_tls;
         }
         return 0;
 #endif
+    }
+
+    std::array<DWORD, 3> s_host_exception_tls{
+        TLS_OUT_OF_INDEXES,
+        TLS_OUT_OF_INDEXES,
+        TLS_OUT_OF_INDEXES,
+    };
+    std::atomic<bool> s_host_exception_seen{false};
+    bool s_host_breakpoint_control = false;
+
+    LONG CALLBACK reserve_host_exception_tls(EXCEPTION_POINTERS *exception) noexcept
+    {
+        // Model host infrastructure that reserves TLS on its first exception dispatch.
+        const DWORD code = exception->ExceptionRecord->ExceptionCode;
+        const bool matches =
+            s_host_breakpoint_control ? code == EXCEPTION_BREAKPOINT : (code == 0xE06D7363 || code == 0x20474343);
+        if (matches && !s_host_exception_seen.exchange(true, std::memory_order_relaxed))
+        {
+            for (auto &index : s_host_exception_tls)
+                index = TlsAlloc();
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    void release_host_exception_tls(void *handler) noexcept
+    {
+        RemoveVectoredExceptionHandler(handler);
+        for (const auto &index : s_host_exception_tls)
+        {
+            if (index != TLS_OUT_OF_INDEXES)
+                TlsFree(index);
+        }
+    }
+
+    int run_resource_host_exception(bool breakpoint = false)
+    {
+        s_host_breakpoint_control = breakpoint;
+        const std::unique_ptr<void, decltype(&release_host_exception_tls)> handler{
+            AddVectoredExceptionHandler(1, &reserve_host_exception_tls),
+            &release_host_exception_tls
+        };
+        if (!handler)
+            return fail("resources", "the host exception control did not install");
+        const int result = run_resource_soak(1);
+        if (result != 0)
+            return result;
+        if (!s_host_exception_seen.load(std::memory_order_relaxed))
+            return fail("resources", "the host exception control did not execute");
+        for (const auto &index : s_host_exception_tls)
+        {
+            if (index == TLS_OUT_OF_INDEXES)
+                return fail("resources", "the host exception control did not reserve each index");
+        }
+        return 0;
     }
 
     int run_soak()
@@ -1269,6 +1460,25 @@ namespace
 int main(int argc, char **argv)
 {
     const std::string scenario = argc > 1 ? argv[1] : "";
+    if (scenario == "resources-host-load")
+    {
+        return run_resource_soak(1, true);
+    }
+    if (scenario == "resources-generation-tls-leak")
+    {
+        const int result = run_resource_soak(1, false, true);
+        if (result == SKIP_EXIT_CODE)
+            return result;
+        return result == TLS_OWNERSHIP_FAILURE ? 0 : fail("resources", "the generation TLS leak escaped its oracle");
+    }
+    if (scenario == "resources-host-breakpoint")
+    {
+        return run_resource_host_exception(true);
+    }
+    if (scenario == "resources-host-exception")
+    {
+        return run_resource_host_exception();
+    }
     if (scenario == "resources")
     {
         return run_resource_soak();
@@ -1308,7 +1518,10 @@ int main(int argc, char **argv)
 
     std::fprintf(
         stderr,
-        "usage: %s soak|local-wheel-retention|uninstall-call-site|parked-callback|drain-retry|"
+        "usage: %s resources|resources-host-exception|resources-host-breakpoint|resources-host-load|"
+        "resources-generation-tls-leak|soak|local-wheel-retention|"
+        "uninstall-call-site|"
+        "parked-callback|drain-retry|"
         "partial-init|foreign-xinput|candidate-collision\n",
         argc > 0 ? argv[0] : "staged_generation_soak"
     );
