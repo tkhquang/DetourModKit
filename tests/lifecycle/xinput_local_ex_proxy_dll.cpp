@@ -13,6 +13,19 @@
 
 namespace
 {
+    SRWLOCK s_connection_mutex = SRWLOCK_INIT;
+
+    class ConnectionReadGuard
+    {
+    public:
+        ConnectionReadGuard() noexcept { AcquireSRWLockShared(&s_connection_mutex); }
+        ~ConnectionReadGuard() noexcept { ReleaseSRWLockShared(&s_connection_mutex); }
+        ConnectionReadGuard(const ConnectionReadGuard &) = delete;
+        ConnectionReadGuard &operator=(const ConnectionReadGuard &) = delete;
+        ConnectionReadGuard(ConnectionReadGuard &&) = delete;
+        ConnectionReadGuard &operator=(ConnectionReadGuard &&) = delete;
+    };
+
     std::atomic<bool> s_success_enabled{false};
     std::atomic<WORD> s_buttons{
         XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B
@@ -42,14 +55,16 @@ namespace
     }
 } // namespace
 
-/** @brief Selects successful controller states before the host starts its callers. */
+/** @brief Changes connection state atomically with packet resets for the new connection epoch. */
 extern "C" void WINAPI dmk_xinput_set_success_state(BOOL enabled) noexcept
 {
+    AcquireSRWLockExclusive(&s_connection_mutex);
     for (auto &packets : s_primary_packets)
         packets.store(0, std::memory_order_relaxed);
     for (auto &packets : s_ex_packets)
         packets.store(0, std::memory_order_relaxed);
     s_success_enabled.store(enabled != FALSE, std::memory_order_release);
+    ReleaseSRWLockExclusive(&s_connection_mutex);
 }
 
 /** @brief Changes digital buttons without a provider byte change. */
@@ -60,6 +75,7 @@ extern "C" void WINAPI dmk_xinput_set_buttons(WORD buttons) noexcept
 
 extern "C" DWORD WINAPI XInputGetState(DWORD user_index, XINPUT_STATE *state) noexcept
 {
+    const ConnectionReadGuard connection;
     if (s_success_enabled.load(std::memory_order_acquire))
         return sample_success(user_index, state, false);
     if (state != nullptr)
@@ -73,6 +89,7 @@ extern "C" DWORD WINAPI XInputGetState(DWORD user_index, XINPUT_STATE *state) no
 // The distinct result prevents identical-code folding with XInputGetState.
 extern "C" DWORD WINAPI XInputGetStateExLocal(DWORD user_index, XINPUT_STATE *state) noexcept
 {
+    const ConnectionReadGuard connection;
     if (s_success_enabled.load(std::memory_order_acquire))
         return sample_success(user_index, state, true);
     if (state != nullptr)

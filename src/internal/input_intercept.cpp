@@ -1,9 +1,6 @@
 /**
  * @file input_intercept.cpp
- * @brief This TU implements the internal active-input layer from input_intercept.hpp.
- *
- * This TU owns the XInputGetState inline hook and the thread-scoped WH_GETMESSAGE wheel hook. They provide gamepad
- * passthrough suppression and mouse-wheel capture for InputPoller.
+ * @brief XInput route maintenance and thread-scoped wheel capture.
  */
 
 #include "input_intercept.hpp"
@@ -20,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -972,6 +970,7 @@ namespace DetourModKit::detail
                 s_xinput_observed_pair = false;
                 s_xinput_primary_observed = false;
                 s_xinput_ex_observed = false;
+                s_xinput_route_warned = false;
             }
             s_bound_user_index.store(user_index, std::memory_order_relaxed);
         }
@@ -2314,11 +2313,113 @@ namespace DetourModKit::detail
                    (member.witness == PatchWitness::OwnedPatch || member.witness == PatchWitness::Foreign);
         }
 
+        enum class XInputCallOutcome : std::uint8_t
+        {
+            Absent,
+            Uninvoked,
+            Returned,
+            Exception,
+        };
+
+        struct XInputCallEvidence
+        {
+            XInputCallOutcome outcome{XInputCallOutcome::Uninvoked};
+            DWORD result{0};
+            bool authenticated{false};
+            std::optional<bool> admitted{};
+        };
+
+        struct XInputPairEvidence
+        {
+            XInputCallEvidence primary{};
+            XInputCallEvidence ex{};
+            std::optional<bool> admitted{};
+            std::optional<bool> raw_admitted{};
+            std::optional<bool> raw_restored{};
+            std::optional<bool> unchanged{};
+            std::optional<bool> healthy{};
+        };
+
+        [[nodiscard]] XInputCallEvidence
+        observe_xinput_export(XInputGetStateFn target, DWORD user_index, XINPUT_STATE &state) noexcept
+        {
+            try
+            {
+                return {
+                    .outcome = XInputCallOutcome::Returned,
+                    .result = target(user_index, &state),
+                };
+            }
+            catch (...)
+            {
+                return {
+                    .outcome = XInputCallOutcome::Exception,
+                };
+            }
+        }
+
+        void append_decimal(std::span<char> buffer, std::size_t &length, std::uint32_t value) noexcept
+        {
+            std::array<char, 10> digits{};
+            const auto converted = std::to_chars(digits.data(), digits.data() + digits.size(), value);
+            append_text(buffer, length, {digits.data(), static_cast<std::size_t>(converted.ptr - digits.data())});
+        }
+
+        [[nodiscard]] std::string_view check_description(std::optional<bool> result) noexcept
+        {
+            return result ? (*result ? "passed" : "failed") : "unmeasured";
+        }
+
+        void append_xinput_call(
+            std::span<char> buffer,
+            std::size_t &length,
+            std::string_view name,
+            const XInputMemberSnapshot &member,
+            const XInputCallEvidence &call
+        ) noexcept
+        {
+            append_text(buffer, length, name);
+            append_text(buffer, length, ": witness=");
+            append_text(buffer, length, witness_description(member.witness));
+            append_text(buffer, length, ", enabled=");
+            append_text(buffer, length, member.enabled ? "yes" : "no");
+            append_text(buffer, length, ", readable=");
+            append_text(buffer, length, member.readable ? "yes" : "no");
+            append_text(buffer, length, ", probe=");
+            append_text(buffer, length, check_description(call.admitted));
+            append_text(buffer, length, ", call=");
+            switch (call.outcome)
+            {
+            case XInputCallOutcome::Absent:
+                append_text(buffer, length, "absent");
+                break;
+            case XInputCallOutcome::Uninvoked:
+                append_text(buffer, length, "uninvoked");
+                break;
+            case XInputCallOutcome::Exception:
+                append_text(buffer, length, "exception");
+                break;
+            case XInputCallOutcome::Returned:
+                append_text(buffer, length, "returned result=");
+                append_decimal(buffer, length, call.result);
+                break;
+            }
+            append_text(buffer, length, ", authentication=");
+            append_text(
+                buffer,
+                length,
+                call.outcome == XInputCallOutcome::Absent || call.outcome == XInputCallOutcome::Uninvoked
+                    ? "unmeasured"
+                    : (call.authenticated ? "matched" : "failed")
+            );
+        }
+
         void degrade_observed_xinput_pair(
             bool was_complete,
-            const XInputMemberSnapshot &failed,
-            bool ex,
-            std::string_view route_result,
+            int user_index,
+            const XInputMemberSnapshot &primary,
+            const XInputMemberSnapshot &ex,
+            const XInputPairEvidence &evidence,
             InterceptLockGuard &lock
         ) noexcept
         {
@@ -2328,16 +2429,27 @@ namespace DetourModKit::detail
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_pair_degraded.store(true, std::memory_order_release);
             const bool warn = was_complete && !s_xinput_route_warned;
-            std::array<char, 256> message{};
+            std::array<char, 1024> message{};
             std::size_t length = 0;
             if (warn)
             {
                 s_xinput_route_warned = true;
-                append_text(message, length, "InputIntercept: XInput paired suppression stopped: ");
-                append_text(message, length, ex ? "XInputGetStateEx: " : "XInputGetState: ");
-                append_text(message, length, witness_description(failed.witness));
-                append_text(message, length, ", ");
-                append_text(message, length, route_result);
+                append_text(message, length, "InputIntercept: XInput paired suppression stopped: controller=");
+                append_decimal(message, length, static_cast<std::uint32_t>(user_index));
+                append_text(message, length, ", pair: admission=");
+                append_text(message, length, check_description(evidence.admitted));
+                append_text(message, length, ", raw_scope=");
+                append_text(message, length, check_description(evidence.raw_admitted));
+                append_text(message, length, ", raw_restore=");
+                append_text(message, length, check_description(evidence.raw_restored));
+                append_text(message, length, ", snapshot=");
+                append_text(message, length, check_description(evidence.unchanged));
+                append_text(message, length, ", context=");
+                append_text(message, length, check_description(evidence.healthy));
+                append_text(message, length, ". ");
+                append_xinput_call(message, length, "XInputGetState", primary, evidence.primary);
+                append_text(message, length, ". ");
+                append_xinput_call(message, length, "XInputGetStateEx", ex, evidence.ex);
                 append_text(message, length, ".");
             }
             lock.unlock();
@@ -2347,30 +2459,32 @@ namespace DetourModKit::detail
             }
         }
 
-        [[nodiscard]] bool
-        observe_xinput_pair(int user_index, std::uint64_t owner, bool was_complete, InterceptLockGuard &lock) noexcept
+        [[nodiscard]] bool observe_xinput_pair(
+            int user_index,
+            std::uint64_t owner,
+            bool was_complete,
+            bool &recovered,
+            InterceptLockGuard &lock
+        ) noexcept
         {
             const std::uint64_t epoch = s_xinput_hook_epoch.load(std::memory_order_seq_cst);
             if (s_intercept_owner.load(std::memory_order_acquire) != owner)
                 return false;
             const XInputMemberSnapshot primary = capture_xinput_member(s_xinput_permanent_hooks->primary);
             const XInputMemberSnapshot ex = capture_xinput_member(s_xinput_permanent_hooks->ex);
+            XInputPairEvidence evidence;
+            if (ex.target == nullptr)
+                evidence.ex.outcome = XInputCallOutcome::Absent;
             if (user_index < 0 || user_index >= XUSER_MAX_COUNT || !reserve_xinput_route_probe())
             {
-                degrade_observed_xinput_pair(was_complete, primary, false, "probe admission failed", lock);
+                evidence.admitted = false;
+                degrade_observed_xinput_pair(was_complete, user_index, primary, ex, evidence, lock);
                 return false;
             }
             const bool ex_required = ex.target != nullptr;
             if (!observed_route_candidate(primary, true) || !observed_route_candidate(ex, ex_required))
             {
-                const bool failed_ex = observed_route_candidate(primary, true);
-                degrade_observed_xinput_pair(
-                    was_complete,
-                    failed_ex ? ex : primary,
-                    failed_ex,
-                    "route is unavailable",
-                    lock
-                );
+                degrade_observed_xinput_pair(was_complete, user_index, primary, ex, evidence, lock);
                 return false;
             }
 
@@ -2400,19 +2514,20 @@ namespace DetourModKit::detail
             const bool admitted =
                 raw_scope.admitted() && primary_probe.admitted() && (!ex_required || ex_probe->admitted());
             lock.unlock();
-            DWORD ex_result = ERROR_SUCCESS;
-            bool ex_received = !ex_required;
+            evidence.admitted = admitted;
             if (ex_required)
             {
                 if (admitted)
-                    ex_result = invoke_xinput_export(ex.target, static_cast<DWORD>(user_index), ex_state);
-                ex_received = ex_probe->finish();
+                    evidence.ex = observe_xinput_export(ex.target, static_cast<DWORD>(user_index), ex_state);
+                evidence.ex.authenticated = ex_probe->finish();
             }
-            const DWORD primary_result =
-                admitted ? invoke_xinput_export(primary.target, static_cast<DWORD>(user_index), primary_state)
-                         : ERROR_INVALID_FUNCTION;
-            const bool primary_received = primary_probe.finish();
-            const bool raw_restored = raw_scope.finish();
+            if (admitted)
+                evidence.primary = observe_xinput_export(primary.target, static_cast<DWORD>(user_index), primary_state);
+            evidence.primary.authenticated = primary_probe.finish();
+            evidence.primary.admitted = primary_probe.admitted();
+            evidence.ex.admitted = ex_required ? std::optional<bool>{ex_probe->admitted()} : std::nullopt;
+            evidence.raw_admitted = raw_scope.admitted();
+            evidence.raw_restored = raw_scope.finish();
             lock.relock();
 
             // A successor owns its publication. An old receipt cannot revoke or refresh that owner's state.
@@ -2422,24 +2537,24 @@ namespace DetourModKit::detail
             const bool unchanged = s_bound_user_index.load(std::memory_order_relaxed) == user_index &&
                                    primary == capture_xinput_member(s_xinput_permanent_hooks->primary) &&
                                    ex == capture_xinput_member(s_xinput_permanent_hooks->ex);
-            if (admitted && primary_received && ex_received && primary_result == ERROR_SUCCESS &&
-                ex_result == ERROR_SUCCESS && raw_restored && unchanged && xinput_consume_context_healthy())
+            evidence.unchanged = unchanged;
+            evidence.healthy = xinput_consume_context_healthy();
+            const auto successful = [](const XInputCallEvidence &call) noexcept -> bool
             {
+                return call.outcome == XInputCallOutcome::Returned && call.authenticated &&
+                       call.result == ERROR_SUCCESS;
+            };
+            if (admitted && successful(evidence.primary) && (!ex_required || successful(evidence.ex)) &&
+                *evidence.raw_restored && unchanged && *evidence.healthy)
+            {
+                recovered = s_xinput_route_warned;
                 publish_complete_xinput_pair(user_index, owner);
                 s_xinput_observed_pair = true;
                 s_xinput_primary_observed = true;
                 s_xinput_ex_observed = ex_required;
                 return true;
             }
-            const bool failed_ex =
-                primary_received && primary_result == ERROR_SUCCESS && (!ex_received || ex_result != ERROR_SUCCESS);
-            degrade_observed_xinput_pair(
-                was_complete,
-                failed_ex ? ex : primary,
-                failed_ex,
-                unchanged ? "scoped route check failed" : "route snapshot changed",
-                lock
-            );
+            degrade_observed_xinput_pair(was_complete, user_index, primary, ex, evidence, lock);
             return false;
         }
     } // anonymous namespace
@@ -2454,20 +2569,37 @@ namespace DetourModKit::detail
             return false;
         }
 
-        if (s_xinput_permanent_detour.load(std::memory_order_acquire))
+        if (s_xinput_permanent_detour.load(std::memory_order_acquire) ||
+            (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary)))
         {
             const bool was_complete = s_xinput_installed.load(std::memory_order_acquire);
-            return maintain_retained_xinput_pair(user_index, owner) ||
-                   observe_xinput_pair(user_index, owner, was_complete, lock);
-        }
-
-        // A live pair uses one transaction for health maintenance and recovery. A second hook over its prologue
-        // captures the first hook's jmp as its original and corrupts the trampoline chain.
-        if (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary))
-        {
-            const bool was_complete = s_xinput_installed.load(std::memory_order_acquire);
-            return maintain_live_xinput_pair(user_index, owner) ||
-                   observe_xinput_pair(user_index, owner, was_complete, lock);
+            const std::uint64_t episode_epoch = s_xinput_hook_epoch.load(std::memory_order_seq_cst);
+            const bool reported_episode = s_xinput_route_warned &&
+                                          s_intercept_owner.load(std::memory_order_acquire) == owner &&
+                                          s_bound_user_index.load(std::memory_order_relaxed) == user_index;
+            const bool exact = s_xinput_permanent_detour.load(std::memory_order_acquire)
+                                   ? maintain_retained_xinput_pair(user_index, owner)
+                                   : maintain_live_xinput_pair(user_index, owner);
+            bool recovered = false;
+            const bool complete = exact || observe_xinput_pair(user_index, owner, was_complete, recovered, lock);
+            if (!complete)
+                return false;
+            if (exact)
+            {
+                recovered = reported_episode && s_xinput_hook_epoch.load(std::memory_order_seq_cst) == episode_epoch &&
+                            s_intercept_owner.load(std::memory_order_acquire) == owner;
+            }
+            lock.unlock();
+            if (recovered)
+            {
+                std::array<char, 128> message{};
+                std::size_t length = 0;
+                append_text(message, length, "InputIntercept: XInput paired suppression recovered: controller=");
+                append_decimal(message, length, static_cast<std::uint32_t>(user_index));
+                append_text(message, length, exact ? ", authorization=exact." : ", authorization=observed.");
+                (void)log().log_noexcept(LogLevel::Info, std::string_view{message.data(), length});
+            }
+            return true;
         }
 
         const HMODULE module = find_loaded_xinput_module();
@@ -2568,8 +2700,9 @@ namespace DetourModKit::detail
             return false;
         }
 
+        bool recovered = false;
         return arm_ex_member_and_publish_xinput_pair(ex_is_distinct_member, user_index, owner) ||
-               observe_xinput_pair(user_index, owner, false, lock);
+               observe_xinput_pair(user_index, owner, false, recovered, lock);
     }
 
     bool xinput_installed() noexcept

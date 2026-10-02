@@ -2,6 +2,8 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 #include "internal/input_intercept.hpp"
+#include "internal/xinput_raw_scope.hpp"
+#include "internal/xinput_route_probe.hpp"
 
 #include <windows.h>
 #include <Xinput.h>
@@ -323,6 +325,7 @@ namespace
         std::array<ByteWindow, 2> original_bytes{};
         std::array<std::array<XINPUT_STATE, 2>, 2> raw{};
         SetButtonsFn set_buttons{nullptr};
+        SetSuccessStateFn set_success{nullptr};
 
         [[nodiscard]] bool prepare() noexcept
         {
@@ -331,7 +334,7 @@ namespace
                 return false;
             targets[0] = reinterpret_cast<void *>(GetProcAddress(module.get(), "XInputGetState"));
             targets[1] = reinterpret_cast<void *>(GetProcAddress(module.get(), MAKEINTRESOURCEA(100)));
-            const auto set_success = reinterpret_cast<SetSuccessStateFn>(
+            set_success = reinterpret_cast<SetSuccessStateFn>(
                 reinterpret_cast<void *>(GetProcAddress(module.get(), "dmk_xinput_set_success_state"))
             );
             set_buttons = reinterpret_cast<SetButtonsFn>(
@@ -359,8 +362,13 @@ namespace
     {
         Forward,
         Bypass,
+        BypassDisconnected,
         Park,
         Transform,
+        Disconnected,
+        ReturnedError,
+        InvalidFunction,
+        ThrowAfterReceipt,
     };
 
     std::array<std::atomic<XInputGetStateFn>, 2> s_layer_original{};
@@ -368,12 +376,15 @@ namespace
     std::array<std::atomic<unsigned int>, 2> s_layer_returns{};
     std::array<std::array<XINPUT_STATE, 2>, 2> s_layer_raw{};
     std::atomic<bool> s_parked{false};
+    std::atomic<unsigned int> s_park_count{0};
     std::atomic<bool> s_release_park{false};
     std::atomic<bool> s_parked_call_raw_success{false};
 
-    DWORD layer_call(std::size_t route, DWORD user_index, XINPUT_STATE *state) noexcept
+    DWORD layer_call(std::size_t route, DWORD user_index, XINPUT_STATE *state)
     {
         const LayerMode mode = s_layer_mode[route].load(std::memory_order_relaxed);
+        if (mode == LayerMode::BypassDisconnected)
+            return ERROR_DEVICE_NOT_CONNECTED;
         if (mode == LayerMode::Bypass && state != nullptr && user_index < 2)
         {
             *state = s_layer_raw[route][user_index];
@@ -382,6 +393,7 @@ namespace
         if (mode == LayerMode::Park && GetCurrentThreadId() != s_probe_thread_id)
         {
             s_parked.store(true, std::memory_order_release);
+            s_park_count.fetch_add(1, std::memory_order_release);
             while (!s_release_park.load(std::memory_order_acquire))
                 std::this_thread::yield();
         }
@@ -397,15 +409,24 @@ namespace
                 std::memory_order_release
             );
         }
+        if (mode == LayerMode::Disconnected)
+            return ERROR_DEVICE_NOT_CONNECTED;
+        if (mode == LayerMode::ReturnedError)
+            return ERROR_ACCESS_DENIED;
+        if (mode == LayerMode::InvalidFunction)
+            return ERROR_INVALID_FUNCTION;
+        // The saved-original call already returned, so the exception crosses only compiler-owned frames.
+        if (mode == LayerMode::ThrowAfterReceipt)
+            throw 1;
         return result;
     }
 
-    DWORD WINAPI primary_layer(DWORD user_index, XINPUT_STATE *state) noexcept
+    DWORD WINAPI primary_layer(DWORD user_index, XINPUT_STATE *state)
     {
         return layer_call(0, user_index, state);
     }
 
-    DWORD WINAPI ex_layer(DWORD user_index, XINPUT_STATE *state) noexcept
+    DWORD WINAPI ex_layer(DWORD user_index, XINPUT_STATE *state)
     {
         return layer_call(1, user_index, state);
     }
@@ -474,6 +495,9 @@ namespace
         if (!require(provider.prepare(), "the layered fixture must supply independent successful states"))
             return 20;
         set_xinput_module_override_for_test(provider.module.get());
+        const bool disconnected_start = scenario == "disconnected-startup";
+        if (disconnected_start)
+            provider.set_success(FALSE);
         auto &input = DetourModKit::input::Input::instance();
         std::atomic<bool> held{false};
         auto guard = input.register_combo({
@@ -490,22 +514,21 @@ namespace
         if (!require(
                 guard.has_value() &&
                     input.start({.poll_interval = std::chrono::milliseconds{2}, .require_focus = false}).has_value() &&
-                    wait_for(
-                        [&input, &held]() -> bool
-                        { return xinput_installed() && input.is_active("layered_consume") && held.load(); }
-                    ),
-                "the real poller must detect and consume the chord"
+                    wait_for([]() -> bool { return xinput_installed(); }),
+                "the poller must install the pair even before the controller connects"
             ))
             return 21;
-        if (!require(
-                check_provider(provider, XINPUT_GAMEPAD_DPAD_UP),
-                "the base layer must preserve every other field"
+        if (!disconnected_start &&
+            !require(
+                wait_for([&input, &held]() -> bool { return input.is_active("layered_consume") && held.load(); }) &&
+                    check_provider(provider, XINPUT_GAMEPAD_DPAD_UP),
+                "the base layer must detect the raw chord and preserve every other field"
             ))
             return 22;
 
         const bool nonforwarding = scenario.starts_with("nonforwarding");
-        const bool primary_selected = scenario.ends_with("primary") || scenario.ends_with("both");
-        const bool ex_selected = scenario.ends_with("ex") || scenario.ends_with("both");
+        const bool primary_selected = disconnected_start || scenario.ends_with("primary") || scenario.ends_with("both");
+        const bool ex_selected = disconnected_start || scenario.ends_with("ex") || scenario.ends_with("both");
         const LayerMode mode = nonforwarding ? LayerMode::Bypass : LayerMode::Forward;
         std::array<std::optional<DetourModKit::hook::Hook>, 2> layers;
         if (primary_selected)
@@ -515,6 +538,24 @@ namespace
         if (!require((!primary_selected || layers[0]) && (!ex_selected || layers[1]), "the ordinary handlers must arm"))
             return 23;
         const std::array<ByteWindow, 2> layered_bytes{snapshot(provider.targets[0]), snapshot(provider.targets[1])};
+        if (disconnected_start)
+        {
+            if (!require(
+                    wait_for([]() -> bool { return !xinput_installed() && xinput_pair_degraded_for_test(); }) &&
+                        !input.is_active("layered_consume") && !held.load(),
+                    "disconnected foreign routes must keep the chord inactive and suppression disarmed"
+                ))
+                return 24;
+            provider.set_success(TRUE);
+            if (!require(
+                    wait_for(
+                        [&input, &held]() -> bool
+                        { return xinput_installed() && input.is_active("layered_consume") && held.load(); }
+                    ),
+                    "connection must recover the same hooks and the raw chord without a restart"
+                ))
+                return 24;
+        }
         const bool expected_installed = !nonforwarding;
         if (!require(
                 wait_for(
@@ -890,13 +931,37 @@ namespace
     std::atomic<unsigned int> s_pair_warnings{0};
     std::atomic<bool> s_warning_reentry_succeeded{false};
     std::atomic<bool> s_warning_names_member{true};
+    std::atomic<unsigned int> s_pair_recoveries{0};
+    std::atomic<bool> s_recovery_reentry_succeeded{false};
+    std::array<char, 1024> s_last_warning{};
+    std::size_t s_last_warning_length{0};
+    std::array<char, 128> s_last_recovery{};
+    std::size_t s_last_recovery_length{0};
 
     void observe_pair_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
     {
+        using namespace DetourModKit::detail;
+        if (level == DetourModKit::LogLevel::Info &&
+            message.starts_with("InputIntercept: XInput paired suppression recovered: "))
+        {
+            (void)xinput_pair_coverage_for_test();
+            (void)xinput_pair_observation_for_test();
+            s_recovery_reentry_succeeded.store(
+                publish_gamepad_suppress(0, STANDALONE_INTERCEPT_OWNER),
+                std::memory_order_release
+            );
+            s_last_recovery_length = message.size();
+            if (message.size() <= s_last_recovery.size())
+                std::memcpy(s_last_recovery.data(), message.data(), message.size());
+            s_pair_recoveries.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         if (level != DetourModKit::LogLevel::Warning ||
             !message.starts_with("InputIntercept: XInput paired suppression stopped: "))
             return;
-        using namespace DetourModKit::detail;
+        s_last_warning_length = message.size();
+        if (message.size() <= s_last_warning.size())
+            std::memcpy(s_last_warning.data(), message.data(), message.size());
         (void)xinput_pair_coverage_for_test();
         (void)xinput_pair_observation_for_test();
         s_warning_reentry_succeeded.store(
@@ -938,6 +1003,24 @@ namespace
         s_layer_mode[0].store(LayerMode::Forward, std::memory_order_relaxed);
         if (!require(install_xinput(0), "a successful observed route must reset the warning episode"))
             return 55;
+        for (int cycle = 0; cycle < 32; ++cycle)
+        {
+            if (!require(install_xinput(0), "healthy retries must keep authorization"))
+                return 55;
+        }
+        if (!require(
+                s_pair_recoveries.load() == 1 && s_recovery_reentry_succeeded.load() &&
+                    std::string_view{s_last_recovery.data(), s_last_recovery_length}.contains("authorization=observed"),
+                "one observed recovery must permit logger reentry and healthy retries must stay silent"
+            ))
+            return 55;
+        const std::string_view warning{s_last_warning.data(), s_last_warning_length};
+        if (!require(
+                warning.contains("controller=0") && warning.contains("call=returned result=0, authentication=failed") &&
+                    warning.ends_with("authentication=matched."),
+                "the successful bypass must report failed authentication without truncation of its companion"
+            ))
+            return 55;
         s_layer_mode[0].store(LayerMode::Bypass, std::memory_order_relaxed);
         if (!require(
                 !install_xinput(0) && s_pair_warnings.load(std::memory_order_relaxed) == 2,
@@ -954,10 +1037,462 @@ namespace
         return 0;
     }
 
+    class PairLogObserver
+    {
+    public:
+        PairLogObserver() : m_previous(DetourModKit::detail::g_logger_record_probe)
+        {
+            DetourModKit::log().set_log_level(DetourModKit::LogLevel::Info);
+            DetourModKit::detail::g_logger_record_probe = &observe_pair_warning;
+        }
+        ~PairLogObserver() noexcept { DetourModKit::detail::g_logger_record_probe = m_previous; }
+        PairLogObserver(const PairLogObserver &) = delete;
+        PairLogObserver &operator=(const PairLogObserver &) = delete;
+        PairLogObserver(PairLogObserver &&) = delete;
+        PairLogObserver &operator=(PairLogObserver &&) = delete;
+
+    private:
+        void (*m_previous)(DetourModKit::LogLevel, std::string_view) noexcept;
+    };
+
+    [[nodiscard]] bool warning_contains(std::string_view expected) noexcept
+    {
+        return s_last_warning_length < s_last_warning.size() &&
+               std::string_view{s_last_warning.data(), s_last_warning_length}.contains(expected);
+    }
+
+    [[nodiscard]] bool reported_loss(std::size_t route, LayerMode mode)
+    {
+        const unsigned int before = s_pair_warnings.load();
+        s_layer_mode[route].store(mode);
+        for (int cycle = 0; cycle < 8; ++cycle)
+        {
+            if (DetourModKit::detail::install_xinput(0))
+                return false;
+        }
+        return !DetourModKit::detail::xinput_installed() && DetourModKit::detail::xinput_pair_degraded_for_test() &&
+               s_pair_warnings.load() == before + 1;
+    }
+
+    [[nodiscard]] bool concurrent_route_probes(std::size_t route, bool expected)
+    {
+        using namespace DetourModKit::detail;
+        s_probe_thread_id = GetCurrentThreadId();
+        s_layer_mode[route].store(LayerMode::Park);
+        s_park_count.store(0);
+        s_release_park.store(false);
+        std::array<bool, 2> results{};
+        std::thread first([&results]() -> void { results[0] = install_xinput(0); });
+        std::thread second([&results]() -> void { results[1] = install_xinput(0); });
+        const bool both_parked = wait_for([]() -> bool { return s_park_count.load(std::memory_order_acquire) == 2; });
+        s_release_park.store(true, std::memory_order_release);
+        first.join();
+        second.join();
+        s_layer_mode[route].store(LayerMode::Forward);
+        return both_parked && results[0] == expected && results[1] == expected;
+    }
+
+    [[nodiscard]] bool verify_observed_reconnect(Provider &provider, std::size_t route)
+    {
+        using namespace DetourModKit::detail;
+        provider.set_success(FALSE);
+        const unsigned int forwards_before = s_layer_returns[route].load();
+        if (!require(concurrent_route_probes(route, false), "concurrent disconnected probes must refuse authorization"))
+            return false;
+        for (int cycle = 0; cycle < 32; ++cycle)
+        {
+            if (!require(!install_xinput(0), "disconnected samples must never authorize a foreign route"))
+                return false;
+        }
+        if (!require(
+                s_pair_warnings.load() == 1 && s_pair_recoveries.load() == 0 &&
+                    warning_contains(
+                        "controller=0, pair: admission=passed, raw_scope=passed, raw_restore=passed, "
+                        "snapshot=passed, context=passed"
+                    ) &&
+                    warning_contains("call=returned result=1167, authentication=matched") &&
+                    std::string_view{s_last_warning.data(), s_last_warning_length}.ends_with(
+                        "result=1167, authentication=matched."
+                    ) &&
+                    s_layer_returns[route].load() == forwards_before + 34,
+                "maintenance must measure both authenticated disconnect results once per warning episode"
+            ))
+            return false;
+        provider.set_success(TRUE);
+        if (!require(
+                concurrent_route_probes(route, true) && s_pair_recoveries.load() == 1,
+                "concurrent reconnect probes must publish exactly one observed recovery"
+            ))
+            return false;
+        return true;
+    }
+
+    [[nodiscard]] bool verify_member_diagnostics(std::size_t route)
+    {
+        using namespace DetourModKit::detail;
+        const std::array<LayerMode, 6> modes{
+            LayerMode::Disconnected,
+            LayerMode::BypassDisconnected,
+            LayerMode::ReturnedError,
+            LayerMode::Bypass,
+            LayerMode::InvalidFunction,
+            LayerMode::ThrowAfterReceipt,
+        };
+        const std::array<std::string_view, 6> outcomes{
+            "call=returned result=1167, authentication=matched",
+            "call=returned result=1167, authentication=failed",
+            "call=returned result=5, authentication=matched",
+            "call=returned result=0, authentication=failed",
+            "call=returned result=1, authentication=matched",
+            "call=exception, authentication=matched",
+        };
+        for (std::size_t i = 0; i < modes.size(); ++i)
+        {
+            if (!require(reported_loss(route, modes[i]), "each failed member must disarm the complete pair once"))
+                return false;
+            const std::string_view warning{s_last_warning.data(), s_last_warning_length};
+            const auto member_start = warning.find(route == 0 ? "XInputGetState:" : "XInputGetStateEx:");
+            if (!require(member_start != std::string_view::npos, "the failed member must have its own evidence fields"))
+                return false;
+            const auto member_tail = warning.substr(member_start);
+            const auto member = member_tail.substr(0, member_tail.find(". XInputGetStateEx:"));
+            if (!require(
+                    member.contains(outcomes[i]) && warning.contains("controller=0") &&
+                        warning.ends_with("authentication=matched.") ==
+                            (route == 0 ||
+                             (modes[i] != LayerMode::Bypass && modes[i] != LayerMode::BypassDisconnected)) &&
+                        (!member.contains("call=exception") || !member.contains("result=")),
+                    "the warning must identify the measured member result and distinguish an exception"
+                ))
+                return false;
+            s_layer_mode[route].store(LayerMode::Forward);
+            if (!require(
+                    install_xinput(0) && s_pair_recoveries.load() == i + 1,
+                    "each restored episode must emit one recovery"
+                ))
+                return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool verify_recovery_exclusions(
+        Provider &provider,
+        std::size_t route,
+        std::optional<DetourModKit::hook::Hook> &layer,
+        unsigned int recoveries
+    )
+    {
+        using namespace DetourModKit::detail;
+        const XInputGetStateFn saved_primary = xinput_trampoline();
+        const XInputGetStateFn saved_ex = xinput_ex_trampoline();
+        if (!require(
+                reported_loss(route, LayerMode::Bypass) && layer->disable().has_value(),
+                "exact hand-back must follow a reported failure"
+            ))
+            return false;
+        layer.reset();
+        const ByteWindow handed_back_bytes = snapshot(provider.targets[route]);
+        if (!require(
+                install_xinput(0) && s_pair_recoveries.load() == recoveries + 1 &&
+                    xinput_trampoline() == saved_primary && xinput_ex_trampoline() == saved_ex &&
+                    xinput_pair_coverage_for_test().primary && xinput_pair_coverage_for_test().ex &&
+                    !xinput_pair_observation_for_test().primary && !xinput_pair_observation_for_test().ex &&
+                    handed_back_bytes == snapshot(provider.targets[route]) &&
+                    publish_gamepad_suppress(SUPPRESS_BITS, STANDALONE_INTERCEPT_OWNER) &&
+                    check_provider(provider, SUPPRESS_BITS) &&
+                    std::string_view{s_last_recovery.data(), s_last_recovery_length}.contains("authorization=exact"),
+                "exact hand-back must report one recovery through the existing hook"
+            ))
+            return false;
+        layer = install_layer(provider, route, LayerMode::Forward);
+        if (!require(layer && install_xinput(0), "episode exclusions need a live forwarder"))
+            return false;
+        const unsigned int before_exclusions = s_pair_recoveries.load();
+        if (!require(reported_loss(route, LayerMode::Bypass), "controller replacement needs a reported episode"))
+            return false;
+        s_layer_mode[route].store(LayerMode::Forward);
+        if (!require(
+                install_xinput(1) && s_pair_recoveries.load() == before_exclusions,
+                "controller replacement must not inherit a recovery episode"
+            ))
+            return false;
+        if (!require(
+                install_xinput(0) && reported_loss(route, LayerMode::Bypass),
+                "owner replacement needs another reported episode"
+            ))
+            return false;
+        uninstall();
+        const std::uint64_t successor = next_intercept_owner();
+        s_layer_mode[route].store(LayerMode::Forward);
+        if (!require(
+                adopt_owner_for_test(successor) && install_xinput(0, successor) &&
+                    s_pair_recoveries.load() == before_exclusions,
+                "a successor owner must not inherit the retired episode"
+            ))
+            return false;
+        uninstall(successor);
+        s_layer_mode[route].store(LayerMode::Bypass);
+        if (!require(!install_xinput(0), "never-complete retries must stay degraded"))
+            return false;
+        s_layer_mode[route].store(LayerMode::Forward);
+        if (!require(
+                install_xinput(0) && s_pair_recoveries.load() == before_exclusions,
+                "success after never-complete retries must emit no inherited recovery"
+            ))
+            return false;
+        if (!require(reported_loss(route, LayerMode::Bypass), "teardown needs a reported episode"))
+            return false;
+        if (!require(layer->disable().has_value(), "the layer must retire before fresh hook installation"))
+            return false;
+        layer.reset();
+        uninstall();
+        if (!require(
+                install_xinput(0) && s_pair_recoveries.load() == before_exclusions,
+                "a new hook epoch must not inherit a recovery episode"
+            ))
+            return false;
+        return true;
+    }
+
+    int run_measured_diagnostics(std::string_view scenario)
+    {
+        using namespace DetourModKit::detail;
+        Provider provider;
+        const PairLogObserver observer;
+        if (!require(provider.prepare(), "the measured fixture must load"))
+            return 80;
+        set_xinput_module_override_for_test(provider.module.get());
+        if (!require(install_xinput(0) && s_pair_recoveries.load() == 0, "initial exact success must emit no recovery"))
+            return 81;
+        const XInputGetStateFn saved_primary = xinput_trampoline();
+        const XInputGetStateFn saved_ex = xinput_ex_trampoline();
+        const std::size_t route = scenario == "diagnostics-ex" ? 1u : 0u;
+        auto layer = install_layer(provider, route, LayerMode::Forward);
+        if (!require(
+                layer && install_xinput(0) && s_pair_recoveries.load() == 0,
+                "initial observed success must emit no recovery"
+            ))
+            return 82;
+        const std::array<ByteWindow, 2> layered_bytes{snapshot(provider.targets[0]), snapshot(provider.targets[1])};
+        if (scenario == "observed-reconnect" ? !verify_observed_reconnect(provider, route)
+                                             : !verify_member_diagnostics(route))
+            return 83;
+        if (!require(
+                publish_gamepad_suppress(SUPPRESS_BITS, STANDALONE_INTERCEPT_OWNER) &&
+                    check_provider(provider, SUPPRESS_BITS) && xinput_trampoline() == saved_primary &&
+                    xinput_ex_trampoline() == saved_ex && layered_bytes[0] == snapshot(provider.targets[0]) &&
+                    layered_bytes[1] == snapshot(provider.targets[1]),
+                "recovery must preserve foreign bytes, trampolines, packets, other users, and analog fields"
+            ))
+            return 89;
+        const unsigned int recoveries = s_pair_recoveries.load();
+        for (int cycle = 0; cycle < 16; ++cycle)
+        {
+            if (!require(install_xinput(0), "healthy observed retries must succeed"))
+                return 90;
+        }
+        if (!require(
+                s_pair_recoveries.load() == recoveries && s_recovery_reentry_succeeded.load(),
+                "recovery logs must stay latched and permit observer reentry"
+            ))
+            return 91;
+
+        if (scenario == "exact-recovery" && !verify_recovery_exclusions(provider, route, layer, recoveries))
+            return 92;
+        if (scenario == "observed-reconnect")
+        {
+            DetourModKit::log().shutdown();
+            if (!require(reported_loss(route, LayerMode::Bypass), "a dropped warning must still disarm suppression"))
+                return 99;
+            s_layer_mode[route].store(LayerMode::Forward);
+            if (!require(
+                    install_xinput(0) && publish_gamepad_suppress(SUPPRESS_BITS, STANDALONE_INTERCEPT_OWNER) &&
+                        check_provider(provider, SUPPRESS_BITS),
+                    "a dropped recovery log must not affect authorization or exported masking"
+                ))
+                return 99;
+        }
+        if (layer)
+        {
+            if (!require(layer->disable().has_value(), "the layer must hand back the owned patch"))
+                return 99;
+            layer.reset();
+        }
+        s_layer_original[route].store(nullptr, std::memory_order_release);
+        uninstall();
+        if (!require(!xinput_installed() && check_provider(provider, 0), "final teardown must preserve raw exports"))
+            return 99;
+        set_xinput_module_override_for_test(nullptr);
+        return 0;
+    }
+
+    [[nodiscard]] bool verify_absent_member_diagnostic()
+    {
+        using namespace DetourModKit::detail;
+        Provider absent;
+        absent.module.reset(LoadLibraryW(L"dmk_xinput_proxy_noex.dll"));
+        if (!require(absent.module != nullptr, "the absent-ordinal fixture must load"))
+            return false;
+        absent.targets[0] = reinterpret_cast<void *>(GetProcAddress(absent.module.get(), "XInputGetState"));
+        if (!require(
+                absent.targets[0] != nullptr && GetProcAddress(absent.module.get(), MAKEINTRESOURCEA(100)) == nullptr,
+                "the fixture must have only the primary member"
+            ))
+            return false;
+        const ByteWindow original_bytes = snapshot(absent.targets[0]);
+        set_xinput_module_override_for_test(absent.module.get());
+        if (!require(install_xinput(0), "an absent ordinal must permit initial exact authorization"))
+            return false;
+        auto layer = install_layer(absent, 0, LayerMode::Forward);
+        if (!require(layer && !install_xinput(0), "a disconnected foreign primary must refuse observed authorization"))
+            return false;
+        const std::string_view warning{s_last_warning.data(), s_last_warning_length};
+        const auto absent_start = warning.find("XInputGetStateEx:");
+        if (!require(absent_start != std::string_view::npos, "the absent member must have its own diagnostic"))
+            return false;
+        const auto absent_fields = warning.substr(absent_start);
+        if (!require(
+                absent_fields.contains("call=absent, authentication=unmeasured") && !absent_fields.contains("result="),
+                "an absent ordinal must report no invocation, result, or authentication measurement"
+            ))
+            return false;
+        if (!require(layer->disable().has_value(), "the absent-ordinal handler must hand back"))
+            return false;
+        layer.reset();
+        s_layer_original[0].store(nullptr);
+        uninstall();
+        return require(
+            !xinput_installed() && xinput_module_refs_held() == 0 && original_bytes == snapshot(absent.targets[0]),
+            "absent-ordinal teardown must restore bytes and release every provider reference"
+        );
+    }
+
+    int run_scope_diagnostics()
+    {
+        using namespace DetourModKit::detail;
+        Provider provider;
+        const PairLogObserver observer;
+        if (!require(provider.prepare(), "the scope fixture must load"))
+            return 100;
+        set_xinput_module_override_for_test(provider.module.get());
+        if (!require(install_xinput(0), "the scope pair must install"))
+            return 101;
+        auto primary_layer_hook = install_layer(provider, 0, LayerMode::Forward);
+        auto ex_layer_hook = install_layer(provider, 1, LayerMode::Forward);
+        if (!require(primary_layer_hook && ex_layer_hook && install_xinput(0), "both scope forwarders must authorize"))
+            return 102;
+        set_xinput_route_probe_failures_for_test(false, true, false);
+        const bool admission_refused = !install_xinput(0) && warning_contains("pair: admission=failed") &&
+                                       warning_contains("call=uninvoked, authentication=unmeasured");
+        set_xinput_route_probe_failures_for_test(false, false, false);
+        if (!require(
+                admission_refused && install_xinput(0),
+                "admission must identify uninvoked members without results"
+            ))
+            return 103;
+        close_xinput_route_probes();
+        if (!require(
+                release_xinput_route_probe_if_idle(),
+                "the idle receipt slot must return before reservation refusal"
+            ))
+            return 103;
+        set_xinput_route_probe_failures_for_test(true, false, false);
+        const bool reservation_refused = !install_xinput(0) &&
+                                         warning_contains("pair: admission=failed, raw_scope=unmeasured") &&
+                                         warning_contains("call=uninvoked, authentication=unmeasured");
+        set_xinput_route_probe_failures_for_test(false, false, false);
+        if (!require(reservation_refused && install_xinput(0), "reservation failure must fabricate no provider result"))
+            return 103;
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::EntryStore),
+                "raw entry refusal must arm"
+            ))
+            return 103;
+        const bool raw_entry_refused = !install_xinput(0) && warning_contains("raw_scope=failed") &&
+                                       warning_contains("probe=passed, call=uninvoked, authentication=unmeasured");
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::None) && raw_entry_refused &&
+                    install_xinput(0),
+                "raw entry failure must differ from receipt probe admission failure"
+            ))
+            return 103;
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::Restore),
+                "raw restore refusal must arm"
+            ))
+            return 104;
+        const bool restore_refused = !install_xinput(0) && warning_contains("raw_restore=failed") &&
+                                     warning_contains("call=returned result=0, authentication=matched");
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::None) &&
+                    TlsSetValue(xinput_raw_scope_index_for_test(), nullptr) != FALSE && restore_refused &&
+                    install_xinput(0),
+                "raw restoration failure must stay a pair cause despite authenticated successful returns"
+            ))
+            return 105;
+
+        s_probe_thread_id = GetCurrentThreadId();
+        s_parked.store(false);
+        s_release_park.store(false);
+        s_layer_mode[0].store(LayerMode::Park);
+        bool probe_result = true;
+        std::thread probe([&probe_result]() -> void { probe_result = install_xinput(0); });
+        const bool parked = wait_for([]() -> bool { return s_parked.load(std::memory_order_acquire); });
+        const bool handed_back = parked && ex_layer_hook->disable().has_value();
+        s_release_park.store(true, std::memory_order_release);
+        probe.join();
+        if (!require(
+                parked && handed_back && !probe_result && warning_contains("snapshot=failed") &&
+                    warning_contains("call=returned result=0, authentication=matched"),
+                "a concurrent hand-back must report a changed pair snapshot instead of a member failure"
+            ))
+            return 106;
+        s_layer_mode[0].store(LayerMode::Forward);
+        ex_layer_hook.reset();
+        s_layer_original[1].store(nullptr);
+        if (!require(install_xinput(0), "fresh evidence must recover after the snapshot transition"))
+            return 107;
+
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::ConsumeOriginalStore),
+                "the context fault must arm"
+            ))
+            return 108;
+        XINPUT_STATE state{};
+        const DWORD result = provider.routes[0](0, &state);
+        if (!require(
+                set_xinput_raw_scope_failure_for_test(XInputRawScopeFailure::None) && result == ERROR_SUCCESS &&
+                    !xinput_consume_context_healthy() && !install_xinput(0) && warning_contains("context=failed") &&
+                    warning_contains("call=returned result=0, authentication=matched"),
+                "poisoned context must report a pair failure even when both providers return success"
+            ))
+            return 109;
+        if (!require(
+                s_pair_warnings.load() == 6 && s_pair_recoveries.load() == 5 && s_warning_reentry_succeeded.load(),
+                "scope failures must each own one episode and permit observer reentry"
+            ))
+            return 110;
+        if (!require(primary_layer_hook->disable().has_value(), "the scope handler must hand back"))
+            return 111;
+        primary_layer_hook.reset();
+        s_layer_original[0].store(nullptr);
+        uninstall();
+        if (!require(
+                !xinput_installed() && xinput_module_refs_held() == 0 && check_provider(provider, 0),
+                "scope teardown must restore raw exports and release provider references"
+            ))
+            return 112;
+        if (!verify_absent_member_diagnostic())
+            return 112;
+        set_xinput_module_override_for_test(nullptr);
+        return 0;
+    }
+
     int run_parked_probe(bool replace_owner)
     {
         using namespace DetourModKit::detail;
         Provider provider;
+        const PairLogObserver observer;
         if (!require(provider.prepare(), "the parked-probe fixture must load"))
             return 40;
         set_xinput_module_override_for_test(provider.module.get());
@@ -975,6 +1510,17 @@ namespace
         auto layer = install_layer(provider, 0, LayerMode::Park);
         if (!require(layer.has_value(), "the upstream handler must arm"))
             return 42;
+        if (replace_owner)
+        {
+            s_layer_mode[0].store(LayerMode::Forward);
+            if (!require(
+                    install_xinput(0) && reported_loss(0, LayerMode::Bypass),
+                    "a stale recovery probe must start from a reported episode"
+                ))
+                return 42;
+            s_layer_mode[0].store(LayerMode::Park);
+            s_primary_entries.store(0, std::memory_order_relaxed);
+        }
         const std::array<ByteWindow, 2> parked_bytes{snapshot(provider.targets[0]), snapshot(provider.targets[1])};
         s_parked.store(false, std::memory_order_relaxed);
         s_release_park.store(false, std::memory_order_relaxed);
@@ -995,6 +1541,7 @@ namespace
         const std::uint64_t successor = next_intercept_owner();
         const bool successor_adopted = !replace_owner || adopt_owner_for_test(successor);
         const bool successor_write = !replace_owner || publish_gamepad_suppress(XINPUT_GAMEPAD_B, successor);
+        const bool successor_degraded = xinput_pair_degraded_for_test();
         XINPUT_STATE saved_primary_state{};
         const bool safely_retained =
             !xinput_installed() && xinput_module_refs_held() == 2 && xinput_trampoline() == nullptr && elapsed < 3000 &&
@@ -1007,7 +1554,9 @@ namespace
         if (!require(
                 safely_retained && successor_adopted && successor_write &&
                     !probe_result.load(std::memory_order_acquire) && !xinput_installed() &&
-                    s_parked_call_raw_success.load(std::memory_order_acquire),
+                    s_parked_call_raw_success.load(std::memory_order_acquire) &&
+                    s_pair_warnings.load() == (replace_owner ? 1u : 0u) && s_pair_recoveries.load() == 0 &&
+                    xinput_pair_degraded_for_test() == successor_degraded,
                 "a pre-admission probe must retain its chain and cannot publish a stale owner receipt"
             ))
             return 44;
@@ -1022,7 +1571,8 @@ namespace
         layer.reset();
         s_layer_original[0].store(nullptr, std::memory_order_release);
         if (!require(
-                install_xinput(0, replace_owner ? successor : STANDALONE_INTERCEPT_OWNER),
+                install_xinput(0, replace_owner ? successor : STANDALONE_INTERCEPT_OWNER) &&
+                    s_pair_recoveries.load() == 0,
                 "the retained pair must recover for the current owner"
             ))
             return 47;
@@ -1065,6 +1615,13 @@ int main(int argc, char **argv)
         return run_transforming_forwarder();
     if (scenario == "probe-before-admission" || scenario == "epoch-race")
         return run_parked_probe(scenario == "epoch-race");
+    if (scenario == "diagnostics-scope")
+        return run_scope_diagnostics();
+    if (scenario == "disconnected-startup")
+        return run_layered_binding_case(scenario);
+    if (scenario == "observed-reconnect" || scenario == "diagnostics-primary" || scenario == "diagnostics-ex" ||
+        scenario == "exact-recovery")
+        return run_measured_diagnostics(scenario);
     if (scenario == "route-diagnostics")
         return run_route_diagnostics();
     std::fputs("unknown conditional XInput scenario\n", stderr);
