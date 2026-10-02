@@ -1566,7 +1566,7 @@ add_custom_command(TARGET staged_generation_soak POST_BUILD
     $<TARGET_FILE:hook_target_lib>
     $<TARGET_FILE_DIR:staged_generation_soak>)
 
-# Pinned images release their file handles only after the scenario process exits. The fixture removes only staged files.
+# Process exit releases pinned files. Cleanup removes only owned fixture artifacts.
 set(_dmk_staged_generation_cleanup_script
   "${CMAKE_CURRENT_BINARY_DIR}/staged_generation_artifact_cleanup.cmake")
 file(GENERATE OUTPUT "${_dmk_staged_generation_cleanup_script}" CONTENT [=[
@@ -1592,6 +1592,24 @@ foreach(_staged_generation_artifact IN LISTS _staged_generation_artifacts)
   file(REMOVE "${_staged_generation_artifact}")
   if(EXISTS "${_staged_generation_artifact}")
     message(FATAL_ERROR "Cleanup left a staged-generation artifact at ${_staged_generation_artifact}.")
+  endif()
+endforeach()
+
+file(REAL_PATH "${_staged_generation_directory}" _staged_example_root)
+file(GLOB _staged_example_directories LIST_DIRECTORIES TRUE
+  "${_staged_example_root}/staged_example.p*_n*")
+foreach(_staged_example_directory IN LISTS _staged_example_directories)
+  file(REAL_PATH "${_staged_example_directory}" _staged_example_resolved)
+  cmake_path(GET _staged_example_resolved PARENT_PATH _staged_example_parent)
+  cmake_path(GET _staged_example_resolved FILENAME _staged_example_name)
+  if(NOT _staged_example_parent STREQUAL _staged_example_root OR
+     NOT _staged_example_name MATCHES "^staged_example[.]p[0-9]+_n[0-9]+$" OR
+     IS_SYMLINK "${_staged_example_directory}")
+    message(FATAL_ERROR "A staged-example directory escaped its fixture root.")
+  endif()
+  file(REMOVE_RECURSE "${_staged_example_resolved}")
+  if(EXISTS "${_staged_example_resolved}")
+    message(FATAL_ERROR "Cleanup left a staged-example directory.")
   endif()
 endforeach()
 ]=])
@@ -1808,3 +1826,45 @@ dmk_add_raw_proof(NAME Lifecycle.InlineSelfTeardownReportsRetention
   COMMAND $<TARGET_FILE:mid_route_retention> inline-self-teardown
   WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+
+# The proof compiles both checked-in sources. Fixture wrappers inject only provider state and byte tags.
+set(_dmk_staged_example_source "${PROJECT_SOURCE_DIR}/examples/staged_reload/mod_logic.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dmk_staged_example_source}")
+file(READ "${_dmk_staged_example_source}" _dmk_staged_example_text)
+string(REPLACE "DMK_WHEELHOST_CALL Init(" "DMK_WHEELHOST_CALL example_init("
+  _dmk_staged_example_text "${_dmk_staged_example_text}")
+string(REPLACE "DMK_WHEELHOST_CALL Revision()" "DMK_WHEELHOST_CALL example_revision()"
+  _dmk_staged_example_text "${_dmk_staged_example_text}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/staged_example_logic_source.cpp" "${_dmk_staged_example_text}")
+add_library(staged_example_logic SHARED staged_example_logic.cpp)
+set_target_properties(staged_example_logic PROPERTIES PREFIX "" OUTPUT_NAME "staged_example_logic")
+target_link_libraries(staged_example_logic PRIVATE DetourModKit dmk_coverage)
+target_include_directories(staged_example_logic PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/examples/staged_reload)
+target_compile_definitions(staged_example_logic PRIVATE
+  DMK_ENABLE_TEST_SEAMS DMK_EXAMPLE_MOD_NAME="StagedExampleProof")
+dmk_static_runtime(staged_example_logic SHARED)
+
+add_executable(staged_example_reload staged_example_reload.cpp)
+target_link_libraries(staged_example_reload PRIVATE DetourModKit::WheelHost safetyhook dmk_coverage)
+target_compile_definitions(staged_example_reload PRIVATE DMK_EXAMPLE_MOD_NAME="StagedExampleProof")
+add_dependencies(staged_example_reload staged_example_logic xinput_forwarding_proxy_local)
+dmk_static_runtime(staged_example_reload)
+add_dependencies(dmk_lifecycle_proof_hosts staged_example_reload)
+
+set(staged_example_proofs
+  Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor retained
+  Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference leak
+  Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor refused
+  Lifecycle.StagedExampleBudgetsStopBeforeTeardown budget
+  Lifecycle.StagedExampleFailedInitRollsBack failed-init
+  Lifecycle.StagedExampleMissingShutdownRequiresRestart missing-export)
+while(staged_example_proofs)
+  list(POP_FRONT staged_example_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:staged_example_reload> $<TARGET_FILE:staged_example_logic> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_example_reload>
+    TEST_TIMEOUT 60
+    LABELS "lifecycle-proof")
+  set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+endwhile()

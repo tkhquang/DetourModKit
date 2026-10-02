@@ -576,6 +576,12 @@ if(DMK_BUILD_TESTS)
     Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease
     Lifecycle.DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits
     Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
+    Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor
+    Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference
+    Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor
+    Lifecycle.StagedExampleBudgetsStopBeforeTeardown
+    Lifecycle.StagedExampleFailedInitRollsBack
+    Lifecycle.StagedExampleMissingShutdownRequiresRestart
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception
@@ -596,7 +602,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 267)
+    --minimum 273)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()
