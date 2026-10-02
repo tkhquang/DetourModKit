@@ -70,7 +70,12 @@ File-scope atomics connect the poll thread and game callers. The layer owns both
 - `Lifecycle.XInputTwoCopiesPreserveFirstFrameModifiers*` verifies overlapping modifiers without any reactive poll mask.
 - `Lifecycle.XInputTransformingForwardersPreserveUpperModifierRules` verifies modifier removal by a foreign handler between compatible copies.
 - `Lifecycle.XInputProbeBeforeAdmissionSurvivesTeardown` and `Lifecycle.XInputStaleProbeCannotPublishOverSuccessor` verify probe lifetime and epoch rejection.
-- `Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks` verifies one warning per episode and logger reentry after lock release.
+- Route diagnostics report each member's normal return, actual result, and receipt authentication. Absent, uninvoked, and exceptional calls report no provider result.
+- Pair diagnostics report admission, raw restoration, snapshot consistency, and shared context health. An authenticated disconnect still refuses observed authorization.
+- One warning reports each complete-to-degraded episode. One Info record reports exact or observed recovery for the same owner, hook epoch, and controller.
+- Initial success, never-complete retries, controller changes, owner replacement, teardown, and stale probes emit no inherited recovery record.
+- `Lifecycle.XInput*Reports*` and `Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks` verify diagnostic fields, episode counts, and logger reentry after lock release.
+- `Lifecycle.XInputDisconnectedStartupRecoversThroughForwarders` verifies raw chord detection and both exported masks after connection without new hooks.
 
 - Each raw-hook reset reads the backend retention verdict. Each retained chain adds one Input leak event and one warning after the interception lock releases. A retained chain keeps the install-time code-provider references for the process lifetime. Clean reset releases those references and adds no event or warning. Install rollback follows the same rule, while pair retention remains one separate event. `Lifecycle.XInput*Reports*` and `Lifecycle.XInputRepeatedUninstallDoesNotRecountRetention` verify attribution and lock release.
 - Routed transactions preserve executable generated pages under the [hook contract](hooking.md#concurrency-model). Non-mid bypass ownership spans the complete provider call, including a dormant fiber. Each raw-hook reset waits up to one second for bypass calls that the restore released. `Lifecycle.RoutedBypassSurvivesDormantFiber` verifies provider retention, `Lifecycle.RoutedBypassCleanRoutesReclaim` verifies clean reset, and `Lifecycle.RoutedBypassDrainsBeforeReclaim` verifies the bypass wait.

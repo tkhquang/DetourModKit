@@ -225,6 +225,17 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_dispatch_cow.cpp` | Re-entrant `EventDispatcher` writer |
 | `raw_proof_error_mode.hpp` | Fault dialog suppression for raw hosts |
 
+The XInput diagnostic routes use `xinput_layered_consume` as separate required `lifecycle-proof` processes. Each route has a 60-second timeout.
+
+| Required process | Scenario |
+| --- | --- |
+| `Lifecycle.XInputDisconnectedStartupRecoversThroughForwarders` | `disconnected-startup` |
+| `Lifecycle.XInputObservedPairReconnectReportsOneRecovery` | `observed-reconnect` |
+| `Lifecycle.XInputPrimaryFailureReportsTheExactCheck` | `diagnostics-primary` |
+| `Lifecycle.XInputExFailureReportsTheExactCheck` | `diagnostics-ex` |
+| `Lifecycle.XInputExactHandBackReportsOneRecovery` | `exact-recovery` |
+| `Lifecycle.XInputScopeFailureReportsPairCause` | `diagnostics-scope` |
+
 ## Staged example proof
 
 `staged_example_reload.cpp` exercises the checked-in loader and logic through six required `Lifecycle.StagedExample*` processes. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each scenario. These processes require a wheel host and a synthetic controller, with no game or hardware dependency. Each process has a 60-second timeout.
