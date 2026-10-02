@@ -1,7 +1,7 @@
 /**
  * @file tls_index_return.cpp
  * @brief Fresh-process proofs that each DMK Win32 TLS index returns with its last owner and stays with a live one.
- * @details The return scenarios reserve an index, read the process TLS bitmaps, and require the exact return after the
+ * @details The return scenarios reserve an index, read the image import ledger, and require its exact return after the
  *          last owner retires. The live-owner scenarios keep one owner live across another owner's release and require
  *          the index to stay reserved and usable. The diagnostics scenarios drive the teardown release of the two
  *          never-destroyed diagnostics dispatchers. Exit status is the oracle.
@@ -22,7 +22,7 @@
 #include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
-#include "tls_census.hpp"
+#include "tls_allocation_failure.hpp"
 
 #include <process.h>
 #include <windows.h>
@@ -73,15 +73,19 @@ namespace
         return true;
     }
 
-    // Materializes the runtime's lazy per-thread and per-process state before any census, so the census counts only
-    // the subject under test.
+    // The runtime's lazy TLS state must precede the subject baseline.
     void warm_runtime()
     {
         std::thread warm([] {});
         warm.join();
     }
 
-    volatile int s_sink = 0;
+    [[nodiscard]] std::size_t owned_tls_indices() noexcept
+    {
+        return dmk_lifecycle::tls_allocation_snapshot().live;
+    }
+
+    [[maybe_unused]] volatile int s_sink = 0;
 
     DMK_PROOF_SEEDED_TARGET(tls_target_3, 3)
     DMK_PROOF_SEEDED_TARGET(tls_target_5, 5)
@@ -137,7 +141,7 @@ namespace
         warm_runtime();
         if (!mid_cycle(&tls_target_3))
             return fail(10, "the warm-up mid hook did not fire");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         const std::size_t leaks = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
         for (Target target : {&tls_target_5, &tls_target_7})
         {
@@ -145,7 +149,7 @@ namespace
                 auto installed = enabled_mid_hook(target, &count_mid);
                 if (!installed)
                     return fail(11, "the mid hook did not install");
-                if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                if (owned_tls_indices() != baseline + 1)
                     return fail(12, "a live mid hook did not hold exactly one TLS index");
                 const int before = s_mid_hits.load();
                 Target volatile call = target;
@@ -153,7 +157,7 @@ namespace
                 if (s_mid_hits.load() != before + 1)
                     return fail(13, "the mid hook on a re-reserved index did not fire");
             }
-            if (dmk_lifecycle::free_tls_indices() != baseline)
+            if (owned_tls_indices() != baseline)
                 return fail(14, "the last released mid slot did not return its TLS index");
         }
         if (diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager) != leaks)
@@ -167,7 +171,7 @@ namespace
         warm_runtime();
         if (!mid_cycle(&tls_target_3))
             return fail(20, "the warm-up mid hook did not fire");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         const std::size_t leaks = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
         {
             auto installed = enabled_mid_hook(&tls_target_5, &reset_own_hook);
@@ -180,11 +184,11 @@ namespace
         if (s_self_hook.has_value() ||
             diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager) != leaks + 1)
             return fail(22, "the hook destroyed inside its own callback was not retained");
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(23, "the retained slot did not keep its TLS index");
         if (!mid_cycle(&tls_target_7))
             return fail(24, "a mid hook beside the retained slot did not fire");
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(25, "a clean release returned the index that the retained slot owns");
         std::puts("MID_ENTRY_TLS_INDEX_STAYS_WITH_A_RETAINED_SLOT");
         return 0;
@@ -196,23 +200,18 @@ namespace
         if (!mid_cycle(&tls_target_3))
             return fail(90, "the warm-up mid hook did not fire");
         const std::size_t leaks = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
-        std::vector<DWORD> taken;
-        taken.reserve(4096);
-        for (DWORD index = TlsAlloc(); index != TLS_OUT_OF_INDEXES; index = TlsAlloc())
-            taken.push_back(index);
-        // No thread starts or ends while every index is taken.
+        dmk_lifecycle::TlsAllocationFailure allocation_failure;
+        if (!allocation_failure.isolated())
+            return fail(91, "TLS refusal escaped the proof executable or did not reach its import");
         const auto refused = enabled_mid_hook(&tls_target_5, &count_mid);
         const bool typed = !refused && refused.error().code == ErrorCode::SystemCallFailed;
-        for (const DWORD index : taken)
-            (void)TlsFree(index);
-        if (taken.empty())
-            return fail(91, "the process had no TLS index to take");
+        allocation_failure.restore();
         if (!typed)
             return fail(92, "mid_at did not refuse with SystemCallFailed while no TLS index was free");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         if (!mid_cycle(&tls_target_7))
             return fail(93, "a mid hook after the refusal did not fire");
-        if (dmk_lifecycle::free_tls_indices() != baseline)
+        if (owned_tls_indices() != baseline)
             return fail(94, "the refused claim left an owner that keeps the index reserved");
         if (diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager) != leaks)
             return fail(95, "the refused claim recorded a leak");
@@ -225,6 +224,7 @@ namespace
         const void *dispatcher = nullptr;
         bool tracked = false;
         int calls = 0;
+        std::uint32_t tls_index{0xFFFFFFFFu};
     };
 
     // Subscribes, emits once, and reports whether the handler ran inside a recorded emit frame.
@@ -236,13 +236,22 @@ namespace
             {
                 ++probe.calls;
                 probe.tracked = detail::thread_is_emitting_dispatcher(probe.dispatcher);
+                detail::EmitFrame frame{
+                    .dispatcher = probe.dispatcher,
+                };
+                if (detail::push_emit_frame(frame))
+                {
+                    probe.tls_index = frame.tls_index;
+                    detail::pop_emit_frame(frame);
+                }
             }
         );
         dispatcher.emit_safe(1);
-        return subscription.active() && probe.calls == 1 && probe.tracked;
+        return subscription.active() && probe.calls == 1 && probe.tracked &&
+               dmk_lifecycle::tls_index_is_owned(probe.tls_index);
     }
 
-    int run_emit_return()
+    int run_emit_return(bool native_return = false)
     {
         warm_runtime();
         {
@@ -252,16 +261,29 @@ namespace
             if (!emit_cycle(warm, subscription, probe))
                 return fail(30, "the warm-up emit was not tracked");
         }
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        std::optional<dmk_lifecycle::NativeTlsOwner> native;
+        const auto before_native = dmk_lifecycle::tls_allocation_snapshot();
+        if (native_return)
+        {
+            native.emplace();
+            if (!native->reserved() || dmk_lifecycle::tls_allocation_snapshot() != before_native)
+                return fail(37, "a native reservation changed the image ownership ledger");
+        }
+        const std::size_t baseline = owned_tls_indices();
         for (int round = 0; round < 2; ++round)
         {
+            const auto before = dmk_lifecycle::tls_allocation_snapshot();
+            std::uint32_t retired_index{0xFFFFFFFFu};
             {
                 EventDispatcher<int> dispatcher;
                 Subscription subscription;
                 EmitProbe probe;
                 if (!emit_cycle(dispatcher, subscription, probe))
                     return fail(31, "an emit on a re-reserved index was not tracked");
-                if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                retired_index = probe.tls_index;
+                const auto subscribed = dmk_lifecycle::tls_allocation_snapshot();
+                if (subscribed.live != baseline + 1 || subscribed.allocations != before.allocations + 1 ||
+                    subscribed.frees != before.frees)
                     return fail(32, "a subscribed dispatcher did not hold exactly one TLS index");
                 // A second publish and a refused publish each return their surplus registration.
                 Subscription second = dispatcher.subscribe([](const int &) noexcept {});
@@ -273,10 +295,19 @@ namespace
                     return fail(36, "a publish after the rundown was admitted");
                 second.reset();
                 subscription.reset();
-                if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                if (native_return && round == 0)
+                {
+                    const auto before_return = dmk_lifecycle::tls_allocation_snapshot();
+                    if (!native->reset() || dmk_lifecycle::tls_allocation_snapshot() != before_return)
+                        return fail(38, "a native return changed the image ownership ledger");
+                }
+                const auto held = dmk_lifecycle::tls_allocation_snapshot();
+                if (held != subscribed || !dmk_lifecycle::tls_index_is_owned(retired_index))
                     return fail(33, "the dispatcher returned its index before its destruction");
             }
-            if (dmk_lifecycle::free_tls_indices() != baseline)
+            const auto returned = dmk_lifecycle::tls_allocation_snapshot();
+            if (returned.live != baseline || returned.allocations != before.allocations + 1 ||
+                returned.frees != before.frees + 1 || dmk_lifecycle::tls_index_is_owned(retired_index))
                 return fail(34, "the last subscribed dispatcher did not return its TLS index");
         }
         std::puts("EMIT_TLS_INDEX_RETURNS_WITH_THE_LAST_SUBSCRIBED_DISPATCHER");
@@ -293,7 +324,7 @@ namespace
             if (!emit_cycle(warm, subscription, probe))
                 return fail(40, "the warm-up emit was not tracked");
         }
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         {
             EventDispatcher<int> live;
             Subscription live_subscription;
@@ -307,7 +338,7 @@ namespace
                 if (!emit_cycle(transient, transient_subscription, transient_probe))
                     return fail(42, "the transient dispatcher's emit was not tracked");
             }
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (owned_tls_indices() != baseline + 1)
                 return fail(43, "another dispatcher's destruction returned the live dispatcher's index");
             live_probe.calls = 0;
             live_probe.tracked = false;
@@ -321,7 +352,7 @@ namespace
             if (!lifecycle_subscription.active())
                 return fail(45, "the diagnostics subscription was refused");
         }
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(46, "the diagnostics dispatcher returned its index without a teardown");
         std::puts("EMIT_TLS_INDEX_STAYS_WITH_A_LIVE_DISPATCHER");
         return 0;
@@ -338,13 +369,13 @@ namespace
         }
         if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES)
             return fail(51, "the warm-up owner did not return its index");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         for (int round = 0; round < 2; ++round)
         {
             {
                 detail::HoldGate gate;
                 if (detail::delivery_scope_tls_index_for_test() == TLS_OUT_OF_INDEXES ||
-                    dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                    owned_tls_indices() != baseline + 1)
                     return fail(52, "a live gate did not hold exactly one TLS index");
                 int calls = 0;
                 bool in_delivery = false;
@@ -358,8 +389,7 @@ namespace
                     return fail(53, "a delivery on a re-reserved index was not recorded");
                 gate.release();
             }
-            if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES ||
-                dmk_lifecycle::free_tls_indices() != baseline)
+            if (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES || owned_tls_indices() != baseline)
                 return fail(54, "the last gate did not return its TLS index");
         }
         std::puts("DELIVERY_TLS_INDEX_RETURNS_WITH_THE_LAST_GATE");
@@ -372,7 +402,7 @@ namespace
         {
             const detail::DeliveryTlsOwner warm;
         }
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         std::atomic<bool> parked{false};
         std::atomic<bool> proceed{false};
         std::atomic<bool> in_delivery_after{false};
@@ -403,8 +433,7 @@ namespace
                     const detail::DeliveryTlsOwner transient_owner;
                 }
                 std::this_thread::sleep_for(OWNER_WINDOW);
-                if (detail::delivery_scope_tls_index_for_test() != index ||
-                    dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                if (detail::delivery_scope_tls_index_for_test() != index || owned_tls_indices() != baseline + 1)
                     status = fail(62, "another owner's release returned the index under a live frame");
             }
             proceed.store(true, std::memory_order_release);
@@ -414,8 +443,8 @@ namespace
             live.on_state_change = nullptr;
             live.release();
         }
-        if (status == 0 && (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES ||
-                            dmk_lifecycle::free_tls_indices() != baseline))
+        if (status == 0 &&
+            (detail::delivery_scope_tls_index_for_test() != TLS_OUT_OF_INDEXES || owned_tls_indices() != baseline))
             status = fail(64, "the last gate did not return its index");
         if (status == 0)
             std::puts("DELIVERY_TLS_INDEX_STAYS_WITH_A_LIVE_GATE");
@@ -460,13 +489,13 @@ namespace
         detail::release_guarded_engine();
         if (detail::guarded_engine_tls_index_for_test() != NO_INDEX)
             return fail(71, "release kept the guarded-read index");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
 
         if (!guarded_copy(value_address, copy) || detail::guarded_engine_tls_index_for_test() == NO_INDEX ||
-            dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            owned_tls_indices() != baseline + 1)
             return fail(72, "a reinstall did not reserve exactly one index");
         detail::release_guarded_engine();
-        if (detail::guarded_engine_tls_index_for_test() != NO_INDEX || dmk_lifecycle::free_tls_indices() != baseline)
+        if (detail::guarded_engine_tls_index_for_test() != NO_INDEX || owned_tls_indices() != baseline)
             return fail(73, "release did not return the index");
 
         // A foreign owner takes the lowest free index, which the release just returned. The next install must reserve
@@ -513,7 +542,7 @@ namespace
 
         detail::release_guarded_engine();
         (void)TlsFree(foreign);
-        if (detail::guarded_engine_tls_index_for_test() != NO_INDEX || dmk_lifecycle::free_tls_indices() != baseline)
+        if (detail::guarded_engine_tls_index_for_test() != NO_INDEX || owned_tls_indices() != baseline)
             return fail(79, "the final release did not return the index");
         std::puts("GUARDED_READ_TLS_INDEX_RETURNS_ON_RELEASE");
         return 0;
@@ -552,7 +581,7 @@ namespace
         if (!guarded_copy(reinterpret_cast<std::uintptr_t>(&value), copy))
             return fail(80, "the install read failed");
         detail::release_guarded_engine();
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         if (!guarded_copy(reinterpret_cast<std::uintptr_t>(&value), copy))
             return fail(81, "the reinstall read failed");
         const std::uint32_t index = detail::guarded_engine_tls_index_for_test();
@@ -590,7 +619,7 @@ namespace
             );
             std::this_thread::sleep_for(OWNER_WINDOW);
             if (released.load(std::memory_order_acquire) || detail::guarded_engine_tls_index_for_test() != index ||
-                dmk_lifecycle::free_tls_indices() + 1 != baseline)
+                owned_tls_indices() != baseline + 1)
                 status = fail(84, "the release returned the index under an in-flight access");
         }
         // Fault inside the range only when the handler and its index are still live, so a defect exits cleanly.
@@ -601,8 +630,7 @@ namespace
             releaser.join();
         if (status == 0 && region_completed.load(std::memory_order_acquire))
             status = fail(85, "the fault inside the in-flight region was not contained");
-        if (status == 0 &&
-            (detail::guarded_engine_tls_index_for_test() != NO_INDEX || dmk_lifecycle::free_tls_indices() != baseline))
+        if (status == 0 && (detail::guarded_engine_tls_index_for_test() != NO_INDEX || owned_tls_indices() != baseline))
             status = fail(86, "the drained release did not return the index");
         if (status == 0)
             std::puts("GUARDED_READ_TLS_INDEX_WAITS_FOR_THE_IN_FLIGHT_ACCESS");
@@ -816,7 +844,7 @@ namespace
         const std::string log_file = session_log_name("session");
         if (!warm_diagnostics(log_file))
             return fail(100, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         std::optional<Session> session;
         if (!start_session(session, log_file))
             return fail(101, "the Session did not start");
@@ -825,7 +853,7 @@ namespace
             const auto lifecycle =
                 std::make_shared<Subscription>(subscribe_probe(diagnostics::hook_lifecycle(), probe));
             Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (owned_tls_indices() != baseline + 1)
                 return fail(102, "two diagnostics subscriptions did not share exactly one TLS index");
             if (!diagnostics_emits_tracked(*lifecycle, faults, probe))
                 return fail(103, "a diagnostics emit was not tracked");
@@ -837,7 +865,7 @@ namespace
             config::bind_int("TlsIndexReturn", "Owner", "tls_index_return_owner", [lifecycle](int) noexcept {}, 0);
         }
         session.reset();
-        if (dmk_lifecycle::free_tls_indices() != baseline)
+        if (owned_tls_indices() != baseline)
             return fail(105, "Session teardown did not return the diagnostics TLS index");
         if (diagnostics_leaks() != 0)
             return fail(106, "a clean Session teardown recorded a diagnostics leak");
@@ -846,13 +874,13 @@ namespace
         {
             Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
             Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (owned_tls_indices() != baseline + 1)
                 return fail(107, "a later subscription did not reserve exactly one TLS index");
             if (!diagnostics_emits_tracked(lifecycle, faults, probe))
                 return fail(108, "an emit after the teardown release was not tracked");
         }
         memory::shutdown_cache();
-        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline || diagnostics_leaks() != 0)
             return fail(109, "the later subscription's index did not return");
         remove_file(log_file);
         std::puts("DIAGNOSTICS_TLS_INDEX_RETURNS_WITH_THE_SESSION");
@@ -863,22 +891,22 @@ namespace
     {
         if (!warm_diagnostics({}))
             return fail(110, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         DiagnosticsProbe probe;
         {
             Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
             Subscription faults = subscribe_probe(diagnostics::scanner_faults(), probe);
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (owned_tls_indices() != baseline + 1)
                 return fail(111, "two diagnostics subscriptions did not share exactly one TLS index");
             // A live subscription stays an ordinary owner across a cache shutdown without a Session.
             memory::shutdown_cache();
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+            if (owned_tls_indices() != baseline + 1 || diagnostics_leaks() != 0)
                 return fail(112, "a cache shutdown under a live subscription returned the index or recorded a leak");
             if (!diagnostics_emits_tracked(lifecycle, faults, probe))
                 return fail(113, "an emit after the cache shutdown was not tracked");
         }
         memory::shutdown_cache();
-        if (dmk_lifecycle::free_tls_indices() != baseline)
+        if (owned_tls_indices() != baseline)
             return fail(114, "a cache shutdown without a Session did not return the index");
         if (diagnostics_leaks() != 0)
             return fail(115, "a clean cache shutdown recorded a diagnostics leak");
@@ -891,7 +919,7 @@ namespace
         const std::string log_file = session_log_name("restart");
         if (!warm_diagnostics(log_file))
             return fail(120, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         std::optional<Session> session;
         if (!start_session(session, log_file))
             return fail(121, "the Session did not start");
@@ -904,17 +932,17 @@ namespace
             if (!memory::init_cache())
                 return fail(122, "the cache did not restart");
             memory::shutdown_cache();
-            if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+            if (owned_tls_indices() != baseline + 1 || diagnostics_leaks() != 0)
                 return fail(123, "a cache restart inside a Session returned the index or recorded a leak");
             if (!diagnostics_emits_tracked(lifecycle, faults, probe))
                 return fail(124, "an emit after the cache restart was not tracked");
         }
         // Inside a Session, the Session teardown owns the release.
         memory::shutdown_cache();
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(125, "a cache shutdown inside a Session returned the index");
         session.reset();
-        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline || diagnostics_leaks() != 0)
             return fail(126, "Session teardown after a cache restart did not return the index cleanly");
         remove_file(log_file);
         std::puts("DIAGNOSTICS_TLS_INDEX_STAYS_THROUGH_A_CACHE_RESTART");
@@ -926,7 +954,7 @@ namespace
         const std::string log_file = session_log_name("live");
         if (!warm_diagnostics(log_file))
             return fail(130, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         DiagnosticsProbe probe;
         Subscription lifecycle;
         {
@@ -935,7 +963,7 @@ namespace
                 return fail(131, "the Session did not start");
             lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
         }
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(132, "Session teardown returned the index under a live subscription");
         if (diagnostics_leaks() != 1)
             return fail(133, "the index kept by a live subscription did not record one diagnostics leak");
@@ -956,7 +984,7 @@ namespace
             return fail(137, "a second teardown counted the same kept index again");
         lifecycle.reset();
         memory::shutdown_cache();
-        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1)
+        if (owned_tls_indices() != baseline || diagnostics_leaks() != 1)
             return fail(138, "a later cache shutdown did not return the kept index");
         // A return ends that ownership, so a new kept ownership records again.
         {
@@ -967,7 +995,7 @@ namespace
         }
         lifecycle.reset();
         memory::shutdown_cache();
-        if (diagnostics_leaks() != 2 || dmk_lifecycle::free_tls_indices() != baseline)
+        if (diagnostics_leaks() != 2 || owned_tls_indices() != baseline)
             return fail(139, "a new kept ownership after a return did not record again");
         remove_file(log_file);
         std::puts("DIAGNOSTICS_TLS_INDEX_STAYS_WITH_A_LIVE_SUBSCRIPTION");
@@ -979,7 +1007,7 @@ namespace
         const std::string log_file = session_log_name("running");
         if (!warm_diagnostics(log_file))
             return fail(140, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         std::optional<Session> session;
         if (!start_session(session, log_file))
             return fail(141, "the Session did not start");
@@ -1004,7 +1032,7 @@ namespace
             return fail(143, "Session teardown did not wait for the running handler inside its bound");
         if (!parked.tracked_after_resume())
             return fail(144, "the index was returned while the handler still ran");
-        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline || diagnostics_leaks() != 0)
             return fail(145, "the teardown that outwaited the handler did not return the index cleanly");
         remove_file(log_file);
         std::puts("DIAGNOSTICS_TLS_INDEX_WAITS_FOR_A_RUNNING_HANDLER");
@@ -1016,7 +1044,7 @@ namespace
         const std::string log_file = session_log_name("parked");
         if (!warm_diagnostics(log_file))
             return fail(150, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         std::optional<Session> session;
         if (!start_session(session, log_file))
             return fail(151, "the Session did not start");
@@ -1030,7 +1058,7 @@ namespace
         int status = 0;
         if (waited < TEARDOWN_WAIT_FLOOR)
             status = fail(153, "Session teardown did not wait out its bound for the parked handler");
-        if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (status == 0 && owned_tls_indices() != baseline + 1)
             status = fail(154, "Session teardown returned the index under a parked handler");
         if (status == 0 && diagnostics_leaks() != 1)
             status = fail(155, "the index kept by a parked handler did not record one diagnostics leak");
@@ -1040,7 +1068,7 @@ namespace
         if (status == 0 && !parked.tracked_after_resume())
             status = fail(157, "the parked handler lost its tracked frame");
         memory::shutdown_cache();
-        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+        if (status == 0 && (owned_tls_indices() != baseline || diagnostics_leaks() != 1))
             status = fail(158, "a later cache shutdown did not return the kept index");
         if (status == 0)
         {
@@ -1054,7 +1082,7 @@ namespace
     {
         if (!warm_diagnostics({}))
             return fail(160, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         // The other dispatcher holds a running handler too, so a wait on either lasts the whole bound.
         ParkedHandler<diagnostics::ScannerFaultEvent> parked{diagnostics::scanner_faults(), &emit_scanner_fault};
         if (!parked.wait_parked())
@@ -1080,14 +1108,14 @@ namespace
         int status = 0;
         if (pauses != 0 || waited >= NO_WAIT_CEILING)
             status = fail(162, "a teardown inside a diagnostics handler waited");
-        if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (status == 0 && owned_tls_indices() != baseline + 1)
             status = fail(163, "a teardown inside a diagnostics handler returned the index");
         if (status == 0 && diagnostics_leaks() != 2)
             status = fail(164, "the two kept ownerships did not record one diagnostics leak each");
         self.reset();
         parked.resume();
         memory::shutdown_cache();
-        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 2))
+        if (status == 0 && (owned_tls_indices() != baseline || diagnostics_leaks() != 2))
             status = fail(165, "a later cache shutdown did not return the kept index");
         if (status == 0)
             std::puts("DIAGNOSTICS_TLS_INDEX_TEARDOWN_INSIDE_A_HANDLER_NEVER_WAITS");
@@ -1099,21 +1127,21 @@ namespace
         if (!warm_diagnostics({}))
             return fail(170, "the warm-up diagnostics cycle was not tracked");
         const dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Trace};
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
 
         // An idle owner returns its index in one attempt, without the prune and its callable destruction.
         std::atomic<int> destroyed{0};
         Subscription retired = diagnostics::hook_lifecycle().subscribe(CountedHandler{&destroyed});
         retired.tombstone();
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline)
+        if (owned_tls_indices() != baseline + 1)
             return fail(171, "the retired subscription did not hold exactly one TLS index");
         const int destroyed_before = destroyed.load(std::memory_order_relaxed);
         {
             const dmk_test::ForcedLoaderProbe held;
             memory::shutdown_cache();
         }
-        if (dmk_lifecycle::free_tls_indices() != baseline ||
-            destroyed.load(std::memory_order_relaxed) != destroyed_before || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline || destroyed.load(std::memory_order_relaxed) != destroyed_before ||
+            diagnostics_leaks() != 0)
             return fail(172, "a loader-lock release did not return the idle index without a callable destruction");
         retired.reset();
 
@@ -1136,7 +1164,7 @@ namespace
                                          detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) - pauses_before;
             if (pauses != 0 || waited >= NO_WAIT_CEILING)
                 status = fail(174, "a loader-lock release waited for a running handler");
-            if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (status == 0 && owned_tls_indices() != baseline + 1)
                 status = fail(175, "a loader-lock release returned the index under a running handler");
             if (status == 0 && diagnostics_leaks() != 1)
                 status = fail(176, "the index kept under the loader lock did not record one diagnostics leak");
@@ -1144,7 +1172,7 @@ namespace
                 status = fail(177, "a loader-lock release logged");
         }
         memory::shutdown_cache();
-        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+        if (status == 0 && (owned_tls_indices() != baseline || diagnostics_leaks() != 1))
             status = fail(178, "a later cache shutdown did not return the kept index");
         if (status == 0)
             std::puts("DIAGNOSTICS_TLS_INDEX_LOADER_LOCK_RELEASE_NEVER_WAITS");
@@ -1155,7 +1183,7 @@ namespace
     {
         if (!warm_diagnostics({}))
             return fail(180, "the warm-up diagnostics cycle was not tracked");
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         DiagnosticsProbe probe;
         {
             Subscription lifecycle = subscribe_probe(diagnostics::hook_lifecycle(), probe);
@@ -1168,10 +1196,10 @@ namespace
             detail::lifecycle().set_loader_context(detail::LoaderContext::ProcessExit);
             memory::shutdown_cache();
         }
-        if (dmk_lifecycle::free_tls_indices() + 1 != baseline || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline + 1 || diagnostics_leaks() != 0)
             return fail(182, "a process-exit teardown touched the diagnostics ownership");
         memory::shutdown_cache();
-        if (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 0)
+        if (owned_tls_indices() != baseline || diagnostics_leaks() != 0)
             return fail(183, "a later cache shutdown did not return the idle index");
         std::puts("DIAGNOSTICS_TLS_INDEX_PROCESS_EXIT_SKIPS_THE_RELEASE");
         return 0;
@@ -1182,7 +1210,7 @@ namespace
         if (!warm_diagnostics({}))
             return fail(190, "the warm-up diagnostics cycle was not tracked");
         const dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Trace};
-        const std::size_t baseline = dmk_lifecycle::free_tls_indices();
+        const std::size_t baseline = owned_tls_indices();
         int status = 0;
         {
             ParkedHandler<diagnostics::HookLifecycleEvent> parked{diagnostics::hook_lifecycle(), &emit_lifecycle};
@@ -1202,7 +1230,7 @@ namespace
             detail::untracked_emit_frames().fetch_sub(1, std::memory_order_seq_cst);
             if (pauses != 0 || waited >= NO_WAIT_CEILING)
                 status = fail(192, "a teardown waited while an untracked emit ran");
-            if (status == 0 && dmk_lifecycle::free_tls_indices() + 1 != baseline)
+            if (status == 0 && owned_tls_indices() != baseline + 1)
                 status = fail(193, "a teardown returned the index while an untracked emit ran");
             if (status == 0 && diagnostics_leaks() != 1)
                 status = fail(194, "the index kept while an untracked emit ran did not record one diagnostics leak");
@@ -1210,7 +1238,7 @@ namespace
                 status = fail(195, "the kept index did not log its cause");
         }
         memory::shutdown_cache();
-        if (status == 0 && (dmk_lifecycle::free_tls_indices() != baseline || diagnostics_leaks() != 1))
+        if (status == 0 && (owned_tls_indices() != baseline || diagnostics_leaks() != 1))
             status = fail(196, "a later cache shutdown did not return the kept index");
         if (status == 0)
             std::puts("DIAGNOSTICS_TLS_INDEX_TEARDOWN_WITH_AN_UNTRACKED_EMIT_NEVER_WAITS");
@@ -1281,69 +1309,79 @@ namespace
             return fail(205, "the loader teardown did not return without a diagnostics leak");
         return 0;
     }
+    int run_proof(int argc, char **argv)
+    {
+        if (argc == 4 && std::string_view{argv[1]} == "process-exit-child")
+        {
+            const std::string_view schedule{argv[2]};
+            if (schedule != "0" && schedule != "1" && schedule != "2")
+                return 1;
+            return run_loader_shutdown_child(argv[2][0] - '0', argv[3]);
+        }
+        const std::string_view scenario = argc == 2 ? std::string_view{argv[1]} : std::string_view{};
+        if (scenario == "guarded-process-exit")
+            return run_loader_shutdown(0);
+        if (scenario == "guarded-lock-process-exit")
+            return run_loader_shutdown(1);
+        if (scenario == "diagnostics-loader-shutdown")
+            return run_loader_shutdown(2);
+        if (scenario == "mid-return")
+            return run_mid_return();
+        if (scenario == "mid-retained")
+            return run_mid_retained();
+        if (scenario == "mid-exhausted")
+            return run_mid_exhausted();
+        if (scenario == "emit-return")
+            return run_emit_return();
+        if (scenario == "emit-return-native")
+            return run_emit_return(true);
+        if (scenario == "emit-live-owner")
+            return run_emit_live_owner();
+        if (scenario == "delivery-return")
+            return run_delivery_return();
+        if (scenario == "delivery-live-owner")
+            return run_delivery_live_owner();
+        if (scenario == "guarded-read-return")
+            return run_guarded_read_return();
+        if (scenario == "guarded-read-in-flight")
+            return run_guarded_read_in_flight();
+        if (scenario == "diagnostics-session")
+            return run_diagnostics_session();
+        if (scenario == "diagnostics-cache-shutdown")
+            return run_diagnostics_cache_shutdown();
+        if (scenario == "diagnostics-cache-restart")
+            return run_diagnostics_cache_restart();
+        if (scenario == "diagnostics-live")
+            return run_diagnostics_live();
+        if (scenario == "diagnostics-running")
+            return run_diagnostics_running();
+        if (scenario == "diagnostics-parked")
+            return run_diagnostics_parked();
+        if (scenario == "diagnostics-self")
+            return run_diagnostics_self();
+        if (scenario == "diagnostics-loader-lock")
+            return run_diagnostics_loader_lock();
+        if (scenario == "diagnostics-process-exit")
+            return run_diagnostics_process_exit();
+        if (scenario == "diagnostics-untracked")
+            return run_diagnostics_untracked();
+        // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario.
+        std::fputs(
+            "usage: tls_index_return <mid-return|mid-retained|mid-exhausted|emit-return|emit-return-native|"
+            "emit-live-owner|delivery-return|delivery-live-owner|guarded-read-return|guarded-read-in-flight|"
+            "diagnostics-session|diagnostics-cache-shutdown|diagnostics-cache-restart|diagnostics-live|"
+            "diagnostics-running|diagnostics-parked|"
+            "diagnostics-self|diagnostics-loader-lock|diagnostics-process-exit|diagnostics-untracked>\n",
+            stderr
+        );
+        return 1;
+    }
 } // namespace
 
 int main(int argc, char **argv)
 {
-    if (argc == 4 && std::string_view{argv[1]} == "process-exit-child")
-    {
-        const std::string_view schedule{argv[2]};
-        if (schedule != "0" && schedule != "1" && schedule != "2")
-            return 1;
-        return run_loader_shutdown_child(argv[2][0] - '0', argv[3]);
-    }
-    const std::string_view scenario = argc == 2 ? std::string_view{argv[1]} : std::string_view{};
-    if (scenario == "guarded-process-exit")
-        return run_loader_shutdown(0);
-    if (scenario == "guarded-lock-process-exit")
-        return run_loader_shutdown(1);
-    if (scenario == "diagnostics-loader-shutdown")
-        return run_loader_shutdown(2);
-    if (scenario == "mid-return")
-        return run_mid_return();
-    if (scenario == "mid-retained")
-        return run_mid_retained();
-    if (scenario == "mid-exhausted")
-        return run_mid_exhausted();
-    if (scenario == "emit-return")
-        return run_emit_return();
-    if (scenario == "emit-live-owner")
-        return run_emit_live_owner();
-    if (scenario == "delivery-return")
-        return run_delivery_return();
-    if (scenario == "delivery-live-owner")
-        return run_delivery_live_owner();
-    if (scenario == "guarded-read-return")
-        return run_guarded_read_return();
-    if (scenario == "guarded-read-in-flight")
-        return run_guarded_read_in_flight();
-    if (scenario == "diagnostics-session")
-        return run_diagnostics_session();
-    if (scenario == "diagnostics-cache-shutdown")
-        return run_diagnostics_cache_shutdown();
-    if (scenario == "diagnostics-cache-restart")
-        return run_diagnostics_cache_restart();
-    if (scenario == "diagnostics-live")
-        return run_diagnostics_live();
-    if (scenario == "diagnostics-running")
-        return run_diagnostics_running();
-    if (scenario == "diagnostics-parked")
-        return run_diagnostics_parked();
-    if (scenario == "diagnostics-self")
-        return run_diagnostics_self();
-    if (scenario == "diagnostics-loader-lock")
-        return run_diagnostics_loader_lock();
-    if (scenario == "diagnostics-process-exit")
-        return run_diagnostics_process_exit();
-    if (scenario == "diagnostics-untracked")
-        return run_diagnostics_untracked();
-    // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario.
-    std::fputs(
-        "usage: tls_index_return <mid-return|mid-retained|mid-exhausted|emit-return|emit-live-owner|delivery-return|"
-        "delivery-live-owner|guarded-read-return|guarded-read-in-flight|diagnostics-session|"
-        "diagnostics-cache-shutdown|diagnostics-cache-restart|diagnostics-live|diagnostics-running|diagnostics-parked|"
-        "diagnostics-self|diagnostics-loader-lock|diagnostics-process-exit|diagnostics-untracked>\n",
-        stderr
-    );
-    return 1;
+    const int result = run_proof(argc, argv);
+    if (result == 0 && !dmk_lifecycle::tls_allocation_snapshot().valid)
+        return fail(206, "a TLS return did not match the image ownership ledger");
+    return result;
 }

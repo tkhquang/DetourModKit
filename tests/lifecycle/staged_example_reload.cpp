@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <exception>
 #include <iterator>
 #include <vector>
 
@@ -100,10 +101,23 @@ namespace
         return 1;
     }
 
+    [[nodiscard]] std::filesystem::path fresh_proof_directory()
+    {
+        const auto root = std::filesystem::current_path();
+        for (unsigned nonce = 1; nonce <= 1024; ++nonce)
+        {
+            const auto candidate = root / std::format("staged_example.p{}_n{}", _getpid(), nonce);
+            if (std::filesystem::create_directory(candidate))
+                return candidate;
+        }
+        return {};
+    }
+
     int run(const std::filesystem::path &fixture, std::string_view scenario)
     {
-        const auto directory = std::filesystem::current_path() / std::format("staged_example.p{}_n1", _getpid());
-        std::filesystem::create_directory(directory);
+        const auto directory = fresh_proof_directory();
+        if (directory.empty())
+            return fail("The sample proof has no fresh directory.");
         const auto anchor_path = directory / std::format("anchor.p{}_n1.dll", _getpid());
         std::filesystem::copy_file(fixture, anchor_path);
         s_loader_module = ::LoadLibraryW(anchor_path.c_str());
@@ -145,7 +159,7 @@ namespace
         s_host_identity = s_wheel_host.host_identity;
         if (!write_ini(scenario != "leak"))
             return fail("The INI write failed.");
-        if (!write_build(fixture, 1))
+        if (scenario != "missing-export" && !write_build(fixture, 1))
             return fail("The first fresh build write failed.");
         if (scenario == "failed-init")
         {
@@ -156,11 +170,7 @@ namespace
         }
         if (scenario == "missing-export")
         {
-            std::filesystem::copy_file(
-                "dmk_xinput_proxy_local.dll",
-                directory / L"StagedExampleProof.logic.dll",
-                std::filesystem::copy_options::overwrite_existing
-            );
+            std::filesystem::copy_file("dmk_xinput_proxy_local.dll", directory / L"StagedExampleProof.logic.dll");
             if (load_generation() || !s_restart_required || s_retained_count != 1 ||
                 s_retained_loader_refs[0] == nullptr)
                 return fail("An unresolved Shutdown did not preserve the failed image and require restart.");
@@ -269,6 +279,28 @@ namespace
         ::DestroyWindow(window);
         return 0;
     }
+
+    int run_directory_collision(const std::filesystem::path &fixture)
+    {
+        const auto directory = fresh_proof_directory();
+        if (directory.empty())
+            return fail("The directory collision control has no fresh directory.");
+        const auto anchor = directory / std::format("anchor.p{}_n1.dll", _getpid());
+        {
+            std::ofstream output(anchor, std::ios::binary);
+            output << "prior generation";
+            if (!output.good())
+                return fail("The directory collision control did not write its anchor.");
+        }
+        const int result = run(fixture, "retained");
+        if (result != 0)
+            return result;
+        std::ifstream input(anchor, std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+        if (bytes != "prior generation")
+            return fail("The fresh proof changed an existing directory anchor.");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -277,11 +309,18 @@ int main(int argc, char **argv)
         return fail("A fixture path and scenario are required.");
     const std::string_view scenario{argv[2]};
     if (scenario != "retained" && scenario != "leak" && scenario != "refused" && scenario != "budget" &&
-        scenario != "failed-init" && scenario != "missing-export")
+        scenario != "failed-init" && scenario != "missing-export" && scenario != "directory-collision")
         return fail("Unknown sample proof scenario.");
     try
     {
+        if (scenario == "directory-collision")
+            return run_directory_collision(std::filesystem::absolute(argv[1]));
         return run(std::filesystem::absolute(argv[1]), scenario);
+    }
+    catch (const std::exception &error)
+    {
+        std::fprintf(stderr, "The sample proof raised an exception: %s\n", error.what());
+        return 1;
     }
     catch (...)
     {

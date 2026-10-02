@@ -2,7 +2,7 @@
 """Final-candidate lifecycle soak: the gate both Release jobs run before producing a package.
 
 It inventories CTest first so a missing label or a renamed regression cannot vacuously pass, temporarily arms
-per-executable WER LocalDumps for the proof processes only, proves capture with a native fail-fast control, then
+per-executable WER LocalDumps for the proof processes only, proves capture with a native access-violation control, then
 repeats the lifecycle proofs. Pre-existing WER values are restored however the run ends, and an otherwise successful
 run that cannot restore every captured value fails: a green soak must not leave machine-wide policy behind.
 
@@ -413,7 +413,7 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
         # status, so the exact NTSTATUS is comparable here.
         # No runtime_directory prepend here, unlike run_ctest: fast_fail_probe is a dmk_static_runtime target whose
         # only imports are KERNEL32 and the system CRT, so it binds no compiler runtime to get wrong.
-        control = subprocess.Popen([str(control_probe), "wer-crash"])
+        control = subprocess.Popen([str(control_probe), "wer-crash"], env=native_crash_environment())
         try:
             control.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -441,7 +441,7 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
 
         if len(control_dumps) != 1 or not is_complete_minidump(control_dumps[0]):
             raise SoakError(
-                "WER did not capture exactly one complete native fail-fast control dump within 120 seconds.\n"
+                "WER did not capture exactly one complete native access-violation control dump within 120 seconds.\n"
                 + wer_environment_report(dump_dir)
             )
         control_dumps[0].unlink()

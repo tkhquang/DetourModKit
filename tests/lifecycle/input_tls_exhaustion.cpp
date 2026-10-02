@@ -1,19 +1,15 @@
 /**
  * @file input_tls_exhaustion.cpp
  * @brief Fresh-process proof that an input delivery with no per-thread identity is refused, not admitted untracked.
- * @details The delivery marker decides whether a control-plane release blocks for an in-flight callback. A process
- *          that has consumed every TLS index before DetourModKit reserves its slot cannot record a delivery frame, and
- *          the only answer that keeps the public rundown promise true is to refuse the delivery before consumer code
- *          starts. The `exhausted` scenario asserts that refusal and that one thread's unrecordable frame never makes
- *          another thread read as callback-entrant. It then returns the indices and requires the next registration to
- *          reserve one, so the refusal lasts only while no owner holds an index. `available` is the positive control
- *          that the same drive delivers when a slot exists. Exit status is the oracle.
+ * @details The executable refuses its own TLS allocations while Windows DLLs retain their allocator.
+ *          The scenarios verify delivery refusal, teardown reentry, consume disarm, and recovery after restoration.
  */
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "input_seam_cleanup.hpp"
+#include "tls_allocation_failure.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
@@ -32,7 +28,6 @@
 #include <string_view>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace
 {
@@ -69,9 +64,7 @@ namespace
         }
     }
 
-    // Pre-warms the thread before any index is taken, then opens one delivery frame on demand. Warming first matters:
-    // the C++ runtime materializes its own per-thread state lazily, and on MinGW that state is emulated TLS whose
-    // first touch would allocate an index this proof is about to make unavailable.
+    // Initialize the thread runtime before the executable refuses TLS allocations.
     void worker_main() noexcept
     {
         s_worker_ready.store(true, std::memory_order_release);
@@ -171,28 +164,6 @@ namespace
         }
         (void)::CloseHandle(thread);
         return wait_result == WAIT_OBJECT_0 ? static_cast<int>(exit_code) : 20;
-    }
-
-    std::vector<DWORD> exhaust_tls_indices()
-    {
-        std::vector<DWORD> taken;
-        for (;;)
-        {
-            const DWORD index = ::TlsAlloc();
-            if (index == TLS_OUT_OF_INDEXES)
-            {
-                return taken;
-            }
-            taken.push_back(index);
-        }
-    }
-
-    void release_tls_indices(const std::vector<DWORD> &taken) noexcept
-    {
-        for (const DWORD index : taken)
-        {
-            (void)::TlsFree(index);
-        }
     }
 
     input::ComboBinding make_hold_binding(std::string name, int key, std::function<void(bool)> callback)
@@ -372,21 +343,11 @@ namespace
             std::this_thread::yield();
         }
 
-        const std::vector<DWORD> taken = exhaust_tls_indices();
-        if (taken.empty())
+        dmk_lifecycle::TlsAllocationFailure allocation_failure;
+        if (!allocation_failure.isolated())
         {
-            std::fputs("FAIL: the process had no TLS index to take, so nothing was exhausted\n", stderr);
-            s_worker_scope_open.store(true, std::memory_order_release);
-            s_worker_release.store(true, std::memory_order_release);
-            worker.join();
-            return 2;
-        }
-        const DWORD unexpected_index = ::TlsAlloc();
-        if (unexpected_index != TLS_OUT_OF_INDEXES)
-        {
-            std::fputs("FAIL: a TLS index was still available after exhaustion\n", stderr);
-            (void)::TlsFree(unexpected_index);
-            release_tls_indices(taken);
+            std::fputs("FAIL: TLS refusal escaped the proof executable or did not reach its import\n", stderr);
+            allocation_failure.restore();
             s_worker_scope_open.store(true, std::memory_order_release);
             s_worker_release.store(true, std::memory_order_release);
             worker.join();
@@ -520,10 +481,7 @@ namespace
             std::fputs("FAIL: another thread's unrecordable frame made this thread read as callback-entrant\n", stderr);
             status = 8;
         }
-        // Hand the indices back before anything is allowed to enter or leave this window. The order protects the
-        // harness, not the subject. The MSVC C runtime's thread-exit path faults intermittently while every index is
-        // taken, so a thread must not start or finish inside the window.
-        release_tls_indices(taken);
+        allocation_failure.restore();
         s_worker_release.store(true, std::memory_order_release);
         worker.join();
         // Every registration inside the window found no index, so none is published yet. Only main_owner is still
@@ -766,16 +724,13 @@ namespace
         return 0;
     }
 
-    // A consume binding registered while no index exists refuses its callbacks, so it must leave its trigger to the
-    // game ([B-26]). The binding registered after the indices return is the positive control for the published table.
+    // A refused TLS reservation leaves the consume trigger to the game ([B-26]).
     int run_consume_exhausted_case()
     {
         input::Input &manager = input::Input::instance();
         const dmk_lifecycle::InputSeamOwner cleanup;
 
-        // Warm the facade, the logger that the refused reservation reports to, and this thread's runtime state before
-        // any index is taken, as worker_main does. The pending entries keep the gate alive after its guard ends, so the
-        // removal is what returns the warm-up index.
+        // Pending entries retain the gate, so explicit removal returns the warm-up index.
         (void)log();
         {
             auto warm = manager.register_combo(make_hold_binding("consume_warm", KEY_A, [](bool) {}));
@@ -794,14 +749,14 @@ namespace
 
         std::optional<input::BindingGuard> unindexed;
         {
-            const std::vector<DWORD> taken = exhaust_tls_indices();
-            auto registered = manager.register_combo(make_consume_binding("consume_without_index", GamepadCode::A));
-            release_tls_indices(taken);
-            if (taken.empty())
+            dmk_lifecycle::TlsAllocationFailure allocation_failure;
+            if (!allocation_failure.isolated())
             {
-                std::fputs("FAIL: the process had no TLS index to take, so nothing was exhausted\n", stderr);
+                std::fputs("FAIL: TLS refusal escaped the proof executable or did not reach its import\n", stderr);
                 return 82;
             }
+            auto registered = manager.register_combo(make_consume_binding("consume_without_index", GamepadCode::A));
+            allocation_failure.restore();
             if (!registered)
             {
                 std::fputs("FAIL: the registration without an index was refused\n", stderr);

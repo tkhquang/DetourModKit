@@ -464,7 +464,8 @@ namespace
         return false;
     }
 
-    [[nodiscard]] bool check_provider(Provider &provider, WORD mask, std::optional<std::size_t> bypass = std::nullopt)
+    [[nodiscard]] bool
+    check_provider(Provider &provider, WORD mask, const std::optional<std::size_t> &bypass = std::nullopt)
     {
         for (std::size_t route = 0; route < provider.routes.size(); ++route)
         {

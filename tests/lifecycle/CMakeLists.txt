@@ -24,6 +24,11 @@ add_executable(fast_fail_probe fast_fail_probe.cpp)
 dmk_static_runtime(fast_fail_probe)
 add_dependencies(dmk_lifecycle_proof_hosts fast_fail_probe)
 
+dmk_add_raw_proof(NAME Lifecycle.WerControlClearsInheritedErrorMode
+  COMMAND $<TARGET_FILE:fast_fail_probe> wer-inherited-mode
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
 add_test(NAME CTestTimeoutControlNegative
   COMMAND ${CMAKE_COMMAND}
     -DCTEST_EXE=${CMAKE_CTEST_COMMAND}
@@ -669,8 +674,8 @@ set_tests_properties(InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario PR
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
   LABELS "lifecycle-proof")
 
-# Exhausting every TLS index is process-wide, so this needs its own host.
-add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
+# TLS allocation refusal uses a link-local import cell in this proof host.
+add_executable(input_tls_exhaustion input_tls_exhaustion.cpp tls_allocation_failure.cpp)
 target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(input_tls_exhaustion PRIVATE
   ${PROJECT_SOURCE_DIR}/include
@@ -726,8 +731,8 @@ set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScena
   LABELS "lifecycle-proof")
 
 # Each DMK Win32 TLS index returns with its last owner and stays with a live one. Every scenario owns its process,
-# because a census reads the whole process and a defective return can write through another owner's index.
-add_executable(tls_index_return tls_index_return.cpp)
+# because each host owns its import ledger and a defective return can write through another owner's index.
+add_executable(tls_index_return tls_index_return.cpp tls_allocation_failure.cpp)
 add_library(process_exit_release_dll SHARED process_exit_release_dll.cpp)
 set_target_properties(process_exit_release_dll PROPERTIES PREFIX "")
 target_link_libraries(process_exit_release_dll PRIVATE DetourModKit dmk_coverage)
@@ -749,6 +754,7 @@ foreach(tls_proof IN ITEMS
     "MidEntryTlsIndexStaysWithARetainedSlot|mid-retained"
     "MidEntryTlsIndexRefusalReleasesItsClaim|mid-exhausted"
     "EmitTlsIndexReturnsWithTheLastSubscribedDispatcher|emit-return"
+    "EmitTlsIndexOwnershipIgnoresNativeReturns|emit-return-native"
     "EmitTlsIndexStaysWithALiveDispatcher|emit-live-owner"
     "DeliveryTlsIndexReturnsWithTheLastGate|delivery-return"
     "DeliveryTlsIndexStaysWithALiveGate|delivery-live-owner"
@@ -1537,7 +1543,7 @@ while(logic_dll_unload_proofs)
 endwhile()
 
 # The generation target links one archive instance. Test seams replace its window and XInput dependencies.
-add_library(staged_generation_dll SHARED staged_generation_dll.cpp)
+add_library(staged_generation_dll SHARED staged_generation_dll.cpp staged_generation_tls.cpp)
 set_target_properties(staged_generation_dll PROPERTIES PREFIX "" OUTPUT_NAME "staged_generation_dll")
 target_link_libraries(staged_generation_dll PRIVATE DetourModKit safetyhook dmk_coverage)
 target_include_directories(staged_generation_dll PRIVATE
@@ -1670,6 +1676,7 @@ endwhile()
 # These scenarios use deterministic fixtures or no platform fixture. Exit 77 reports a failure.
 set(staged_generation_required_proofs
   Lifecycle.StagedGenerationForeignXInputRetainsThePair       foreign-xinput
+  Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes foreign-xinput-background
   Lifecycle.StagedGenerationParkedCallbackRefusesReload       parked-callback
   Lifecycle.StagedGenerationReleasedCallbackAllowsReload      drain-retry
   Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps     partial-init
@@ -1791,6 +1798,44 @@ if(DMK_ENABLE_SANITIZERS)
   set_tests_properties(Lifecycle.StagedGenerationResourcesStayWithinBudget PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+dmk_add_raw_proof(NAME Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls
+  COMMAND $<TARGET_FILE:staged_generation_soak> resources-host-exception
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 300
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+if(DMK_ENABLE_SANITIZERS)
+  set_tests_properties(Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+dmk_add_raw_proof(NAME Lifecycle.StagedGenerationResourcesExcludeHostBreakpointTls
+  COMMAND $<TARGET_FILE:staged_generation_soak> resources-host-breakpoint
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 300
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.StagedGenerationResourcesExcludeHostBreakpointTls PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+if(DMK_ENABLE_SANITIZERS)
+  set_tests_properties(Lifecycle.StagedGenerationResourcesExcludeHostBreakpointTls PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+set(staged_generation_tls_proofs
+  Lifecycle.StagedGenerationResourcesExcludeHostLoadTls resources-host-load
+  Lifecycle.StagedGenerationResourcesRejectLoadTlsLeak resources-generation-tls-leak)
+while(staged_generation_tls_proofs)
+  list(POP_FRONT staged_generation_tls_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:staged_generation_soak> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+    TEST_TIMEOUT 300
+    LABELS "lifecycle-proof")
+  set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+  if(DMK_ENABLE_SANITIZERS)
+    set_tests_properties(${proof_name} PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
+endwhile()
+
 add_library(routed_bypass_provider SHARED routed_bypass_provider.cpp)
 set_target_properties(routed_bypass_provider PROPERTIES PREFIX "" OUTPUT_NAME "dmk_routed_bypass_provider")
 dmk_static_runtime(routed_bypass_provider)
@@ -1811,6 +1856,14 @@ dmk_add_raw_proof(NAME Lifecycle.RoutedBypassCleanRoutesReclaim
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
 dmk_add_raw_proof(NAME Lifecycle.RoutedBypassDrainsBeforeReclaim
   COMMAND $<TARGET_FILE:routed_bypass_continuation> drain
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassWaitsForCompleteCallerReturn
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> scan-wait
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
+  TEST_TIMEOUT 30 LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan
+  COMMAND $<TARGET_FILE:routed_bypass_continuation> thread-exit
   WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
 add_test(NAME Lifecycle.RoutedBypassProofRejectsUnknownScenario
@@ -1859,6 +1912,7 @@ dmk_static_runtime(staged_example_reload)
 add_dependencies(dmk_lifecycle_proof_hosts staged_example_reload)
 
 set(staged_example_proofs
+  Lifecycle.StagedExampleExistingDirectoryUsesFreshName directory-collision
   Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor retained
   Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference leak
   Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor refused
