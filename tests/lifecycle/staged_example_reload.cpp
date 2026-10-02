@@ -145,7 +145,7 @@ namespace
         s_host_identity = s_wheel_host.host_identity;
         if (!write_ini(scenario != "leak"))
             return fail("The INI write failed.");
-        if (!write_build(fixture, 1))
+        if (scenario != "missing-export" && !write_build(fixture, 1))
             return fail("The first fresh build write failed.");
         if (scenario == "failed-init")
         {
@@ -156,11 +156,7 @@ namespace
         }
         if (scenario == "missing-export")
         {
-            std::filesystem::copy_file(
-                "dmk_xinput_proxy_local.dll",
-                directory / L"StagedExampleProof.logic.dll",
-                std::filesystem::copy_options::overwrite_existing
-            );
+            std::filesystem::copy_file("dmk_xinput_proxy_local.dll", directory / L"StagedExampleProof.logic.dll");
             if (load_generation() || !s_restart_required || s_retained_count != 1 ||
                 s_retained_loader_refs[0] == nullptr)
                 return fail("An unresolved Shutdown did not preserve the failed image and require restart.");
