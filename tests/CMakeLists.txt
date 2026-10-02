@@ -437,6 +437,12 @@ if(DMK_BUILD_TESTS)
     Lifecycle.XInputTwoCopiesPreserveFirstFrameModifiersInReverseOrder
     Lifecycle.XInputTransformingForwardersPreserveUpperModifierRules
     Lifecycle.XInputProbeBeforeAdmissionSurvivesTeardown
+    Lifecycle.XInputDisconnectedStartupRecoversThroughForwarders
+    Lifecycle.XInputObservedPairReconnectReportsOneRecovery
+    Lifecycle.XInputPrimaryFailureReportsTheExactCheck
+    Lifecycle.XInputExFailureReportsTheExactCheck
+    Lifecycle.XInputExactHandBackReportsOneRecovery
+    Lifecycle.XInputScopeFailureReportsPairCause
     Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks
     Lifecycle.XInputStaleProbeCannotPublishOverSuccessor
     Lifecycle.XInputLayeredProofRejectsAnUnknownScenario
@@ -602,7 +608,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 273)
+    --minimum 279)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

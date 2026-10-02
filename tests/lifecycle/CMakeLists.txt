@@ -1163,7 +1163,7 @@ target_link_libraries(xinput_layered_consume PRIVATE DetourModKit dmk_coverage p
 target_include_directories(xinput_layered_consume PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(xinput_layered_consume PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_layered_consume)
-add_dependencies(xinput_layered_consume xinput_forwarding_proxy_local)
+add_dependencies(xinput_layered_consume xinput_forwarding_proxy_local xinput_absent_ex_proxy)
 add_dependencies(dmk_lifecycle_proof_hosts xinput_layered_consume)
 
 foreach(copy_index RANGE 0 9)
@@ -1192,7 +1192,13 @@ set(xinput_layered_proof_cases
   "TransformingForwardersPreserveUpperModifierRules|two-copies-transforming-forwarder"
   "ProbeBeforeAdmissionSurvivesTeardown|probe-before-admission"
   "StaleProbeCannotPublishOverSuccessor|epoch-race"
-  "RouteDiagnosticsStayLatchedOutsideLocks|route-diagnostics")
+  "RouteDiagnosticsStayLatchedOutsideLocks|route-diagnostics"
+  "DisconnectedStartupRecoversThroughForwarders|disconnected-startup"
+  "ObservedPairReconnectReportsOneRecovery|observed-reconnect"
+  "PrimaryFailureReportsTheExactCheck|diagnostics-primary"
+  "ExFailureReportsTheExactCheck|diagnostics-ex"
+  "ExactHandBackReportsOneRecovery|exact-recovery"
+  "ScopeFailureReportsPairCause|diagnostics-scope")
 foreach(proof_case IN LISTS xinput_layered_proof_cases)
   string(REPLACE "|" ";" proof_fields "${proof_case}")
   list(GET proof_fields 0 proof_name)
