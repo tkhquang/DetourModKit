@@ -6,10 +6,13 @@
 #include <stdint.h>
 
 /** @brief ABI revision for the staged-reload example request. */
-#define DMK_STAGED_RELOAD_ABI_VERSION 1u
+#define DMK_STAGED_RELOAD_ABI_VERSION 2u
 
-/** @brief Success value for staged logic exports. */
+/** @brief A live Init result or a retired Shutdown result with no retained resources. */
 #define DMK_STAGED_RELOAD_OK 1u
+
+/** @brief A retired Shutdown result that requires the loader to retain its module reference. */
+#define DMK_STAGED_RELOAD_RETAINED 2u
 
 /**
  * @struct StagedReloadInitRequest

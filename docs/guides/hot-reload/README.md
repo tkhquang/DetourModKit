@@ -1,6 +1,13 @@
 # Hot-reload development guide
 
-Split a mod into a thin loader and a logic DLL to change mod code without a game restart. The loader lives for the process. The logic DLL is replaced on demand.
+> [!IMPORTANT]
+> **The reference pair supports INI Consume changes without loader-policy edits.**
+>
+> Successful teardown permits a fresh generation even when the retired DLL stays mapped. The development loader retains images within count and byte limits.
+>
+> Failed callback drain or hook restoration still refuses retirement. The loader never reinitializes an old image as a reload fallback.
+
+Split the mod into a resident loader and a replaceable logic DLL.
 
 | Binary              | Role                                        | Lifetime         |
 |---------------------|---------------------------------------------|------------------|
@@ -9,7 +16,9 @@ Split a mod into a thin loader and a logic DLL to change mod code without a game
 
 This guide defines DetourModKit unload guarantees, module pin sources, and the staged-generation pattern for repeatable reloads.
 
-CI compiles the [reference pair](../../../examples/staged_reload/) to check current API use. It does not run the pair. [The examples contract](../../../examples/README.md) defines ownership and compatibility.
+Use unique staged names and bounded retained generations for mods that consume gamepad input or layer XInput hooks.
+
+Debug builds compile the [reference pair](../../../examples/staged_reload/) to check current API use. The [permanent proofs](#proof-pointers) exercise its sources. [The examples contract](../../../examples/README.md) defines ownership and compatibility.
 
 ## Why split the mod
 
@@ -21,7 +30,7 @@ The split creates one stable control plane and a sequence of logic generations. 
 flowchart LR
     Build["Build output<br/>ModName.logic.dll"] ==> Stage["Unique staged copy<br/>ModName.gen0042.logic.dll"]
     Game["Game process"] ==> Loader["Resident loader<br/>ModName.asi"]
-    Loader ==> Host["Resident wheel host"]
+    Loader -.-> Host["Resident wheel host<br/>ExternalHost only"]
     Loader ==> State["Persistent loader state"]
     Loader ==> Stage
     Stage ==> Logic["One logic generation"]
@@ -56,7 +65,19 @@ Run the MSVC commands from an x64 Developer Command Prompt.
 
 Set `DMK_EXAMPLE_MOD_NAME` in [`examples/CMakeLists.txt`](../../../examples/CMakeLists.txt). If an ASI host loads the pair, rename the loader DLL to `<name>.asi`. Put `<name>.logic.dll` beside it.
 
+Rebuild both reference DLLs together after a protocol change.
+
 The fixed-width C protocol permits different loader and logic-DLL toolchains. Verify the deployed mixed pair with a lifecycle host before use.
+
+The example loads its default wheel binding and optional gamepad combos from `<name>.ini`:
+
+```ini
+[Input]
+DemoCombo=WheelUp,Gamepad_DpadUp
+DemoCombo.Consume=true
+```
+
+Set `DemoCombo.Consume=false` to disable suppression. Rebuild no loader code for this change.
 
 ## Choose the ownership topology
 
@@ -70,7 +91,7 @@ The ownership choice controls which image receives DetourModKit module reference
 | Logic DLL contents | Full archive plus mod code | Mod callables and generation state, but no DetourModKit objects |
 | Reload cost | Full `Session` teardown and restart | Host services remain live |
 | Unmap limit | A permanent logic-side pin retains the image | A retained host object refuses the unmap |
-| Boundary | Stable C exports; a table is optional | A versioned C table is required |
+| Boundary | Stable C exports. A table is optional. | A versioned C table is required |
 
 Use the logic-DLL topology unless a measured retained-image cost requires the persistent host. Read [Topology: DetourModKit in the logic DLL](#topology-detourmodkit-in-the-logic-dll) for its contract. Read [Advanced topology: DetourModKit in a persistent host](#advanced-topology-detourmodkit-in-a-persistent-host) for the alternative.
 
@@ -93,65 +114,77 @@ Some subsystems take counted module references on the module that links the arch
 
 The permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A teardown delta therefore reads zero for a current wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`.
 
-`MessageHookKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. The Steam overlay layers on the XInput hooks by default, so XInput retention is the common case under Steam. Every other nonzero reason can identify live code.
+A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. The [retention policy](#define-a-retained-generation-policy) also covers teardown leaks without module pins.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
-The resident wheel host removes the wheel pin from the logic image. Set `input::Input::Settings::wheel_backend` to `input::Input::WheelBackend::ExternalHost`. The loader then owns that keepalive. A successful lease close is necessary but does not authorize unload. Require the typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address-unmap probe.
+The resident wheel host removes the wheel pin from the logic image. Set `input::Input::Settings::wheel_backend` to `input::Input::WheelBackend::ExternalHost`. The loader then owns that keepalive. A successful lease close is necessary but does not authorize retirement. The [reload sequence](#reload-sequence-staged-generations) applies the remaining checks.
 
 The checked-in [`staged_reload` pair](../../../examples/staged_reload/) shows the loader-side probe and unmap order. The [input design note](../../design/input.md) owns the backend contract.
 
 ## Reload sequence (staged generations)
 
-Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only the loader is development-specific:
+Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only the loader is development-specific.
 
-1. Serialize reload requests. The reference loader uses one control thread.
-2. Call the logic DLL's `Shutdown()` export. If it returns zero, keep the DLL mapped, log the refusal, and stop.
-3. Open and close a loader probe lease. If either call fails, keep the DLL mapped and request a restart.
-4. Save one logic code address, then call `FreeLibrary` exactly once. If it fails, request a game restart.
-5. Require the saved address to become unmapped before the next load. If it stays mapped, request a game restart.
+Before teardown, check the count limit and the retained bytes plus the current image size. Before successor load, check its bytes against the remaining budget.
+
+1. Serialize reload requests.
+2. Call `Shutdown()` off the loader lock. If it refuses, stop the current reload. Preserve the mapped image after a refusal. Log each refusal.
+3. With `ExternalHost`, open a loader probe lease. If it opens, close that probe lease. If either call fails, request a game restart.
+4. If `Shutdown()` returns `DMK_STAGED_RELOAD_RETAINED`, keep the loader reference. Otherwise, save a code address and call `FreeLibrary` once. If release fails, request a restart.
+5. If the image stays mapped, charge its count and bytes against both budgets.
 6. Copy the rebuilt DLL to a unique staged name. Call `LoadLibrary` on the copy.
-7. Resolve `Init`, `Shutdown`, and `Revision` with `GetProcAddress`. Pass the resident table to `Init`.
-8. Log the exported build revision. `__DATE__` alone moves only when its translation unit recompiles.
+7. Resolve `Init`, `Shutdown`, and `Revision` with `GetProcAddress`. With `ExternalHost`, supply the resident table in the generation request. Call `Init()` for the new image.
+8. After `Init()` succeeds, log the exported build revision.
 
 ```mermaid
 flowchart TD
-    Request["Serialized reload request"] ==> Budget{"Reload budget available?"}
-    Budget ==>|No| Restart["Keep the current image<br/>Request a game restart"]
-    Budget ==>|Yes| Shutdown["Call Shutdown"]
-    Shutdown ==>|Refused| Retry["Keep the image mapped<br/>Log and retry later"]
-    Shutdown ==>|Accepted| Lease{"Probe lease opens and closes?"}
+    Request["Serialized reload request"] ==> Budget{"Retention budget available?"}
+    Budget ==>|No| Restart["Preserve mapped images<br/>Request a restart"]
+    Budget ==>|Yes| Shutdown{"Shutdown verdict?"}
+    Shutdown ==>|Refused| Retry["Keep the image mapped<br/>Retry after quiescence"]
+    Shutdown ==>|OK or RETAINED| Lease{"ExternalHost probe succeeds?"}
     Lease ==>|No| Restart
-    Lease ==>|Yes| Release["Save one code address<br/>Call FreeLibrary once"]
-    Release ==> Unmapped{"Saved address unmapped?"}
-    Unmapped ==>|No| Restart
-    Unmapped ==>|Yes| Prepare{"Stage, load, and resolve succeed?"}
-    Prepare ==>|No| Idle["No generation is live<br/>Retry on a later request"]
-    Prepare ==>|Yes| Init{"Init succeeds?"}
-    Init ==>|No| Idle
-    Init ==>|Yes| Live["Log the revision<br/>Generation is live"]
+    Lease ==>|Yes| Verdict{"Resources retained?"}
+    Verdict ==>|Yes| Retain["Keep loader reference<br/>Charge count and bytes"]
+    Verdict ==>|No| Release{"FreeLibrary succeeds?"}
+    Release ==>|No| Restart
+    Release ==>|Yes| Probe{"Image unmapped?"}
+    Probe ==>|No| Account["Charge surviving image<br/>Count and bytes"]
+    Probe ==>|Yes| Prepare["Stage a unique copy<br/>Load, resolve, and initialize"]
+    Retain ==> Prepare
+    Account ==> Prepare
+    Prepare ==> Result{"Init succeeds?"}
+    Result ==>|Yes| Live["Log fresh revision<br/>Generation is live"]
+    Result ==>|No| Cleanup{"Failed stage retires safely?"}
+    Cleanup ==>|No| Restart
+    Cleanup ==>|Yes| Idle["Release or retain failed stage<br/>Retry on a later request"]
 ```
+
 
 Never load two generations by the same file name. If the loader maps the build output, the path stays locked and a rebuild cannot replace it. A unique staged name gives every generation a fresh image. It prevents stale-image reuse and replay of function-local `static` state.
 
 ### Define a retained-generation policy
 
-A retained image keeps its code mapped, but it can still contain live old behavior. Only documented `MessageHookKeepalive` and XInput retention become inert after teardown. The reference loader requests a restart when an accepted image stays mapped. Every retained image counts against the reload budget.
+Retirement ends the generation's feature behavior. Unmap releases its image. A retained XInput chain can still forward calls after retirement.
+
+Use bounded retained generations with either wheel backend. `ExternalHost` removes the wheel pin from the logic image, but XInput retention remains possible.
+
+The example distinguishes successful feature teardown from image reclamation. `Shutdown()` returns zero after an unsafe teardown, `DMK_STAGED_RELOAD_OK` after clean retirement, or `DMK_STAGED_RELOAD_RETAINED` after retirement with resources.
+
+For `DMK_STAGED_RELOAD_RETAINED`, keep the loader's own module reference until process exit. A leak counter does not prove that the leaked resource holds a module pin.
+
+The development policy accepts leak counts after the [Shutdown sequence](#topology-detourmodkit-in-the-logic-dll) succeeds. It does not authorize live feature callbacks, abandoned workers, or failed hook restoration.
+
+`LeakSubsystem::Input` combines several causes. An XInput pin does not attribute every Input leak to XInput. The example needs no such attribution because it retains its own reference.
 
 An inline or mid hook retains its executable route at teardown when its storage cannot be freed safely. Causes include a failed idle proof, a refused or timed-out process coordinator, and a newer overlapping route in any participant. The retained route keeps its module reference, so the image stays mapped. The retention is booked as a `LeakSubsystem::HookManager` leak, and the warning names its cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator).
 
 Each linked copy that initializes the trap runtime retains one executable trap page. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the fixture budget for each toolchain.
 
-A custom staged-name loader can continue after an inert retention verdict. It must refuse every other pin and enforce count and byte budgets. `ExternalHost` removes the wheel pin, but every other unload proof still applies.
+Do not force an unmap. The retained references protect code that can still execute.
 
-Do not fight the pins:
-
-- Do not call `FreeLibrary` repeatedly to defeat the reference count.
-- Do not force an unmap. The reference protects a live frame and a selected hook callback after `UnhookWindowsHookEx` returns.
-- Do not treat every `LeakSubsystem::Input` leak as harmless.
-- That subsystem also records abandoned pollers and other state that can still execute.
-- In a permissive loader, accept only `MessageHookKeepalive` and a retained `XInputKeepalive` / `XInputTarget` pair.
-- Refuse the reload for every other nonzero reason, any drain refusal, any unjoined worker, and any unknown reason.
+Do not reinitialize a retired image as a substitute for a fresh generation. Its globals and function-local statics still contain the prior state.
 
 Budget retained generations by both count and total image bytes.
 
@@ -167,7 +200,9 @@ Use one repeatable development loop:
 
 The reference loader removes unlocked staged copies from earlier sessions. Windows keeps a mapped stage file locked, so a retained image leaves its file in place. Do not delete or overwrite that file while its image remains mapped.
 
-Export a revision that identifies the exact build. A source-control revision or generated build id is stronger than `__DATE__` and `__TIME__`. Log the value after `Init()` succeeds, so a stale value exposes a stale image or an unchanged revision translation unit.
+Export a revision that identifies the exact build.
+
+A source-control revision or generated build id is stronger than `__DATE__` and `__TIME__`. Those timestamps change only when their translation unit recompiles. An unchanged revision can indicate stale bytes or an unchanged revision translation unit.
 
 Keep debugger symbols from the same build as each staged DLL. A debugger can cache symbols from the prior generation. Reload the module symbols after each accepted generation if source lines or breakpoints still name old code.
 
@@ -175,7 +210,7 @@ Keep debugger symbols from the same build as each staged DLL. A debugger can cac
 
 ### Hook removal needs a quiescent target
 
-A `Hook` destruction restores the original prologue but does not freeze threads. During the rewrite, the backend removes execute permission and tracks the patch windows. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. It does not drain detour bodies or code outside those windows. Removal is safe only when the hooked function is quiescent.
+A clean hook teardown restores the original prologue without a thread freeze. During the rewrite, the backend removes execute permission and tracks the patch windows. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. It does not drain detour bodies or code outside those windows. Removal is safe only when the hooked function is quiescent.
 
 A fixed sleep cannot prove quiescence. `Shutdown()` must return false while any consumer-owned worker, subscription, hook caller, or other callback source can still run. The loader must keep the DLL mapped and retry later.
 
@@ -191,13 +226,13 @@ Destroy the `Session` before `FreeLibrary`. If code skips this step, the old sin
 
 ### State ownership across reloads
 
-This table follows the reference topology.
+A unique staged image starts with fresh logic state, even when an inert predecessor remains mapped.
 
-| State | Owner | Result after a clean unmap | Required action |
+| State | Owner | Result across replacement | Required action |
 | --- | --- | --- | --- |
-| Logic globals and function-local statics | Logic generation | Reset | Recreate them in `Init()`. |
-| `Session`, hooks, workers, and bindings | Logic generation | Destroyed | Drain them in `Shutdown()` and on every failed `Init()` path. |
-| Profiler ring samples | Logic generation | Lost | Export required samples before `Shutdown()`. |
+| Logic globals and function-local statics | Logic generation | Fresh in the successor | Recreate them in `Init()`. |
+| `Session`, hooks, workers, and bindings | Logic generation | Retired in the predecessor | Drain them in `Shutdown()` and on every failed `Init()` path. |
+| Profiler ring samples | Logic generation | Generation-local | Export required samples before `Shutdown()`. |
 | Direct game-memory writes | Game process | Preserved | Track and revert raw patches before the unload drain. |
 | INI file | File system | Preserved | Load it again from the new generation. |
 | Cross-generation feature state | Resident loader | Preserved | Pass fixed-width data through the versioned C request. |
@@ -212,7 +247,7 @@ A MinGW generation that imports `libwinpthread-1.dll` takes one TLS index on eac
 
 The MinGW GCC 15.1 reference logic DLL with a static runtime consumes one TLS index per reload after loader warm-up. That measurement applies to the reference DLL, not every static runtime. Measure the exact linked runtime before a deployment budget includes this cost.
 
-Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
+Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives image unmap executes unmapped code.
 
 Use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp). Normal destruction requests a stop and joins the thread. When the loader lock forbids a teardown that can block, it detaches and runs no stop callbacks. It leaves its counted module reference open, so the code pages stay mapped. That branch requests no stop at all, so an abandoned body never observes `stop_requested()`. Publish your own cancellation flag beside the stop token when the body must terminate on that path.
 
@@ -231,13 +266,13 @@ Apply this `Shutdown()` order:
 5. Call `prepare_logic_dll_unload*` and require `SafeToUnload`.
 6. Clear the `HookStack` newest-first and latch any restore failure.
 7. Destroy the `Session`.
-8. Read every module-pin reason and compute the unload verdict.
+8. Read the module-pin and leak counters, then compute the retirement verdict.
 
 Read pin counters after `~Session`, because XInput retention occurs there. The counters remain readable after the `Session` is gone.
 
 Latch the first hook restore failure across retries. Keep every saved original pointer and target-module reference after a failure. A retained inline route can still enter the detour.
 
-With the local wheel backend, accept only the documented inert pin and leak set. With `ExternalHost`, require zero logic-image pins and intentional leaks. Refuse every other nonzero reason. On either backend, refuse a `LeakSubsystem::Diagnostics` event, because a diagnostics handler can still run in the image.
+Apply the [retained-generation policy](#define-a-retained-generation-policy) to either wheel backend. `ExternalHost` does not change the XInput verdict.
 
 ## Advanced topology: DetourModKit in a persistent host
 
@@ -263,9 +298,9 @@ After `FreeLibrary`, verify the unmap. Probe an export address captured before t
 
 [`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the transaction contract and the binding-guard drain rules. The `BindingGuard` contract in `input.hpp` owns the lock and join rule for guard destruction. The `prepare_logic_dll_unload` contract in `session.hpp` states what a retained guard still does.
 
-## Idempotency on a second `Init()`
+## Repeated calls into a persistent host
 
-In a persistent host, every call into a process-wide singleton from `Init()` is the second or later call in the process.
+In a persistent host, every call into a process-wide singleton from `Init()` is the second or later call in the process. These service contracts do not establish mod-state idempotency for repeated `Init()` in one logic image.
 
 | API                                        | Second-call behavior                                  | Do first                                |
 |--------------------------------------------|-------------------------------------------------------|-----------------------------------------|
@@ -288,16 +323,36 @@ A retained mid continuation keeps its backend and module references. The `mid_at
 | The revision does not change. | Check the staged file name and exported revision source. | Stop the cycle until the loader reports fresh bytes. |
 | `Shutdown()` refuses the unload. | Check parked callbacks, workers, subscriptions, hook restore, and pin counters. | Keep the DLL mapped and retry off the loader lock. |
 | The lease probe fails. | Check both the open and close status. | Keep the DLL mapped and request a game restart. |
-| `FreeLibrary` fails or the address stays mapped. | Check `diagnostics::module_pin_count` by reason. | Request a game restart. Do not load a successor in the reference route. |
+| `FreeLibrary` fails. | Check the loader's module handle and release result. | Request a game restart. |
+| The retired address stays mapped. | Check the successful teardown verdict and retention budget. | Record retention and load a unique successor. |
 | The stage copy fails. | Check that the build completed and that the source file is readable. | No generation is live. Retry on a later request. |
-| Export resolution fails. | Check `Init`, `Shutdown`, `Revision`, calling convention, and protocol revision. | Release the failed stage only through the normal unmap proof. |
+| Export resolution fails. | Check `Init`, `Shutdown`, `Revision`, calling convention, and protocol revision. | Retire the failed stage through the same teardown and retention checks. |
 | A breakpoint names old source lines. | Check the module name, revision, and loaded symbol file. | Reload debugger symbols for the current staged image. |
 | A reload starts from another application. | Check the foreground-process guard around `GetAsyncKeyState`. | Accept the hotkey only while the game owns the foreground window. |
-| `Init()` returns zero. | Check that the failure path ran the same teardown as `Shutdown()`: workers joined, hooks cleared newest-first, `~Session`. | Release the stage only through the normal unmap proof, as the reference loader does. |
+| `Init()` returns zero. | Check that the failure path ran the same teardown as `Shutdown()`: workers joined, hooks cleared newest-first, `~Session`. | Retire the failed stage through the same verdict as `Shutdown()`. |
 
 ## Proof pointers
 
-[`test_logic_dll_unload.cpp`](../../../tests/lifecycle/test_logic_dll_unload.cpp) owns the callback-rundown and unmap proofs. [`staged_generation_soak.cpp`](../../../tests/lifecycle/staged_generation_soak.cpp) owns fresh-byte, retention, rollback, and XInput proofs. Each scenario runs in a separate process under `ctest -L lifecycle-proof`.
+[`test_logic_dll_unload.cpp`](../../../tests/lifecycle/test_logic_dll_unload.cpp) owns the callback-rundown and unmap proofs. [`staged_generation_soak.cpp`](../../../tests/lifecycle/staged_generation_soak.cpp) contains these staged-generation proofs:
+
+| `Lifecycle` test | Verified scope |
+| --- | --- |
+| `StagedGenerationSoakReloadsWithFreshBytes` | Clean `ExternalHost` generations load fresh bytes and unmap. |
+| `StagedGenerationLocalWheelRetentionStaysMapped` | Fresh local-wheel generations coexist with retained predecessors. |
+| `StagedGenerationForeignXInputRetainsThePair` | One local generation retains XInput, forwards calls, and survives foreign hand-back. |
+
+[`staged_example_reload.cpp`](../../../tests/lifecycle/staged_example_reload.cpp) exercises both reference sources with a required resident wheel host and a synthetic controller.
+
+| `Lifecycle` test | Verified scope |
+| --- | --- |
+| `StagedExampleConsumeLoadsFreshRetainedSuccessor` | INI gamepad Consume, an active wheel-host lease, retained XInput, distinct successor bytes, retired callbacks, and Consume on/off/on transitions. |
+| `StagedExampleUnpinnedLeakKeepsLoaderReference` | A leak without a pin retains the loader reference and permits fresh bytes. |
+| `StagedExampleUnsafeTeardownRefusesSuccessor` | Failed hook restoration blocks a successor and repeated `Init()`. |
+| `StagedExampleBudgetsStopBeforeTeardown` | Count and byte limits preserve the current generation. |
+| `StagedExampleFailedInitRollsBack` | Failed initialization retires and unmaps before a retry. |
+| `StagedExampleMissingShutdownRequiresRestart` | Missing teardown exports preserve the mapped stage and require a restart. |
+
+Each scenario runs in a separate process under `ctest -L lifecycle-proof`.
 
 ## Related documentation
 

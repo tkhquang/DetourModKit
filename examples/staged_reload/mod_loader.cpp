@@ -9,6 +9,7 @@
 
 #include <process.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -69,6 +70,7 @@ namespace
     std::size_t s_retained_count = 0;
     std::uintmax_t s_retained_bytes = 0;
     bool s_restart_required = false;
+    std::array<HMODULE, MAX_RETAINED_GENERATIONS> s_retained_loader_refs{};
 
     static_assert(std::is_nothrow_move_constructible_v<Generation>);
 
@@ -185,8 +187,12 @@ namespace
         }
     }
 
-    void record_retained_generation(const Generation &generation) noexcept
+    void record_retained_generation(const Generation &generation, HMODULE loader_reference = nullptr) noexcept
     {
+        if (s_retained_count < s_retained_loader_refs.size())
+        {
+            s_retained_loader_refs[s_retained_count] = loader_reference;
+        }
         if (s_retained_count < (std::numeric_limits<std::size_t>::max)())
         {
             ++s_retained_count;
@@ -204,8 +210,7 @@ namespace
 
     /**
      * @brief Waits until no loaded module owns an old generation address.
-     * @return true only when the
-     * address becomes unmapped before the deadline.
+     * @return true only when the address becomes unmapped before the deadline.
      */
     [[nodiscard]] bool wait_for_unmap(const void *address) noexcept
     {
@@ -232,8 +237,7 @@ namespace
 
     /**
      * @brief Opens and closes a probe lease after logic shutdown.
-     * @return true only when the generation
-     * left no host lease open.
+     * @return true only when the generation left no host lease open.
      */
     [[nodiscard]] bool host_lease_is_closed(std::uint64_t generation_id) noexcept
     {
@@ -249,7 +253,7 @@ namespace
             s_wheel_host.close_lease(s_wheel_host.host_context, probe, LEASE_PROBE_OWNER, generation_id);
         if (close_status != DMK_WHEELHOST_OK)
         {
-            // A failed probe close leaves the host lease state unknown, exactly like a failed unmap.
+            // A failed probe close leaves the lease state unknown.
             s_restart_required = true;
             append_formatted_log("The loader failed to close its wheel-host probe lease: {}.", close_status);
             return false;
@@ -258,10 +262,10 @@ namespace
     }
 
     /**
-     * @brief Drops one loader reference and records a surviving image.
-     * @return true only when the staged image no longer maps.
+     * @brief Releases a retired image or retains its loader reference within the development budget.
+     * @return true after accepted retirement. A failed lease probe or module release returns false.
      */
-    [[nodiscard]] bool release_generation(Generation &generation) noexcept
+    [[nodiscard]] bool release_generation(Generation &generation, std::uint32_t verdict) noexcept
     {
         if (generation.module == nullptr)
         {
@@ -270,6 +274,13 @@ namespace
         if (!host_lease_is_closed(generation.generation_id))
         {
             return false;
+        }
+        if (verdict == DMK_STAGED_RELOAD_RETAINED)
+        {
+            // Retain our reference even if a leaked resource holds no module pin.
+            record_retained_generation(generation, generation.module);
+            generation.module = nullptr;
+            return true;
         }
         const HMODULE module = generation.module;
         if (::FreeLibrary(module) == 0)
@@ -281,10 +292,36 @@ namespace
         if (!wait_for_unmap(generation.unmap_address))
         {
             record_retained_generation(generation);
-            return false;
+            return true;
         }
         remove_staged_file(generation.path);
         return true;
+    }
+
+    [[nodiscard]] bool retire_generation(Generation &generation) noexcept
+    {
+        if (generation.shutdown == nullptr)
+        {
+            return false;
+        }
+        const std::uint32_t verdict = generation.shutdown();
+        if (verdict != DMK_STAGED_RELOAD_OK && verdict != DMK_STAGED_RELOAD_RETAINED)
+        {
+            append_log("Shutdown refused retirement. The generation stays mapped.");
+            return false;
+        }
+        return release_generation(generation, verdict);
+    }
+
+    void retire_failed_stage(Generation &generation) noexcept
+    {
+        if (!retire_generation(generation))
+        {
+            s_restart_required = true;
+            record_retained_generation(generation, generation.module);
+            generation.module = nullptr;
+            append_log("The failed stage did not retire. Restart the game before another reload.");
+        }
     }
 
     /**
@@ -323,6 +360,7 @@ namespace
 
     template <class Fn> [[nodiscard]] Fn resolve(HMODULE module, const char *symbol) noexcept
     {
+        // NOLINTNEXTLINE(bugprone-casting-through-void): Avoid GCC's incompatible function cast diagnostic.
         return reinterpret_cast<Fn>(reinterpret_cast<void *>(::GetProcAddress(module, symbol)));
     }
 
@@ -332,6 +370,14 @@ namespace
         Generation generation;
         if (!stage_copy(generation))
         {
+            return false;
+        }
+        if (s_retained_count >= MAX_RETAINED_GENERATIONS || s_retained_bytes > MAX_RETAINED_BYTES ||
+            generation.image_bytes > MAX_RETAINED_BYTES - s_retained_bytes)
+        {
+            s_restart_required = true;
+            remove_staged_file(generation.path);
+            append_log("The next image exceeds the retention budget. Restart the game before another reload.");
             return false;
         }
         generation.module = ::LoadLibraryW(generation.path.c_str());
@@ -348,11 +394,8 @@ namespace
         generation.unmap_address = reinterpret_cast<const void *>(generation.init);
         if (generation.init == nullptr || generation.shutdown == nullptr || generation.revision == nullptr)
         {
-            const bool unmapped = release_generation(generation);
-            append_log(
-                unmapped ? "The export resolution failed. The staged image unloaded."
-                         : "The export resolution failed. The staged image remains mapped."
-            );
+            retire_failed_stage(generation);
+            append_log("The export resolution failed.");
             return false;
         }
         const StagedReloadInitRequest request{
@@ -364,10 +407,8 @@ namespace
         };
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
-            const bool unmapped = release_generation(generation);
-            append_log(
-                unmapped ? "Init failed. The staged image unloaded." : "Init failed. The staged image remains mapped."
-            );
+            retire_failed_stage(generation);
+            append_log("Init failed.");
             return false;
         }
         s_current.emplace(std::move(generation));
@@ -381,8 +422,8 @@ namespace
     }
 
     /**
-     * @brief Unloads the current generation (guide steps 2 to 5).
-     * @return false on a Shutdown refusal. The DLL stays mapped and the loader retries on the next press.
+     * @brief Retires the current generation before a fresh load.
+     * @return false after a teardown refusal or release failure. A release failure requests a restart.
      */
     [[nodiscard]] bool unload_current() noexcept
     {
@@ -390,15 +431,16 @@ namespace
         {
             return true;
         }
-        if (s_current->shutdown() != DMK_STAGED_RELOAD_OK)
+        const std::uint32_t verdict = s_current->shutdown();
+        if (verdict != DMK_STAGED_RELOAD_OK && verdict != DMK_STAGED_RELOAD_RETAINED)
         {
-            append_log("Shutdown refused the unload. The generation stays mapped.");
+            append_log("Shutdown refused retirement. The generation stays mapped. Retry after quiescence.");
             return false;
         }
-        if (!release_generation(*s_current))
+        if (!release_generation(*s_current, verdict))
         {
             s_restart_required = true;
-            append_log("The old logic image did not unmap. Restart the game before another reload.");
+            append_log("The current generation did not retire. Restart the game before another reload.");
             return false;
         }
         s_current.reset();
@@ -406,14 +448,15 @@ namespace
     }
 
     /**
-     * @brief Refuses the reload once worst-case retention would breach the budget, backing the guide's restart rule.
-     * @details The check runs before the unload and counts the current image as retained. A refusal keeps the current
-     *          generation live.
+     * @brief Checks count capacity and the current image size before teardown.
+     * @details The count check reserves both slots. The byte check includes only the current image.
+     *          The successor size check precedes its load.
      */
     [[nodiscard]] bool budget_allows_reload() noexcept
     {
         const std::uintmax_t current_bytes = s_current.has_value() ? s_current->image_bytes : 0;
-        const bool count_would_exceed = s_retained_count >= MAX_RETAINED_GENERATIONS;
+        const std::size_t current_slot = s_current.has_value() ? 1 : 0;
+        const bool count_would_exceed = s_retained_count >= MAX_RETAINED_GENERATIONS - current_slot;
         const bool bytes_would_exceed =
             s_retained_bytes > MAX_RETAINED_BYTES || current_bytes > MAX_RETAINED_BYTES - s_retained_bytes;
         if (count_would_exceed || bytes_would_exceed)

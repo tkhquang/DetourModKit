@@ -47,13 +47,13 @@ namespace
 
     /**
      * @brief Stands in for a game function that a real mod resolves with a scan ladder.
-     * @details The sample hooks its own function so the example compiles without a game. The top-level README code
-     *          example shows the scan-ladder install that a real mod uses. The Debug prologue exceeds every SafetyHook
-     *          patch size. A copy whose optimized prologue is too short fails inline_at, and Init() rolls back.
+     * @details Volatile operands preserve a hookable body under optimization. A real mod resolves a game target.
      */
     __declspec(noinline) int demo_apply_damage(int amount, int resist) noexcept
     {
-        return amount - resist;
+        volatile int observed_amount = amount;
+        volatile int observed_resist = resist;
+        return observed_amount - observed_resist;
     }
 
     int apply_damage_detour(int amount, int resist) noexcept
@@ -86,6 +86,17 @@ namespace
         return !s_hook_restore_failed;
     }
 
+    [[nodiscard]] std::uint32_t retirement_verdict() noexcept
+    {
+        if (s_hook_restore_failed)
+        {
+            return 0;
+        }
+        namespace diag = dmk::diagnostics;
+        const bool retained = diag::total_module_pins() != 0 || diag::total_intentional_leaks() != 0;
+        return retained ? DMK_STAGED_RELOAD_RETAINED : DMK_STAGED_RELOAD_OK;
+    }
+
     /// Drops each reclaimable generation resource after a failed Init step.
     void roll_back_generation() noexcept
     {
@@ -109,12 +120,9 @@ extern "C"
 
     /**
      * @brief Starts one generation with the loader's resident wheel host.
-     * @param request The versioned loader
-     * request. Its host table remains valid for the process lifetime.
-     * @return DMK_STAGED_RELOAD_OK when the
-     * generation is live, or zero after rollback.
-     * @note The loader calls this from its control thread, off the
-     * loader lock.
+     * @param request The versioned request. Its host table remains valid for the process lifetime.
+     * @return DMK_STAGED_RELOAD_OK when the generation is live, or zero after rollback.
+     * @note The loader calls this from its control thread, off the loader lock.
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const StagedReloadInitRequest *request) noexcept
     {
@@ -128,7 +136,6 @@ extern "C"
         }
         try
         {
-            // LogOpenMode::Append preserves the prior generation's teardown records, retention warnings included.
             auto started = dmk::Session::start(
                 dmk::ModInfo{
                     .name = MOD_NAME,
@@ -142,7 +149,6 @@ extern "C"
             }
             s_session.emplace(std::move(*started));
 
-            // config::bind_* replaces the item in place, so re-registration from each Init() is the supported path.
             dmk::config::bind_bool(
                 "Damage",
                 "EnableBonus",
@@ -150,7 +156,6 @@ extern "C"
                 [](bool value) -> void { s_bonus_enabled.store(value, std::memory_order_relaxed); },
                 true
             );
-            s_session->ini().load(std::format("{}.ini", MOD_NAME));
 
             auto installed = dmk::hook::inline_at(
                 dmk::hook::InlineRequest{
@@ -173,27 +178,27 @@ extern "C"
                 return 0;
             }
 
-            // The resident host owns wheel interception, so the logic image books no interception keepalive.
-            auto combo = dmk::input::register_combo(
-                dmk::input::ComboBinding{
-                    .name = std::format("{}.demo_combo", MOD_NAME),
-                    .trigger = dmk::input::Trigger::Press,
-                    .combos = {{.keys = {dmk::mouse_wheel(dmk::WheelCode::Up)}, .modifiers = {}}},
-                    .consume = true,
-                    .on_press = []() noexcept -> void { s_combo_presses.fetch_add(1, std::memory_order_relaxed); },
-                }
+            auto combo = dmk::config::press_combo(
+                "Input",
+                "DemoCombo",
+                "Demo combo",
+                std::format("{}.demo_combo", MOD_NAME),
+                []() noexcept -> void { s_combo_presses.fetch_add(1, std::memory_order_relaxed); },
+                "WheelUp",
+                true
             );
-            if (!combo)
+            if (combo.name().empty())
             {
                 roll_back_generation();
                 return 0;
             }
-            s_session->scope().add(std::move(*combo));
+            s_session->scope().add(std::move(combo));
+            s_session->ini().load(std::format("{}.ini", MOD_NAME));
 
             // This worker is the sample target's only caller. Its destruction joins before hook teardown.
             s_heartbeat.emplace(
                 std::format("{}.heartbeat", MOD_NAME),
-                [](std::stop_token token) -> void
+                [](const std::stop_token &token) -> void
                 {
                     auto next_report = std::chrono::steady_clock::now() + HEARTBEAT_INTERVAL;
                     while (!token.stop_requested())
@@ -216,8 +221,8 @@ extern "C"
                 }
             );
 
-            // input().start() stays the last fallible step: roll_back_generation() runs no typed callback drain, so no
-            // step can fail while the poll thread is live.
+            // Input start is the final fallible step. Init rollback omits the typed drain, so no later operation can
+            // fail with a live poller.
             if (!s_session->input().start(
                     dmk::input::Input::Settings{
                         .wheel_backend = dmk::input::Input::WheelBackend::ExternalHost,
@@ -239,18 +244,15 @@ extern "C"
     }
 
     /**
-     * @brief Runs the guide's Shutdown sequence and its refusal boundary.
-     * @return DMK_STAGED_RELOAD_OK only when callbacks drain, hooks restore, and no logic wheel pin remains.
-     *
-     * @note The loader must keep the DLL mapped after a zero return.
+     * @brief Retires feature state before the loader releases or retains this image.
+     * @return Zero refuses retirement. OK permits release. RETAINED requires the loader's module reference.
+     * @note Pin and leak counts affect image retention after callback drain and hook restoration succeed.
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Shutdown() noexcept
     {
-        namespace diag = dmk::diagnostics;
-
         if (!s_session.has_value())
         {
-            return 0;
+            return retirement_verdict();
         }
         s_heartbeat.reset(); // This request stops and joins outside the loader lock.
         // Revert every raw memory::patch_code or write_bytes change here, before the drain. This sample makes none.
@@ -261,9 +263,7 @@ extern "C"
         (void)clear_generation_hooks(); // The stack clears newest-first while the code pages stay mapped.
         s_session.reset();              // Ordered teardown can retain XInput here.
 
-        // The ExternalHost verdict from the hot-reload guide: zero logic-image pins and zero intentional leaks.
-        const bool no_pins = diag::total_module_pins() == 0 && diag::total_intentional_leaks() == 0;
-        return !s_hook_restore_failed && no_pins ? DMK_STAGED_RELOAD_OK : 0;
+        return retirement_verdict();
     }
 } // extern "C"
 

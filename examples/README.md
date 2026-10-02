@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains reference samples as source. CI compiles them on both toolchains to detect public API drift. The project does not install them or register runtime tests.
+This directory contains reference samples as source. CI compiles them on both toolchains to detect public API drift. The project does not install them. DMK-owned lifecycle fixtures exercise the staged pair.
 
 Copy a sample into your mod project and own the copy.
 
@@ -8,17 +8,26 @@ A sample carries no compatibility promise.
 
 ## staged_reload
 
-This pair implements the staged-generation development loader and resident wheel host from the [hot-reload guide](../docs/guides/hot-reload/README.md).
+> [!IMPORTANT]
+> **INI bindings and Consume settings require no loader-policy edits.**
+>
+> The default development policy retains retired DLLs within budgets and loads fresh staged images. It never falls back to old-image `Init()`.
+>
+> Unsafe callback drain or hook teardown still blocks replacement. Follow the [hot-reload guide](../docs/guides/hot-reload/README.md).
+
+This pair implements the default development policy and resident wheel host from the guide.
 
 `DMK_EXAMPLE_MOD_NAME` in [CMakeLists.txt](CMakeLists.txt) names the deployed pair and every derived file: `ModName.asi`, `ModName.logic.dll`, staged copies `ModName.genXXXX.logic.dll`, the INI, and both logs. Rename the mod in that one line.
 
 | File | Role |
 | --- | --- |
-| `mod_loader.cpp` | It owns one process-lifetime wheel host, creates unique staged names, probes lease release, calls `FreeLibrary`, and checks address unmap. It links only `DetourModKit::WheelHost`. |
+| `mod_loader.cpp` | It owns one process-lifetime wheel host, creates unique staged names, probes lease release, and releases or retains retired images. It links only `DetourModKit::WheelHost`. |
 | `mod_logic.cpp` | It owns one generation, selects required `ExternalHost`, and implements the typed `Shutdown()` refusal boundary. It links the full archive. |
 | `protocol.h` | It defines the fixed-width request that carries the host table, host identity, and generation id across the DLL boundary. |
 
-The loader starts the wheel host once before the first logic load. Each logic shutdown closes its lease and reports zero logic-side module pins. The loader opens and closes a probe lease before `FreeLibrary`, then waits for an exported code address to become unmapped. A failed lease probe or unmap check stops later reloads and requests a game restart. Unique staged names reject stale-image reuse. The [hot-reload guide](../docs/guides/hot-reload/README.md) owns the pin rules.
+The loader starts the wheel host once before the first logic load. An accepted logic shutdown closes its lease and retires feature state.
+
+The [retention policy](../docs/guides/hot-reload/README.md#define-a-retained-generation-policy) defines the shutdown verdicts and loader-reference ownership. Unique staged names prevent old-image reuse.
 
 Build with a Debug preset (`DMK_BUILD_EXAMPLES` is ON there), or pass `-DDMK_BUILD_EXAMPLES=ON` to any configure:
 
