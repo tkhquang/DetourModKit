@@ -256,4 +256,4 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 
 ## Staged example proof
 
-`staged_example_reload.cpp` exercises the checked-in loader and logic through six required `Lifecycle.StagedExample*` processes. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each scenario. These processes require a wheel host and a synthetic controller, with no game or hardware dependency. Each process has a 60-second timeout.
+`staged_example_reload.cpp` exercises the checked-in loader and logic through required `Lifecycle.StagedExample*` processes. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each scenario. These processes require a wheel host and a synthetic controller, with no game or hardware dependency. Each process has a 60-second timeout.

@@ -455,8 +455,8 @@ class TopologyRefusals(unittest.TestCase):
     def test_replacing_an_action_under_its_reviewed_name_is_refused(self):
         self.workspace.mutate(
             RELEASE,
-            "uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
-            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "uses: softprops/action-gh-release@",
+            "uses: actions/checkout@",
         )
         self.refuses("normalized source does not match the reviewed canonical identity")
 
