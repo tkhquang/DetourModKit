@@ -44,6 +44,7 @@ namespace
     // Latches the first failed hook restore. A retry must never convert retained patched bytes into an unload
     // acceptance.
     bool s_hook_restore_failed = false;
+    bool s_worker_retirement_failed = false;
 
     /**
      * @brief Stands in for a game function that a real mod resolves with a scan ladder.
@@ -69,6 +70,19 @@ namespace
     }
 
     /**
+     * @brief Stops the sample worker and latches any absent join proof.
+     * @return true only when no worker module reference remains.
+     */
+    [[nodiscard]] bool stop_generation_workers() noexcept
+    {
+        s_heartbeat.reset();
+        // A retained Worker reference can outlive its owner. The sample has no independent thread-exit proof.
+        s_worker_retirement_failed = s_worker_retirement_failed ||
+                                     dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::Worker) != 0;
+        return !s_worker_retirement_failed;
+    }
+
+    /**
      * @brief Clears hooks and latches any restoration failure.
      * @return true only when every hook target returns to its original bytes.
      */
@@ -88,7 +102,7 @@ namespace
 
     [[nodiscard]] std::uint32_t retirement_verdict() noexcept
     {
-        if (s_hook_restore_failed)
+        if (s_hook_restore_failed || s_worker_retirement_failed)
         {
             return 0;
         }
@@ -100,7 +114,10 @@ namespace
     /// Drops each reclaimable generation resource after a failed Init step.
     void roll_back_generation() noexcept
     {
-        s_heartbeat.reset();
+        if (!stop_generation_workers())
+        {
+            return;
+        }
         (void)clear_generation_hooks();
         s_session.reset();
     }
@@ -121,7 +138,7 @@ extern "C"
     /**
      * @brief Starts one generation with the loader's resident wheel host.
      * @param request The versioned request. Its host table remains valid for the process lifetime.
-     * @return DMK_STAGED_RELOAD_OK when the generation is live, or zero after rollback.
+     * @return DMK_STAGED_RELOAD_OK when the generation is live, or zero when initialization fails.
      * @note The loader calls this from its control thread, off the loader lock.
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const StagedReloadInitRequest *request) noexcept
@@ -130,7 +147,7 @@ extern "C"
             request->abi_version != DMK_STAGED_RELOAD_ABI_VERSION || request->generation_id == 0 ||
             request->wheel_host == nullptr || request->expected_host_identity == 0 ||
             request->wheel_host->host_identity != request->expected_host_identity || s_session.has_value() ||
-            s_hook_restore_failed)
+            s_hook_restore_failed || s_worker_retirement_failed)
         {
             return 0;
         }
@@ -195,7 +212,7 @@ extern "C"
             s_session->scope().add(std::move(combo));
             s_session->ini().load(std::format("{}.ini", MOD_NAME));
 
-            // This worker is the sample target's only caller. Its destruction joins before hook teardown.
+            // This worker is the sample target's only caller. Teardown checks its module reference before hook removal.
             s_heartbeat.emplace(
                 std::format("{}.heartbeat", MOD_NAME),
                 [](const std::stop_token &token) -> void
@@ -250,25 +267,32 @@ extern "C"
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Shutdown() noexcept
     {
+        if (!stop_generation_workers())
+        {
+            return 0;
+        }
         if (!s_session.has_value())
         {
             return retirement_verdict();
         }
-        s_heartbeat.reset(); // This request stops and joins outside the loader lock.
         // Revert every raw memory::patch_code or write_bytes change here, before the drain. This sample makes none.
+        (void)clear_generation_hooks();
         if (dmk::prepare_logic_dll_unload_all() != dmk::LogicDllUnloadStatus::SafeToUnload)
         {
             return 0;
         }
-        (void)clear_generation_hooks(); // The stack clears newest-first while the code pages stay mapped.
-        s_session.reset();              // Ordered teardown can retain XInput here.
+        s_session.reset(); // Ordered teardown can retain XInput here.
 
         return retirement_verdict();
     }
 } // extern "C"
 
-/// The loader drives Init and Shutdown explicitly, so attach and detach have no work.
-BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) noexcept
+/** @brief Prevents Session teardown under the loader lock at process termination. */
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved) noexcept
 {
+    if (reason == DLL_PROCESS_DETACH && reserved != nullptr && s_session.has_value())
+    {
+        s_session->abandon();
+    }
     return TRUE;
 }

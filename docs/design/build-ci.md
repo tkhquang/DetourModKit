@@ -87,7 +87,17 @@ This is not a stylistic preference. A presence check answers "is the reviewed li
 
 Never accept fragment presence as evidence for publication identity or status propagation.
 
-The comparison is bidirectional. An unreviewed source byte, job, step, shell, or condition is refused. A reviewed one that was deleted or renamed is refused too. A workflow change therefore means a contract change in the same review. When a reviewed workflow change moves a digest, `python scripts/check_workflow_topology.py --print-source-identities` prints the replacement values under the same normalization the gate applies. The refusal reports the observed digest beside the reviewed one. Neither is a reason to accept the diff that produced it: read the workflow diff first, then move the identity.
+The comparison is bidirectional. The checker rejects any source or structural difference from the contract. A workflow change requires a contract change in the same review. Dependabot PRs update action pins but leave the source identities unchanged, so the contract gate initially fails.
+
+For a workflow update, use this procedure on the PR branch:
+
+1. Review the workflow diff and the release notes for each updated action.
+2. Run `python scripts/check_workflow_topology.py --print-source-identities` to print the normalized source hashes.
+3. Update only the affected `WORKFLOW_SOURCE_SHA256` entries in `scripts/workflow_contract.py`.
+4. If jobs, steps, or commands change, update their structural contracts too.
+5. Run `python scripts/test_check_workflow_topology.py` and `python scripts/check_workflow_topology.py --repository-root .`.
+6. Include the contract change in the same PR.
+7. Require all CI checks to pass before merge.
 
 Identity contexts enter only as quoted data. Each workflow binds the dispatch input, event commit, and publication ref through the exact step environment the contract records. Its one exactly reviewed command expands each value once inside quotes, so shell-significant context text is never evaluated as Bash source. `scripts/check_release_identity.py` compares those arguments, resolves the checkout with inherited `GIT_*` repository redirects removed, and optionally requires one exact ref. `release.yml` runs it with `--verify-checkout` in both `validate-version` and `create-release`, where the second guard also requires `refs/heads/main`. The publish boundary therefore re-decides identity rather than trusts an earlier job. `arch-gate.yml`, `sanitizers.yml`, `simd-tier-correctness.yml`, and `coverage-pages.yml` run the same helper on manual dispatch and each declare `expected_sha` as a required string input. Never interpolate a GitHub context directly into `run`, and do not re-implement this comparison inline in a workflow.
 

@@ -25,6 +25,7 @@ namespace
     using StateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
     using SnapshotFn = void(DMK_WHEELHOST_CALL *)(std::uint64_t *) noexcept;
     using FaultFn = void(DMK_WHEELHOST_CALL *)(std::uint32_t) noexcept;
+    using WorkerControlFn = std::uint32_t(DMK_WHEELHOST_CALL *)() noexcept;
     std::atomic<StateFn> s_rival_original{nullptr};
 
     DWORD WINAPI rival_state(DWORD user, XINPUT_STATE *state) noexcept
@@ -33,9 +34,9 @@ namespace
         return original != nullptr ? original(user, state) : ERROR_INVALID_FUNCTION;
     }
 
-    [[nodiscard]] std::array<std::uint64_t, 5> snapshot(HMODULE module)
+    [[nodiscard]] std::array<std::uint64_t, 19> snapshot(HMODULE module)
     {
-        std::array<std::uint64_t, 5> out{};
+        std::array<std::uint64_t, 19> out{};
         resolve<SnapshotFn>(module, "example_proof_snapshot")(out.data());
         return out;
     }
@@ -101,6 +102,87 @@ namespace
         return 1;
     }
 
+    /** @brief Releases the fixture worker on every proof exit. */
+    class WorkerReleaseGuard
+    {
+    public:
+        /** @brief Adopts the fixture cleanup export. */
+        explicit WorkerReleaseGuard(WorkerControlFn cleanup) noexcept : m_finish(cleanup) {}
+        /** @brief Releases a worker after an early proof failure. */
+        ~WorkerReleaseGuard() noexcept
+        {
+            if (!finish())
+                std::fputs("The parked worker cleanup did not witness thread exit.\n", stderr);
+        }
+        WorkerReleaseGuard(const WorkerReleaseGuard &) = delete;
+        WorkerReleaseGuard &operator=(const WorkerReleaseGuard &) = delete;
+        WorkerReleaseGuard(WorkerReleaseGuard &&) = delete;
+        WorkerReleaseGuard &operator=(WorkerReleaseGuard &&) = delete;
+
+        /** @brief Returns true after the native worker thread exits. */
+        [[nodiscard]] bool finish() noexcept
+        {
+            if (m_finish == nullptr)
+                return true;
+            if (m_finish() == 0)
+                return false;
+            m_finish = nullptr;
+            return true;
+        }
+
+    private:
+        WorkerControlFn m_finish;
+    };
+
+    int run_worker_refusal(HMODULE module, bool rollback)
+    {
+        const auto park_worker = resolve<WorkerControlFn>(module, "example_proof_park_worker");
+        const auto release_worker = resolve<WorkerControlFn>(module, "example_proof_release_worker");
+        const auto roll_back_worker =
+            resolve<void(DMK_WHEELHOST_CALL *)() noexcept>(module, "example_proof_roll_back_worker");
+        if (park_worker == nullptr || release_worker == nullptr || roll_back_worker == nullptr)
+            return fail("The worker proof exports are absent.");
+        WorkerReleaseGuard release{release_worker};
+        if (park_worker() != 1)
+            return fail("The worker did not park before its final hook call.");
+        const auto before = snapshot(module);
+        if (before[2] != 1 || before[5] != 1 || before[6] != 1 || before[12] != 1 || before[13] != 1 ||
+            before[14] != 1 || before[15] != 0 || before[16] != 0)
+            return fail("The parked worker did not retain its live hook dependencies.");
+        const auto dependencies_intact = [module]() -> bool
+        {
+            const auto state = snapshot(module);
+            return s_current && s_current->module == module && s_generation_counter == 1 && s_retained_count == 0 &&
+                   !s_restart_required && state[0] == 1 && state[2] == 1 && state[5] == 1 && state[6] == 1 &&
+                   state[7] == 0 && state[12] == 1 && state[13] == 1 && state[16] == 0 && state[17] == 1;
+        };
+        if (rollback)
+        {
+            roll_back_worker();
+            if (!dependencies_intact() || snapshot(module)[15] != 0)
+                return fail("Rollback retired dependencies before the worker exited.");
+            roll_back_worker();
+            if (!dependencies_intact() || snapshot(module)[15] != 0)
+                return fail("Repeated rollback bypassed the failed worker join.");
+        }
+        reload_once();
+        if (!dependencies_intact() || snapshot(module)[15] != 0)
+            return fail("A failed worker join retired dependencies or accepted a successor.");
+        reload_once();
+        if (!dependencies_intact() || snapshot(module)[15] != 0)
+            return fail("A reload retry bypassed the failed worker join.");
+        if (!release.finish())
+            return fail("The released worker did not exit before its deadline.");
+        const auto exited = snapshot(module);
+        if (exited[15] != 1 || exited[18] != 115 || exited[8] != before[8] + 1)
+            return fail("The released worker lost its original hook path.");
+        reload_once();
+        if (!dependencies_intact())
+            return fail("Worker exit cleared the permanent teardown refusal.");
+        std::puts("The failed worker join preserves dependencies and refuses every successor.");
+        return 0;
+    }
+
     [[nodiscard]] std::filesystem::path fresh_proof_directory()
     {
         const auto root = std::filesystem::current_path();
@@ -157,7 +239,8 @@ namespace
             ) != DMK_WHEELHOST_OK)
             return fail("The resident wheel host did not start.");
         s_host_identity = s_wheel_host.host_identity;
-        if (!write_ini(scenario != "leak"))
+        const bool worker_failure = scenario == "worker-join-failure" || scenario == "worker-rollback-failure";
+        if (!write_ini(scenario != "leak" && scenario != "drain-retry" && !worker_failure))
             return fail("The INI write failed.");
         if (scenario != "missing-export" && !write_build(fixture, 1))
             return fail("The first fresh build write failed.");
@@ -185,6 +268,60 @@ namespace
             return fail("The generation did not own a lease on the mounted wheel host.");
         const HMODULE first_module = s_current->module;
         const auto first_path = s_current->path;
+        if (worker_failure)
+            return run_worker_refusal(first_module, scenario == "worker-rollback-failure");
+        if (scenario == "drain-retry")
+        {
+            using ParkFn = std::uint32_t(DMK_WHEELHOST_CALL *)() noexcept;
+            using ReleaseFn = void(DMK_WHEELHOST_CALL *)() noexcept;
+            const auto park_callback = resolve<ParkFn>(first_module, "example_proof_park_callback");
+            const auto release_callback = resolve<ReleaseFn>(first_module, "example_proof_release_callback");
+            if (park_callback == nullptr || release_callback == nullptr || park_callback() != 1)
+                return fail("The callback park did not register.");
+            resolve<void(WINAPI *)(WORD)>(provider, "dmk_xinput_set_buttons")(XINPUT_GAMEPAD_DPAD_DOWN);
+            const ULONGLONG park_deadline = ::GetTickCount64() + 5000;
+            while (snapshot(first_module)[9] == 0 || snapshot(first_module)[8] == 0)
+            {
+                if (::GetTickCount64() >= park_deadline)
+                {
+                    release_callback();
+                    return fail("The input callback and heartbeat did not both execute.");
+                }
+                ::Sleep(1);
+            }
+            const ULONGLONG started = ::GetTickCount64();
+            reload_once();
+            const ULONGLONG elapsed = ::GetTickCount64() - started;
+            const auto refused = snapshot(first_module);
+            release_callback();
+            if (!s_current || s_current->module != first_module || s_generation_counter != 1 || s_retained_count != 0 ||
+                s_restart_required || refused[2] != 1 || refused[6] != 0 || refused[7] != 0 || refused[10] != 0 ||
+                refused[11] != 0 || elapsed >= 5000)
+                return fail("A parked callback escaped refusal or the heartbeat remained live.");
+            std::printf(
+                "Refused drain: hook pins=%llu, worker pins=%llu, hook calls=%llu, elapsed=%llu ms.\n",
+                static_cast<unsigned long long>(refused[5]),
+                static_cast<unsigned long long>(refused[6]),
+                static_cast<unsigned long long>(refused[8]),
+                static_cast<unsigned long long>(elapsed)
+            );
+            const std::uint32_t verdict = s_current->shutdown();
+            const auto retired = snapshot(first_module);
+            if (verdict != DMK_STAGED_RELOAD_OK || retired[2] != 0 || retired[4] != 0 || retired[8] != refused[8] ||
+                retired[10] != 1 || retired[11] != 0)
+                return fail("The retry failed to retire callbacks, hooks, and worker ownership.");
+            const void *const old_address = s_current->unmap_address;
+            if (!unload_current() || s_current || s_retained_count != 0 || !wait_for_unmap(old_address))
+                return fail("The retired generation did not unmap after the successful retry.");
+            if (!write_build(fixture, 2) || !load_generation() || !s_current ||
+                std::string_view{s_current->revision()} != "0000000000000002" || snapshot(s_current->module)[0] != 1)
+                return fail("The successor did not initialize from fresh bytes.");
+            if (!unload_current() || wheel_host_stop() != DMK_WHEELHOST_OK)
+                return fail("The drain proof did not retire its successor.");
+            ::DestroyWindow(window);
+            std::puts("Retry: callbacks retired, hook calls unchanged, image unmapped, fresh successor accepted.");
+            return 0;
+        }
         if (scenario == "refused")
         {
             resolve<FaultFn>(first_module, "example_proof_fault")(2);
@@ -309,7 +446,8 @@ int main(int argc, char **argv)
         return fail("A fixture path and scenario are required.");
     const std::string_view scenario{argv[2]};
     if (scenario != "retained" && scenario != "leak" && scenario != "refused" && scenario != "budget" &&
-        scenario != "failed-init" && scenario != "missing-export" && scenario != "directory-collision")
+        scenario != "failed-init" && scenario != "missing-export" && scenario != "directory-collision" &&
+        scenario != "drain-retry" && scenario != "worker-join-failure" && scenario != "worker-rollback-failure")
         return fail("Unknown sample proof scenario.");
     try
     {

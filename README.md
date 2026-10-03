@@ -87,7 +87,7 @@ This method suits active development. Your own toolchain compiles the library, s
 
     ```yaml
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         submodules: "recursive"
     ```
@@ -589,16 +589,39 @@ The input system targets mod hotkeys and toggles, not a replacement for a game's
 
 ## Projects Using DetourModKit
 
-For practical reference and real-world usage examples:
+[In-repo samples](examples/) contain the source for the staged-reload loader pair from the [Hot-Reload Guide](docs/guides/hot-reload/README.md).
 
-- **In-repo samples**: [examples/](examples/) contains the source for the staged-reload loader pair from the [Hot-Reload Guide](docs/guides/hot-reload/README.md).
-- **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
-- **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
-- **KCD1-TPVCamera**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera)
-- **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
-- **KCD2-TPVCamera**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera)
-- **CrimsonDesert-EquipHide**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)
-- **CrimsonDesert-LiveTransmog**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog)
+<details>
+<summary><strong>Oblivion Remastered</strong></summary>
+
+- [No Carry Weight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
+
+</details>
+
+<details>
+<summary><strong>Crimson Desert</strong></summary>
+
+- [Live Transmog - Runtime Armor Appearance Swap](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog)
+- [Gear Hider - Equipment Visibility Toggle for Armor Weapon Helmet and More](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)
+
+</details>
+
+<details>
+<summary><strong>Kingdom Come: Deliverance II</strong></summary>
+
+- [Henry's Senses - Loot and Object Highlighting](https://github.com/tkhquang/KCD2Tools/tree/main/HenrySenses)
+- [Proper Third Person View (TPV Camera)](https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera)
+- [Third Person View (TPV Camera) Enabler](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
+
+</details>
+
+<details>
+<summary><strong>Kingdom Come: Deliverance</strong></summary>
+
+- [Proper Third Person View (TPV Camera)](https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera)
+- [Third Person View (TPV Camera) Enabler](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
+
+</details>
 
 ## Acknowledgements
 

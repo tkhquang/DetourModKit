@@ -1886,7 +1886,7 @@ dmk_add_raw_proof(NAME Lifecycle.InlineSelfTeardownReportsRetention
   WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
 
-# The proof compiles both checked-in sources. Fixture wrappers inject only provider state and byte tags.
+# The proof compiles both checked-in sources. Fixture wrappers control input, worker failure, and byte tags.
 set(_dmk_staged_example_source "${PROJECT_SOURCE_DIR}/examples/staged_reload/mod_logic.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dmk_staged_example_source}")
 file(READ "${_dmk_staged_example_source}" _dmk_staged_example_text)
@@ -1916,6 +1916,9 @@ set(staged_example_proofs
   Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor retained
   Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference leak
   Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor refused
+  Lifecycle.StagedExampleParkedCallbackRefusesThenRetires drain-retry
+  Lifecycle.StagedExampleWorkerJoinFailureRefusesSuccessor worker-join-failure
+  Lifecycle.StagedExampleWorkerJoinFailureStopsRollback worker-rollback-failure
   Lifecycle.StagedExampleBudgetsStopBeforeTeardown budget
   Lifecycle.StagedExampleFailedInitRollsBack failed-init
   Lifecycle.StagedExampleMissingShutdownRequiresRestart missing-export)

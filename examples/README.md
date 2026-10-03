@@ -13,7 +13,7 @@ A sample carries no compatibility promise.
 >
 > The default development policy retains retired DLLs within budgets and loads fresh staged images. It never falls back to old-image `Init()`.
 >
-> Unsafe callback drain or hook teardown still blocks replacement. Follow the [hot-reload guide](../docs/guides/hot-reload/README.md).
+> A failed callback drain, worker join, or hook teardown blocks replacement. Follow the [hot-reload guide](../docs/guides/hot-reload/README.md).
 
 This pair implements the default development policy and resident wheel host from the guide.
 
@@ -42,4 +42,6 @@ Deploy the pair with these steps:
 2. If an ASI host loads the pair, rename `StagedExample.dll` to `StagedExample.asi`.
 3. Put `StagedExample.logic.dll` beside the loader.
 
-The CMake gate rejects a full archive edge on the loader. The fixed-width C ABI permits mixed-toolchain pairs, but the mixed MSVC and MinGW lifecycle gate remains required.
+The CMake gate rejects a direct full-archive dependency on the loader. The fixed-width C ABI permits mixed-toolchain pairs. The lifecycle fixtures use one toolchain per pair. Before deployment, verify a mixed pair with a lifecycle host.
+
+Apply the guide's [thread and TLS preconditions](../docs/guides/hot-reload/README.md#threads-tls-and-static-constructors) to the deployed pair. The MinGW examples and proof DLLs use different runtime linkage.
