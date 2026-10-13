@@ -22,11 +22,14 @@
 #include "logic_dll_protocol.hpp"
 #include "raw_proof_error_mode.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <span>
@@ -58,6 +61,18 @@ namespace DetourModKit::detail
 
     void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
     [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
+
+    // Redeclared from internal/hook_backend.hpp for the same reason. One program holds both definitions, so this one
+    // must match that one token for token.
+    struct BackendCoordinatorCounts
+    {
+        std::size_t live{0};
+        std::size_t retained{0};
+        std::size_t vacant{0};
+        std::size_t free{0};
+    };
+
+    [[nodiscard]] BackendCoordinatorCounts backend_coordinator_counts_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1297,12 +1312,11 @@ namespace
     }
 
     /**
-     * @brief Pins a mid hook's backend after its tombstone, unloads the DLL, and proves the target call stays inert.
-     * @details Destroying a hook that is not the newest layer on its target is a leak-on-purpose branch: the patched
-     *          prologue and the adapter stub stay mapped forever so a newer layer's chain into them cannot dangle.
-     *          That leaves a reachable stub whose detour lives in a module the host is about to unmap, which is the
-     *          exact shape the tombstone has to make safe. The adapter's live recheck must turn the call into a no-op
-     *          instead of a jump into freed code.
+     * @brief Retires an older mid hook under a newer layer, unloads the DLL, and proves the target call stays inert.
+     * @details A hook that is not the newest layer on its target retires as residue. The target keeps its jump into
+     *          the older gateway, and the gateway, trampoline, and stub stay mapped for the process. The retirement
+     *          closes the route, vacates the position, and releases the adapter slot, so a call through the residue
+     *          goes to the trampoline. No path reaches the detour in the module that the host unmaps.
      */
     int run_mid_pinned(Logic &logic)
     {
@@ -1314,6 +1328,9 @@ namespace
         }
 
         const int baseline = target(10, 5);
+        const auto *const prologue = reinterpret_cast<const unsigned char *>(reinterpret_cast<std::uintptr_t>(target));
+        std::array<unsigned char, 5> original_prologue{};
+        std::memcpy(original_prologue.data(), prologue, original_prologue.size());
 
         auto older = DetourModKit::hook::mid_at(
             DetourModKit::hook::MidRequest{
@@ -1367,15 +1384,28 @@ namespace
         }
         std::optional<DetourModKit::hook::Hook> newer_hook{std::move(*newer)};
 
-        const std::size_t leaks_before = DetourModKit::diagnostics::total_intentional_leaks();
+        // The total leak count alone proves nothing, because a residue and a pin both raise it. A vacated position
+        // proves that the route closed, and teardown releases the adapter slot only after a vacate.
+        namespace diagnostics = DetourModKit::diagnostics;
+        const std::size_t pins_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+        const std::size_t residue_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookResidue);
+        const std::size_t vacant_before = DetourModKit::detail::backend_coordinator_counts_for_test().vacant;
         older_hook.reset();
-        const std::size_t leaks_after = DetourModKit::diagnostics::total_intentional_leaks();
-        if (leaks_after <= leaks_before)
+        const std::size_t pins_booked =
+            diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager) - pins_before;
+        const std::size_t residue_booked =
+            diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookResidue) - residue_before;
+        const std::size_t vacated = DetourModKit::detail::backend_coordinator_counts_for_test().vacant - vacant_before;
+        if (pins_booked != 0 || residue_booked != 1 || vacated != 1)
         {
             std::fprintf(
                 stderr,
-                "FAIL[mid-pinned]: destroying the older layer booked no intentional leak, so the "
-                "backend was restored rather than pinned and the scenario proves nothing\n"
+                "FAIL[mid-pinned]: the older layer teardown booked %zu HookManager and %zu HookResidue events and "
+                "vacated %zu positions, expected 0, 1, and 1. The older layer did not retire as residue, so the "
+                "scenario proves nothing\n",
+                pins_booked,
+                residue_booked,
+                vacated
             );
             return 54;
         }
@@ -1386,24 +1416,33 @@ namespace
         {
             std::fprintf(
                 stderr,
-                "FAIL[mid-pinned]: the target reports clean after a pinned teardown; a later install "
-                "would layer over a stub that is still patched in\n"
+                "FAIL[mid-pinned]: the target reports clean after the older layer retired, but its jump into the "
+                "residue is still patched in\n"
             );
             return 55;
+        }
+        if (std::memcmp(prologue, original_prologue.data(), original_prologue.size()) == 0)
+        {
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: the target holds its original bytes after both teardowns, so no call goes "
+                "through the residue and the scenario proves nothing\n"
+            );
+            return 97;
         }
 
         const std::uint64_t dispatches_before = logic.read(Counter::MidInvoked);
         if (target(10, 5) != baseline)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: the pinned target no longer returns its original result\n");
+            std::fprintf(stderr, "FAIL[mid-pinned]: a call through the residue lost the original result\n");
             return 56;
         }
         if (logic.read(Counter::MidInvoked) != dispatches_before)
         {
             std::fprintf(
                 stderr,
-                "FAIL[mid-pinned]: the tombstoned adapter still called the DLL detour; unmapping the "
-                "module would turn the next call into a jump into freed code\n"
+                "FAIL[mid-pinned]: a call through the residue still reached the DLL detour. After the unmap, that "
+                "call jumps into freed code\n"
             );
             return 57;
         }
@@ -1427,8 +1466,8 @@ namespace
             return 59;
         }
 
-        // The load-bearing call: the stub is still patched into the target and still reachable, but its detour is now
-        // unmapped. Reaching the DLL here faults rather than returning, so surviving this call IS the assertion.
+        // The load-bearing call: the target still jumps into the residue, and the detour module is now unmapped. A call
+        // that reaches the DLL faults and does not return, so a return with the original result is the assertion.
         if (target(10, 5) != baseline)
         {
             std::fprintf(stderr, "FAIL[mid-pinned]: the target returned the wrong result after the module unmapped\n");
@@ -1436,8 +1475,8 @@ namespace
         }
 
         std::printf(
-            "PASS[mid-pinned]: the pinned stub went inert at its tombstone, so calling the target after the "
-            "module unmapped stayed a no-op\n"
+            "PASS[mid-pinned]: the older layer retired as residue with its route closed, so a call to the target "
+            "after the module unmapped stayed a no-op\n"
         );
         return 0;
     }

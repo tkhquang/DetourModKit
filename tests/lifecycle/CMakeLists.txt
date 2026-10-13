@@ -1680,6 +1680,7 @@ set(staged_generation_required_proofs
   Lifecycle.StagedGenerationParkedCallbackRefusesReload       parked-callback
   Lifecycle.StagedGenerationReleasedCallbackAllowsReload      drain-retry
   Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps     partial-init
+  Lifecycle.StagedGenerationLowerLayerRetiresUnderNewerHost   layered-host
   Lifecycle.StagedGenerationExistingCandidateUsesFreshName    candidate-collision)
 while(staged_generation_required_proofs)
   list(POP_FRONT staged_generation_required_proofs proof_name scenario)
@@ -1699,6 +1700,63 @@ set_tests_properties(Lifecycle.StagedGenerationProofRejectsAnUnknownScenario PRO
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
   LABELS "lifecycle-proof")
+
+# The layered reload host links its own archive only to read the process route records. It stages two
+# staged_generation_dll families in the staged-generation output directory, so the artifact fixture removes them.
+add_executable(layered_generation_reload layered_generation_reload.cpp)
+target_link_libraries(layered_generation_reload PRIVATE DetourModKit dmk_coverage)
+target_include_directories(layered_generation_reload PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_compile_definitions(layered_generation_reload PRIVATE DMK_ENABLE_TEST_SEAMS)
+add_dependencies(layered_generation_reload staged_generation_dll hook_target_lib)
+dmk_static_runtime(layered_generation_reload)
+add_dependencies(dmk_lifecycle_proof_hosts layered_generation_reload)
+add_custom_command(TARGET layered_generation_reload POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:layered_generation_reload>)
+
+# These scenarios use deterministic fixtures. Exit 77 reports a failure.
+set(layered_generation_reload_proofs
+  Lifecycle.LayeredReloadLowerCopyRetiresInFieldOrder             lower-copy-field-order
+  Lifecycle.LayeredReloadLowerCopyRetiresInReverseOrder           lower-copy-reverse-order
+  Lifecycle.LayeredReloadDisableFirstConsumerRetires              disable-first-consumer
+  Lifecycle.LayeredReloadHandBackBeforeShutdownRestoresCleanly    hand-back-before-shutdown
+  Lifecycle.LayeredReloadHandBackBeforeSuccessorInit              hand-back-before-successor-init
+  Lifecycle.LayeredReloadHandBackAfterSuccessorInit               hand-back-after-successor-init
+  Lifecycle.LayeredReloadPreservesForeignChainingLayer            foreign-chaining-layer
+  Lifecycle.LayeredReloadLeavesNonChainingHijackUntouched         non-chaining-hijack
+  Lifecycle.LayeredReloadLowerMidCopyRetires                      lower-mid-copy
+  Lifecycle.LayeredReloadFarHookRetires                           far-hook
+  Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer claimed-position-under-foreign-layer
+  Lifecycle.LayeredReloadResidueBudgetFallsBackToPin              residue-budget-pin)
+while(layered_generation_reload_proofs)
+  list(POP_FRONT layered_generation_reload_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:layered_generation_reload> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+    TEST_TIMEOUT 120
+    LABELS "lifecycle-proof")
+  set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+endwhile()
+
+# The constancy soak runs 1000 reloads, and the mid soak runs 128. Local Debug runs take about 150 and 45 seconds.
+# The budgets follow the 100-generation soak above, which covers a coverage-instrumented hosted runner. Under ASan
+# the RWX census is not available, so the constancy soak exits 77.
+dmk_add_raw_proof(NAME Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth
+  COMMAND $<TARGET_FILE:layered_generation_reload> alternating-constant-depth
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 1200
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+dmk_add_raw_proof(NAME Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute
+  COMMAND $<TARGET_FILE:layered_generation_reload> mid-successor-claims-closed-route
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 600
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
 
 add_dependencies(xinput_detour_rundown xinput_alias_ex_proxy)
 set(xinput_route_telemetry_proofs
@@ -1727,17 +1785,19 @@ add_test(NAME Lifecycle.XInputTelemetryProofRejectsUnknownScenario
 set_tests_properties(Lifecycle.XInputTelemetryProofRejectsUnknownScenario PROPERTIES
   WILL_FAIL TRUE TIMEOUT 10 LABELS "lifecycle-proof")
 
-foreach(participant IN ITEMS a b)
+foreach(participant IN ITEMS a b legacy)
   add_library(route_copy_${participant} SHARED route_copy_dll.cpp)
   set_target_properties(route_copy_${participant} PROPERTIES PREFIX "")
   target_link_libraries(route_copy_${participant} PRIVATE DetourModKit safetyhook dmk_coverage)
   dmk_static_runtime(route_copy_${participant} SHARED)
 endforeach()
+# The legacy participant applies the 4.3.0 hook policy directly over the backend and emits no relay cell.
+target_compile_definitions(route_copy_legacy PRIVATE ROUTE_COPY_LEGACY_POLICY)
 add_executable(route_copy_host route_copy_host.cpp)
 target_link_libraries(route_copy_host PRIVATE dmk_coverage)
 target_compile_features(route_copy_host PRIVATE cxx_std_23)
 dmk_static_runtime(route_copy_host)
-add_dependencies(route_copy_host route_copy_a route_copy_b)
+add_dependencies(route_copy_host route_copy_a route_copy_b route_copy_legacy)
 add_dependencies(dmk_lifecycle_proof_hosts route_copy_host)
 add_test(NAME Lifecycle.RouteCopiesRejectUnknownScenario
   COMMAND $<TARGET_FILE:route_copy_host> invalid-scenario)
@@ -1763,7 +1823,13 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
   Lifecycle.RouteCopiesReportLayerConflict layer-conflict
   Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict stale-layer-conflict
-  Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause)
+  Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause
+  Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline retire-inline
+  Lifecycle.RouteCopiesLegacyLowerStaysRefused legacy-lower
+  Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper legacy-upper
+  Lifecycle.RouteCopiesLegacyAroundClaimedPosition legacy-around-claim
+  Lifecycle.RouteCopiesResidueBudgetFloorPins budget-floor
+  Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed retire-closed-route)
 while(route_copy_proofs)
   list(POP_FRONT route_copy_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}

@@ -51,6 +51,34 @@ namespace staged_gen
     };
 
     /**
+     * @enum HookKind
+     * @brief The hook that StagedInit installs on @ref HOOK_TARGET_SYMBOL.
+     * @details Each kind adds InitOptions::detour_bonus to every call result that crosses it.
+     */
+    enum class HookKind : int
+    {
+        /// inline_at with a raw detour that calls the trampoline.
+        Raw = 0,
+        /// mid_at with a callback that adds the bonus to the modifier argument register.
+        Mid = 1,
+    };
+
+    /**
+     * @enum TeardownMode
+     * @brief The hook teardown sequence that StagedShutdown runs.
+     */
+    enum class TeardownMode : int
+    {
+        /// HookStack::clear destroys every hook, newest first.
+        Destroy = 0,
+        /**
+         * @brief Disables every hook newest first, then destroys every hook.
+         * @details A failed disable returns 0 before any destroy and keeps the Session, as a consumer latch does.
+         */
+        DisableFirst = 1,
+    };
+
+    /**
      * @struct InitOptions
      * @brief Per-generation configuration the host passes to StagedInit.
      */
@@ -94,6 +122,27 @@ namespace staged_gen
         int enable_diagnostics = 0;
         /// Keeps the hook lifecycle subscription live across ~Session when nonzero. Requires enable_diagnostics.
         int retain_diagnostics = 0;
+        /// Selects the @ref HookKind on @ref HOOK_TARGET_SYMBOL.
+        int hook_kind = 0;
+        /// Selects the @ref TeardownMode of StagedShutdown.
+        int teardown_mode = 0;
+        /**
+         * @brief Sets the value that this generation's hook adds to each call result of @ref HOOK_TARGET_SYMBOL.
+         * @details Init measures one call before the install and requires one armed call to return that result plus
+         *          this bonus. A family can therefore arm over another layer. Distinct bonuses show which layers a
+         *          call crossed.
+         */
+        int detour_bonus = 1000;
+        /**
+         * @brief Names the hook on @ref HOOK_TARGET_SYMBOL. Null selects "staged_gen_hook".
+         * @details The name identifies the chain position, so a successor with the same name and kind claims the
+         *          position that a retired generation vacated.
+         */
+        const char *hook_name = nullptr;
+        /// Forces the backend FF path for the hook on @ref HOOK_TARGET_SYMBOL when nonzero.
+        int far_hook = 0;
+        /// Withholds the position claim from every install of this copy when nonzero, so each install is fresh.
+        int refuse_position_claims = 0;
     };
 
     /**
@@ -127,6 +176,12 @@ namespace staged_gen
         /// Hook lifecycle events that the generation's diagnostics subscription observed.
         std::uint64_t lifecycle_events = 0;
         std::uint64_t diagnostics_leaks = 0;
+        /// LeakSubsystem::HookResidue: retired hooks that keep backend storage while no caller reaches their detour.
+        std::uint64_t hook_residue_leaks = 0;
+        /// ModulePinReason::Hook: one module reference per hook whose detour a caller can still reach.
+        std::uint64_t hook_module_pins = 0;
+        /// Process route records whose relay cell is Vacant.
+        std::size_t coordinator_vacant = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.

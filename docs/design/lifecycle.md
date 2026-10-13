@@ -115,7 +115,9 @@ A close is legal only once no live thread can still be inside the use. That is e
 - Never join while you hold a mutex that the worker needs.
 - Never restore a prologue when a newer layer still chains through it.
 - Check the newer-live count that `HookLedger::acquire_target_slot` returns before `Hook::~Hook` touches backend memory.
-- If a newer layer remains live, retain the older backend and keep the target tracked as hooked.
+- If a newer layer remains live, retire the older layer by bypass and keep the target tracked as hooked (`[B-104]`).
+- If the ledger cannot decide that count, retain the older backend with its detour reachable.
+- If a mid route does not drain before the bypass, retain the older backend the same way.
 - Preallocate the aligned XInput retention cell before hook publication.
 - If the 10 ms XInput drain expires, transfer the hooks and keepalives into that cell.
 - Retain receipt TLS and shared scope ownership with reachable XInput chains.
@@ -124,7 +126,7 @@ A close is legal only once no live thread can still be inside the use. That is e
 - Leave logical XInput interception disarmed after that transfer.
 - If the 5 s start handshake expires, retain the complete `ConfigWatcher::Impl`.
 - Clean-join a failed worker after it reports failure and starts its return.
-- Restore a newest-first hook layer normally.
+- Restore the newest unclaimed hook layer when its witness is `OwnedPatch`, and free it when its witness is `Original`.
 - Record each leak on its `diagnostics::LeakSubsystem` counter.
 - Limit each event to one retention cell.
 - Bound every teardown wait or prove that it drains a closed set.

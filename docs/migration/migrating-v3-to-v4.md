@@ -74,7 +74,7 @@ Gamepad bindings with `input::ComboBinding::consume` set and wheel bindings on t
 | `with_inline_hook(id, callback)`, `try_with_inline_hook(id, callback)`, `InlineHook::get_original<T>()` | `Hook::original<Fn>()` |
 | `enable_hook`, `disable_hook`, `enable_hooks`, `disable_hooks`, `enable_all_hooks`, `disable_all_hooks` | `Hook::enable()` and `Hook::disable()` on each handle |
 | `HookStatus`, `Hook::get_status()`, `get_hook_status(id)` | `Hook::is_enabled()` |
-| `remove_hook`, `remove_all_hooks`, `remove_vmt_hook`, `remove_all_vmt_hooks` | Destroy the handle. `HookStack` tears layered hooks down newest-first. |
+| `remove_hook`, `remove_all_hooks`, `remove_vmt_hook`, `remove_all_vmt_hooks` | Destroy the handle. Layered inline and mid hooks on one target retire in any order. |
 | `get_hook_counts`, `get_hook_ids` | `diagnostics::collect()` fields `hooks_total`, `hooks_active`, and `hooks_disabled` |
 | `is_target_already_hooked(address)` | `is_target_hooked(Address)` |
 | `HookConfig`, `VmtHookConfig` | `Options`, `VmtOptions` |

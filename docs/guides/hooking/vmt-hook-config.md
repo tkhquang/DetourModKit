@@ -90,7 +90,11 @@ The pre-flight is intentionally conservative. A real function whose first byte i
 
 When two hooks are layered on one object, the second clones the first's clone and records it as the table it will put back. Destruction newest-first unwinds that cleanly, and the object ends on its real vtable.
 
-Destruction oldest-first cannot. The older hook's table is still the newer hook's recorded original, so a free of it leaves the newer hook to restore released memory, and the object dispatches through it. DetourModKit detects this at teardown. It restores other objects that still point directly at the older clone, leaks the outranked clone rather than free it, counts the leak on `diagnostics::LeakSubsystem::HookManager`, and logs a warning that names the hook. The stacked object then stays on the leaked clone. It still dispatches correctly, but it never returns to its original table. That is the deliberate trade: a permanent leak of one vtable-sized allocation instead of a use-after-free. Order your teardown to avoid it. The same rule and the same reasoning apply to stacked inline hooks on one target.
+Destruction oldest-first cannot. The older hook's table is still the newer hook's recorded original. A free of it leaves the newer hook to restore released memory, and the object dispatches through it. DetourModKit detects this at teardown. It restores other objects that still point directly at the older clone and leaks the outranked clone rather than free it. It counts the leak on `diagnostics::LeakSubsystem::HookManager` and logs a warning that names the hook.
+
+The stacked object then stays on the leaked clone. It still dispatches correctly, but it never returns to its original table. That is the deliberate trade: a permanent leak of one vtable-sized allocation instead of a use-after-free. Order your teardown to avoid it.
+
+This rule covers VMT hooks only. Stacked inline and mid hooks on one target retire in any order, as the [hot-reload guide](../hot-reload/README.md#layered-hooks-retire-in-any-order) states.
 
 `remove_from` on an outranked object follows the same rule. It reports success but leaves the object on the newer hook's clone and keeps the restoration dependency. The object is restored later if the newer hook unwinds first. The clone is leaked if it does not.
 

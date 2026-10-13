@@ -77,6 +77,13 @@ namespace
         return r;
     }
 
+    // A residue and a pin stay on this target for the process lifetime, so no other case can use it.
+    DMK_PROOF_TARGET int lifecycle_target_residue(int a, int b)
+    {
+        volatile int r = a ^ b;
+        return r;
+    }
+
     DMK_TEST_NOINLINE int lifecycle_detour_add(int a, int b)
     {
         return a + b + 1;
@@ -85,6 +92,16 @@ namespace
     [[nodiscard]] Address target_address(int (*fn)(int, int)) noexcept
     {
         return Address{reinterpret_cast<std::uintptr_t>(fn)};
+    }
+
+    [[nodiscard]] std::size_t leak_bucket(const diag::Snapshot &snapshot, LeakSubsystem subsystem) noexcept
+    {
+        return snapshot.intentional_leaks[static_cast<std::size_t>(subsystem)];
+    }
+
+    [[nodiscard]] std::size_t hook_module_pins(const diag::Snapshot &snapshot) noexcept
+    {
+        return snapshot.module_pins[static_cast<std::size_t>(diag::ModulePinReason::Hook)];
     }
 
     // A small polymorphic object so vmt_for has a real vtable to clone.
@@ -650,8 +667,9 @@ TEST_F(DiagnosticsSnapshotTest, DestroyingAnArmedHookReleasesBothFigures)
 
 TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
 {
-    // An inverted teardown leaves the older target patch and ledger record live. The Removed event retires the handle,
-    // but the population must retain the hook while DMK still conservatively reports its target as hooked.
+    // release() pins a layer: its patch, detour, and ledger record stay live. The population must retain the hook while
+    // DMK reports its target as hooked. A destroyed lower layer retires as residue and leaves the population instead
+    // (HookResidueCountsApartFromHookManager).
     const diag::Snapshot before = diag::collect();
 
     Result<hook::Hook> older_result = hook::inline_at(
@@ -680,16 +698,25 @@ TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
     ASSERT_EQ(layered.hooks_active, before.hooks_active + 1);
     ASSERT_EQ(layered.hooks_disabled, before.hooks_disabled + 1);
 
-    older.reset();
-
+    // release() abandons the handle and emits nothing, and the destructor that it disarms subtracts nothing. An
+    // abandoned hook stays installed, so one subtraction under-reports the tally and two make it underflow.
+    older->release();
     const diag::Snapshot retained = diag::collect();
     EXPECT_EQ(retained.hooks_total, layered.hooks_total);
     EXPECT_EQ(retained.hooks_active, layered.hooks_active);
     EXPECT_EQ(retained.hooks_disabled, layered.hooks_disabled);
+    EXPECT_EQ(leak_bucket(retained, LeakSubsystem::HookManager), leak_bucket(layered, LeakSubsystem::HookManager) + 1);
+    EXPECT_EQ(leak_bucket(retained, LeakSubsystem::HookResidue), leak_bucket(layered, LeakSubsystem::HookResidue));
 
-    // The newer disabled backend is also deliberately retained so it cannot restore over the pinned older patch.
-    // release() abandons the handle without emitting, and the destructor it disarms must not subtract either: an
-    // abandoned hook stays installed, so subtracting once would under-report and twice would underflow the tally.
+    older.reset();
+
+    const diag::Snapshot older_handle_destroyed = diag::collect();
+    EXPECT_EQ(older_handle_destroyed.hooks_total, layered.hooks_total);
+    EXPECT_EQ(older_handle_destroyed.hooks_active, layered.hooks_active);
+    EXPECT_EQ(older_handle_destroyed.hooks_disabled, layered.hooks_disabled);
+    EXPECT_TRUE(hook::is_target_hooked(target_address(&lifecycle_target_layered)));
+
+    // The disabled layer pins the same way and stays counted disabled.
     newer->release();
     const diag::Snapshot released = diag::collect();
     EXPECT_EQ(released.hooks_total, layered.hooks_total);
@@ -703,6 +730,161 @@ TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
     EXPECT_EQ(after_handle_destroyed.hooks_active, layered.hooks_active);
     EXPECT_EQ(after_handle_destroyed.hooks_disabled, layered.hooks_disabled);
 }
+
+TEST_F(DiagnosticsSnapshotTest, HookResidueCountsApartFromHookManager)
+{
+    // HookManager counts a hook whose detour stays reachable, and HookResidue counts a retired hook that no path
+    // reaches. A lower layer destroyed under a newer one is residue. It leaves the live population and releases its
+    // module reference, but its position keeps the target tracked. A released layer is a pin and stays live.
+    const Address target = target_address(&lifecycle_target_residue);
+    ASSERT_FALSE(hook::is_target_hooked(target));
+    const diag::Snapshot before = diag::collect();
+
+    Result<hook::Hook> older_result = hook::inline_at(
+        hook::InlineRequest{
+            .name = "ResidueBase",
+            .target = target,
+        },
+        &lifecycle_detour_add
+    );
+    ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
+    std::optional<hook::Hook> older{std::move(*older_result)};
+    ASSERT_TRUE(older->enable().has_value());
+
+    Result<hook::Hook> newer_result = hook::inline_at(
+        hook::InlineRequest{
+            .name = "ResidueTop",
+            .target = target,
+        },
+        &lifecycle_detour_add
+    );
+    ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
+    std::optional<hook::Hook> newer{std::move(*newer_result)};
+    ASSERT_TRUE(newer->enable().has_value());
+
+    const diag::Snapshot layered = diag::collect();
+    ASSERT_EQ(layered.hooks_total, before.hooks_total + 2);
+    ASSERT_EQ(layered.hooks_active, before.hooks_active + 2);
+    ASSERT_EQ(hook_module_pins(layered), hook_module_pins(before) + 2);
+
+    older.reset();
+
+    const diag::Snapshot retired = diag::collect();
+    EXPECT_EQ(leak_bucket(retired, LeakSubsystem::HookResidue), leak_bucket(before, LeakSubsystem::HookResidue) + 1);
+    EXPECT_EQ(leak_bucket(retired, LeakSubsystem::HookManager), leak_bucket(before, LeakSubsystem::HookManager))
+        << "a residue reaches no detour, so it must not count as a pin";
+    EXPECT_EQ(retired.total_intentional_leaks, before.total_intentional_leaks + 1);
+    EXPECT_EQ(
+        leak_bucket(retired, LeakSubsystem::HookResidue),
+        diag::intentional_leak_count(LeakSubsystem::HookResidue)
+    );
+    EXPECT_EQ(retired.hooks_total, layered.hooks_total - 1);
+    EXPECT_EQ(retired.hooks_active, layered.hooks_active - 1);
+    EXPECT_EQ(retired.hooks_disabled, layered.hooks_disabled);
+    EXPECT_EQ(hook_module_pins(retired), hook_module_pins(layered) - 1);
+    EXPECT_TRUE(hook::is_target_hooked(target)) << "the residue position keeps the target tracked";
+
+    newer->release();
+
+    const diag::Snapshot pinned = diag::collect();
+    EXPECT_EQ(leak_bucket(pinned, LeakSubsystem::HookManager), leak_bucket(before, LeakSubsystem::HookManager) + 1);
+    EXPECT_EQ(leak_bucket(pinned, LeakSubsystem::HookResidue), leak_bucket(retired, LeakSubsystem::HookResidue))
+        << "a pin keeps its detour reachable, so it must not count as residue";
+    EXPECT_EQ(pinned.total_intentional_leaks, before.total_intentional_leaks + 2);
+    EXPECT_EQ(pinned.hooks_total, retired.hooks_total);
+    EXPECT_EQ(pinned.hooks_active, retired.hooks_active);
+    EXPECT_EQ(hook_module_pins(pinned), hook_module_pins(retired));
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    extern bool (*g_hook_teardown_restore_override)();
+} // namespace DetourModKit::detail
+
+namespace
+{
+    // A failed teardown restore pins a hook on this target for the process lifetime, so no other case can use it.
+    DMK_PROOF_TARGET int lifecycle_target_pinned(int a, int b)
+    {
+        volatile int r = a | b;
+        return r;
+    }
+
+    /// Models a teardown restore that fails before it writes the target.
+    bool refuse_teardown_restore()
+    {
+        return false;
+    }
+
+    /// Makes each teardown restore in scope fail before any write, and always clears the override.
+    class TeardownRestoreRefusalScope
+    {
+    public:
+        TeardownRestoreRefusalScope() noexcept
+        {
+            DetourModKit::detail::g_hook_teardown_restore_override = &refuse_teardown_restore;
+        }
+        ~TeardownRestoreRefusalScope() noexcept { DetourModKit::detail::g_hook_teardown_restore_override = nullptr; }
+        TeardownRestoreRefusalScope(const TeardownRestoreRefusalScope &) = delete;
+        TeardownRestoreRefusalScope &operator=(const TeardownRestoreRefusalScope &) = delete;
+        TeardownRestoreRefusalScope(TeardownRestoreRefusalScope &&) = delete;
+        TeardownRestoreRefusalScope &operator=(TeardownRestoreRefusalScope &&) = delete;
+    };
+} // namespace
+
+TEST_F(DiagnosticsSnapshotTest, FailedOwnedRestorePinStaysInTheLivePopulation)
+{
+    // A teardown restore that fails before any write leaves the detour reachable. The pin books HookManager, and its
+    // Removed event keeps the hook in the live population while DMK reports the target as hooked.
+    const Address target = target_address(&lifecycle_target_pinned);
+    ASSERT_FALSE(hook::is_target_hooked(target));
+    const int detoured = lifecycle_detour_add(2, 5);
+    ASSERT_NE(dmk_test::call_unfolded(&lifecycle_target_pinned, 2, 5), detoured);
+    const diag::Snapshot before = diag::collect();
+    std::size_t removed_events = 0;
+    const auto subscription = diag::hook_lifecycle().subscribe(
+        [&removed_events](const diag::HookLifecycleEvent &event)
+        {
+            if (event.name == "FailedRestorePin" && event.transition == diag::HookTransition::Removed)
+            {
+                ++removed_events;
+            }
+        }
+    );
+
+    diag::Snapshot armed{};
+    {
+        // The override outlives the hook, so the hook destructor reads it.
+        const TeardownRestoreRefusalScope refusal;
+        Result<hook::Hook> created = hook::inline_at(
+            hook::InlineRequest{
+                .name = "FailedRestorePin",
+                .target = target,
+            },
+            &lifecycle_detour_add
+        );
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        hook::Hook pinned_hook = std::move(*created);
+        ASSERT_TRUE(pinned_hook.enable().has_value());
+        ASSERT_EQ(dmk_test::call_unfolded(&lifecycle_target_pinned, 2, 5), detoured);
+        armed = diag::collect();
+        ASSERT_EQ(armed.hooks_total, before.hooks_total + 1);
+        ASSERT_EQ(armed.hooks_active, before.hooks_active + 1);
+    }
+
+    const diag::Snapshot after_pin = diag::collect();
+    EXPECT_EQ(removed_events, 1u) << "the pin emitted no Removed event";
+    EXPECT_EQ(leak_bucket(after_pin, LeakSubsystem::HookManager), leak_bucket(armed, LeakSubsystem::HookManager) + 1);
+    EXPECT_EQ(leak_bucket(after_pin, LeakSubsystem::HookResidue), leak_bucket(armed, LeakSubsystem::HookResidue));
+    EXPECT_EQ(after_pin.hooks_total, armed.hooks_total) << "a pinned hook left the live population";
+    EXPECT_EQ(after_pin.hooks_active, armed.hooks_active);
+    EXPECT_EQ(after_pin.hooks_disabled, armed.hooks_disabled);
+    EXPECT_EQ(hook_module_pins(after_pin), hook_module_pins(armed)) << "a pinned hook gave its module reference back";
+    EXPECT_TRUE(hook::is_target_hooked(target));
+    EXPECT_EQ(dmk_test::call_unfolded(&lifecycle_target_pinned, 2, 5), detoured) << "the pinned detour stopped running";
+}
+#endif // DMK_ENABLE_TEST_SEAMS
 
 TEST_F(DiagnosticsSnapshotTest, MidHookIsCountedDisabledFromCreation)
 {

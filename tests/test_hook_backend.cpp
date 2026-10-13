@@ -5,7 +5,8 @@
  * The backend can report failure or throw before or after its mutation callback. Address-scoped seams prove that DMK
  * contains those exceptions, reconciles committed bytes, and preserves state across enable, disable, rollback, and
  * teardown. Ownership cases prove that emitted-patch provenance is required and that Foreign bytes are never
- * overwritten. Each throwing GoogleTest is discovered as a separate CTest child, so an exception escaping a noexcept
+ * overwritten. Relay cases prove the aligned relay switch, and relay-cell cases prove the position a later generation
+ * claims. Each throwing GoogleTest is discovered as a separate CTest child, so an exception escaping a noexcept
  * boundary fails the case as a process termination.
  */
 
@@ -18,6 +19,7 @@
 
 #include <process.h>
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -28,10 +30,12 @@
 #include <format>
 #include <functional>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "DetourModKit/diagnostics.hpp"
@@ -40,6 +44,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include "fixtures/log_capture.hpp"
+#include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "internal/diagnostics_population.hpp"
 #include "test_alloc_probe.hpp"
@@ -79,6 +84,53 @@ namespace DetourModKit::detail
     [[nodiscard]] std::size_t backend_instruction_boundary_trace_size_for_test() noexcept;
     [[nodiscard]] std::array<std::size_t, 2> backend_instruction_boundary_trace_for_test(std::size_t index) noexcept;
     [[nodiscard]] std::uint8_t backend_last_inline_error_type_for_test() noexcept;
+    void omit_backend_relay_cell_for_test(bool omit) noexcept;
+    void set_backend_coordinator_refusal_for_test(unsigned refusal) noexcept;
+    struct BackendCoordinatorCounts
+    {
+        std::size_t live{0};
+        std::size_t retained{0};
+        std::size_t vacant{0};
+        std::size_t free{0};
+    };
+    [[nodiscard]] BackendCoordinatorCounts backend_coordinator_counts_for_test() noexcept;
+    enum class BackendProbeKind : std::uint8_t
+    {
+        Inline,
+        Mid,
+        Routed,
+    };
+    enum class BackendProbeOperation : std::uint8_t
+    {
+        Enable,
+        Disable,
+        Bypass,
+        Resume,
+        Vacate,
+        Reset,
+        MoveAssign,
+        RetainRoute,
+    };
+    struct BackendProbeState
+    {
+        bool valid{false};
+        bool enabled{false};
+        bool claimed{false};
+        bool bypassed{false};
+        void *trampoline{nullptr};
+        void *relay_slot{nullptr};
+        void *relay_cell{nullptr};
+    };
+    struct BackendProbe;
+    [[nodiscard]] BackendProbe *create_backend_probe_for_test(
+        BackendProbeKind kind,
+        void *target,
+        void *destination,
+        std::string_view position_name
+    ) noexcept;
+    [[nodiscard]] bool drive_backend_probe_for_test(BackendProbe *probe, BackendProbeOperation operation) noexcept;
+    [[nodiscard]] BackendProbeState backend_probe_state_for_test(const BackendProbe *probe) noexcept;
+    void destroy_backend_probe_for_test(BackendProbe *probe) noexcept;
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
     extern void (*g_hook_backend_disable_probe)() noexcept;
     extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
@@ -1331,12 +1383,12 @@ TEST(HookBackendTransaction, CommittedEnableFailureStillTearsDownWithoutLeaking)
 
 #endif // DMK_ENABLE_TEST_SEAMS
 
-// A third party owns the prologue. The backend's disable copies its saved bytes back unconditionally, so DMK has to
-// refuse BEFORE the call or the foreign patch is silently clobbered. Mutation: collapsing OwnedPatch and Foreign into
-// one Patched state makes the foreign bytes read as ours and the refusal disappears.
+// A third party owns the prologue. The backend's disable copies its saved bytes back unconditionally, so the Active
+// hook switches its relay off in place of a restore. Mutation: if OwnedPatch and Foreign merge into one Patched state,
+// the foreign bytes read as ours, and the restore clobbers them.
 TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByDisable)
 {
-    std::uintptr_t pinned_target = 0;
+    std::uintptr_t retired_target = 0;
     {
         dmk_test::ScratchPage page;
         ASSERT_TRUE(page.ok());
@@ -1345,6 +1397,8 @@ TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByDisable)
         std::array<std::uint8_t, 6> foreign{};
         const std::size_t leaks_before =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+        const std::size_t residue_before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
         {
             Result<Hook> installed = install_leaf(page, "ForeignDisable");
             ASSERT_TRUE(installed.has_value()) << installed.error().message();
@@ -1355,32 +1409,35 @@ TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByDisable)
             foreign = read_prologue(page);
 
             const Result<void> disabled = hook.disable();
-            ASSERT_FALSE(disabled.has_value());
-            EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
-            // The refusal happened before the backend ran, so the foreign bytes are exactly as they were left.
+            ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
+            // The bypass wrote no target byte, so the foreign bytes are exactly as they were left.
             EXPECT_EQ(read_prologue(page), foreign);
-            // The hook never claimed a disarm it did not perform.
-            EXPECT_TRUE(hook.is_enabled());
+            // The relay now sends every caller past the detour, so the hook reports the disarm.
+            EXPECT_FALSE(hook.is_enabled());
         }
 
-        // Teardown must fail closed too: the target is not restorable, so the backend is pinned rather than freed, and
-        // the foreign writer's bytes survive that as well.
+        // Teardown retires the bypassed hook in place of a restore. The foreign bytes survive, and the position books
+        // HookResidue, not HookManager, because no path reaches the detour.
         EXPECT_EQ(
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-            leaks_before + 1
+            leaks_before
+        );
+        EXPECT_EQ(
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue),
+            residue_before + 1
         );
         EXPECT_EQ(read_prologue(page), foreign);
-        pinned_target = page.addr();
-        // The ledger keeps this address pinned for process life, so the fixture must not hand it back to the allocator.
+        retired_target = page.addr();
+        // The position stays in the target's chain for process life, so the fixture must not hand the page back.
         page.abandon();
     }
 
     MEMORY_BASIC_INFORMATION memory_info{};
     const SIZE_T queried =
-        VirtualQuery(reinterpret_cast<const void *>(pinned_target), &memory_info, sizeof(memory_info));
+        VirtualQuery(reinterpret_cast<const void *>(retired_target), &memory_info, sizeof(memory_info));
     ASSERT_EQ(queried, sizeof(memory_info));
-    EXPECT_EQ(memory_info.State, MEM_COMMIT) << "the pinned target reservation must survive fixture destruction";
-    EXPECT_TRUE(is_target_hooked(Address{pinned_target}));
+    EXPECT_EQ(memory_info.State, MEM_COMMIT) << "the retired target reservation must survive fixture destruction";
+    EXPECT_TRUE(is_target_hooked(Address{retired_target}));
 }
 
 // The enable direction of the same rule: the backend emits its jmp over whatever is present, so a foreign prologue has
@@ -1671,8 +1728,8 @@ TEST(HookBackendRelease, CleanManagedDestructionAllocatesNothing)
     );
 }
 
-// The HookBackendOwnership cases above are deliberately outside every seam guard: they drive the refusal through the
-// public API alone, so the ownership proofs survive a seam-free build. Only the exception cases below need a seam.
+// The HookBackendOwnership cases above sit outside every seam guard on purpose. They drive the ownership rule through
+// the public API alone, so the ownership proofs survive a seam-free build. Only the exception cases below need a seam.
 #if defined(DMK_ENABLE_TEST_SEAMS)
 TEST(HookBackendException, InlineEnableReconcilesBeforeAndAfterMutationThrows)
 {
@@ -1909,7 +1966,7 @@ TEST(HookBackendException, TeardownPinLoggingContainsRealAllocationFailure)
 // patch, so read_prologue() comes back as the original leaf and the error code becomes EnableFailed.
 TEST(HookBackendOwnership, EnableRollbackDoesNotOverwriteForeignPrologue)
 {
-    std::uintptr_t pinned_target = 0;
+    std::uintptr_t retired_target = 0;
     {
         dmk_test::ScratchPage page;
         ASSERT_TRUE(page.ok());
@@ -1918,6 +1975,8 @@ TEST(HookBackendOwnership, EnableRollbackDoesNotOverwriteForeignPrologue)
         std::array<std::uint8_t, 6> foreign{};
         const std::size_t leaks_before =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+        const std::size_t residue_before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
         {
             Result<Hook> installed = install_leaf(page, "ForeignRollback");
             ASSERT_TRUE(installed.has_value()) << installed.error().message();
@@ -1941,23 +2000,28 @@ TEST(HookBackendOwnership, EnableRollbackDoesNotOverwriteForeignPrologue)
             EXPECT_TRUE(hook.is_enabled());
         }
 
-        // Teardown sees the same foreign window and pins rather than restoring, so the bytes survive that too.
+        // Teardown sees the same foreign window and retires the hook by bypass in place of a restore, so the bytes
+        // survive that too. The position books HookResidue, not HookManager.
         EXPECT_EQ(
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
-            leaks_before + 1
+            leaks_before
+        );
+        EXPECT_EQ(
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue),
+            residue_before + 1
         );
         EXPECT_EQ(read_prologue(page), foreign);
-        pinned_target = page.addr();
-        // The ledger keeps this address pinned for process life, so the fixture must not hand it back to the allocator.
+        retired_target = page.addr();
+        // The position stays in the target's chain for process life, so the fixture must not hand the page back.
         page.abandon();
     }
 
     MEMORY_BASIC_INFORMATION memory_info{};
     const SIZE_T queried =
-        VirtualQuery(reinterpret_cast<const void *>(pinned_target), &memory_info, sizeof(memory_info));
+        VirtualQuery(reinterpret_cast<const void *>(retired_target), &memory_info, sizeof(memory_info));
     ASSERT_EQ(queried, sizeof(memory_info));
-    EXPECT_EQ(memory_info.State, MEM_COMMIT) << "the pinned target reservation must survive fixture destruction";
-    EXPECT_TRUE(is_target_hooked(Address{pinned_target}));
+    EXPECT_EQ(memory_info.State, MEM_COMMIT) << "the retired target reservation must survive fixture destruction";
+    EXPECT_TRUE(is_target_hooked(Address{retired_target}));
 }
 #endif // DMK_ENABLE_TEST_SEAMS
 
@@ -2682,7 +2746,7 @@ TEST(HookBackendCreate, InteriorShortJumpReportsTheFirstContentCheck)
     EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
 }
 
-// The four deferred toggle warnings are the operator's only signal for a refused or reconciled toggle. These cases
+// The deferred toggle lines are the operator's only signal for a refused, reconciled, or bypassed toggle. These cases
 // pin their text after the hook name and address.
 TEST(HookToggleWarning, RefusedEnableNamesTheWitness)
 {
@@ -2735,33 +2799,51 @@ TEST(HookToggleWarning, ReconciledEnableNamesTheRetry)
     EXPECT_EQ(call_target(page), DETOUR_RESULT);
 }
 
-TEST(HookToggleWarning, RefusedDisableNamesTheWitness)
+TEST(HookToggleWarning, BypassedDisableNamesTheWitness)
 {
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::size_t pins_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+    const std::size_t residue_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
     Result<Hook> installed = install_leaf(page, "WarnRefusedDisable");
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
-    Hook hook = std::move(*installed);
-    ASSERT_TRUE(hook.enable().has_value());
+    std::optional<Hook> hook{std::move(*installed)};
+    ASSERT_TRUE(hook->enable().has_value());
     const PrologueSpan armed = read_prologue_span(page);
     plant_foreign_patch(page);
 
+    // An Active hook over foreign bytes bypasses in place of the refusal. Its Info line names the witness.
     std::string text;
     {
-        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
-        const Result<void> disabled = hook.disable();
-        ASSERT_FALSE(disabled.has_value());
-        EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Info};
+        const Result<void> disabled = hook->disable();
+        ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
         text = capture.read_all();
     }
-    const std::string expected =
-        toggle_warning_prefix("WarnRefusedDisable", page) + "refused disable: another writer owns the prologue.";
+    const std::string expected = toggle_warning_prefix("WarnRefusedDisable", page) +
+                                 "bypassed under a newer layer: another writer owns the prologue.";
     EXPECT_NE(text.find(expected), std::string::npos) << text;
 
-    // A hand restore of this hook's exact patch lets the ordinary disable and teardown run.
+    // A hand restore of this hook's exact patch makes the bypassed hook the owner again, so its disable restores the
+    // target and teardown frees it.
     write_prologue_span(page, armed);
-    EXPECT_TRUE(hook.disable().has_value());
+    EXPECT_TRUE(hook->disable().has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine) << "the second disable did not restore the target";
+    EXPECT_FALSE(hook->is_enabled());
+    hook.reset();
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+        pins_before
+    );
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue),
+        residue_before
+    );
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
 }
 
 TEST(HookToggleWarning, ReconciledDisableNamesTheRetry)
@@ -2874,3 +2956,1726 @@ TEST(HookBackendTrapWindow, VmtForWaitsForTheBackendTrapWindow)
     EXPECT_EQ(reinterpret_cast<std::uintptr_t>(hook.original<VmtWindowFn>(1)), method_page.addr(0x140));
 }
 #endif
+
+namespace
+{
+    std::atomic<bool> s_parked_callee_reached{false};
+    std::atomic<bool> s_parked_callee_release{false};
+    std::atomic<int> s_parked_result{0};
+    std::atomic<LeafFn> s_parked_original{nullptr};
+
+    /// Parks its caller until the test releases it. The relocated call in the trampoline reaches it.
+    DMK_TEST_NOINLINE int parked_callee() noexcept
+    {
+        s_parked_callee_reached.store(true, std::memory_order_release);
+        while (!s_parked_callee_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        return LEAF_RESULT;
+    }
+
+    /// Chains into the trampoline, so the parked frame returns through the relocated call.
+    DMK_TEST_NOINLINE int parked_detour() noexcept
+    {
+        return s_parked_original.load(std::memory_order_acquire)();
+    }
+
+    /// Plants `sub rsp, 0x28; call [rip+0xF6]; add rsp, 0x28; ret`. The call reads the callee address at offset 0x100.
+    void plant_relocated_call(dmk_test::ScratchPage &page) noexcept
+    {
+        page.put(0, {0x48, 0x83, 0xEC, 0x28, 0xFF, 0x15, 0xF6, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x28, 0xC3});
+        const auto callee = reinterpret_cast<std::uintptr_t>(&parked_callee);
+        std::memcpy(reinterpret_cast<void *>(page.addr(0x100)), &callee, sizeof(callee));
+    }
+
+    /**
+     * @brief Calls a scratch target on its own thread. The callee parks until release_and_join().
+     * @details The destructor releases and joins. abandon() leaves the thread parked for the process lifetime, so it
+     *          never returns into a trampoline that a regressed teardown freed. The thread writes only globals.
+     */
+    class ParkedCaller
+    {
+    public:
+        explicit ParkedCaller(std::uintptr_t target)
+            : m_thread(
+                  [target]
+                  {
+                      s_parked_result.store(
+                          dmk_test::call_unfolded(reinterpret_cast<LeafFn>(target)),
+                          std::memory_order_release
+                      );
+                  }
+              )
+        {
+        }
+
+        ~ParkedCaller() noexcept
+        {
+            if (m_thread.joinable())
+            {
+                (void)release_and_join();
+            }
+        }
+
+        ParkedCaller(const ParkedCaller &) = delete;
+        ParkedCaller &operator=(const ParkedCaller &) = delete;
+        ParkedCaller(ParkedCaller &&) = delete;
+        ParkedCaller &operator=(ParkedCaller &&) = delete;
+
+        /// Releases the callee, joins, and returns the call result.
+        [[nodiscard]] int release_and_join()
+        {
+            s_parked_callee_release.store(true, std::memory_order_release);
+            m_thread.join();
+            return s_parked_result.load(std::memory_order_acquire);
+        }
+
+        void abandon() noexcept { m_thread.detach(); }
+
+    private:
+        std::thread m_thread;
+    };
+} // namespace
+
+// A top restore frees the trampoline only after an idle proof. A thread parked inside the callee of a relocated call
+// returns into the trampoline, so teardown keeps the trampoline as HookResidue. It still releases the module
+// reference, because the restored target reaches no image code.
+TEST(HookBackendRelay, TrampolineFreeWaitsForAParkedThread)
+{
+    using namespace std::chrono_literals;
+    using DetourModKit::diagnostics::intentional_leak_count;
+    using DetourModKit::diagnostics::LeakSubsystem;
+    using DetourModKit::diagnostics::module_pin_count;
+    using DetourModKit::diagnostics::ModulePinReason;
+
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_relocated_call(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    s_parked_callee_reached.store(false, std::memory_order_release);
+    s_parked_callee_release.store(false, std::memory_order_release);
+    s_parked_result.store(0, std::memory_order_release);
+
+    const std::size_t pins_before = module_pin_count(ModulePinReason::Hook);
+    const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::HookManager);
+    const std::size_t residue_before = intentional_leak_count(LeakSubsystem::HookResidue);
+    std::optional<Hook> hook;
+    {
+        Result<Hook> installed = inline_at(
+            InlineRequest{
+                .name = "ParkedTrampoline",
+                .target = Address{page.addr(0)},
+            },
+            reinterpret_cast<void (*)()>(&parked_detour)
+        );
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        hook.emplace(std::move(*installed));
+    }
+    s_parked_original.store(hook->original<LeafFn>(), std::memory_order_release);
+    ASSERT_TRUE(hook->enable().has_value());
+    ASSERT_EQ(module_pin_count(ModulePinReason::Hook), pins_before + 1);
+
+    ParkedCaller caller{page.addr(0)};
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!s_parked_callee_reached.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(s_parked_callee_reached.load(std::memory_order_acquire)) << "the caller never reached the callee";
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Info};
+        hook.reset();
+        text = capture.read_all();
+    }
+    const bool trampoline_kept = intentional_leak_count(LeakSubsystem::HookResidue) == residue_before + 1;
+    if (!trampoline_kept)
+    {
+        // A freed trampoline must never run, so a regressed teardown leaves the caller parked.
+        caller.abandon();
+    }
+    EXPECT_TRUE(trampoline_kept) << "the restore freed a trampoline that a parked thread returns into";
+    EXPECT_EQ(intentional_leak_count(LeakSubsystem::HookManager), leaks_before);
+    EXPECT_EQ(module_pin_count(ModulePinReason::Hook), pins_before);
+    EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    const std::string expected = toggle_warning_prefix("ParkedTrampoline", page) +
+                                 "restored its target and kept its trampoline: route idle proof refused.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+
+    if (trampoline_kept)
+    {
+        // The parked thread returns through the kept trampoline into the restored target.
+        EXPECT_EQ(caller.release_and_join(), LEAF_RESULT);
+        EXPECT_EQ(call_target(page), LEAF_RESULT);
+    }
+    s_parked_original.store(nullptr, std::memory_order_release);
+    // The retained record names this target for process life, so the fixture must not hand the page back.
+    page.abandon();
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    using DetourModKit::detail::BackendCoordinatorCounts;
+    using DetourModKit::detail::BackendProbe;
+    using DetourModKit::detail::BackendProbeKind;
+    using DetourModKit::detail::BackendProbeOperation;
+    using DetourModKit::detail::BackendProbeState;
+
+    constexpr int SUCCESSOR_RESULT = 0x5EEE;
+    constexpr int UPPER_BONUS = 0x100;
+    constexpr std::uint64_t RELAY_CELL_OWNED = 1;
+    constexpr std::uint64_t RELAY_CELL_VACANT = 2;
+    constexpr std::uint16_t RELAY_CELL_LAYOUT = 1;
+    constexpr std::uint64_t RELAY_CELL_SEAL = 0x59414C45524B4D44ULL;
+    constexpr std::uint32_t ROUTE_LIVE = 0;
+    constexpr std::uint32_t ROUTE_CLOSED = 2;
+    constexpr unsigned COORDINATOR_UNAVAILABLE = 1;
+    /// The near patch of the planted leaf covers `mov eax, 1`.
+    constexpr std::size_t NEAR_PATCH_SIZE = 5;
+    /// The far patch covers `FF 25 00000000` and the 8-byte relay address.
+    constexpr std::size_t FAR_PATCH_SIZE = 14;
+    constexpr std::array<std::uint8_t, 6> FAR_JUMP{0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
+
+    /// The footer kinds of relay cell layout 1.
+    enum class RelayCellKind : std::uint16_t
+    {
+        E9 = 1,
+        FF = 2,
+        Mid = 3,
+        Routed = 4,
+    };
+
+    /// The relay cell body of layout 1. Other backend copies read this frozen format.
+    struct RelayCellBody
+    {
+        std::uint64_t state;
+        std::uint64_t identity;
+        std::uint64_t target;
+        std::uint64_t switch_word;
+        std::uint64_t route_word;
+        std::uint32_t original_size;
+        std::uint32_t reserved;
+        std::uint8_t original[32];
+    };
+    static_assert(sizeof(RelayCellBody) == 80);
+
+    /// The 16-byte footer that ends every trampoline with a relay cell.
+    struct RelayCellFooter
+    {
+        std::uint32_t body_offset;
+        std::uint16_t layout;
+        std::uint16_t kind;
+        std::uint64_t seal;
+    };
+    static_assert(sizeof(RelayCellFooter) == 16);
+
+    std::atomic<std::size_t> s_first_mid_calls{0};
+    std::atomic<std::size_t> s_second_mid_calls{0};
+    std::atomic<LeafFn> s_upper_original{nullptr};
+
+    DMK_TEST_NOINLINE int successor_detour() noexcept
+    {
+        return SUCCESSOR_RESULT;
+    }
+
+    /// Chains into the newer trampoline, whose relocated jump reaches the lower relay.
+    DMK_TEST_NOINLINE int upper_chaining_detour() noexcept
+    {
+        return s_upper_original.load(std::memory_order_acquire)() + UPPER_BONUS;
+    }
+
+    // The mid stub passes its context in the first argument register, so a pointer parameter matches its call.
+    DMK_TEST_NOINLINE void first_mid_callback(void *) noexcept
+    {
+        s_first_mid_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    DMK_TEST_NOINLINE void second_mid_callback(void *) noexcept
+    {
+        s_second_mid_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    template <class Function> [[nodiscard]] void *code_address(Function *function) noexcept
+    {
+        return reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(function));
+    }
+
+    [[nodiscard]] std::uintptr_t address_of(const void *pointer) noexcept
+    {
+        return reinterpret_cast<std::uintptr_t>(pointer);
+    }
+
+    [[nodiscard]] std::uint64_t read_word(std::uintptr_t address) noexcept
+    {
+        std::uint64_t value = 0;
+        std::memcpy(&value, reinterpret_cast<const void *>(address), sizeof(value));
+        return value;
+    }
+
+    void write_word(std::uintptr_t address, std::uint64_t value) noexcept
+    {
+        std::memcpy(reinterpret_cast<void *>(address), &value, sizeof(value));
+    }
+
+    [[nodiscard]] std::uint32_t read_route_state(std::uintptr_t address) noexcept
+    {
+        std::uint32_t value = 0;
+        std::memcpy(&value, reinterpret_cast<const void *>(address), sizeof(value));
+        return value;
+    }
+
+    void write_route_state(std::uintptr_t address, std::uint32_t value) noexcept
+    {
+        std::memcpy(reinterpret_cast<void *>(address), &value, sizeof(value));
+    }
+
+    [[nodiscard]] RelayCellBody read_relay_cell(const void *cell) noexcept
+    {
+        RelayCellBody body{};
+        std::memcpy(&body, cell, sizeof(body));
+        return body;
+    }
+
+    void write_relay_cell(void *cell, const RelayCellBody &body) noexcept
+    {
+        std::memcpy(cell, &body, sizeof(body));
+    }
+
+    [[nodiscard]] RelayCellFooter read_footer(const std::uint8_t *footer_address) noexcept
+    {
+        RelayCellFooter footer{};
+        std::memcpy(&footer, footer_address, sizeof(footer));
+        return footer;
+    }
+
+    void write_footer(std::uint8_t *footer_address, const RelayCellFooter &footer) noexcept
+    {
+        std::memcpy(footer_address, &footer, sizeof(footer));
+    }
+
+    /**
+     * @brief Returns the sealed footer after the cell body at @p cell, or nullptr when no candidate carries the seal.
+     * @details Up to seven spare bytes separate the body from the footer that ends the allocation. The scan stops at
+     *          the first sealed candidate, so it never reads past the allocation.
+     */
+    [[nodiscard]] std::uint8_t *find_relay_cell_footer(void *cell) noexcept
+    {
+        std::uint8_t *const body_end = static_cast<std::uint8_t *>(cell) + sizeof(RelayCellBody);
+        for (std::size_t spare = 0; spare < alignof(std::uint64_t); ++spare)
+        {
+            std::uint8_t *const candidate = body_end + spare;
+            const std::uintptr_t seal_address = address_of(candidate + offsetof(RelayCellFooter, seal));
+            if (read_footer(candidate).seal == (RELAY_CELL_SEAL ^ seal_address))
+            {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }
+
+    /// The identity that a position claim derives from @p name: 64-bit FNV-1a, with 1 in place of 0.
+    [[nodiscard]] constexpr std::uint64_t position_identity(std::string_view name) noexcept
+    {
+        std::uint64_t hash = 0xCBF29CE484222325ULL;
+        for (const char character : name)
+        {
+            hash ^= static_cast<std::uint8_t>(character);
+            hash *= 0x100000001B3ULL;
+        }
+        return hash != 0 ? hash : 1;
+    }
+
+    /// Returns the slot that the relay behind a near or far target patch reads, or 0 for any other shape.
+    [[nodiscard]] std::uintptr_t relay_slot_from_target(std::uintptr_t target) noexcept
+    {
+        const auto *const bytes = reinterpret_cast<const std::uint8_t *>(target);
+        std::uintptr_t relay = 0;
+        if (bytes[0] == 0xE9)
+        {
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement, bytes + 1, sizeof(displacement));
+            relay = target + 5 + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(displacement));
+        }
+        else if (std::equal(FAR_JUMP.begin(), FAR_JUMP.end(), bytes, bytes + FAR_JUMP.size()))
+        {
+            relay = read_word(target + FAR_JUMP.size());
+        }
+        if (relay == 0)
+        {
+            return 0;
+        }
+        const auto *const relay_bytes = reinterpret_cast<const std::uint8_t *>(relay);
+        if (relay_bytes[0] != 0xFF || relay_bytes[1] != 0x25)
+        {
+            return 0;
+        }
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, relay_bytes + 2, sizeof(displacement));
+        return relay + 6 + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(displacement));
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> page_bytes(const dmk_test::ScratchPage &page)
+    {
+        const auto *const begin = static_cast<const std::uint8_t *>(page.base());
+        return std::vector<std::uint8_t>(begin, begin + dmk_test::ScratchPage::PAGE_SIZE);
+    }
+
+    [[nodiscard]] const char *probe_kind_label(BackendProbeKind kind) noexcept
+    {
+        switch (kind)
+        {
+        case BackendProbeKind::Inline:
+            return "inline";
+        case BackendProbeKind::Mid:
+            return "mid";
+        case BackendProbeKind::Routed:
+            return "routed";
+        }
+        return "unknown";
+    }
+
+    /// The destination of the first generation on a position: DETOUR_RESULT, or the first mid callback.
+    [[nodiscard]] void *first_destination(BackendProbeKind kind) noexcept
+    {
+        return kind == BackendProbeKind::Mid ? code_address(&first_mid_callback) : code_address(&detour_leaf);
+    }
+
+    /// The destination of a successor generation: SUCCESSOR_RESULT, or the second mid callback.
+    [[nodiscard]] void *second_destination(BackendProbeKind kind) noexcept
+    {
+        return kind == BackendProbeKind::Mid ? code_address(&second_mid_callback) : code_address(&successor_detour);
+    }
+
+    [[nodiscard]] BackendCoordinatorCounts coordinator_counts() noexcept
+    {
+        return DetourModKit::detail::backend_coordinator_counts_for_test();
+    }
+
+    [[nodiscard]] ::testing::AssertionResult
+    counts_equal(const BackendCoordinatorCounts &actual, const BackendCoordinatorCounts &expected)
+    {
+        if (actual.live == expected.live && actual.retained == expected.retained && actual.vacant == expected.vacant &&
+            actual.free == expected.free)
+        {
+            return ::testing::AssertionSuccess();
+        }
+        return ::testing::AssertionFailure()
+               << "records (live, retained, vacant, free) are (" << actual.live << ", " << actual.retained << ", "
+               << actual.vacant << ", " << actual.free << "), expected (" << expected.live << ", " << expected.retained
+               << ", " << expected.vacant << ", " << expected.free << ")";
+    }
+
+    /// Owns one raw backend probe and destroys it through the backend destructor.
+    class ProbeHandle
+    {
+    public:
+        ProbeHandle() = default;
+        explicit ProbeHandle(BackendProbe *probe) noexcept : m_probe(probe) {}
+        ~ProbeHandle() noexcept { reset(); }
+
+        ProbeHandle(ProbeHandle &&other) noexcept : m_probe(std::exchange(other.m_probe, nullptr)) {}
+        ProbeHandle &operator=(ProbeHandle &&other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                m_probe = std::exchange(other.m_probe, nullptr);
+            }
+            return *this;
+        }
+        ProbeHandle(const ProbeHandle &) = delete;
+        ProbeHandle &operator=(const ProbeHandle &) = delete;
+
+        [[nodiscard]] explicit operator bool() const noexcept { return m_probe != nullptr; }
+
+        [[nodiscard]] bool drive(BackendProbeOperation operation) const noexcept
+        {
+            return m_probe != nullptr && DetourModKit::detail::drive_backend_probe_for_test(m_probe, operation);
+        }
+
+        [[nodiscard]] BackendProbeState state() const noexcept
+        {
+            return m_probe != nullptr ? DetourModKit::detail::backend_probe_state_for_test(m_probe)
+                                      : BackendProbeState{};
+        }
+
+        void reset() noexcept
+        {
+            if (m_probe != nullptr)
+            {
+                DetourModKit::detail::destroy_backend_probe_for_test(std::exchange(m_probe, nullptr));
+            }
+        }
+
+    private:
+        BackendProbe *m_probe{nullptr};
+    };
+
+    [[nodiscard]] ProbeHandle
+    create_probe(BackendProbeKind kind, std::uintptr_t target, void *destination, std::string_view name) noexcept
+    {
+        return ProbeHandle{DetourModKit::detail::create_backend_probe_for_test(
+            kind,
+            reinterpret_cast<void *>(target),
+            destination,
+            name
+        )};
+    }
+
+    /// Makes the next inline setup take its far path, and clears an unconsumed request at scope exit.
+    class FarHookScope
+    {
+    public:
+        explicit FarHookScope(bool use_far_path = true) noexcept
+        {
+            DetourModKit::detail::force_backend_ff_hook_for_test(use_far_path);
+        }
+        ~FarHookScope() noexcept { DetourModKit::detail::force_backend_ff_hook_for_test(false); }
+        FarHookScope(const FarHookScope &) = delete;
+        FarHookScope &operator=(const FarHookScope &) = delete;
+        FarHookScope(FarHookScope &&) = delete;
+        FarHookScope &operator=(FarHookScope &&) = delete;
+    };
+
+    /// Makes every setup in scope emit the earlier trampoline shape, which has no relay cell.
+    class RelayCellOmissionScope
+    {
+    public:
+        RelayCellOmissionScope() noexcept { DetourModKit::detail::omit_backend_relay_cell_for_test(true); }
+        ~RelayCellOmissionScope() noexcept { DetourModKit::detail::omit_backend_relay_cell_for_test(false); }
+        RelayCellOmissionScope(const RelayCellOmissionScope &) = delete;
+        RelayCellOmissionScope &operator=(const RelayCellOmissionScope &) = delete;
+        RelayCellOmissionScope(RelayCellOmissionScope &&) = delete;
+        RelayCellOmissionScope &operator=(RelayCellOmissionScope &&) = delete;
+    };
+
+    /// Refuses the process coordinator for the scope.
+    class CoordinatorRefusalScope
+    {
+    public:
+        explicit CoordinatorRefusalScope(unsigned refusal) noexcept
+        {
+            DetourModKit::detail::set_backend_coordinator_refusal_for_test(refusal);
+        }
+        ~CoordinatorRefusalScope() noexcept { DetourModKit::detail::set_backend_coordinator_refusal_for_test(0); }
+        CoordinatorRefusalScope(const CoordinatorRefusalScope &) = delete;
+        CoordinatorRefusalScope &operator=(const CoordinatorRefusalScope &) = delete;
+        CoordinatorRefusalScope(CoordinatorRefusalScope &&) = delete;
+        CoordinatorRefusalScope &operator=(CoordinatorRefusalScope &&) = delete;
+    };
+
+    /**
+     * @brief Commits one read-write page above @p floor and within 2 GB of it, and frees it at scope exit.
+     * @details A 32-bit offset from any address at or below @p floor then reaches the page exactly.
+     */
+    class ReadWritePageAbove
+    {
+    public:
+        explicit ReadWritePageAbove(std::uintptr_t floor) noexcept
+        {
+            constexpr std::uintptr_t MAX_DISTANCE = 0x7FFF'0000;
+            SYSTEM_INFO system_info{};
+            GetSystemInfo(&system_info);
+            const std::uintptr_t granule = system_info.dwAllocationGranularity;
+            for (std::uintptr_t candidate = (floor + granule) & ~(granule - 1);
+                 m_base == nullptr && candidate - floor < MAX_DISTANCE;
+                 candidate += granule)
+            {
+                m_base = VirtualAlloc(
+                    reinterpret_cast<void *>(candidate),
+                    dmk_test::ScratchPage::PAGE_SIZE,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE
+                );
+            }
+        }
+        ~ReadWritePageAbove() noexcept
+        {
+            if (m_base != nullptr)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+        ReadWritePageAbove(const ReadWritePageAbove &) = delete;
+        ReadWritePageAbove &operator=(const ReadWritePageAbove &) = delete;
+        ReadWritePageAbove(ReadWritePageAbove &&) = delete;
+        ReadWritePageAbove &operator=(ReadWritePageAbove &&) = delete;
+
+        /// The page start, or 0 when no granule above the floor was free.
+        [[nodiscard]] std::uintptr_t address() const noexcept { return address_of(m_base); }
+
+    private:
+        void *m_base{nullptr};
+    };
+
+    /// Publishes the newer trampoline that upper_chaining_detour calls, and clears it at scope exit.
+    class UpperOriginalScope
+    {
+    public:
+        explicit UpperOriginalScope(void *trampoline) noexcept
+        {
+            s_upper_original.store(reinterpret_cast<LeafFn>(address_of(trampoline)), std::memory_order_release);
+        }
+        ~UpperOriginalScope() noexcept { s_upper_original.store(nullptr, std::memory_order_release); }
+        UpperOriginalScope(const UpperOriginalScope &) = delete;
+        UpperOriginalScope &operator=(const UpperOriginalScope &) = delete;
+        UpperOriginalScope(UpperOriginalScope &&) = delete;
+        UpperOriginalScope &operator=(UpperOriginalScope &&) = delete;
+    };
+
+    /// Calls one scratch target on several threads until stopped, and counts each result outside two allowed values.
+    class TargetCallers
+    {
+    public:
+        TargetCallers(std::uintptr_t target, int first, int second, std::size_t thread_count)
+        {
+            m_threads.reserve(thread_count);
+            for (std::size_t index = 0; index < thread_count; ++index)
+            {
+                m_threads.emplace_back(
+                    [this, target, first, second](std::stop_token stop_request) noexcept
+                    {
+                        const auto entry = reinterpret_cast<LeafFn>(target);
+                        while (!stop_request.stop_requested())
+                        {
+                            const int result = dmk_test::call_unfolded(entry);
+                            if (result != first && result != second)
+                            {
+                                m_unexpected.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            m_calls.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                );
+            }
+        }
+
+        TargetCallers(const TargetCallers &) = delete;
+        TargetCallers &operator=(const TargetCallers &) = delete;
+        TargetCallers(TargetCallers &&) = delete;
+        TargetCallers &operator=(TargetCallers &&) = delete;
+
+        /// Waits up to 10 seconds for @p minimum calls in total.
+        [[nodiscard]] bool wait_for_calls(std::size_t minimum) const noexcept
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            while (m_calls.load(std::memory_order_relaxed) < minimum)
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    return false;
+                }
+                std::this_thread::yield();
+            }
+            return true;
+        }
+
+        void stop()
+        {
+            for (std::jthread &thread : m_threads)
+            {
+                thread.request_stop();
+            }
+            for (std::jthread &thread : m_threads)
+            {
+                if (thread.joinable())
+                {
+                    thread.join();
+                }
+            }
+        }
+
+        [[nodiscard]] std::size_t calls() const noexcept { return m_calls.load(std::memory_order_relaxed); }
+        [[nodiscard]] std::size_t unexpected() const noexcept { return m_unexpected.load(std::memory_order_relaxed); }
+
+    private:
+        std::atomic<std::size_t> m_calls{0};
+        std::atomic<std::size_t> m_unexpected{0};
+        std::vector<std::jthread> m_threads;
+    };
+
+    /// One fresh position that its owner switched off and vacated for a same-name successor.
+    struct VacantPosition
+    {
+        /// The owner state after the arm, before the vacate made the owner inert.
+        BackendProbeState state;
+        PrologueSpan armed;
+    };
+
+    /// Arms a fresh probe, switches it off, and vacates its position. The inert owner is destroyed on return.
+    [[nodiscard]] std::optional<VacantPosition> vacate_fresh_position(
+        BackendProbeKind kind,
+        dmk_test::ScratchPage &page,
+        void *destination,
+        std::string_view name
+    ) noexcept
+    {
+        ProbeHandle owner = create_probe(kind, page.addr(0), destination, name);
+        if (!owner || !owner.drive(BackendProbeOperation::Enable))
+        {
+            return std::nullopt;
+        }
+        const VacantPosition position{owner.state(), read_prologue_span(page)};
+        if (position.state.relay_cell == nullptr || !owner.drive(BackendProbeOperation::Bypass) ||
+            !owner.drive(BackendProbeOperation::Vacate))
+        {
+            return std::nullopt;
+        }
+        return position;
+    }
+
+    enum class ClaimOutcome : std::uint8_t
+    {
+        CreateFailed,
+        Fresh,
+        Claimed,
+    };
+
+    /// Creates one successor probe, reports whether it claimed, and destroys it. A claim vacates the cell again.
+    [[nodiscard]] ClaimOutcome
+    claim_outcome(BackendProbeKind kind, std::uintptr_t target, std::string_view name) noexcept
+    {
+        const ProbeHandle successor = create_probe(kind, target, second_destination(kind), name);
+        if (!successor)
+        {
+            return ClaimOutcome::CreateFailed;
+        }
+        return successor.state().claimed ? ClaimOutcome::Claimed : ClaimOutcome::Fresh;
+    }
+
+    /**
+     * @brief Destroys fresh, never-armed probes on one target, newest first.
+     * @details Only the newest record passes the arm check, so each pass arms, restores, and destroys the one probe
+     *          whose Enable succeeds. An older probe destroyed first retains its record.
+     */
+    void destroy_newest_first(std::vector<ProbeHandle> &fresh_layers)
+    {
+        while (!fresh_layers.empty())
+        {
+            const auto newest = std::find_if(
+                fresh_layers.begin(),
+                fresh_layers.end(),
+                [](const ProbeHandle &layer) { return layer.drive(BackendProbeOperation::Enable); }
+            );
+            ASSERT_NE(newest, fresh_layers.end()) << "no fresh layer passed the arm check";
+            EXPECT_TRUE(newest->drive(BackendProbeOperation::Disable));
+            fresh_layers.erase(newest);
+        }
+    }
+
+    enum class RouteReached : std::uint8_t
+    {
+        None,
+        First,
+        Second,
+        Unexpected,
+    };
+
+    /// Calls the target once and names the probe destination that ran.
+    [[nodiscard]] RouteReached route_reached(BackendProbeKind kind, dmk_test::ScratchPage &page) noexcept
+    {
+        const std::size_t first_before = s_first_mid_calls.load(std::memory_order_relaxed);
+        const std::size_t second_before = s_second_mid_calls.load(std::memory_order_relaxed);
+        const int result = call_target(page);
+        if (kind != BackendProbeKind::Mid)
+        {
+            return result == LEAF_RESULT        ? RouteReached::None
+                   : result == DETOUR_RESULT    ? RouteReached::First
+                   : result == SUCCESSOR_RESULT ? RouteReached::Second
+                                                : RouteReached::Unexpected;
+        }
+        // A mid callback returns into the original code, so only the callback counters tell the paths apart.
+        const bool first = s_first_mid_calls.load(std::memory_order_relaxed) != first_before;
+        const bool second = s_second_mid_calls.load(std::memory_order_relaxed) != second_before;
+        if (result != LEAF_RESULT || (first && second))
+        {
+            return RouteReached::Unexpected;
+        }
+        return first ? RouteReached::First : second ? RouteReached::Second : RouteReached::None;
+    }
+} // namespace
+
+// An atomic retarget needs one aligned 8-byte word. Every path into the detour crosses that word, for the near and the
+// far patch alike.
+TEST(HookBackendRelay, SlotIsEightByteAligned)
+{
+    for (const bool use_far_path : {false, true})
+    {
+        SCOPED_TRACE(use_far_path ? "far" : "near");
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+
+        std::optional<Result<Hook>> installed;
+        {
+            const FarHookScope far_hook{use_far_path};
+            installed.emplace(install_leaf(page, use_far_path ? "RelaySlotFar" : "RelaySlotNear"));
+        }
+        ASSERT_TRUE(installed->has_value()) << installed->error().message();
+        Hook hook = std::move(**installed);
+        ASSERT_TRUE(hook.enable().has_value());
+
+        const std::uintptr_t slot = relay_slot_from_target(page.addr(0));
+        ASSERT_NE(slot, 0u) << "the target patch does not lead to an FF 25 relay";
+        EXPECT_EQ(slot % alignof(std::uint64_t), 0u);
+        EXPECT_EQ(read_word(slot), address_of(code_address(&detour_leaf)));
+        EXPECT_EQ(call_target(page), DETOUR_RESULT);
+        ASSERT_TRUE(hook.disable().has_value());
+        EXPECT_EQ(call_target(page), LEAF_RESULT);
+    }
+}
+
+// A lower layer switches its relay under a newer layer while callers run through both. A thread at the relay reads
+// one aligned word, so every call reaches the old or the new destination, never a torn one.
+TEST(HookBackendRelay, ConcurrentCallersSeeOnlyTheOldOrNewTarget)
+{
+    constexpr std::size_t CALLER_THREADS = 4;
+    constexpr std::size_t SWITCH_ROUNDS = 50000;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    {
+        const ProbeHandle lower =
+            create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "RelayStressLower");
+        ASSERT_TRUE(lower);
+        ASSERT_TRUE(lower.drive(BackendProbeOperation::Enable));
+        const ProbeHandle upper = create_probe(
+            BackendProbeKind::Inline,
+            page.addr(0),
+            code_address(&upper_chaining_detour),
+            "RelayStressUpper"
+        );
+        ASSERT_TRUE(upper);
+        const UpperOriginalScope chained{upper.state().trampoline};
+        ASSERT_TRUE(upper.drive(BackendProbeOperation::Enable));
+        ASSERT_EQ(call_target(page), DETOUR_RESULT + UPPER_BONUS);
+
+        {
+            TargetCallers callers{page.addr(0), LEAF_RESULT + UPPER_BONUS, DETOUR_RESULT + UPPER_BONUS, CALLER_THREADS};
+            ASSERT_TRUE(callers.wait_for_calls(CALLER_THREADS * 16)) << "the callers never started";
+            for (std::size_t round = 0; round < SWITCH_ROUNDS; ++round)
+            {
+                ASSERT_TRUE(lower.drive(BackendProbeOperation::Bypass));
+                ASSERT_TRUE(lower.drive(BackendProbeOperation::Resume));
+            }
+            callers.stop();
+            EXPECT_EQ(callers.unexpected(), 0u) << "of " << callers.calls() << " calls";
+            EXPECT_GT(callers.calls(), CALLER_THREADS * 16);
+        }
+
+        ASSERT_TRUE(lower.drive(BackendProbeOperation::Bypass));
+        EXPECT_EQ(call_target(page), LEAF_RESULT + UPPER_BONUS);
+        ASSERT_TRUE(lower.drive(BackendProbeOperation::Resume));
+        EXPECT_EQ(call_target(page), DETOUR_RESULT + UPPER_BONUS);
+    }
+    // The newer probe is destroyed first, so each restore runs as the top layer.
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// The far patch jumps to a relay inside the trampoline. The target holds the relay address, never the detour, so its
+// retarget point never lies in the target page.
+TEST(HookBackendRelay, FarHookRoutesThroughItsRelay)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    ProbeHandle far_probe;
+    {
+        const FarHookScope far_hook;
+        far_probe = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "FarRelay");
+    }
+    ASSERT_TRUE(far_probe);
+    ASSERT_TRUE(far_probe.drive(BackendProbeOperation::Enable));
+    const BackendProbeState state = far_probe.state();
+    ASSERT_NE(state.relay_slot, nullptr);
+
+    const auto *const target = reinterpret_cast<const std::uint8_t *>(page.addr(0));
+    EXPECT_TRUE(std::equal(FAR_JUMP.begin(), FAR_JUMP.end(), target, target + FAR_JUMP.size()));
+    const std::uintptr_t relay = read_word(page.addr(FAR_JUMP.size()));
+    EXPECT_NE(relay, address_of(code_address(&detour_leaf)));
+    EXPECT_GE(relay, address_of(state.trampoline));
+    EXPECT_LT(relay, address_of(state.relay_slot));
+    EXPECT_EQ(relay_slot_from_target(page.addr(0)), address_of(state.relay_slot));
+    EXPECT_EQ(read_word(address_of(state.relay_slot)), address_of(code_address(&detour_leaf)));
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+
+    const PrologueSpan armed = read_prologue_span(page);
+    ASSERT_TRUE(far_probe.drive(BackendProbeOperation::Bypass));
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_EQ(read_prologue_span(page), armed);
+    ASSERT_TRUE(far_probe.drive(BackendProbeOperation::Resume));
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+
+    ASSERT_TRUE(far_probe.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// A switch is one store into the relay slot. It writes no target byte, changes no page protection, and flushes no
+// instruction cache.
+TEST(HookBackendRelay, BypassWritesNoTargetByte)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const ProbeHandle probe =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "BypassNoTargetWrite");
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Enable));
+    const BackendProbeState armed_state = probe.state();
+    ASSERT_NE(armed_state.relay_slot, nullptr);
+    const std::vector<std::uint8_t> armed = page_bytes(page);
+
+    const auto expect_switch_without_write = [&](BackendProbeOperation operation, std::uint64_t slot_value, int result)
+    {
+        DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+        const std::size_t protects_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
+        ASSERT_TRUE(probe.drive(operation));
+        EXPECT_EQ(DetourModKit::detail::backend_trap_protect_calls_for_test(), protects_before);
+        EXPECT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 0u);
+        EXPECT_EQ(page_bytes(page), armed);
+        EXPECT_EQ(read_word(address_of(armed_state.relay_slot)), slot_value);
+        EXPECT_EQ(call_target(page), result);
+    };
+
+    expect_switch_without_write(BackendProbeOperation::Bypass, address_of(armed_state.trampoline), LEAF_RESULT);
+    EXPECT_TRUE(probe.state().bypassed);
+    EXPECT_TRUE(probe.state().enabled);
+    expect_switch_without_write(BackendProbeOperation::Resume, address_of(code_address(&detour_leaf)), DETOUR_RESULT);
+    EXPECT_FALSE(probe.state().bypassed);
+}
+
+// Every emitted trampoline ends with a sealed relay cell that names its position: the near, far, mid, and routed
+// kinds.
+TEST(HookBackendRelayCell, FooterSealsEveryTrampolineKind)
+{
+    struct KindCase
+    {
+        const char *name;
+        BackendProbeKind kind;
+        bool use_far_path;
+        RelayCellKind footer_kind;
+        std::size_t window;
+    };
+    const std::array<KindCase, 4> cases{{
+        {"RelayCellNear", BackendProbeKind::Inline, false, RelayCellKind::E9, NEAR_PATCH_SIZE},
+        {"RelayCellFar", BackendProbeKind::Inline, true, RelayCellKind::FF, FAR_PATCH_SIZE},
+        {"RelayCellMid", BackendProbeKind::Mid, false, RelayCellKind::Mid, NEAR_PATCH_SIZE},
+        {"RelayCellRouted", BackendProbeKind::Routed, false, RelayCellKind::Routed, NEAR_PATCH_SIZE},
+    }};
+    for (const KindCase &kind_case : cases)
+    {
+        SCOPED_TRACE(kind_case.name);
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        const PrologueSpan pristine = read_prologue_span(page);
+        void *const destination = first_destination(kind_case.kind);
+
+        ProbeHandle probe;
+        {
+            const FarHookScope far_hook{kind_case.use_far_path};
+            probe = create_probe(kind_case.kind, page.addr(0), destination, kind_case.name);
+        }
+        ASSERT_TRUE(probe);
+        const BackendProbeState state = probe.state();
+        ASSERT_NE(state.trampoline, nullptr);
+        ASSERT_NE(state.relay_cell, nullptr);
+        EXPECT_EQ(address_of(state.relay_cell) % alignof(std::uint64_t), 0u);
+
+        const RelayCellBody body = read_relay_cell(state.relay_cell);
+        EXPECT_EQ(body.state, RELAY_CELL_OWNED);
+        EXPECT_EQ(body.identity, position_identity(kind_case.name));
+        EXPECT_EQ(body.target, page.addr(0));
+        ASSERT_EQ(body.original_size, kind_case.window);
+        EXPECT_EQ(std::memcmp(body.original, pristine.data(), kind_case.window), 0);
+        if (kind_case.kind == BackendProbeKind::Inline)
+        {
+            // The switch word is the relay slot, and the body follows it.
+            EXPECT_EQ(body.switch_word, address_of(state.relay_slot));
+            EXPECT_EQ(address_of(state.relay_cell), address_of(state.relay_slot) + sizeof(std::uint64_t));
+            EXPECT_EQ(body.route_word, 0u);
+        }
+        else
+        {
+            // The switch word is the route state, and the route word holds this generation's destination.
+            ASSERT_NE(body.switch_word, 0u);
+            ASSERT_NE(body.route_word, 0u);
+            EXPECT_EQ(read_word(body.route_word), address_of(destination));
+        }
+
+        const std::uint8_t *const footer_address = find_relay_cell_footer(state.relay_cell);
+        ASSERT_NE(footer_address, nullptr) << "no sealed footer follows the cell body";
+        const RelayCellFooter footer = read_footer(footer_address);
+        EXPECT_EQ(footer.layout, RELAY_CELL_LAYOUT);
+        EXPECT_EQ(footer.kind, static_cast<std::uint16_t>(kind_case.footer_kind));
+        EXPECT_EQ(footer.body_offset, address_of(state.relay_cell) - address_of(state.trampoline));
+    }
+}
+
+// A trampoline without a relay cell has the earlier shape. No seal ends it, so it cannot switch or vacate, and a
+// same-name successor installs fresh on top of it.
+TEST(HookBackendRelayCell, SealRejectsALegacyTrampoline)
+{
+    constexpr std::string_view NAME = "LegacyRelayCell";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    ProbeHandle legacy;
+    {
+        const RelayCellOmissionScope omission;
+        legacy = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), NAME);
+    }
+    ASSERT_TRUE(legacy);
+    const BackendProbeState state = legacy.state();
+    EXPECT_EQ(state.relay_cell, nullptr);
+    ASSERT_NE(state.relay_slot, nullptr);
+    ASSERT_TRUE(legacy.drive(BackendProbeOperation::Enable));
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    const PrologueSpan armed = read_prologue_span(page);
+
+    // The earlier shape ends with its relay slot, so its last 16 bytes are relay code and data, never a seal.
+    const std::uintptr_t allocation_end = address_of(state.relay_slot) + sizeof(std::uint64_t);
+    const RelayCellFooter tail = read_footer(reinterpret_cast<const std::uint8_t *>(allocation_end - sizeof(tail)));
+    EXPECT_NE(tail.seal, RELAY_CELL_SEAL ^ (allocation_end - sizeof(std::uint64_t)));
+    EXPECT_FALSE(legacy.drive(BackendProbeOperation::Bypass));
+    EXPECT_FALSE(legacy.drive(BackendProbeOperation::Vacate));
+    EXPECT_FALSE(legacy.state().bypassed);
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+
+    const BackendCoordinatorCounts counts_before = coordinator_counts();
+    {
+        const ProbeHandle successor =
+            create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), NAME);
+        ASSERT_TRUE(successor);
+        EXPECT_FALSE(successor.state().claimed);
+        // The seam scope ended, so the successor carries a cell of its own.
+        EXPECT_NE(successor.state().relay_cell, nullptr);
+        BackendCoordinatorCounts layered = counts_before;
+        ++layered.live;
+        --layered.free;
+        EXPECT_TRUE(counts_equal(coordinator_counts(), layered));
+    }
+    EXPECT_TRUE(counts_equal(coordinator_counts(), counts_before));
+    EXPECT_EQ(read_prologue_span(page), armed);
+
+    legacy.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// A vacate turns the cell Vacant and leaves the object inert. The record stays live, enabled, and unretained, and the
+// target patch stays in the chain with its relay on the trampoline.
+TEST(HookBackendRelayCell, VacateKeepsTheRecordLiveEnabledAndUnretained)
+{
+    constexpr std::string_view NAME = "VacateKeepsRecord";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    ProbeHandle owner = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(owner);
+    const BackendProbeState created = owner.state();
+    ASSERT_NE(created.relay_cell, nullptr);
+
+    // A fresh hook owns a position only while its committed patch is switched off. An unarmed or a live relay refuses.
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+    EXPECT_FALSE(owner.drive(BackendProbeOperation::Vacate));
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Enable));
+    EXPECT_FALSE(owner.drive(BackendProbeOperation::Vacate));
+    EXPECT_EQ(read_relay_cell(created.relay_cell).state, RELAY_CELL_OWNED);
+
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+    const PrologueSpan armed = read_prologue_span(page);
+    const BackendCoordinatorCounts before = coordinator_counts();
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Vacate));
+    BackendCoordinatorCounts vacant_counts = before;
+    ++vacant_counts.vacant;
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    EXPECT_EQ(read_relay_cell(created.relay_cell).state, RELAY_CELL_VACANT);
+    const BackendProbeState vacated = owner.state();
+    EXPECT_FALSE(vacated.valid);
+    EXPECT_FALSE(vacated.enabled);
+    EXPECT_EQ(vacated.relay_cell, nullptr);
+    EXPECT_EQ(read_prologue_span(page), armed);
+    EXPECT_EQ(read_word(address_of(created.relay_slot)), address_of(created.trampoline));
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+
+    // The inert object writes and frees nothing at destruction.
+    owner.reset();
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    EXPECT_EQ(read_prologue_span(page), armed);
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+
+    // A claim accepts only an enabled, unretained record, so a same-name successor proves both flags.
+    {
+        const ProbeHandle successor =
+            create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), NAME);
+        ASSERT_TRUE(successor);
+        EXPECT_TRUE(successor.state().claimed);
+        EXPECT_EQ(successor.state().trampoline, created.trampoline);
+    }
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    // The position stays in the target's chain for process life, so the fixture must not hand the page back.
+    page.abandon();
+}
+
+// A claim adopts the vacated trampoline by one state change. It writes no target byte and no record, and the claimed
+// object toggles by stores into the relay slot alone.
+TEST(HookBackendRelayCell, ClaimWritesNoTargetByteAndNoRecord)
+{
+    constexpr std::string_view NAME = "ClaimNoWrite";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const std::optional<VacantPosition> position =
+        vacate_fresh_position(BackendProbeKind::Inline, page, code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(position.has_value());
+    const BackendCoordinatorCounts vacant_counts = coordinator_counts();
+    BackendCoordinatorCounts claimed_counts = vacant_counts;
+    --claimed_counts.vacant;
+    const std::vector<std::uint8_t> armed = page_bytes(page);
+
+    DetourModKit::detail::reset_backend_instruction_flush_trace_for_test();
+    const std::size_t protects_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
+    ProbeHandle successor = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), NAME);
+    ASSERT_TRUE(successor);
+    const BackendProbeState state = successor.state();
+    EXPECT_TRUE(state.claimed);
+    EXPECT_FALSE(state.enabled);
+    EXPECT_TRUE(state.bypassed);
+    EXPECT_EQ(state.trampoline, position->state.trampoline);
+    EXPECT_EQ(state.relay_slot, position->state.relay_slot);
+    EXPECT_EQ(state.relay_cell, position->state.relay_cell);
+    EXPECT_EQ(read_relay_cell(position->state.relay_cell).state, RELAY_CELL_OWNED);
+    EXPECT_TRUE(counts_equal(coordinator_counts(), claimed_counts));
+    EXPECT_EQ(page_bytes(page), armed);
+
+    ASSERT_TRUE(successor.drive(BackendProbeOperation::Enable));
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+    ASSERT_TRUE(successor.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_EQ(page_bytes(page), armed);
+    EXPECT_TRUE(counts_equal(coordinator_counts(), claimed_counts));
+    EXPECT_EQ(DetourModKit::detail::backend_trap_protect_calls_for_test(), protects_before);
+    EXPECT_EQ(DetourModKit::detail::backend_instruction_flush_trace_size_for_test(), 0u);
+
+    successor.reset();
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    EXPECT_EQ(page_bytes(page), armed);
+    EXPECT_EQ(read_relay_cell(position->state.relay_cell).state, RELAY_CELL_VACANT);
+    page.abandon();
+}
+
+// Each sub-case breaks one claim check and keeps every other check satisfied, sees a fresh install in place of the
+// claim, and repairs the check. A control claim after each repair shows that the broken check alone refused.
+TEST(HookBackendRelayCell, ClaimRefusesEachFailedPrecondition)
+{
+    constexpr std::string_view NAME = "ClaimRefusal";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::optional<VacantPosition> position =
+        vacate_fresh_position(BackendProbeKind::Inline, page, code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(position.has_value());
+    auto *const cell = static_cast<std::uint8_t *>(position->state.relay_cell);
+    std::uint8_t *const footer_address = find_relay_cell_footer(cell);
+    ASSERT_NE(footer_address, nullptr);
+    const RelayCellBody body = read_relay_cell(cell);
+    const RelayCellFooter footer = read_footer(footer_address);
+    // The body, the spare bytes, and the footer run to the trampoline end.
+    std::uint8_t *const trampoline_end = footer_address + sizeof(RelayCellFooter);
+    const std::vector<std::uint8_t> cell_bytes(cell, trampoline_end);
+    const std::uintptr_t slot = address_of(position->state.relay_slot);
+    ASSERT_EQ(body.state, RELAY_CELL_VACANT);
+    ASSERT_EQ(claim_outcome(BackendProbeKind::Inline, page.addr(0), NAME), ClaimOutcome::Claimed);
+
+    const auto restore_cell = [&] { std::memcpy(cell, cell_bytes.data(), cell_bytes.size()); };
+    const auto expect_refused_until_repaired = [&](const char *check, const auto &break_check, const auto &repair)
+    {
+        SCOPED_TRACE(check);
+        break_check();
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, page.addr(0), NAME), ClaimOutcome::Fresh);
+        repair();
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, page.addr(0), NAME), ClaimOutcome::Claimed);
+    };
+
+    {
+        SCOPED_TRACE("the exact target");
+        dmk_test::ScratchPage other_page;
+        ASSERT_TRUE(other_page.ok());
+        plant_leaf(other_page);
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, other_page.addr(0), NAME), ClaimOutcome::Fresh);
+    }
+    {
+        SCOPED_TRACE("the identity");
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, page.addr(0), "ClaimRefusalOther"), ClaimOutcome::Fresh);
+    }
+    {
+        SCOPED_TRACE("the requested kind");
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Mid, page.addr(0), NAME), ClaimOutcome::Fresh);
+    }
+    expect_refused_until_repaired(
+        "the footer seal",
+        [&]
+        {
+            RelayCellFooter broken = footer;
+            broken.seal ^= 1;
+            write_footer(footer_address, broken);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the footer layout",
+        [&]
+        {
+            RelayCellFooter broken = footer;
+            broken.layout = static_cast<std::uint16_t>(RELAY_CELL_LAYOUT + 1);
+            write_footer(footer_address, broken);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the footer kind",
+        [&]
+        {
+            RelayCellFooter broken = footer;
+            broken.kind = static_cast<std::uint16_t>(RelayCellKind::Mid);
+            write_footer(footer_address, broken);
+        },
+        restore_cell
+    );
+    // The allocator starts each trampoline at an even address, so the cell of the planted leaf leaves an odd spare gap
+    // before the footer. One spare byte keeps the shifted body inside the bound check.
+    ASSERT_GT(static_cast<std::size_t>(footer_address - cell), sizeof(RelayCellBody));
+    expect_refused_until_repaired(
+        "the aligned body",
+        [&]
+        {
+            // A copy of the Vacant body one byte later satisfies every other check at the unaligned offset.
+            RelayCellFooter broken = footer;
+            ++broken.body_offset;
+            write_footer(footer_address, broken);
+            write_relay_cell(cell + 1, body);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the Vacant state",
+        [&]
+        {
+            RelayCellBody broken = body;
+            broken.state = RELAY_CELL_OWNED;
+            write_relay_cell(cell, broken);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the body target",
+        [&]
+        {
+            RelayCellBody broken = body;
+            ++broken.target;
+            write_relay_cell(cell, broken);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the original size",
+        [&]
+        {
+            RelayCellBody broken = body;
+            ++broken.original_size;
+            write_relay_cell(cell, broken);
+        },
+        restore_cell
+    );
+    // An aligned word past the trampoline end that holds the trampoline start satisfies every other switch check.
+    const ReadWritePageAbove outside{address_of(trampoline_end)};
+    ASSERT_NE(outside.address(), 0u) << "no free granule above the trampoline";
+    write_word(outside.address(), address_of(position->state.trampoline));
+    expect_refused_until_repaired(
+        "the switch word range",
+        [&]
+        {
+            RelayCellBody broken = body;
+            broken.switch_word = outside.address();
+            write_relay_cell(cell, broken);
+        },
+        restore_cell
+    );
+    expect_refused_until_repaired(
+        "the switched-off relay",
+        [&] { write_word(slot, address_of(code_address(&detour_leaf))); },
+        [&] { write_word(slot, address_of(position->state.trampoline)); }
+    );
+    expect_refused_until_repaired(
+        "the pristine target window",
+        [&] { std::memcpy(page.base(), pristine.data(), body.original_size); },
+        [&] { write_prologue_span(page, position->armed); }
+    );
+
+    {
+        SCOPED_TRACE("the enabled record");
+        constexpr std::string_view DISABLED_NAME = "ClaimRefusalDisabled";
+        dmk_test::ScratchPage disabled_page;
+        ASSERT_TRUE(disabled_page.ok());
+        plant_leaf(disabled_page);
+        const PrologueSpan disabled_pristine = read_prologue_span(disabled_page);
+        const ProbeHandle owner =
+            create_probe(BackendProbeKind::Inline, disabled_page.addr(0), code_address(&detour_leaf), DISABLED_NAME);
+        ASSERT_TRUE(owner);
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Enable));
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+        // The restore marks the record disabled and keeps the relay on the trampoline start.
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Disable));
+        void *const owner_cell = owner.state().relay_cell;
+        ASSERT_NE(owner_cell, nullptr);
+        const RelayCellBody owner_body = read_relay_cell(owner_cell);
+        RelayCellBody vacant = owner_body;
+        vacant.state = RELAY_CELL_VACANT;
+        write_relay_cell(owner_cell, vacant);
+        // A window that differs from the saved bytes leaves the disabled record as the only failed check.
+        disabled_page.put(0, {0xB8, 0x02, 0x00, 0x00, 0x00});
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, disabled_page.addr(0), DISABLED_NAME), ClaimOutcome::Fresh);
+        write_prologue_span(disabled_page, disabled_pristine);
+        write_relay_cell(owner_cell, owner_body);
+    }
+    {
+        SCOPED_TRACE("the unretained record");
+        constexpr std::string_view RETAINED_NAME = "ClaimRefusalRetained";
+        dmk_test::ScratchPage retained_page;
+        ASSERT_TRUE(retained_page.ok());
+        plant_leaf(retained_page);
+        {
+            const ProbeHandle owner = create_probe(
+                BackendProbeKind::Inline,
+                retained_page.addr(0),
+                code_address(&detour_leaf),
+                RETAINED_NAME
+            );
+            ASSERT_TRUE(owner);
+            ASSERT_TRUE(owner.drive(BackendProbeOperation::Enable));
+            ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+            ASSERT_TRUE(owner.drive(BackendProbeOperation::RetainRoute));
+            ASSERT_TRUE(owner.drive(BackendProbeOperation::Vacate));
+        }
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, retained_page.addr(0), RETAINED_NAME), ClaimOutcome::Fresh);
+        retained_page.abandon();
+    }
+    {
+        SCOPED_TRACE("the closed route");
+        constexpr std::string_view ROUTED_NAME = "ClaimRefusalRouted";
+        dmk_test::ScratchPage routed_page;
+        ASSERT_TRUE(routed_page.ok());
+        plant_leaf(routed_page);
+        const std::optional<VacantPosition> routed =
+            vacate_fresh_position(BackendProbeKind::Routed, routed_page, code_address(&detour_leaf), ROUTED_NAME);
+        ASSERT_TRUE(routed.has_value());
+        void *const routed_cell = routed->state.relay_cell;
+        const RelayCellBody routed_body = read_relay_cell(routed_cell);
+        ASSERT_EQ(read_route_state(routed_body.switch_word), ROUTE_CLOSED);
+
+        write_route_state(routed_body.switch_word, ROUTE_LIVE);
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Routed, routed_page.addr(0), ROUTED_NAME), ClaimOutcome::Fresh);
+        write_route_state(routed_body.switch_word, ROUTE_CLOSED);
+
+        RelayCellBody broken = routed_body;
+        broken.route_word += sizeof(std::uint64_t);
+        write_relay_cell(routed_cell, broken);
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Routed, routed_page.addr(0), ROUTED_NAME), ClaimOutcome::Fresh);
+        write_relay_cell(routed_cell, routed_body);
+
+        EXPECT_EQ(claim_outcome(BackendProbeKind::Routed, routed_page.addr(0), ROUTED_NAME), ClaimOutcome::Claimed);
+        routed_page.abandon();
+    }
+
+    EXPECT_EQ(read_relay_cell(cell).state, RELAY_CELL_VACANT);
+    EXPECT_EQ(read_prologue_span(page), position->armed);
+    page.abandon();
+}
+
+// Claimants race for one vacated cell. The claim runs under the process coordinator, so exactly one of them takes it,
+// and every other one installs fresh on top.
+TEST(HookBackendRelayCell, ConcurrentClaimsSucceedOnce)
+{
+    using namespace std::chrono_literals;
+    constexpr std::size_t CLAIMANTS = 8;
+    constexpr std::string_view NAME = "ConcurrentClaims";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const std::optional<VacantPosition> position =
+        vacate_fresh_position(BackendProbeKind::Inline, page, code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(position.has_value());
+    const BackendCoordinatorCounts vacant_counts = coordinator_counts();
+
+    std::array<BackendProbe *, CLAIMANTS> created{};
+    bool started = false;
+    {
+        std::atomic<std::size_t> ready{0};
+        std::atomic<bool> start{false};
+        std::vector<std::jthread> threads;
+        threads.reserve(CLAIMANTS);
+        for (std::size_t index = 0; index < CLAIMANTS; ++index)
+        {
+            threads.emplace_back(
+                [&created, &ready, &start, &page, index, NAME]
+                {
+                    ready.fetch_add(1, std::memory_order_acq_rel);
+                    const auto deadline = std::chrono::steady_clock::now() + 10s;
+                    while (!start.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+                    {
+                        std::this_thread::yield();
+                    }
+                    created[index] = DetourModKit::detail::create_backend_probe_for_test(
+                        BackendProbeKind::Inline,
+                        reinterpret_cast<void *>(page.addr(0)),
+                        code_address(&successor_detour),
+                        NAME
+                    );
+                }
+            );
+        }
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (ready.load(std::memory_order_acquire) < CLAIMANTS && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        started = ready.load(std::memory_order_acquire) == CLAIMANTS;
+        start.store(true, std::memory_order_release);
+    }
+    EXPECT_TRUE(started) << "the claimants did not reach the start barrier together";
+
+    std::vector<ProbeHandle> claimed;
+    std::vector<ProbeHandle> fresh_layers;
+    for (BackendProbe *const probe : created)
+    {
+        ProbeHandle handle{probe};
+        if (!handle)
+        {
+            continue;
+        }
+        if (handle.state().claimed)
+        {
+            claimed.push_back(std::move(handle));
+        }
+        else
+        {
+            fresh_layers.push_back(std::move(handle));
+        }
+    }
+    EXPECT_EQ(claimed.size() + fresh_layers.size(), CLAIMANTS);
+    ASSERT_EQ(claimed.size(), 1u);
+    EXPECT_EQ(claimed.front().state().trampoline, position->state.trampoline);
+    BackendCoordinatorCounts layered = vacant_counts;
+    --layered.vacant;
+    layered.live += fresh_layers.size();
+    layered.free -= fresh_layers.size();
+    EXPECT_TRUE(counts_equal(coordinator_counts(), layered));
+
+    destroy_newest_first(fresh_layers);
+    claimed.clear();
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    EXPECT_EQ(read_prologue_span(page), position->armed);
+    page.abandon();
+}
+
+// Callers run through a vacated position while successors claim it, switch it on and off, and vacate it again. Every
+// call reaches the trampoline or the successor's detour. The vacated detour never runs again.
+TEST(HookBackendRelayCell, ConcurrentCallersDuringClaimSeeTrampolineOrDetour)
+{
+    constexpr std::size_t CALLER_THREADS = 4;
+    constexpr std::size_t CLAIM_CYCLES = 256;
+    constexpr std::string_view NAME = "CallersDuringClaim";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const std::optional<VacantPosition> position =
+        vacate_fresh_position(BackendProbeKind::Inline, page, code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(position.has_value());
+    const BackendCoordinatorCounts vacant_counts = coordinator_counts();
+
+    {
+        TargetCallers callers{page.addr(0), LEAF_RESULT, SUCCESSOR_RESULT, CALLER_THREADS};
+        ASSERT_TRUE(callers.wait_for_calls(CALLER_THREADS * 16)) << "the callers never started";
+        for (std::size_t cycle = 0; cycle < CLAIM_CYCLES; ++cycle)
+        {
+            const ProbeHandle successor =
+                create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), NAME);
+            ASSERT_TRUE(successor);
+            ASSERT_TRUE(successor.state().claimed) << "cycle " << cycle;
+            ASSERT_TRUE(successor.drive(BackendProbeOperation::Enable));
+            ASSERT_TRUE(successor.drive(BackendProbeOperation::Disable));
+        }
+        callers.stop();
+        EXPECT_EQ(callers.unexpected(), 0u) << "of " << callers.calls() << " calls";
+        EXPECT_GT(callers.calls(), CALLER_THREADS * 16);
+    }
+
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    EXPECT_EQ(read_prologue_span(page), position->armed);
+    page.abandon();
+}
+
+// A claimed object switches off and gives its position back on every teardown path. It writes no target byte and no
+// record, and route retention leaves the record that it does not own unchanged.
+TEST(HookBackendRelayCell, ClaimedObjectWritesNoRecordOnAnyTeardownPath)
+{
+    struct TeardownCase
+    {
+        const char *label;
+        std::optional<BackendProbeOperation> operation;
+    };
+    const std::array<TeardownCase, 4> teardowns{{
+        {"destroy", std::nullopt},
+        {"reset", BackendProbeOperation::Reset},
+        {"move assignment", BackendProbeOperation::MoveAssign},
+        {"route retention", BackendProbeOperation::RetainRoute},
+    }};
+    for (const BackendProbeKind kind : {BackendProbeKind::Inline, BackendProbeKind::Routed, BackendProbeKind::Mid})
+    {
+        SCOPED_TRACE(probe_kind_label(kind));
+        const std::string name = std::string{"ClaimedTeardown_"} + probe_kind_label(kind);
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        const std::optional<VacantPosition> position = vacate_fresh_position(kind, page, first_destination(kind), name);
+        ASSERT_TRUE(position.has_value());
+        const BackendCoordinatorCounts vacant_counts = coordinator_counts();
+        BackendCoordinatorCounts claimed_counts = vacant_counts;
+        --claimed_counts.vacant;
+        const std::vector<std::uint8_t> armed = page_bytes(page);
+
+        for (const TeardownCase &teardown : teardowns)
+        {
+            SCOPED_TRACE(teardown.label);
+            ProbeHandle claimant = create_probe(kind, page.addr(0), second_destination(kind), name);
+            ASSERT_TRUE(claimant);
+            ASSERT_TRUE(claimant.state().claimed);
+            ASSERT_TRUE(claimant.drive(BackendProbeOperation::Enable));
+            EXPECT_TRUE(counts_equal(coordinator_counts(), claimed_counts));
+            if (teardown.operation == BackendProbeOperation::RetainRoute)
+            {
+                ASSERT_TRUE(claimant.drive(BackendProbeOperation::RetainRoute));
+                EXPECT_TRUE(counts_equal(coordinator_counts(), claimed_counts));
+                EXPECT_TRUE(claimant.state().claimed);
+                claimant.reset();
+            }
+            else if (teardown.operation.has_value())
+            {
+                ASSERT_TRUE(claimant.drive(*teardown.operation));
+                EXPECT_FALSE(claimant.state().claimed);
+            }
+            else
+            {
+                claimant.reset();
+            }
+            EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+            EXPECT_EQ(page_bytes(page), armed);
+            EXPECT_EQ(read_relay_cell(position->state.relay_cell).state, RELAY_CELL_VACANT);
+        }
+        page.abandon();
+    }
+}
+
+// A routed or mid claim writes its destination into the route word only while the route stays closed. A closed route
+// reads no route word. Over an open route the claim is refused and writes nothing.
+TEST(HookBackendRelayCell, RoutedClaimWritesTheRouteWordOnlyWhileClosed)
+{
+    for (const BackendProbeKind kind : {BackendProbeKind::Routed, BackendProbeKind::Mid})
+    {
+        SCOPED_TRACE(probe_kind_label(kind));
+        const std::string name = std::string{"RouteWord_"} + probe_kind_label(kind);
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+
+        ProbeHandle owner = create_probe(kind, page.addr(0), first_destination(kind), name);
+        ASSERT_TRUE(owner);
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Enable));
+        void *const cell = owner.state().relay_cell;
+        ASSERT_NE(cell, nullptr);
+        const RelayCellBody body = read_relay_cell(cell);
+        ASSERT_NE(body.switch_word, 0u);
+        ASSERT_NE(body.route_word, 0u);
+        EXPECT_EQ(read_route_state(body.switch_word), ROUTE_LIVE);
+        EXPECT_EQ(read_word(body.route_word), address_of(first_destination(kind)));
+        EXPECT_EQ(route_reached(kind, page), RouteReached::First);
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+        EXPECT_EQ(read_route_state(body.switch_word), ROUTE_CLOSED);
+        EXPECT_EQ(route_reached(kind, page), RouteReached::None);
+        ASSERT_TRUE(owner.drive(BackendProbeOperation::Vacate));
+        owner.reset();
+
+        write_route_state(body.switch_word, ROUTE_LIVE);
+        EXPECT_EQ(claim_outcome(kind, page.addr(0), name), ClaimOutcome::Fresh);
+        EXPECT_EQ(read_word(body.route_word), address_of(first_destination(kind)));
+        write_route_state(body.switch_word, ROUTE_CLOSED);
+
+        ProbeHandle successor = create_probe(kind, page.addr(0), second_destination(kind), name);
+        ASSERT_TRUE(successor);
+        ASSERT_TRUE(successor.state().claimed);
+        EXPECT_EQ(read_word(body.route_word), address_of(second_destination(kind)));
+        EXPECT_EQ(read_route_state(body.switch_word), ROUTE_CLOSED);
+        EXPECT_EQ(route_reached(kind, page), RouteReached::None);
+        ASSERT_TRUE(successor.drive(BackendProbeOperation::Enable));
+        EXPECT_EQ(read_route_state(body.switch_word), ROUTE_LIVE);
+        EXPECT_EQ(route_reached(kind, page), RouteReached::Second);
+        ASSERT_TRUE(successor.drive(BackendProbeOperation::Disable));
+        EXPECT_EQ(route_reached(kind, page), RouteReached::None);
+
+        successor.reset();
+        EXPECT_EQ(read_route_state(body.switch_word), ROUTE_CLOSED);
+        EXPECT_EQ(read_relay_cell(cell).state, RELAY_CELL_VACANT);
+        page.abandon();
+    }
+}
+
+// A vacate that the coordinator refuses changes nothing: the cell stays Owned, and the object keeps its position for a
+// later vacate. This holds for a fresh and for a claimed object.
+TEST(HookBackendRelayCell, RefusedVacateLeavesTheCellOwned)
+{
+    constexpr std::string_view NAME = "RefusedVacate";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    ProbeHandle owner = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), NAME);
+    ASSERT_TRUE(owner);
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Enable));
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Bypass));
+    const BackendProbeState armed_state = owner.state();
+    ASSERT_NE(armed_state.relay_cell, nullptr);
+    const BackendCoordinatorCounts owned_counts = coordinator_counts();
+
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_UNAVAILABLE};
+        EXPECT_FALSE(owner.drive(BackendProbeOperation::Vacate));
+    }
+    EXPECT_EQ(read_relay_cell(armed_state.relay_cell).state, RELAY_CELL_OWNED);
+    const BackendProbeState refused_state = owner.state();
+    EXPECT_TRUE(refused_state.valid);
+    EXPECT_TRUE(refused_state.enabled);
+    EXPECT_TRUE(refused_state.bypassed);
+    EXPECT_EQ(refused_state.relay_cell, armed_state.relay_cell);
+    EXPECT_TRUE(counts_equal(coordinator_counts(), owned_counts));
+    // An Owned cell gives nothing to a same-name successor.
+    EXPECT_EQ(claim_outcome(BackendProbeKind::Inline, page.addr(0), NAME), ClaimOutcome::Fresh);
+    EXPECT_TRUE(counts_equal(coordinator_counts(), owned_counts));
+
+    ASSERT_TRUE(owner.drive(BackendProbeOperation::Vacate));
+    owner.reset();
+    BackendCoordinatorCounts vacant_counts = owned_counts;
+    ++vacant_counts.vacant;
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+
+    ProbeHandle claimant = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), NAME);
+    ASSERT_TRUE(claimant);
+    ASSERT_TRUE(claimant.state().claimed);
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_UNAVAILABLE};
+        EXPECT_FALSE(claimant.drive(BackendProbeOperation::Vacate));
+    }
+    EXPECT_EQ(read_relay_cell(armed_state.relay_cell).state, RELAY_CELL_OWNED);
+    EXPECT_TRUE(claimant.state().claimed);
+
+    // The destructor vacates once the coordinator answers again.
+    claimant.reset();
+    EXPECT_EQ(read_relay_cell(armed_state.relay_cell).state, RELAY_CELL_VACANT);
+    EXPECT_TRUE(counts_equal(coordinator_counts(), vacant_counts));
+    page.abandon();
+}
+
+// A restore that fails before any write keeps a bypassed route closed. The failed disable never reopens the route of a
+// switched-off hook.
+TEST(HookBackendRelay, FailedRestoreKeepsABypassedRouteClosed)
+{
+    for (const BackendProbeKind kind : {BackendProbeKind::Routed, BackendProbeKind::Mid})
+    {
+        SCOPED_TRACE(probe_kind_label(kind));
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf(page);
+        const PrologueSpan pristine = read_prologue_span(page);
+        ProbeHandle probe = create_probe(
+            kind,
+            page.addr(0),
+            first_destination(kind),
+            std::string{"FailedRestoreRoute_"} + probe_kind_label(kind)
+        );
+        ASSERT_TRUE(probe);
+        ASSERT_TRUE(probe.drive(BackendProbeOperation::Enable));
+        ASSERT_EQ(route_reached(kind, page), RouteReached::First);
+        ASSERT_TRUE(probe.drive(BackendProbeOperation::Bypass));
+        const PrologueSpan armed = read_prologue_span(page);
+
+        {
+            const BackendToggleExceptionScope seam{page.addr(0), ToggleExceptionStage::BeforeMutation};
+            EXPECT_FALSE(probe.drive(BackendProbeOperation::Disable));
+            EXPECT_EQ(DetourModKit::detail::backend_toggle_exception_catches_for_test(), 1u);
+        }
+        const BackendProbeState refused = probe.state();
+        EXPECT_TRUE(refused.enabled);
+        EXPECT_TRUE(refused.bypassed) << "the failed restore reopened the route";
+        EXPECT_EQ(read_prologue_span(page), armed);
+        EXPECT_EQ(route_reached(kind, page), RouteReached::None);
+
+        ASSERT_TRUE(probe.drive(BackendProbeOperation::Disable));
+        EXPECT_EQ(read_prologue_span(page), pristine);
+        EXPECT_EQ(route_reached(kind, page), RouteReached::None);
+    }
+}
+
+// A participant outside this kit's ledger owns a newer record on the target. The disable of the armed hook reaches the
+// backend restore, the coordinator refuses it before any write, and the hook bypasses. Its Info line names the newer
+// participant.
+TEST(HookToggleWarning, CoordinatorRefusedDisableNamesTheNewerParticipant)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    Result<Hook> installed = install_leaf(page, "WarnCoordinatorDisable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+
+    // The probe never arms, so it writes no target byte and the hook keeps its own patch as the witness.
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "WarnCoordinatorNewer");
+    ASSERT_TRUE(newer);
+    ASSERT_FALSE(newer.state().claimed);
+    ASSERT_EQ(read_prologue_span(page), armed);
+
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Info};
+        const Result<void> disabled = hook.disable();
+        ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
+        text = capture.read_all();
+    }
+    const std::string expected = toggle_warning_prefix("WarnCoordinatorDisable", page) +
+                                 "bypassed under a newer layer: a newer participant owns the target.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+    EXPECT_FALSE(hook.is_enabled());
+    EXPECT_EQ(read_prologue_span(page), armed) << "the refused restore wrote the target";
+    EXPECT_EQ(call_target(page), LEAF_RESULT) << "the bypassed detour still ran";
+
+    // The probe holds the newest record, so it goes first. The bypassed hook is then the top layer over its own patch,
+    // and its next disable restores the target.
+    newer.reset();
+    const Result<void> restored = hook.disable();
+    ASSERT_TRUE(restored.has_value()) << restored.error().message();
+    EXPECT_FALSE(hook.is_enabled());
+    EXPECT_EQ(read_prologue_span(page), pristine) << "the second disable did not restore";
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+}
+#endif // DMK_ENABLE_TEST_SEAMS

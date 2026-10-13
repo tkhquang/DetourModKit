@@ -224,7 +224,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_hook_static_order.cpp`, `vmt_late_static_owner.cpp`, `never_destroyed_storage.cpp`, `diagnostics_late_emitter.cpp`, `test_profiler_late_uaf.cpp` | Static-destruction order, calls after static teardown |
 | `*_oom.cpp`, `first_use_oom_poison.hpp` | First-use allocation failure, writer progress after a failed batch reservation |
 | `test_trap_closed_window.cpp`, `vmt_unreadable_header.cpp`, `test_hook_instance_scope.cpp`, `hook_kit_dll.cpp` | Closed trap window, unreadable module header, per-instance ledger |
-| `test_mid_route_retention.cpp`, `route_*`, `routed_bypass_*` | Route reclamation, retention, continuation, process route coordinator |
+| `test_mid_route_retention.cpp`, `route_*`, `routed_bypass_*` | Route reclamation, retention, continuation, process route coordinator, layered retirement across participants, the older-policy participant `route_copy_legacy` |
 | `veh_*.cpp` | MinGW guarded-read handler after an unmap |
 | `tls_*`, `process_exit_release_dll.cpp`, `input_tls_exhaustion.cpp` | Image-owned TLS return, native allocation isolation, input delivery with no TLS index |
 | `input_reshape_retirement.cpp`, `test_input_gate_abba.cpp`, `input_control_thread_shutdown.cpp`, `input_self_shutdown.cpp`, `*input_loader_detach*`, `input_seam_cleanup.hpp` | Reshape disposal, gate teardown, shutdown from a callback, loader detach |
@@ -232,7 +232,8 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `cache_shutdown_stall.cpp` | Cache shutdown with a stalled reader |
 | `*bootstrap*`, `session_detach_terminal.cpp`, `test_full_lifecycle.cpp`, `test_config_servicer_self_retire.cpp` | Bootstrap module reference, detach after a drain, full lifecycles, servicer self-retirement |
 | `*logic_*` | Logic-DLL unmap after typed teardown |
-| `staged_generation_*` | Staged-generation reload |
+| `staged_generation_*` | Staged-generation reload, the shared staged-generation host helpers |
+| `layered_generation_reload.cpp` | Two-copy layered reload on one external target: relay bypass, position claims, foreign layers, residue budget |
 | `logger_generation_log.cpp`, `legacy_acp*` | Log file across generations, paths outside the ANSI code page |
 | `test_dispatch_cow.cpp` | Re-entrant `EventDispatcher` writer |
 | `raw_proof_error_mode.hpp` | Fault dialog suppression for raw hosts |
@@ -253,6 +254,35 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.XInputExFailureReportsTheExactCheck` | `diagnostics-ex` |
 | `Lifecycle.XInputExactHandBackReportsOneRecovery` | `exact-recovery` |
 | `Lifecycle.XInputScopeFailureReportsPairCause` | `diagnostics-scope` |
+
+## Layered reload proof
+
+`layered_generation_reload.cpp` loads two separately linked families of `staged_generation_dll` that hook one `hook_target_lib` export. `route_copy_host` adds `route_copy_legacy`, which applies the refusal policy of DMK 4.3.0 and emits no relay cell. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each `LayeredReload` scenario. These required `lifecycle-proof` processes verify layered retirement:
+
+| Required process | Host |
+| --- | --- |
+| `Lifecycle.LayeredReloadLowerCopyRetiresInFieldOrder` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadLowerCopyRetiresInReverseOrder` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadDisableFirstConsumerRetires` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadHandBackBeforeShutdownRestoresCleanly` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadHandBackBeforeSuccessorInit` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadHandBackAfterSuccessorInit` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadPreservesForeignChainingLayer` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadLeavesNonChainingHijackUntouched` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadLowerMidCopyRetires` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadFarHookRetires` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadResidueBudgetFallsBackToPin` | `layered_generation_reload` |
+| `Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline` | `route_copy_host` |
+| `Lifecycle.RouteCopiesLegacyLowerStaysRefused` | `route_copy_host` |
+| `Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper` | `route_copy_host` |
+| `Lifecycle.RouteCopiesLegacyAroundClaimedPosition` | `route_copy_host` |
+| `Lifecycle.RouteCopiesResidueBudgetFloorPins` | `route_copy_host` |
+| `Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed` | `route_copy_host` |
+
+`Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` is the constancy soak. It runs 1000 reload cycles under a 1200-second timeout and returns skip code 77 under ASan. `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` runs 128 mid reload cycles under a 600-second timeout.
 
 ## Staged example proof
 

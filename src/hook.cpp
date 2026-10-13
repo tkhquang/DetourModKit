@@ -29,6 +29,8 @@
 
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -89,6 +91,9 @@ namespace DetourModKit::detail
     void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept = nullptr;
     // Fires at the first operation boundary after one mutation entry passes its loader-lock veto.
     void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept = nullptr;
+    // Withholds the position claim from inline_at and mid_at, so every install is fresh and every new cell is
+    // unclaimable. The residue budget proofs need positions that no successor takes.
+    std::atomic<bool> g_hook_position_claims_refused_for_test{false};
     // This probe fires after the vtable pre-count and before the guarded snapshot capture.
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
     // This probe fires after the captured slot count becomes fixed and before the backend sizes its clone.
@@ -270,6 +275,161 @@ namespace DetourModKit::detail
     {
         return safetyhook::non_executable_transaction_marker_for_test();
     }
+
+    void omit_backend_relay_cell_for_test(bool omit) noexcept
+    {
+        safetyhook::omit_relay_cell_for_test(omit);
+    }
+
+    void set_backend_coordinator_refusal_for_test(unsigned refusal) noexcept
+    {
+        safetyhook::g_coordinator_refusal_for_test.store(refusal);
+    }
+
+    BackendCoordinatorCounts backend_coordinator_counts_for_test() noexcept
+    {
+        const safetyhook::ProcessCoordinatorSnapshot snapshot = safetyhook::process_coordinator_snapshot_for_test();
+        return BackendCoordinatorCounts{
+            .live = snapshot.live,
+            .retained = snapshot.retained,
+            .vacant = snapshot.vacant,
+            .free = snapshot.bytes == 0 ? 0 : safetyhook::PROCESS_ROUTE_CAPACITY - snapshot.live - snapshot.retained,
+        };
+    }
+
+    struct BackendProbe
+    {
+        std::variant<safetyhook::InlineHook, safetyhook::MidHook> backend;
+    };
+
+    BackendProbe *create_backend_probe_for_test(
+        BackendProbeKind kind,
+        void *target,
+        void *destination,
+        std::string_view position_name
+    ) noexcept
+    {
+        try
+        {
+            const std::shared_ptr<safetyhook::Allocator> &allocator = hook::backend_allocator();
+            const safetyhook::PositionClaim claim = safetyhook::PositionClaim::from_name(position_name);
+            if (kind == BackendProbeKind::Mid)
+            {
+                auto created = safetyhook::MidHook::create(
+                    allocator,
+                    target,
+                    reinterpret_cast<safetyhook::MidHookFn>(destination),
+                    safetyhook::MidHook::StartDisabled,
+                    claim
+                );
+                return created ? new BackendProbe{std::move(*created)} : nullptr;
+            }
+            const auto flags = static_cast<safetyhook::InlineHook::Flags>(
+                safetyhook::InlineHook::StartDisabled |
+                (kind == BackendProbeKind::Routed ? safetyhook::InlineHook::RoutedExternal : 0)
+            );
+            auto created = safetyhook::InlineHook::create(allocator, target, destination, flags, claim);
+            return created ? new BackendProbe{std::move(*created)} : nullptr;
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    bool drive_backend_probe_for_test(BackendProbe *probe, BackendProbeOperation operation) noexcept
+    {
+        return backend_value_or(
+            probe->backend,
+            false,
+            [operation](auto &backend) noexcept -> bool
+            {
+                using Backend = std::remove_reference_t<decltype(backend)>;
+                switch (operation)
+                {
+                case BackendProbeOperation::Enable:
+                    return try_backend_enable(backend);
+                case BackendProbeOperation::Disable:
+                    return try_backend_disable(backend);
+                case BackendProbeOperation::Bypass:
+                    return backend.bypass();
+                case BackendProbeOperation::Resume:
+                    return backend.resume();
+                case BackendProbeOperation::Vacate:
+                    return backend.vacate();
+                case BackendProbeOperation::Reset:
+                    backend.reset();
+                    return true;
+                case BackendProbeOperation::MoveAssign:
+                    backend = Backend{};
+                    return true;
+                case BackendProbeOperation::RetainRoute:
+                    backend.retain_route();
+                    return true;
+                }
+                return false;
+            }
+        );
+    }
+
+    BackendProbeState backend_probe_state_for_test(const BackendProbe *probe) noexcept
+    {
+        return backend_value_or(
+            probe->backend,
+            BackendProbeState{},
+            [](const auto &backend) noexcept
+            {
+                return BackendProbeState{
+                    .valid = static_cast<bool>(backend),
+                    .enabled = backend.enabled(),
+                    .claimed = backend.claimed(),
+                    .bypassed = backend.bypassed(),
+                    .trampoline = backend.trampoline().data(),
+                    .relay_slot = backend.relay_slot_for_test(),
+                    .relay_cell = backend.relay_cell_for_test(),
+                };
+            }
+        );
+    }
+
+    void destroy_backend_probe_for_test(BackendProbe *probe) noexcept
+    {
+        delete probe;
+    }
+
+    namespace
+    {
+        // One-byte targets for the filler records. Their patches overlap no hook target, so they change no layer
+        // count and no top() answer.
+        std::array<std::uint8_t, safetyhook::PROCESS_ROUTE_CAPACITY> s_coordinator_fill_keys{};
+        std::size_t s_coordinator_fill_count{0};
+    } // namespace
+
+    std::size_t fill_backend_coordinator_for_test(std::size_t count) noexcept
+    {
+        safetyhook::ProcessCoordinator coordinator;
+        std::size_t added = 0;
+        while (coordinator && added < count && s_coordinator_fill_count < s_coordinator_fill_keys.size())
+        {
+            std::uint8_t *const key = &s_coordinator_fill_keys[s_coordinator_fill_count];
+            if (!coordinator.add(key, 1, {key, key + 1}, {}, nullptr, {}))
+            {
+                break;
+            }
+            ++s_coordinator_fill_count;
+            ++added;
+        }
+        return added;
+    }
+
+    void clear_backend_coordinator_fill_for_test() noexcept
+    {
+        safetyhook::ProcessCoordinator coordinator;
+        while (s_coordinator_fill_count != 0)
+        {
+            coordinator.remove(&s_coordinator_fill_keys[--s_coordinator_fill_count]);
+        }
+    }
 #endif
 } // namespace DetourModKit::detail
 
@@ -294,6 +454,30 @@ namespace DetourModKit
             }
 #endif
             return DetourModKit::detail::acquire_module_ref(diagnostics::ModulePinReason::Hook);
+        }
+
+        /// Names the chain position that a request with @p name claims and leaves behind (`[B-105]`).
+        [[nodiscard]] safetyhook::PositionClaim position_claim_for(std::string_view name) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (DetourModKit::detail::g_hook_position_claims_refused_for_test.load(std::memory_order_acquire))
+            {
+                return {};
+            }
+#endif
+            return safetyhook::PositionClaim::from_name(name);
+        }
+
+        /// Logs that an install took the vacated position of an earlier generation.
+        void note_position_claim(std::string_view name, std::uintptr_t target) noexcept
+        {
+            (void)log().try_log(
+                LogLevel::Info,
+                "hook: '{}' at 0x{:0{}X} claimed a vacated position.",
+                name,
+                target,
+                sizeof(std::uintptr_t) * 2
+            );
         }
         /// Reports whether the foreign-inline-hook preflight found a present redirect and its destination.
         enum class PrehookState : std::uint8_t
@@ -937,8 +1121,8 @@ namespace DetourModKit
                 // If this install layers on a same-kit hook, warn and continue.
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. Destroy "
-                    "layered hooks newest-first.",
+                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. The layers retire "
+                    "in any order.",
                     name,
                     address,
                     sizeof(std::uintptr_t) * 2
@@ -1084,35 +1268,33 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Pins the backend of an older layer that newer layers on the same target still chain through.
-         * @details The caller holds the target install-serialization slot. The helper releases it. Hook::Impl is
-         *          private to Hook, so each ~Hook phase helper deduces the Impl type as a template parameter.
+         * @brief Pins a backend whose detour can stay reachable: it leaks the Impl and keeps its module reference.
+         * @details The caller holds the target install-serialization slot. The helper releases it and keeps the
+         *          creation-order entry, so is_target_hooked still reports the hooked target. Hook::Impl is private to
+         *          Hook, so each ~Hook phase helper deduces the Impl type as a template parameter.
+         * @param reason A string literal that completes the warning sentence.
          */
         template <class HookImpl>
-        void pin_backend_under_newer_layers(
+        void pin_backend_with_live_detour(
             std::unique_ptr<HookImpl> &impl,
             detail::HookLedger &ledger,
             const std::string &name,
             std::uintptr_t target,
             std::uint64_t ledger_id,
             diagnostics::HookKind kind,
-            std::size_t newer
+            const char *reason
         ) noexcept
         {
-            // The Impl module reference remains held, so the trampoline pages stay mapped. release_target_slot keeps
-            // the creation-order entry, so is_target_hooked still reports the physically hooked target.
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)impl.release();
             ledger.release_target_slot(target, ledger_id);
             (void)log().try_log(
                 LogLevel::Warning,
-                "hook: '{}' at 0x{:0{}X} destroyed while {} newer hook(s) remain layered on the same target; "
-                "leaked the older backend to avoid a trampoline use-after-free. Tear layered hooks down "
-                "newest-first (hold them in a HookStack).",
+                "hook: '{}' at 0x{:0{}X} leaked its backend during teardown, so its detour stays reachable: {}.",
                 name,
                 target,
                 sizeof(std::uintptr_t) * 2,
-                newer
+                reason
             );
             emit_lifecycle(
                 name,
@@ -1125,19 +1307,39 @@ namespace DetourModKit
             );
         }
 
+        /// Names why a layer retires by bypass in place of a restore.
+        struct RetirementCause
+        {
+            /// The newer hooks of this kit, or zero when @ref detail proves the newer layer.
+            std::size_t newer_layers{0};
+            /// The byte witness or coordinator text, or empty for a claimed position.
+            std::string_view detail{};
+        };
+
+        /// The outcome of the teardown restore.
+        enum class TeardownRestore : std::uint8_t
+        {
+            Restored,
+            Pinned,
+            /// A newer layer, foreign bytes, or unreadable bytes refused the restore. The hook retires by bypass.
+            Retire,
+        };
+
         /**
-         * @brief Restores the target prologue under the process coordinator, or pins the backend on failure.
-         * @details The caller holds the target install-serialization slot. The helper releases it on a false return.
-         * @return True when the target holds its original bytes, or false when the helper pinned the backend.
+         * @brief Restores the target prologue under the process coordinator, or decides how the hook retires.
+         * @details The caller holds the target install-serialization slot. The helper releases it after a pin. A
+         *          Retire outcome fills @p cause and, before it releases the coordinator, leaves a bypassed mid route
+         *          closed and reopens any other.
          */
         template <class HookImpl>
-        [[nodiscard]] bool restore_target_or_pin_backend(
+        [[nodiscard]] TeardownRestore restore_target_or_pin_backend(
             std::unique_ptr<HookImpl> &impl,
             detail::HookLedger &ledger,
             const std::string &name,
             std::uintptr_t target,
             std::uint64_t ledger_id,
-            diagnostics::HookKind kind
+            diagnostics::HookKind kind,
+            RetirementCause &cause
         ) noexcept
         {
             // Close the backend-owned route before restore, so admitted callers stay counted across the generated
@@ -1152,12 +1354,38 @@ namespace DetourModKit
             }
             // Disable the backend here instead of in ~Impl. Its backend destructor discards a failed disable and
             // reclaims storage regardless. Only a prologue at its original bytes authorizes backend destruction.
-            // Foreign and Indeterminate fail closed to the pin (see run_teardown_restore).
+            // Foreign and Indeterminate bytes write nothing (see run_teardown_restore) and retire the hook.
             DetourModKit::detail::CoordinatorRefusal refusal = DetourModKit::detail::CoordinatorRefusal::None;
             const PatchWitness restore = run_teardown_restore(impl->backend, refusal);
+            // Bytes that are not this hook's own, or a coordinator that saw a newer participant, mean that a restore
+            // can clobber another layer. Only an own patch after a failed or thrown restore keeps the pin.
+            const bool newer_participant = refusal == DetourModKit::detail::CoordinatorRefusal::LayerConflict;
+            if (restore == PatchWitness::Foreign || restore == PatchWitness::Indeterminate ||
+                (restore == PatchWitness::OwnedPatch && newer_participant))
+            {
+                // Retirement takes the coordinator again, and its wait export can be this route. A bypassed route
+                // stays closed, so no caller enters the tombstoned adapter before the drain.
+                const bool bypassed = impl->bypassed;
+                (void)apply_backend(
+                    impl->backend,
+                    [bypassed](auto &backend) noexcept
+                    { bypassed ? backend.finish_route_rundown() : backend.cancel_route_rundown(); }
+                );
+                coordinator.reset();
+                cause.detail = restore == PatchWitness::OwnedPatch
+                                   ? DetourModKit::detail::coordinator_refusal_description(refusal)
+                                   : witness_description(restore);
+                return TeardownRestore::Retire;
+            }
             if (restore != PatchWitness::Original)
             {
-                (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.cancel_route_rundown(); });
+                // A pin keeps the route state from before teardown, so a bypassed route stays closed.
+                const bool bypassed = impl->bypassed;
+                (void)apply_backend(
+                    impl->backend,
+                    [bypassed](auto &backend) noexcept
+                    { bypassed ? backend.finish_route_rundown() : backend.cancel_route_rundown(); }
+                );
                 coordinator.reset();
                 // The target can still dispatch through this trampoline. Pin the Impl to keep its pages mapped. Book
                 // the leak and keep the creation-order entry, so is_target_hooked stays true.
@@ -1186,11 +1414,226 @@ namespace DetourModKit
                         .remains_live = true,
                     }
                 );
-                return false;
+                return TeardownRestore::Pinned;
             }
             (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
             coordinator.reset();
+            return TeardownRestore::Restored;
+        }
+
+        /// A time-stamp counter budget of about one to four seconds on a 1 GHz to 4 GHz counter.
+        constexpr std::uint64_t CLOSING_DRAIN_TICK_BUDGET = 4'000'000'000ULL;
+
+        /**
+         * @brief Waits for a CLOSING mid route to empty, with no call into any export.
+         * @details A call that reaches the hooked export spins in the gateway while the route is CLOSING. A clock read,
+         *          a yield, or a sleep can be that export, so the wait reads only the entry count and the time-stamp
+         *          counter. New entrants wait outside the count, so the count can only fall.
+         * @return False when the budget expired first. A false return never licenses a vacate.
+         */
+        template <class BackendVariant> [[nodiscard]] bool drain_closing_route(BackendVariant &backend) noexcept
+        {
+            const std::uint64_t start = __rdtsc();
+            while (backend_value_or(
+                       backend,
+                       std::size_t{1},
+                       [](const auto &one) noexcept { return one.route_entries(); }
+                   ) != 0)
+            {
+                if (__rdtsc() - start > CLOSING_DRAIN_TICK_BUDGET)
+                {
+                    return false;
+                }
+                _mm_pause();
+            }
             return true;
+        }
+
+        /// The deepest target chain at which a fresh layer still leaves a residue position.
+        constexpr std::size_t RESIDUE_LAYER_LIMIT = 16;
+        /// The fewest free process records at which a fresh layer still leaves a residue position.
+        constexpr std::size_t RESIDUE_FREE_RECORD_FLOOR = 64;
+
+        /**
+         * @brief Reports whether one more residue position fits: at most @ref RESIDUE_LAYER_LIMIT layers on the target
+         *        and at least @ref RESIDUE_FREE_RECORD_FLOOR free process records.
+         * @details A full registry fails every inline and mid create that claims no Vacant position, so the guard
+         *          stops the growth first. An unusable coordinator fails the check.
+         */
+        template <class BackendVariant> [[nodiscard]] bool residue_fits_budget(BackendVariant &backend) noexcept
+        {
+            const safetyhook::ProcessCoordinator coordinator;
+            if (!coordinator)
+            {
+                return false;
+            }
+            std::uint8_t *const key = backend_value_or(
+                backend,
+                static_cast<std::uint8_t *>(nullptr),
+                [](const auto &one) noexcept { return one.trampoline().data(); }
+            );
+            return coordinator.layer_count(key) <= RESIDUE_LAYER_LIMIT &&
+                   coordinator.free_record_count() >= RESIDUE_FREE_RECORD_FLOOR;
+        }
+
+        /**
+         * @brief Retires a hook that cannot restore. It switches the hook off, drains a mid route, and vacates the
+         *        position for a later generation of the same hook name.
+         * @details The caller holds the target install-serialization slot. The helper releases it and keeps the
+         *          creation-order entry, because the position stays in the target's chain. A drained position reaches
+         *          no image code, so the module reference goes. The residue books HookResidue under the
+         *          diagnostics::LeakSubsystem contract. Over the residue budget, a fresh layer keeps the pin.
+         */
+        template <class HookImpl>
+        void retire_by_vacate(
+            std::unique_ptr<HookImpl> &impl,
+            detail::HookLedger &ledger,
+            const std::string &name,
+            std::uintptr_t target,
+            std::uint64_t ledger_id,
+            diagnostics::HookKind kind,
+            bool was_active,
+            DetourModKit::detail::MidRundown mid_rundown,
+            bool has_mid_slot,
+            std::size_t mid_slot,
+            RetirementCause cause
+        ) noexcept
+        {
+            const bool claimed = DetourModKit::detail::backend_claimed(impl->backend);
+            if (!claimed && !residue_fits_budget(impl->backend))
+            {
+                // Same route-state rule as the pin in restore_target_or_pin_backend.
+                (void)apply_backend(
+                    impl->backend,
+                    [was_active](auto &backend) noexcept
+                    { was_active ? backend.cancel_route_rundown() : backend.finish_route_rundown(); }
+                );
+                pin_backend_with_live_detour(
+                    impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    "the target or the process route registry reached the residue budget"
+                );
+                return;
+            }
+
+            // A mid route drains while CLOSING, because a CLOSED route admits bypass traffic that holds entries. The
+            // coordinator and the stack query come first, because either can call an export that this route hooks.
+            bool drained = true;
+            if (has_mid_slot)
+            {
+                const bool caller_owns_route = backend_value_or(
+                    impl->backend,
+                    true,
+                    [](const auto &backend) noexcept { return backend.caller_owns_route(); }
+                );
+                const safetyhook::ProcessCoordinator coordinator;
+                (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.begin_route_rundown(); });
+                drained = mid_rundown == DetourModKit::detail::MidRundown::Drained && !caller_owns_route &&
+                          drain_closing_route(impl->backend);
+                (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
+            }
+            drained =
+                drained &&
+                (!has_mid_slot ||
+                 DetourModKit::detail::drain_mid_adapter_entries(DetourModKit::detail::mid_adapter_slots()[mid_slot]));
+            if (!drained)
+            {
+                // A thread can still be inside the detour. The closed route stays closed.
+                pin_backend_with_live_detour(
+                    impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    "a callback or route entrant did not drain before the bypass"
+                );
+                return;
+            }
+            if (!DetourModKit::detail::switch_backend(impl->backend, false))
+            {
+                pin_backend_with_live_detour(
+                    impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    "the backend cannot switch its relay off"
+                );
+                return;
+            }
+
+            const HMODULE self_ref = static_cast<HMODULE>(impl->self_ref);
+            const bool vacated = DetourModKit::detail::vacate_backend(impl->backend);
+            if (vacated)
+            {
+                impl.reset();
+                if (has_mid_slot)
+                {
+                    DetourModKit::detail::release_mid_adapter_slot(mid_slot);
+                }
+            }
+            else
+            {
+                // The cell stays Owned, so no successor takes this position. The bypassed backend reaches no image
+                // code, so only the Impl leaks.
+                (void)impl.release();
+            }
+            if (!claimed || !vacated)
+            {
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookResidue);
+            }
+            ledger.release_target_slot(target, ledger_id);
+            if (claimed)
+            {
+                (void)log().try_log(
+                    LogLevel::Info,
+                    "hook: '{}' at 0x{:0{}X} retired its claimed position{}.",
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    vacated ? "" : ", which stays owned because the vacate was refused"
+                );
+            }
+            else if (cause.newer_layers != 0)
+            {
+                (void)log().try_log(
+                    LogLevel::Info,
+                    "hook: '{}' at 0x{:0{}X} retired by bypass under {} newer layer(s). Its position {}.",
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    cause.newer_layers,
+                    vacated ? "stays for a later generation" : "stays owned because the vacate was refused"
+                );
+            }
+            else
+            {
+                (void)log().try_log(
+                    LogLevel::Info,
+                    "hook: '{}' at 0x{:0{}X} retired by bypass under a newer layer: {}. Its position {}.",
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    cause.detail,
+                    vacated ? "stays for a later generation" : "stays owned because the vacate was refused"
+                );
+            }
+            DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
+            emit_lifecycle(
+                name,
+                ledger_id,
+                kind,
+                diagnostics::HookTransition::Removed,
+                RemovalPopulationState{
+                    .was_active = was_active,
+                }
+            );
         }
 
         /**
@@ -1335,7 +1778,14 @@ namespace DetourModKit
                 "route idle proof refused",
                 [](const auto &backend) noexcept { return backend.route_retention_reason(); }
             );
-            if (route_retained)
+            // A raw hook that failed the idle proof keeps only its trampoline in allocator memory. The restored target
+            // and the bypassed relay reach no image code, so the residue releases every reference.
+            const auto *const inline_backend = std::get_if<safetyhook::InlineHook>(&impl->backend);
+            const bool trampoline_residue =
+                route_retained && inline_backend != nullptr &&
+                inline_backend->route_retention_cause() == safetyhook::RouteRetentionReason::IdleProofFailed;
+            const bool pin_references = route_retained && !trampoline_residue;
+            if (pin_references)
             {
                 // A retained route preserves every provider reference.
                 (void)impl.release();
@@ -1345,12 +1795,16 @@ namespace DetourModKit
             {
                 impl.reset();
             }
-            if (has_mid_slot && !route_retained)
+            if (trampoline_residue)
+            {
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookResidue);
+            }
+            if (has_mid_slot && !pin_references)
             {
                 DetourModKit::detail::release_mid_adapter_slot(mid_slot);
             }
             (void)ledger.release_hook(target, ledger_id);
-            if (route_retained)
+            if (pin_references)
             {
                 (void)log().try_log(
                     LogLevel::Warning,
@@ -1362,7 +1816,18 @@ namespace DetourModKit
                     retention_reason
                 );
             }
-            if (!route_retained)
+            if (trampoline_residue)
+            {
+                (void)log().try_log(
+                    LogLevel::Info,
+                    "hook: '{}' at 0x{:0{}X} restored its target and kept its trampoline: {}.",
+                    name,
+                    target,
+                    sizeof(std::uintptr_t) * 2,
+                    retention_reason
+                );
+            }
+            if (!pin_references)
             {
                 DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             }
@@ -1755,9 +2220,9 @@ namespace DetourModKit
                 DetourModKit::detail::mid_adapter_slots()[mid_slot].live.store(false, std::memory_order_seq_cst);
             }
 
-            // Loader-lock leaf discipline forbids a prologue restore or backend destruction under the loader lock.
-            // Either action can deadlock, so leak the Impl instead. Its module reference keeps the trampoline code
-            // pages mapped, so the gate callable stays valid.
+            // Loader-lock leaf discipline forbids a prologue restore, a drain, or backend destruction under the loader
+            // lock. Each can deadlock, so leak the Impl instead. The detour stays reachable, so its module reference
+            // stays held.
             if (!DetourModKit::detail::blocking_teardown_permitted())
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
@@ -1806,20 +2271,64 @@ namespace DetourModKit
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
             }
 
-            // Decide leak or restore under this target's install-serialization slot. The slot makes the decision and
-            // restore atomic against a concurrent same-target install. Restore is sound only for the newest layer
-            // (newer == 0). Newer layers still chain through this trampoline. A pristine prologue below them causes a
-            // trampoline use-after-free. The count under the slot also closes the race between a peek and restore.
+            // Decide restore or retirement under this target's install-serialization slot. The slot makes the
+            // decision atomic against a concurrent same-target install. Only the newest layer restores. A newer layer
+            // relocated this hook's jump, so a lower layer and a claimed position retire by bypass (`[B-104]`).
             auto &ledger = DetourModKit::detail::HookLedger::instance();
             const std::size_t newer = ledger.acquire_target_slot(target, ledger_id);
-            if (newer > 0)
+            if (newer == DetourModKit::detail::HookLedger::SLOT_UNAVAILABLE)
             {
-                pin_backend_under_newer_layers(m_impl, ledger, name, target, ledger_id, kind, newer);
+                pin_backend_with_live_detour(
+                    m_impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    "the hook ledger cannot decide the layer order"
+                );
+                return;
+            }
+            if (newer > 0 || DetourModKit::detail::backend_claimed(m_impl->backend))
+            {
+                retire_by_vacate(
+                    m_impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    was_active,
+                    mid_rundown,
+                    has_mid_slot,
+                    mid_slot,
+                    RetirementCause{.newer_layers = newer}
+                );
                 return;
             }
 
-            if (!restore_target_or_pin_backend(m_impl, ledger, name, target, ledger_id, kind))
+            RetirementCause cause{};
+            const TeardownRestore restore =
+                restore_target_or_pin_backend(m_impl, ledger, name, target, ledger_id, kind, cause);
+            if (restore == TeardownRestore::Pinned)
             {
+                return;
+            }
+            if (restore == TeardownRestore::Retire)
+            {
+                retire_by_vacate(
+                    m_impl,
+                    ledger,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    was_active,
+                    mid_rundown,
+                    has_mid_slot,
+                    mid_slot,
+                    cause
+                );
                 return;
             }
 
@@ -1969,7 +2478,8 @@ namespace DetourModKit
                         allocator,
                         reinterpret_cast<void *>(target),
                         detour,
-                        safetyhook::InlineHook::StartDisabled
+                        safetyhook::InlineHook::StartDisabled,
+                        position_claim_for(request.name)
                     );
                     if (!created)
                     {
@@ -1986,6 +2496,7 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
 #endif
+                    const bool claimed = backend_hook.claimed();
                     auto impl = std::make_unique<Hook::Impl>(
                         std::move(backend_hook),
                         std::move(request.name),
@@ -1993,6 +2504,7 @@ namespace DetourModKit
                         ledger_id,
                         HookState::Disabled
                     );
+                    impl->bypassed = claimed;
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
 #endif
@@ -2013,6 +2525,10 @@ namespace DetourModKit
                         created_name,
                         format::format_address(target)
                     );
+                    if (claimed)
+                    {
+                        note_position_claim(created_name, target);
+                    }
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
@@ -2091,7 +2607,8 @@ namespace DetourModKit
                     allocator,
                     reinterpret_cast<void *>(target),
                     DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
-                    safetyhook::MidHook::StartDisabled
+                    safetyhook::MidHook::StartDisabled,
+                    position_claim_for(request.name)
                 );
                 if (!created)
                 {
@@ -2108,6 +2625,7 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
 #endif
+                const bool claimed = backend_hook.claimed();
                 auto impl = std::make_unique<Hook::Impl>(
                     std::move(backend_hook),
                     std::move(request.name),
@@ -2115,6 +2633,7 @@ namespace DetourModKit
                     ledger_id,
                     HookState::Disabled
                 );
+                impl->bypassed = claimed;
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
 #endif
@@ -2134,6 +2653,10 @@ namespace DetourModKit
                     created_name,
                     format::format_address(target)
                 );
+                if (claimed)
+                {
+                    note_position_claim(created_name, target);
+                }
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
@@ -2169,9 +2692,9 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
             note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::InstallAll);
 #endif
-            // InstallRollback removes a partial install newest-first. A vector's front-to-back destruction is unsafe
-            // for layered hooks on one target. InstallRollback handles mandatory misses and exceptions unless commit()
-            // moves the rows out.
+            // InstallRollback removes a partial install newest-first, so every layered row restores. A vector's
+            // front-to-back destruction leaves lower rows as residue. InstallRollback handles mandatory misses and
+            // exceptions unless commit() moves the rows out.
             class InstallRollback
             {
             public:
