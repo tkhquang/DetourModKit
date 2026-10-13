@@ -98,10 +98,11 @@ namespace DetourModKit
          * @details The same-kit ledger reports it, with a scope of one linked archive, not the process. A hook that is
          *          created but not enabled also holds a record, so this code does not prove that the prologue is
          *          patched. Drop the prior handle, or clear Options::fail_if_already_hooked to layer on it. A pinned
-         *          record (hook::Hook::release, or a teardown that failed to restore) belongs to no handle and is never
-         *          erased. It refuses every later strict install on that address, also after the allocator reissues the
-         *          address. A recorded target reports this code even after a foreign module patches it, because the
-         *          ledger check runs before the @ref TargetAlreadyHookedByAnotherModule decode.
+         *          record (hook::Hook::release, a teardown that failed to restore, or a residue) belongs to no handle
+         *          and is never erased. It refuses every later strict install on that address, also after the
+         *          allocator reissues the address. A recorded target reports this code even after a foreign module
+         *          patches it, because the ledger check runs before the @ref TargetAlreadyHookedByAnotherModule
+         *          decode.
          */
         TargetAlreadyHookedByThisKit,
         /**
@@ -117,7 +118,10 @@ namespace DetourModKit
         TargetPrologueUnsafe,
         /// An unclassified hook error: an unmapped backend failure, or a failed hook gate acquisition.
         UnknownError,
-        /** @brief Refused with no change: a newer layered hook owns the target bytes. Disable or tear it down first. */
+        /**
+         * @brief Refused with no change. An arm or restore over restored bytes writes under a newer layered hook, or
+         *        the hook ledger cannot decide the layer order. An armed lower layer bypasses instead.
+         */
         LayerConflict,
         /**
          * @brief Every mid-hook adapter in the fixed pool is in use, so nothing was patched.

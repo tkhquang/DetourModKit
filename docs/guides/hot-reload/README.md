@@ -5,7 +5,7 @@
 >
 > Successful teardown permits a fresh generation even when the retired DLL stays mapped. The development loader retains images within count and byte limits.
 >
-> A failed callback drain, worker join, or consumer hook restoration blocks retirement. The loader never reinitializes an old image as a reload fallback.
+> A failed callback drain, a failed worker join, or a hook whose detour stays reachable blocks retirement. A newer hook layer on the same target does not block it. The loader never reinitializes an old image as a reload fallback.
 
 Split the mod into a resident loader and a replaceable logic DLL.
 
@@ -185,11 +185,13 @@ The example distinguishes successful feature teardown from image reclamation. `S
 
 For `DMK_STAGED_RELOAD_RETAINED`, keep the loader's own module reference until process exit. A leak counter does not prove that the leaked resource holds a module pin.
 
-The development policy accepts leak counts after the [Shutdown sequence](#topology-detourmodkit-in-the-logic-dll) succeeds. It does not authorize live feature callbacks, abandoned workers, or failed consumer hook restoration. Accept the sample's verdict only after the [thread and TLS preconditions](#threads-tls-and-static-constructors) hold.
+The development policy accepts leak counts after the [Shutdown sequence](#topology-detourmodkit-in-the-logic-dll) succeeds. It does not authorize live feature callbacks, abandoned workers, or a hook whose detour stays reachable. Accept the sample's verdict only after the [thread and TLS preconditions](#threads-tls-and-static-constructors) hold.
 
 `LeakSubsystem::Input` combines several causes. An XInput pin does not attribute every Input leak to XInput. The example needs no such attribution because it retains its own reference.
 
-An inline or mid hook retains its executable route when teardown cannot safely reclaim its storage. Causes include a failed idle proof, a refused or timed-out process coordinator, and a newer overlapping route in any participant. The retained route keeps its module reference, so the image stays mapped. DMK records a `LeakSubsystem::HookManager` leak and logs the cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator). The reference sample refuses retirement after any new `HookManager` leak during `HookStack::clear()`, even when target restoration succeeds.
+An inline or mid hook that cannot restore its target retires by bypass. Causes include a newer layer in any participant, foreign or unreadable target bytes, and a claimed position. The hook switches its detour off without a target write and leaves its position for the next generation with the same hook name. It releases its module reference, so the image can unmap. Each position records one `LeakSubsystem::HookResidue` leak at its first retirement. A restored inline trampoline that fails its idle proof also stays as `HookResidue`.
+
+A hook keeps its executable route, with its detour reachable, when teardown cannot prove that no new call enters it. The `~Hook` contract in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) lists every cause. The retained route keeps its module reference, so the image stays mapped. DMK records a `LeakSubsystem::HookManager` leak and logs the cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator). The reference sample refuses retirement after any new `HookManager` leak during `HookStack::clear()`, even when target restoration succeeds.
 
 Each linked copy with a published trap gateway retains one executable page and one data page, even after clean image unmap. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for executable bytes on each toolchain.
 
@@ -233,9 +235,15 @@ DMK owns rundown for mid callbacks and counted displaced execution. The [`mid_at
 
 `Shutdown()` must refuse retirement while any source can still enter generation-owned feature code. Such sources include window procedures, timers, and third-party overlay callbacks outside DMK's typed drain. Remove those registrations and drain their callbacks while their code and state remain valid. The loader must keep the DLL mapped after a refusal.
 
-### Layered hooks unwind newest-first
+### Layered hooks retire in any order
 
-When several handles target the same address, destroy them newest-first. `hook::HookStack` enforces this order for its own handles in its destructor, move-assignment, and `clear()`. Coordinate teardown across stacks and compatible participants that share a target. An older backend retains its route when target bytes identify a newer layer. Newest-first order is necessary, but quiescence and target-byte checks still determine whether restoration succeeds.
+Hooks that share a target retire in any order, in one DMK copy or across copies (`[B-16]`). The newest layer restores its target. A lower layer bypasses its own detour without a target write and leaves its position as residue. `hook::HookStack` tears its own handles down newest-first, so each of its layers can restore. Quiescence of a raw inline detour stays caller-owned in both cases.
+
+- A lower copy built with DMK 4.3.0 or earlier stays refused for the session, because its own code refuses the disable. Rebuild that mod with 4.4.0.
+- The next generation claims a vacated position when its hook name, target, and hook kind match. Keep hook names stable across builds. A renamed hook installs fresh on top.
+- The claim matches hook names across every DMK copy in the process. Give each hook a name that no other mod uses on the same target.
+- A position that no generation claims stays for the process. It keeps one process record and adds two jumps to each call.
+- VMT hook stacks fall outside this rule. [Destroy stacked VMT hooks newest-first](../hooking/vmt-hook-config.md#destroy-stacked-vmt-hooks-newest-first).
 
 ### Session teardown owns one instance's subsystems
 
@@ -294,7 +302,7 @@ Apply this `Shutdown()` order:
 2. Drop dispatcher subscriptions. Quiesce their emitters.
 3. Retire external callback registrations and quiesce every hook caller.
 4. Revert direct game-memory patches after their writers stop.
-5. Clear the `HookStack` newest-first and latch any restore failure.
+5. Clear the `HookStack` newest-first and latch any teardown that books `HookManager`.
 6. Call `prepare_logic_dll_unload*` and require `SafeToUnload`.
 7. Destroy the `Session`.
 8. Read the module-pin and leak counters, then compute the retirement verdict.
@@ -307,7 +315,7 @@ Apply the same obligations after partial `Init()` publication. The example start
 
 Read pin counters after `~Session`, because XInput retention occurs there. The counters remain readable after the `Session` is gone.
 
-Latch the first hook restore failure across retries. Keep every saved original pointer and target-module reference after a failure. A retained inline route can still enter the detour.
+Latch the first hook teardown that books `HookManager` across retries. Keep every saved original pointer and target-module reference after it. A retained inline route can still enter the detour. A `HookResidue` leak needs no latch, because no new call reaches that detour.
 
 Apply the [retained-generation policy](#define-a-retained-generation-policy) to either wheel backend. `ExternalHost` does not change the XInput verdict.
 
@@ -321,7 +329,7 @@ The host links the archive and owns every DetourModKit object. The logic DLL lin
 | --- | --- | --- |
 | Config registrations | Host | Drain references to generation-owned values before unmap. |
 | `input::Input::start()` | Host | The poll-thread module reference must land on the host. |
-| Hooks with logic-DLL detours | Host, with newest-first teardown | A retained hook can reach a logic-DLL detour. |
+| Hooks with logic-DLL detours | Host | A retained hook can reach a logic-DLL detour. |
 
 `prepare_logic_dll_unload(binding_names)` retires named input bindings and all config callbacks in that DMK instance. It closes callback admission during the drain and requests watcher and reload-servicer stop. A successful drain clears config registrations and reopens input admission. Its deadline bounds waits for DMK callbacks and workers. Consumer release callbacks and capture destructors can exceed that deadline, as `session.hpp` specifies.
 
@@ -359,6 +367,7 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | --- | --- | --- |
 | The revision does not change. | Check the staged file name and exported revision source. | If the revision translation unit did not recompile, compare DLL hashes. |
 | `Shutdown()` refuses the unload. | Check parked callbacks, workers, subscriptions, hook restore, and pin counters. | Keep the DLL mapped. Retry recoverable refusals off the loader lock. Restart after a latched worker or hook failure. |
+| A log line reads `refused disable: another writer owns the prologue`. | Check the DetourModKit version of the mod that logged it. A lower copy built with 4.3.0 or earlier refuses under a newer layer. | Rebuild that mod with DMK 4.4.0, or restart the game. |
 | The lease probe fails. | Check both the open and close status. | Keep the DLL mapped and request a game restart. |
 | `FreeLibrary` fails. | Check the loader's module handle and release result. | Request a game restart. |
 | The retired address stays mapped. | Check the successful teardown verdict and retention budget. | Record retention and load a unique successor. |
@@ -379,6 +388,26 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | `StagedGenerationSoakReloadsWithFreshBytes` | Clean `ExternalHost` generations load fresh bytes and unmap. |
 | `StagedGenerationLocalWheelRetentionStaysMapped` | Fresh local-wheel generations coexist with retained predecessors. CTest skips this case without a window station. |
 | `StagedGenerationForeignXInputRetainsThePair` | One local generation retains XInput, forwards calls, and survives foreign hand-back. |
+| `StagedGenerationLowerLayerRetiresUnderNewerHost` | A generation under a newer host hook retires by bypass with one `HookResidue` leak and no `HookManager` leak, and it unmaps. The host chain skips the retired detour. A successor claims the position with no new record, and its detour reaches the call result. |
+
+[`layered_generation_reload.cpp`](../../../tests/lifecycle/layered_generation_reload.cpp) loads two separately linked families of the staged-generation DLL, which hook one export of `hook_target_lib.dll`. It contains these layered-reload proofs:
+
+| `Lifecycle` test | Verified scope |
+| --- | --- |
+| `LayeredReloadLowerCopyRetiresInFieldOrder` | The lower copy reloads under the upper copy. It retires by bypass and unmaps, and its successor claims its position. |
+| `LayeredReloadLowerCopyRetiresInReverseOrder` | The same reload with the other family installed first. |
+| `LayeredReloadDisableFirstConsumerRetires` | A consumer that disables every hook newest-first and then destroys them retires the lower copy. |
+| `LayeredReloadHandBackBeforeShutdownRestoresCleanly` | The upper copy retires before the lower Shutdown, so the lower copy restores its target after the trampoline idle proof. |
+| `LayeredReloadHandBackBeforeSuccessorInit` | The upper copy retires between the lower Shutdown and the successor Init. The successor claims the vacated position at the top. |
+| `LayeredReloadHandBackAfterSuccessorInit` | The upper copy retires after the successor Init. The claimed position survives the upper restore. |
+| `LayeredReloadPreservesForeignChainingLayer` | A host stub with relocated bytes and a jump back sits above the lower copy. The retirement writes none of its bytes, and calls skip the retired detour. |
+| `LayeredReloadLeavesNonChainingHijackUntouched` | A host jump that does not chain sits above the lower copy. The retirement writes none of its bytes. |
+| `LayeredReloadLowerMidCopyRetires` | A lower mid hook closes and drains its route, and its copy unmaps, in both install orders and after a newest-first disable. |
+| `LayeredReloadFarHookRetires` | A lower far hook retires through its relay, and its successor claims that relay. |
+| `LayeredReloadAlternatingCopiesKeepConstantDepth` | The two copies of raw inline hooks reload in turn 1000 times. From cycle 2 on, the live record count, free record count, Vacant count, and private RWX bytes stay equal at each cycle end. No generation books `HookManager`, and only the first lower generation books `HookResidue`. |
+| `LayeredReloadMidSuccessorClaimsClosedRoute` | Two copies of mid hooks reload in turn 64 times in both install orders. The same counts stay equal at each cycle end. |
+| `LayeredReloadClaimedPositionUnderForeignChainingLayer` | A successor claims a vacated position under a host stub that chains, and the stub bytes stay untouched. |
+| `LayeredReloadResidueBudgetFallsBackToPin` | With position claims refused, the residue budget engages. The next lower generation books `HookManager`, and its Shutdown refuses. |
 
 [`staged_example_reload.cpp`](../../../tests/lifecycle/staged_example_reload.cpp) exercises both reference sources with a required resident wheel host and a synthetic controller. Its executable calls loader functions directly. It does not exercise the loader DLL entry point, control-thread startup, or F10 path.
 

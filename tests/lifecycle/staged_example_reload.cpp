@@ -7,6 +7,7 @@
 #include "../../examples/staged_reload/mod_loader.cpp"
 
 #include <safetyhook/inline_hook.hpp>
+#include "../fixtures/quiet_window.hpp"
 
 #include <xinput.h>
 
@@ -214,23 +215,9 @@ namespace
         const auto extended = resolve<StateFn>(provider, MAKEINTRESOURCEA(100));
         if (primary == nullptr || extended == nullptr)
             return fail("The paired provider exports are absent.");
-        const HWND window = ::CreateWindowExW(
-            0,
-            L"STATIC",
-            L"DMK sample proof",
-            WS_OVERLAPPEDWINDOW,
-            0,
-            0,
-            200,
-            150,
-            nullptr,
-            nullptr,
-            ::GetModuleHandleW(nullptr),
-            nullptr
-        );
+        const HWND window = dmk_test::create_quiet_window(L"STATIC", L"DMK sample proof");
         if (window == nullptr)
             return fail("The required wheel window is absent.");
-        ::ShowWindow(window, SW_SHOWNA);
         if (wheel_host_start(
                 ::GetCurrentThreadId(),
                 DMK_WHEELHOST_ABI_VERSION,

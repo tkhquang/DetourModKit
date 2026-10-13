@@ -2,8 +2,8 @@
  * @file staged_generation_dll.cpp
  * @brief Defines one reloadable test generation with its own DetourModKit archive.
  * @details The fixture runs the guide's Init and Shutdown sequence. The host controls each test seam before poll start.
- *          It exercises inline and mid hooks, an input binding, a subscribed dispatcher, and both diagnostics
- *          dispatchers, and omits VMT hooks.
+ *          It hooks the external hook target with a raw inline or a mid hook. It also exercises in-image mid hooks, an
+ *          input binding, a subscribed dispatcher, and both diagnostics dispatchers, and omits VMT hooks.
  */
 
 #include "DetourModKit/diagnostics.hpp"
@@ -27,11 +27,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
 
 #include <windows.h>
+
+namespace DetourModKit::detail
+{
+    /// Withholds the position claim from the installs of this image's copy. src/internal/hook_backend.hpp declares it.
+    extern std::atomic<bool> g_hook_position_claims_refused_for_test;
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -40,8 +47,11 @@ namespace
     /// Identifies an unassigned virtual key that cannot collide with real hardware.
     constexpr int PROBE_VK = VK_F24;
 
-    /// Adds a distinct value to each chained result.
-    constexpr int DETOUR_BONUS = 1000;
+    /// Names the hook on the target export when InitOptions::hook_name is null.
+    constexpr const char *DEFAULT_HOOK_NAME = "staged_gen_hook";
+
+    /// Bounds the hooks of one generation: the target hook and six mid hooks.
+    constexpr std::size_t HOOK_CAPACITY = 7;
 
     constexpr int HOOK_PROBE_BASE = 17;
     constexpr int HOOK_PROBE_MODIFIER = 5;
@@ -60,7 +70,12 @@ namespace
     static_assert(sizeof(s_generation_tag) == sizeof(staged_gen::TAG_MARKER) + staged_gen::TAG_LENGTH);
 
     std::optional<DetourModKit::Session> s_session;
-    DetourModKit::hook::HookStack s_hooks;
+    // Owns the generation's hooks in install order. A slot keeps its address, so a held pointer survives a later
+    // install. Static destruction also runs newest first, because an array destroys its last element first.
+    std::array<std::optional<DetourModKit::hook::Hook>, HOOK_CAPACITY> s_held_hooks;
+    std::size_t s_held_hook_count = 0;
+    int s_teardown_mode = 0;
+    std::atomic<int> s_detour_bonus{0};
     HMODULE s_target_lib = nullptr;
     HMODULE s_xinput_proxy = nullptr;
     std::uint32_t s_drain_timeout_ms = 5000;
@@ -98,6 +113,19 @@ namespace
         s_mid_calls.fetch_add(1, std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Moves @p hook into the next free slot of s_held_hooks.
+     * @return Null when the generation already holds HOOK_CAPACITY hooks. The hook is then destroyed.
+     */
+    [[nodiscard]] DetourModKit::hook::Hook *hold_hook(DetourModKit::hook::Hook hook)
+    {
+        if (s_held_hook_count == HOOK_CAPACITY)
+            return nullptr;
+        DetourModKit::hook::Hook &held = s_held_hooks[s_held_hook_count].emplace(std::move(hook));
+        ++s_held_hook_count;
+        return &held;
+    }
+
     bool install_mid_hooks()
     {
         constexpr std::array<MidTarget, 6> targets{
@@ -117,7 +145,8 @@ namespace
                 },
                 &mid_callback
             );
-            if (!installed || !s_hooks.push(std::move(*installed)).enable())
+            DetourModKit::hook::Hook *const held = installed ? hold_hook(std::move(*installed)) : nullptr;
+            if (held == nullptr || !held->enable())
                 return false;
             MidTarget volatile target = targets[i];
             if (target() != static_cast<int>(3 * (i + 1)) || s_mid_calls.load() != i + 1)
@@ -172,19 +201,80 @@ namespace
     {
         s_hook_calls.fetch_add(1, std::memory_order_relaxed);
         const TargetFn original = s_original.load(std::memory_order_acquire);
-        return original != nullptr ? original(base, modifier) + DETOUR_BONUS : UNCHAINED_RESULT;
+        return original != nullptr ? original(base, modifier) + s_detour_bonus.load(std::memory_order_relaxed)
+                                   : UNCHAINED_RESULT;
+    }
+
+    void compute_damage_mid_callback(DetourModKit::hook::MidContext &context) noexcept
+    {
+        s_hook_calls.fetch_add(1, std::memory_order_relaxed);
+        // The target returns base + modifier, so a bonus in the modifier register reaches the call result. The 32-bit
+        // sum zero-extends, as a 32-bit register write does.
+        std::uintptr_t &modifier = DetourModKit::hook::gpr(context, DetourModKit::hook::Gpr::Rdx);
+        modifier = static_cast<std::uint32_t>(
+            static_cast<std::uint32_t>(modifier) +
+            static_cast<std::uint32_t>(s_detour_bonus.load(std::memory_order_relaxed))
+        );
     }
 
     /**
-     * @brief Drops hook handles and checks the HookManager leak delta.
-     * @return true if this generation has no HookManager
-     *         retention.
+     * @brief Installs the InitOptions::hook_kind hook on @p target, then arms it.
+     * @return False after a create or arm failure. A created hook stays held for the rollback.
+     */
+    [[nodiscard]] bool install_target_hook(const staged_gen::InitOptions &options, TargetFn target)
+    {
+        using namespace DetourModKit;
+        const Address address{reinterpret_cast<std::uintptr_t>(target)};
+        const std::string name = options.hook_name != nullptr ? options.hook_name : DEFAULT_HOOK_NAME;
+        const bool mid = options.hook_kind == static_cast<int>(staged_gen::HookKind::Mid);
+        if (options.far_hook != 0)
+        {
+            safetyhook::force_ff_hook_for_test(true);
+        }
+        Result<hook::Hook> installed =
+            mid ? hook::mid_at(hook::MidRequest{.name = name, .target = address}, &compute_damage_mid_callback)
+                : hook::inline_at(hook::InlineRequest{.name = name, .target = address}, &compute_damage_detour);
+        // A claim runs no backend setup, so the one-shot request can survive it. Later installs stay near.
+        safetyhook::force_ff_hook_for_test(false);
+        hook::Hook *const held = installed ? hold_hook(std::move(*installed)) : nullptr;
+        if (held == nullptr)
+        {
+            return false;
+        }
+        if (!mid)
+        {
+            s_original.store(held->original<TargetFn>(), std::memory_order_release);
+        }
+        return held->enable().has_value();
+    }
+
+    /// Disables every held hook, newest first, and stops at the first refusal.
+    [[nodiscard]] bool disable_generation_hooks_newest_first() noexcept
+    {
+        for (std::size_t index = s_held_hook_count; index > 0; --index)
+        {
+            if (!s_held_hooks[index - 1]->disable())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief Destroys the held hooks newest first and checks the HookManager leak delta.
+     * @details A HookResidue retirement leaves no detour reachable and releases its module reference, so it does not
+     *          refuse.
+     * @return true if this generation has no HookManager retention.
      */
     [[nodiscard]] bool clear_generation_hooks() noexcept
     {
         namespace diag = DetourModKit::diagnostics;
         const std::size_t hook_leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
-        s_hooks.clear();
+        for (; s_held_hook_count > 0; --s_held_hook_count)
+        {
+            s_held_hooks[s_held_hook_count - 1].reset();
+        }
         if (diag::intentional_leak_count(diag::LeakSubsystem::HookManager) != hook_leaks_before)
         {
             s_hook_teardown_refused = true;
@@ -199,7 +289,7 @@ namespace
     /// Rolls back reclaimable state while a retained hook preserves its trampoline and target-module reference.
     void roll_back_generation() noexcept
     {
-        const bool prologues_restored = clear_generation_hooks();
+        const bool hooks_released = clear_generation_hooks();
         s_subscription.reset();
         s_lifecycle_subscription.reset();
         s_fault_subscription.reset();
@@ -212,7 +302,7 @@ namespace
             ::FreeLibrary(s_xinput_proxy);
             s_xinput_proxy = nullptr;
         }
-        if (prologues_restored && s_target_lib != nullptr)
+        if (hooks_released && s_target_lib != nullptr)
         {
             ::FreeLibrary(s_target_lib);
             s_target_lib = nullptr;
@@ -276,6 +366,9 @@ extern "C"
         out->dispatched = s_dispatched.load(std::memory_order_relaxed);
         out->lifecycle_events = s_lifecycle_events.load(std::memory_order_relaxed);
         out->diagnostics_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Diagnostics);
+        out->hook_residue_leaks = diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
+        out->hook_module_pins = diag::module_pin_count(diag::ModulePinReason::Hook);
+        out->coordinator_vacant = coordinator.vacant;
     }
 
     /// Implements @ref staged_gen::ArmParkFn.
@@ -324,6 +417,12 @@ extern "C"
         {
             s_drain_timeout_ms = options->drain_timeout_ms;
             s_external_wheel = options->wheel_host != nullptr;
+            s_teardown_mode = options->teardown_mode;
+            s_detour_bonus.store(options->detour_bonus, std::memory_order_relaxed);
+            detail::g_hook_position_claims_refused_for_test.store(
+                options->refuse_position_claims != 0,
+                std::memory_order_release
+            );
 
             Result<Session> started = Session::start(
                 ModInfo{
@@ -363,27 +462,17 @@ extern "C"
                 roll_back_generation();
                 return 0;
             }
-            Result<hook::Hook> installed = hook::inline_at(
-                hook::InlineRequest{
-                    .name = "staged_gen_hook",
-                    .target = Address{reinterpret_cast<std::uintptr_t>(target)},
-                },
-                &compute_damage_detour
-            );
-            if (!installed)
-            {
-                roll_back_generation();
-                return 0;
-            }
-            hook::Hook &held = s_hooks.push(std::move(*installed));
-            s_original.store(held.original<TargetFn>(), std::memory_order_release);
-            if (!held.enable())
+            // The baseline crosses every layer already on the target, so a family can arm over another family.
+            const int baseline = target(HOOK_PROBE_BASE, HOOK_PROBE_MODIFIER);
+            const std::uint64_t calls_before_arm = s_hook_calls.load(std::memory_order_relaxed);
+            if (!install_target_hook(*options, target))
             {
                 roll_back_generation();
                 return 0;
             }
             const int hook_probe = target(HOOK_PROBE_BASE, HOOK_PROBE_MODIFIER);
-            if (hook_probe != HOOK_PROBE_BASE + HOOK_PROBE_MODIFIER + DETOUR_BONUS)
+            if (hook_probe != baseline + options->detour_bonus ||
+                s_hook_calls.load(std::memory_order_relaxed) == calls_before_arm)
             {
                 roll_back_generation();
                 return 0;
@@ -562,13 +651,19 @@ extern "C"
         {
             return 0;
         }
+        // The disable-first consumer latches a refused disable and destroys nothing, so the loader keeps it mapped.
+        if (s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::DisableFirst) &&
+            !disable_generation_hooks_newest_first())
+        {
+            return 0;
+        }
 
         std::thread parked_caller;
         if (s_retain_mid && !park_mid_caller(parked_caller))
         {
             return 0;
         }
-        const bool prologues_restored = clear_generation_hooks();
+        const bool hooks_released = clear_generation_hooks();
         if (parked_caller.joinable())
         {
             // The closed route sends the released caller through its bypass to the restored target.
@@ -592,20 +687,23 @@ extern "C"
             ::FreeLibrary(s_xinput_proxy);
             s_xinput_proxy = nullptr;
         }
-        if (prologues_restored && s_target_lib != nullptr)
+        if (hooks_released && s_target_lib != nullptr)
         {
             ::FreeLibrary(s_target_lib);
             s_target_lib = nullptr;
         }
 
         // Read the guide's refusal boundary after ~Session so XInput retention is visible. The reserved WndProc
-        // reason never counts; the local wheel pin is now MessageHookKeepalive.
+        // reason never counts, and the local wheel pin is MessageHookKeepalive. A retired hook releases its Hook
+        // reference, so both pin checks admit a HookResidue.
         const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
         const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
         const std::size_t input_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Input);
-        const std::size_t total_leaks = diag::total_intentional_leaks();
+        // No caller reaches the detour of a HookResidue, so it does not block the unmap.
+        const std::size_t blocking_leaks =
+            diag::total_intentional_leaks() - diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
         const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
                                   (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
         // A kept diagnostics index can belong to a handler that still runs in this image.
@@ -615,10 +713,10 @@ extern "C"
         const bool local_backend_safe = wndproc == 0 && message_hook <= 1 && xinput_inert && diagnostics_released &&
                                         diag::total_module_pins() == message_hook + xinput_self + xinput_targets;
         const bool external_backend_safe = wndproc == 0 && message_hook == 0 && xinput_self == 0 &&
-                                           xinput_targets == 0 && input_leaks == 0 && total_leaks == 0 &&
+                                           xinput_targets == 0 && input_leaks == 0 && blocking_leaks == 0 &&
                                            diag::total_module_pins() == 0;
         s_external_wheel = false;
-        return (prologues_restored && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1 : 0;
+        return (hooks_released && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1 : 0;
     }
 } // extern "C"
 

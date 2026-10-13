@@ -444,24 +444,44 @@ TEST(InlineHookFaultProof, EnableFailureIsReported)
     EXPECT_FALSE(hook.is_enabled());
 }
 
-// The mirror of EnableFailureIsReported: a disable() whose restore cannot land keeps reporting the hook as enabled
-// rather than claiming a disarm that never happened.
-TEST(InlineHookFaultProof, DisableFailureIsReported)
+// A decommitted target reads Indeterminate, so the Active hook cannot restore. It bypasses: the relay switches off with
+// no target write and the hook publishes Disabled. Teardown then retires it as residue, not as a pin.
+TEST(InlineHookFaultProof, DisableUnderUnreadableBytesBypasses)
 {
+    namespace diag = DetourModKit::diagnostics;
+
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
     plant_leaf_function(page);
 
-    Result<Hook> installed = try_install_at(page.addr(0), "DisableFailure");
-    ASSERT_TRUE(installed.has_value()) << installed.error().message();
-    Hook hook = std::move(*installed);
-    ASSERT_TRUE(hook.enable().has_value());
+    const std::size_t pins_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+    const std::size_t residue_before = diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
+    {
+        Result<Hook> installed = try_install_at(page.addr(0), "DisableFailure");
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        Hook hook = std::move(*installed);
+        ASSERT_TRUE(hook.enable().has_value());
 
-    ASSERT_NE(VirtualFree(page.base(), dmk_test::ScratchPage::PAGE_SIZE, MEM_DECOMMIT), 0);
-    const Result<void> disabled = hook.disable();
-    ASSERT_FALSE(disabled.has_value());
-    EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
-    EXPECT_TRUE(hook.is_enabled());
+        ASSERT_NE(VirtualFree(page.base(), dmk_test::ScratchPage::PAGE_SIZE, MEM_DECOMMIT), 0);
+        const Result<void> disabled = hook.disable();
+        ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
+        EXPECT_FALSE(hook.is_enabled());
+        const Result<int> refused_call = hook.try_call<int>();
+        ASSERT_FALSE(refused_call.has_value()) << "a bypassed hook must clear its gate callable";
+        EXPECT_EQ(refused_call.error().code, ErrorCode::InvalidHookState);
+
+        // A bypassed hook is already Disabled, so a second disable succeeds over the same unreadable target.
+        EXPECT_TRUE(hook.disable().has_value());
+        EXPECT_FALSE(hook.is_enabled());
+    }
+
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), pins_before)
+        << "no path reaches the bypassed detour, so teardown must not pin it";
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookResidue), residue_before + 1)
+        << "an unreadable target must retire the hook as exactly one residue";
+    EXPECT_TRUE(is_target_hooked(Address{page.addr(0)})) << "a residue keeps its position in the target's chain";
+    // The residue keeps its ledger entry and process record, so the address must not go back to the allocator.
+    page.abandon();
 }
 
 namespace DetourModKit::detail

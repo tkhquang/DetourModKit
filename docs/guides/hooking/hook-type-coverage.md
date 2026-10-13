@@ -15,7 +15,9 @@ DetourModKit ships three families of code-interception primitives: inline, mid-f
 
 ## 1. Supported hook types
 
-All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp). `inline_at`, `mid_at`, and `vmt_for` hand back a move-only RAII handle whose lifetime is the hook's lifetime: a dropped handle restores the target, unless the handle was released. A per-method VMT hook has no handle of its own. It lives inside the owning `VmtHook`. `Hook::release()` and `VmtHook::release()` both disengage the handle and retain what it owned for the process lifetime. An armed inline or mid backend stays patched and keeps its dispatch live. A hook released while still disabled keeps its backend and its ledger record without an armed target. A released VMT clone stays applied with no vptr restored.
+All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp). `inline_at`, `mid_at`, and `vmt_for` hand back a move-only RAII handle whose lifetime is the hook's lifetime. A dropped handle restores the target, unless the handle was released. An inline or mid layer that cannot restore retires by bypass instead.
+
+A per-method VMT hook has no handle of its own. It lives inside the owning `VmtHook`. `Hook::release()` and `VmtHook::release()` both disengage the handle and retain what it owned for the process lifetime. An armed inline or mid backend stays patched and keeps its dispatch live. A hook released while still disabled keeps its backend and its ledger record without an armed target. A released VMT clone stays applied with no vptr restored.
 
 The handle's lifetime is the hook's lifetime, but a Logic-DLL detour adds a callback-provider lifetime on top. `mid_at` reaches its callback through a DetourModKit adapter. Ordinary off-loader-lock destruction from outside the callback refuses new entry and waits for admitted callbacks. A backend that stays patched after that rundown is inert. Loader-lock teardown, self-destruction, and an entrant the adapter did not record all tombstone without a wait, and `Hook::release()` bypasses the tombstone step. None of those paths authorizes immediate unmapping. `inline_at` has no adapter, because the detour *is* the target. Quiescence there is caller-owned: stop every thread that can reach the target, join it, destroy the handle, then unmap. The callback-only Logic-DLL hosts in [`tests/lifecycle/test_logic_dll_unload.cpp`](../../../tests/lifecycle/test_logic_dll_unload.cpp) prove the ordinary managed-mid and caller-quiesced inline paths.
 
@@ -47,7 +49,7 @@ The classification decides what gets published:
 - A committed restore publishes Disabled and closes the call gate.
 - A committed restore followed by Foreign or Indeterminate remains conservatively Active with `DisableFailed`, because a newer layer can chain through its trampoline and unreadable bytes prove no absence. DMK reasserts the backend's retained state in that case, so `is_enabled()` remains true, and a restore of the exact OwnedPatch bytes permits a real retry.
 - Original clears any stale backend flag and authorizes backend destruction. The [hook design note](../../design/hooking.md) owns published-route reclamation, retention, and leak accounting under "Clean x64 mid teardown".
-- Foreign and Indeterminate are refused before either unconditional backend write, and teardown pins the whole backend.
+- Foreign and Indeterminate before the write stop both unconditional backend writes. An Active hook then bypasses: its relay skips its own detour, no target byte changes, and the hook publishes Disabled. Teardown retires it as `HookResidue`. A restored hook over such bytes refuses its toggle.
 
 Some routes dispatch through generated code rather than a straight jump to the destination:
 

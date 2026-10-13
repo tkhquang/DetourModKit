@@ -262,7 +262,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved)
 ```
 
 > [!WARNING]
-> See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for dynamic unload and caller-owned hook order.
+> See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for dynamic unload and caller-owned hook quiescence.
 
 ## Configuration File Example
 

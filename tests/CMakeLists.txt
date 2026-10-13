@@ -562,6 +562,12 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesReportLayerConflict
     Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict
     Lifecycle.RouteCopiesReportCoordinatorRefusal
+    Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline
+    Lifecycle.RouteCopiesLegacyLowerStaysRefused
+    Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper
+    Lifecycle.RouteCopiesLegacyAroundClaimedPosition
+    Lifecycle.RouteCopiesResidueBudgetFloorPins
+    Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed
     Lifecycle.RouteCoordinatorSurvivesParticipantUnload
     Lifecycle.StagedGenerationResourcesStayWithinBudget
     Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls
@@ -608,6 +614,21 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationParkedCallbackRefusesReload
     Lifecycle.StagedGenerationReleasedCallbackAllowsReload
     Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps
+    Lifecycle.StagedGenerationLowerLayerRetiresUnderNewerHost
+    Lifecycle.LayeredReloadLowerCopyRetiresInFieldOrder
+    Lifecycle.LayeredReloadLowerCopyRetiresInReverseOrder
+    Lifecycle.LayeredReloadDisableFirstConsumerRetires
+    Lifecycle.LayeredReloadHandBackBeforeShutdownRestoresCleanly
+    Lifecycle.LayeredReloadHandBackBeforeSuccessorInit
+    Lifecycle.LayeredReloadHandBackAfterSuccessorInit
+    Lifecycle.LayeredReloadPreservesForeignChainingLayer
+    Lifecycle.LayeredReloadLeavesNonChainingHijackUntouched
+    Lifecycle.LayeredReloadLowerMidCopyRetires
+    Lifecycle.LayeredReloadFarHookRetires
+    Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth
+    Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute
+    Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer
+    Lifecycle.LayeredReloadResidueBudgetFallsBackToPin
     Lifecycle.StagedGenerationExistingCandidateUsesFreshName
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
     Lifecycle.VmtUnreadableModuleHeader
@@ -621,7 +642,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 293)
+    --minimum 314)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

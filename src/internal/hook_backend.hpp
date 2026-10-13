@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -79,12 +80,15 @@ namespace DetourModKit
             // it; a pinned Impl carries it away and the slot is never reclaimed, which is what keeps a still-reachable
             // stub's adapter pointing at storage that outlives it.
             std::size_t mid_slot{static_cast<std::size_t>(-1)};
-            // Counted reference on the module this hook's trampoline/detour code lives in, taken before the backend is
-            // published while the module is mapped. ~Hook releases it on the clean off-loader-lock teardown; on a leak
-            // branch it rides along with the leaked Impl (never released), keeping the trampoline mapped for a late
-            // foreign caller. Holds an HMODULE (kept as void* so the acquire/release stay in hook.cpp). See
-            // detail::acquire_module_ref.
+            // Counted reference on the module that holds the detour and adapter code, taken before the backend is
+            // published while the module is mapped. Trampolines live in allocator memory, so the reference protects
+            // only image code that a retained chain can still reach. ~Hook releases it when no path reaches that code:
+            // after a restore, or after a bypass and drain. A leak branch keeps it with the leaked Impl. Holds an
+            // HMODULE (kept as void* so the acquire/release stay in hook.cpp). See detail::acquire_module_ref.
             void *self_ref{nullptr};
+            // True while the switch word sends every caller past the detour and the target patch stays in the chain.
+            // Written under the call gate mutex. A claimed backend starts bypassed.
+            bool bypassed{false};
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
             ~Impl() noexcept;
@@ -280,6 +284,90 @@ namespace DetourModKit
 
         /// Returns an address whose page cannot enter a non-executable backend transaction.
         [[nodiscard]] void *backend_non_executable_transaction_marker_for_test() noexcept;
+
+        /// Withholds the position claim from inline_at and mid_at. See hook.cpp.
+        extern std::atomic<bool> g_hook_position_claims_refused_for_test;
+
+        /// Makes every later backend setup emit the trampoline shape of a 4.3.0 copy, with no relay cell.
+        void omit_backend_relay_cell_for_test(bool omit) noexcept;
+
+        /// Selects 0 for no refusal, or a safetyhook::g_coordinator_refusal_for_test value.
+        void set_backend_coordinator_refusal_for_test(unsigned refusal) noexcept;
+
+        /// Counts the process route records by state.
+        struct BackendCoordinatorCounts
+        {
+            std::size_t live{0};
+            std::size_t retained{0};
+            std::size_t vacant{0};
+            std::size_t free{0};
+        };
+
+        /// Reads the process route records under the coordinator.
+        [[nodiscard]] BackendCoordinatorCounts backend_coordinator_counts_for_test() noexcept;
+
+        /// Selects the kind of a raw backend probe.
+        enum class BackendProbeKind : std::uint8_t
+        {
+            Inline,
+            Mid,
+            Routed,
+        };
+
+        /// Names one operation that a proof drives on a raw backend probe.
+        enum class BackendProbeOperation : std::uint8_t
+        {
+            Enable,
+            Disable,
+            Bypass,
+            Resume,
+            Vacate,
+            Reset,
+            MoveAssign,
+            RetainRoute,
+        };
+
+        /// Reads one raw backend probe. A null address means absent.
+        struct BackendProbeState
+        {
+            bool valid{false};
+            bool enabled{false};
+            bool claimed{false};
+            bool bypassed{false};
+            void *trampoline{nullptr};
+            void *relay_slot{nullptr};
+            void *relay_cell{nullptr};
+        };
+
+        /// One raw backend hook that a proof drives without a Hook handle.
+        struct BackendProbe;
+
+        /**
+         * @brief Creates a disabled raw backend hook on @p target with the claim of @p position_name.
+         * @param destination The detour, or a `void(safetyhook::Context &)` callback for a mid probe.
+         * @return The probe, or nullptr when the backend refused.
+         */
+        [[nodiscard]] BackendProbe *create_backend_probe_for_test(
+            BackendProbeKind kind,
+            void *target,
+            void *destination,
+            std::string_view position_name
+        ) noexcept;
+
+        /// Drives @p operation on @p probe and reports the backend result.
+        [[nodiscard]] bool drive_backend_probe_for_test(BackendProbe *probe, BackendProbeOperation operation) noexcept;
+
+        /// Reads @p probe.
+        [[nodiscard]] BackendProbeState backend_probe_state_for_test(const BackendProbe *probe) noexcept;
+
+        /// Destroys @p probe through the backend destructor.
+        void destroy_backend_probe_for_test(BackendProbe *probe) noexcept;
+
+        /// Adds up to @p count one-byte filler records to the process route registry and returns the number added.
+        [[nodiscard]] std::size_t fill_backend_coordinator_for_test(std::size_t count) noexcept;
+
+        /// Removes every filler record that fill_backend_coordinator_for_test added.
+        void clear_backend_coordinator_fill_for_test() noexcept;
     } // namespace detail
 #endif
 } // namespace DetourModKit

@@ -108,12 +108,16 @@ namespace DetourModKit
             [[nodiscard]] bool commit_hook(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
+             * @brief The result of a slot or release call that cannot decide a count.
+             * @details It is positive, so a caller that reads only the count still fails closed.
+             */
+            static constexpr std::size_t SLOT_UNAVAILABLE = static_cast<std::size_t>(-1);
+
+            /**
              * @brief Removes hook @p id from @p target and returns how many newer hooks remain recorded on it.
-             * @return The count of ids created AFTER @p id still in @p target's order. Zero means @p id is the newest
-             *         (or sole) record, so a byte restore is in the safe newest-first order. Any positive value means
-             *         newer layers sit on top and the caller must not restore. Lock failure returns a positive count
-             *         so the caller fails closed to a leak.
-             * @note An id counts until its owner calls this method, so retained ids count too
+             * @return The count of ids created AFTER @p id still in @p target's order, or @ref SLOT_UNAVAILABLE on an
+             *         inert ledger or a lock failure. Zero means that @p id is the newest record.
+             * @note An id counts until its owner calls this method, so retained and residue ids count too
              *       (docs/design/hooking.md, "A retained id still counts").
              */
             [[nodiscard]] std::size_t release_hook(std::uintptr_t target, std::uint64_t id) noexcept;
@@ -122,10 +126,11 @@ namespace DetourModKit
              * @brief Claims @p target's serialization slot for an operation that may alter its bytes, returning the
              *        newer-live count measured at the instant the slot is held.
              * @return The count of ids created AFTER @p id still recorded on @p target (see @ref release_hook for what
-             *         that includes). Zero authorizes the caller to write target bytes (enable, disable, or restore);
-             *         any positive value means @p id is not the top layer (or one raced in during the claim) and
-             *         the caller MUST refuse (toggle) or leak (teardown). An absent target/id, a bookkeeping
-             *         allocation failure, or a lock failure all return a positive count so the caller fails closed.
+             *         that includes). Zero authorizes the caller to write target bytes (enable, disable, or restore).
+             *         A newer count means that @p id is not the top layer: an Active disable bypasses, and
+             *         teardown retires by bypass. An absent target or id, a bookkeeping allocation failure, or a lock
+             *         failure returns @ref SLOT_UNAVAILABLE. The layer order then stays undecided, so the caller
+             *         refuses (toggle) or pins (teardown).
              * @details The write-side counterpart to @ref try_reserve_hook. The slot waits its turn in the same
              *          per-target queue an install waits in, so {decide, write} is atomic against installs (`[B-79]`).
              * @warning The caller MUST release the slot exactly once, through @ref release_hook (which also drops the
@@ -144,11 +149,11 @@ namespace DetourModKit
             /**
              * @brief Releases a slot claimed by @ref acquire_target_slot WITHOUT removing @p id from the creation
              *        order.
-             * @details For callers whose hook remains live or remains physically patched: a refused toggle, or a
-             *          teardown that leaked its backend. Only the queue sentinel is removed, waking the next
-             *          same-target installer; the order entry stays so @ref is_target_hooked keeps reporting the
-             *          target hooked. The restoring teardown path instead calls @ref release_hook, which drops the id
-             *          from both.
+             * @details For callers whose hook remains live or remains physically patched: a refused toggle, a
+             *          teardown that leaked its backend, or a residue. Only the queue sentinel is removed, which wakes
+             *          the next same-target installer. The order entry stays, so @ref is_target_hooked keeps reporting
+             *          the target hooked. The restoring teardown path instead calls @ref release_hook, which drops the
+             *          id from both.
              * @note The kept order entry stays counted as a newer layer for the process lifetime
              *       (docs/design/hooking.md, "A retained id still counts").
              */

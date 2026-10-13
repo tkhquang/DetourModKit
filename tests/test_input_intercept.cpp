@@ -21,6 +21,7 @@
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "fixtures/intercept_lease.hpp"
+#include "fixtures/quiet_window.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::detail::add_wheel_notches;
@@ -884,25 +885,7 @@ namespace
     HWND make_test_window() noexcept
     {
         ensure_test_window_class_registered();
-        const HWND hwnd = CreateWindowExW(
-            0,
-            TEST_WINDOW_CLASS,
-            L"DMK Intercept Test",
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            200,
-            150,
-            nullptr,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr
-        );
-        if (hwnd != nullptr)
-        {
-            ShowWindow(hwnd, SW_SHOWNA);
-        }
-        return hwnd;
+        return dmk_test::create_quiet_window(TEST_WINDOW_CLASS, L"DMK Intercept Test");
     }
 
     // Builds a wheel-message wParam whose HIWORD contains the exact signed delta.

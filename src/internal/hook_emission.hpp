@@ -55,7 +55,8 @@ namespace DetourModKit::detail
     /**
      * @brief Updates the live population tally, then emits the associated hook lifecycle event.
      * @param removal Population state for a Removed event. Teardown must capture @c was_active before it forces its
-     *                status to Disabled. Set @c remains_live when the target stays conservatively tracked.
+     *                status to Disabled. Set @c remains_live when the detour stays reachable. A residue keeps
+     *                the target tracked but leaves the live population.
      * @details The tally moves first so a subscriber that calls collect() observes the completed transition.
      */
     inline void emit_lifecycle(
