@@ -13,9 +13,10 @@
  *          The Hook and VmtHook destructors retain unsafe state instead of a wait.
  *
  *          Participants are the DetourModKit copies in this process that share the process route coordinator in
- *          docs/design/hooking.md. They share backend patch order and route dependencies, and teardown must proceed
- *          newest-first across them. A coordinator refusal prevents mutation or retains the route. Foreign libraries
- *          outside that protocol receive no cross-instance lifetime guarantee.
+ *          docs/design/hooking.md. They share backend patch order and route dependencies. Layered hooks on one
+ *          target retire in any order (`[B-16]`): the newest layer restores, and a lower layer bypasses its own
+ *          detour. A coordinator refusal prevents mutation or retains the route. Foreign libraries outside that
+ *          protocol receive no cross-instance lifetime guarantee.
  */
 
 #include "DetourModKit/address.hpp"
@@ -174,7 +175,8 @@ namespace DetourModKit
              * @details A same-kit hook in this instance's ledger returns @ref ErrorCode::TargetAlreadyHookedByThisKit.
              *          Otherwise a foreign jump over the prologue returns
              *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule. The jump forms are E9 rel32, FF25 indirect,
-             *          and `mov rax, imm64` then `jmp rax`. The default (false) layers the new hook on top.
+             *          and `mov rax, imm64` then `jmp rax`. The default (false) layers the new hook on top. A vacated
+             *          position of an earlier generation counts as a hook, so this option refuses its successor.
              */
             bool fail_if_already_hooked = false;
         };
@@ -189,7 +191,12 @@ namespace DetourModKit
         /// An absolute @ref Address, or a @ref scan::OwnedScanRequest that the install resolves through scan::resolve.
         using Target = std::variant<Address, scan::OwnedScanRequest>;
 
-        /// A request to install one inline hook by @ref inline_at.
+        /**
+         * @brief A request to install one inline hook by @ref inline_at.
+         * @details @ref name also identifies the hook's chain position across generations. A later install with the
+         *          same name, target, and kind claims a position that an earlier generation vacated (`[B-105]`). Keep
+         *          names stable across builds: a renamed hook installs fresh on top.
+         */
         struct InlineRequest
         {
             std::string name;
@@ -197,7 +204,7 @@ namespace DetourModKit
             Options options{};
         };
 
-        /// A request to install one mid hook by @ref mid_at.
+        /// A request to install one mid hook by @ref mid_at. @ref InlineRequest states what the name identifies.
         struct MidRequest
         {
             std::string name;
@@ -220,9 +227,9 @@ namespace DetourModKit
 #endif
 
         /**
-         * @brief Move-only RAII handle for one inline or mid hook. The destructor restores the prologue.
-         * @note If two hooks share one target, destroy the newer one first, or own them in a @ref HookStack. An
-         *       inverted teardown retains the older backend, logs a warning, and keeps the newer trampoline chain.
+         * @brief Move-only RAII handle for one inline or mid hook. The destructor restores the prologue, or retires a
+         *        layer that cannot restore by bypass.
+         * @note Hooks that share one target, in this copy or in other copies, retire in any order (`[B-16]`).
          * @note Lock order: a toggle takes the per-hook call gate before the HookLedger target slot and releases them
          *       in reverse order. Logs and lifecycle events follow both releases.
          */
@@ -235,21 +242,40 @@ namespace DetourModKit
             Hook &operator=(const Hook &) = delete;
 
             /**
-             * @brief Restores the target when safe and reclaims an idle mid route.
-             * @details Teardown frees the backend only over Original bytes. Foreign or unreadable bytes, the loader
-             *          lock, a newer layer, an unproved restore, an unresolved continuation, or a nonlocal exit retains
-             *          it. A backend retention at reset also retains it and logs the reason. A retained backend keeps
-             *          its module reference for the process lifetime, and a mid backend also keeps its adapter and
-             *          capacity charge. Teardown inside a displaced callee retains the backend without a route drain
-             *          wait.
+             * @brief Restores the target when safe and reclaims an idle mid route, or retires the hook as residue.
+             * @details The newest layer over its own patch restores and frees the backend over Original bytes. These
+             *          layers retire instead (`[B-104]`):
+             *          - a layer under a newer one,
+             *          - a layer over foreign or unreadable bytes,
+             *          - a layer that a newer participant refuses through the coordinator,
+             *          - a claimed position.
              *
-             *          A retained patch keeps the target tracked as hooked, and `[B-73]` attributes each retention to
-             *          @ref diagnostics::LeakSubsystem::HookManager. A mid hook tombstones its callback before `[B-85]`
-             *          rundown, so no new callback begins after destruction returns. Mid teardown waits a bounded time
-             *          for admitted callbacks and adapter bodies. The loader lock, a published unload phase,
-             *          self-destruction, or an unrecorded entrant prevents that wait. An expired or prevented wait
-             *          retains the backend, and an admitted callback can still run after destruction returns.
-             * @warning Inline hook quiescence is caller-owned. See @ref inline_at.
+             *          A retirement switches the relay or route off without a target write and drains a mid route.
+             *          It then vacates the position for the next generation with the same name. The residue keeps
+             *          the target tracked as hooked and releases the module reference. It counts in
+             *          @ref diagnostics::LeakSubsystem::HookResidue, whose contract states when a position counts.
+             *
+             *          These conditions retain the backend with its detour reachable:
+             *          - the loader lock,
+             *          - an owned restore that failed,
+             *          - a ledger that cannot decide the layer order,
+             *          - a process coordinator that refuses or times out,
+             *          - a backend that cannot switch its relay off,
+             *          - an unproved drain or route idle proof, an unresolved continuation, or a nonlocal exit,
+             *          - a full residue budget: more than 16 layers on the target, or fewer than 64 free process
+             *            records.
+             *
+             *          Such a backend keeps its module reference for the process lifetime, and a mid backend also
+             *          keeps its adapter and capacity charge. `[B-73]` attributes each such retention to
+             *          @ref diagnostics::LeakSubsystem::HookManager. A restored trampoline that fails its idle proof
+             *          stays mapped as HookResidue.
+             *
+             *          A mid hook tombstones its callback before `[B-85]` rundown, so no new callback begins after
+             *          destruction returns. Mid teardown waits a bounded time for admitted callbacks and adapter
+             *          bodies. The loader lock, a published unload phase, self-destruction, or an unrecorded entrant
+             *          prevents that wait. An expired or prevented wait retains the backend, and an admitted callback
+             *          can still run after destruction returns.
+             * @warning Inline hook quiescence is caller-owned for a restore and for a residue. See @ref inline_at.
              * @note Setup/control-plane only: teardown mutates the target and can wait for callbacks and continuations.
              */
             ~Hook() noexcept;
@@ -264,8 +290,8 @@ namespace DetourModKit
              * @brief True when the hook is armed or conservatively retained as possibly reachable.
              * @details It reads the published state and backend flag, not target bytes, and never repairs drift. A
              *          toggle that reads Foreign or unreadable bytes after a committed restore keeps it true, because a
-             *          newer layer can still reach the trampoline. A toggle that reads Original bytes after the restore
-             *          makes it false.
+             *          newer layer can still reach the trampoline. A toggle that reads Original bytes after the
+             *          restore, or a bypass, makes it false.
              * @note Setup/control-plane only: it waits on the per-hook call gate for an in-flight call or toggle.
              */
             [[nodiscard]] bool is_enabled() const noexcept;
@@ -340,18 +366,20 @@ namespace DetourModKit
              * @return Success when the hook is active. Otherwise LoaderLockActive, LayerConflict, BackendFailed,
              *         EnableFailed, DisableFailed, or InvalidHookState.
              * @details The target bytes decide the published state (`[B-97]`), and Foreign or unreadable bytes after a
-             *          committed arm keep the hook Active. Foreign or unreadable bytes before the write refuse with
-             *          EnableFailed and write nothing. If the hook claims Active over Original bytes, the call first
-             *          reconciles it to Disabled. EnableFailed means that this call published no new arm. A byte
-             *          refusal keeps the prior state and bytes, and any other EnableFailed leaves the hook Disabled.
-             *          BackendFailed means that the hook is active, but page protection can stay unrestored.
+             *          committed arm keep the hook Active. For a restored hook, Foreign or unreadable bytes before the
+             *          write refuse with EnableFailed and write nothing. If the hook claims Active over Original
+             *          bytes, the call first reconciles it to Disabled. EnableFailed means that this call published no
+             *          new arm. A byte refusal keeps the prior state and bytes, and any other EnableFailed leaves the
+             *          hook Disabled. BackendFailed means that the hook is active, but page protection can stay
+             *          unrestored.
              * @warning DisableFailed means that this call did not prove a disarm after a rejected or uncertain arm. The
              *          handle stays active, so quiesce or disable it before teardown.
-             * @note Only the target's newest live layer can arm it (`[B-16]`). LayerConflict writes no bytes and keeps
-             *       the hook's state, but a coordinator refusal after the reconciliation leaves it Disabled. A lower
-             *       local layer gets LayerConflict even when it is already armed. Arm the base hook before you create
-             *       the one above it. Under another participant's newer layer, the arm returns LayerConflict, or
-             *       EnableFailed when that armed patch fails the byte witness first.
+             * @note A hook that @ref disable bypassed, and a hook that claimed a vacated position, re-arm by one store
+             *       with no target write, under any newer layer. Otherwise only the target's newest live layer writes
+             *       the arm (`[B-16]`). LayerConflict writes no bytes and keeps the hook's state, but a coordinator
+             *       refusal after the reconciliation leaves it Disabled. A restored lower layer gets LayerConflict.
+             *       Under another participant's newer layer, the arm returns LayerConflict, or EnableFailed when that
+             *       patch fails the byte witness first.
              * @note Idempotent and thread-safe. Publish everything the detour needs before this call (`[B-83]`).
              * @note Setup/control-plane only: the arm patches the target and serializes on the per-hook call gate.
              */
@@ -361,18 +389,21 @@ namespace DetourModKit
              * @brief Disarms the hook but leaves it installed.
              * @return Success when the hook is disabled. Otherwise LoaderLockActive, LayerConflict, BackendFailed,
              *         DisableFailed, or InvalidHookState.
-             * @details As in @ref enable, the target bytes decide the state (`[B-97]`), and Disabled publishes only
-             *          once Original bytes read back. Any other bytes after the restore keep the hook Active, so a
-             *          retry can disarm after this hook's exact patch bytes return. Foreign or unreadable bytes before
-             *          the write refuse with DisableFailed and keep the prior state and bytes, and teardown then
-             *          retains the backend. If the hook claims Disabled over its exact patch bytes, the call first
-             *          reconciles it to Active and retries the restore. DisableFailed means that this call did not
-             *          prove a disarm, and except for that byte refusal, it leaves the hook Active. BackendFailed means
-             *          that the disarm took effect, but page protection can stay unrestored.
-             * @note Only the target's newest live layer can disarm it, even when it is already disabled (`[B-16]`).
-             *       Disable or destroy the newer layer first. After LayerConflict, an armed lower layer stays armed and
-             *       @ref is_enabled reports true. Under another participant's newer layer, the disarm returns
-             *       LayerConflict, or DisableFailed when that armed patch fails the byte witness first.
+             * @details An Active layer under a newer layer, local or another participant's, bypasses. So does an
+             *          Active layer over foreign or unreadable bytes. One store sends every caller past its detour, no
+             *          target byte changes, and the hook publishes Disabled (`[B-97]`, `[B-104]`). A second disable
+             *          succeeds. Once the bypassed hook is the newest layer over its own patch again, that call also
+             *          restores.
+             *
+             *          The newest layer over its own patch restores, and Disabled publishes only once Original bytes
+             *          read back. Any other bytes after the restore keep the hook Active, so a retry can disarm after
+             *          this hook's exact patch bytes return. If the hook claims Disabled over its exact patch bytes,
+             *          the call first reconciles it to Active and retries the restore. DisableFailed means that this
+             *          call did not prove a disarm. BackendFailed means that the disarm took effect, but page
+             *          protection can stay unrestored.
+             * @note A restored lower layer gets LayerConflict. A restored top layer over foreign or unreadable
+             *       bytes gets DisableFailed. A ledger that cannot decide the layer order returns LayerConflict and
+             *       changes nothing.
              * @note Setup/control-plane only: the disarm restores the target and serializes on the per-hook call gate.
              */
             [[nodiscard]] Result<void> disable() noexcept;
@@ -380,10 +411,10 @@ namespace DetourModKit
             /**
              * @brief Detaches the hook from this handle. The hook keeps its state, backend, and ledger record for the
              *        process lifetime.
-             * @note @ref diagnostics::total_intentional_leaks counts the release. @ref is_target_hooked still reports
-             *       the target, and an install with @ref Options::fail_if_already_hooked stays refused. A layer under
-             *       this one can no longer write bytes and gets the @ref enable and @ref disable codes. A layer
-             *       installed after it tears down normally.
+             * @note @ref diagnostics::LeakSubsystem::HookManager counts the release. @ref is_target_hooked still
+             *       reports the target, and an install with @ref Options::fail_if_already_hooked stays refused. A layer
+             *       under this one bypasses on @ref disable and retires as residue. A layer installed after it tears
+             *       down normally.
              * @note Setup/control-plane only.
              * @warning The detour and everything it reaches must stay mapped for the rest of the process.
              */
@@ -464,8 +495,9 @@ namespace DetourModKit
 #endif
 
         /**
-         * @brief Move-only owner of Hook handles that tears them down newest-first (`[B-16]`).
-         * @details A `std::vector<Hook>` does not guarantee that order. Use HookStack for hooks layered on one target.
+         * @brief Move-only owner of Hook handles that tears them down newest-first, so each layer restores (`[B-16]`).
+         * @details A `std::vector<Hook>` does not guarantee that order, and a lower layer then retires as residue. Use
+         *          HookStack for hooks layered on one target.
          * @note HookStack has no internal synchronization. Build it and tear it down on the setup thread.
          */
         class HookStack
@@ -679,8 +711,8 @@ namespace DetourModKit
 
         /**
          * @brief Per-row result of @ref install_all, in table order.
-         * @warning A `std::vector<InstallOutcome>` does not guarantee newest-first destruction (`[B-16]`). Move the
-         *          successful hooks into a @ref HookStack in table order.
+         * @warning Move the successful hooks into a @ref HookStack in table order. A `std::vector<InstallOutcome>`
+         *          does not guarantee newest-first destruction, and a lower layer then retires as residue (`[B-16]`).
          */
         struct InstallOutcome
         {

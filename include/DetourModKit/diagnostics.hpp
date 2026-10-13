@@ -26,8 +26,10 @@ namespace DetourModKit
     {
         /**
          * @brief Identifies a subsystem that took an intentional leak or detach path. Caller-requested retention verbs
-         *        also record here. These are not normal-shutdown counters. HookManager records one event per hook that
-         *        retains its backend.
+         *        also record here. These are not normal-shutdown counters. HookManager records one event per hook whose
+         *        detour or adapter code stays reachable. HookResidue records one event per retired position that
+         *        keeps backend storage while no path reaches its detour. A claimed position that vacates again
+         *        records nothing, and a refused vacate records once.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -41,6 +43,8 @@ namespace DetourModKit
             Bootstrap,
             /// A diagnostics dispatcher kept its emit-chain TLS index at teardown. See @ref hook_lifecycle.
             Diagnostics,
+            /// A retired hook kept its relay, trampoline, or process record. A later generation can claim a vacancy.
+            HookResidue,
             /// The number of tracked subsystems, not a subsystem.
             Count
         };
@@ -68,7 +72,7 @@ namespace DetourModKit
          */
         enum class ModulePinReason : std::uint8_t
         {
-            /// Tracks one reference per live inline, mid, or VMT hook until its teardown is proved.
+            /// Tracks one reference per inline, mid, or VMT hook while its detour or clone can still be reached.
             Hook,
             /// Tracks a StoppableWorker reference from before thread start until after its join.
             Worker,
@@ -216,8 +220,8 @@ namespace DetourModKit
 
             /**
              * @brief Live inline, mid, and VMT hooks. The count includes hooks created before the first @ref collect. A
-             *        hook still counts after Hook::release() or VmtHook::release(), and while teardown keeps its target
-             *        or clone conservatively tracked.
+             *        hook still counts after Hook::release() or VmtHook::release(), and while teardown keeps its detour
+             *        or clone reachable. A residue leaves the count while its target stays tracked.
              */
             std::size_t hooks_total = 0;
             /// Live hooks in the Active state that @ref HookTransition::Enabled defines. A VMT hook starts Active.

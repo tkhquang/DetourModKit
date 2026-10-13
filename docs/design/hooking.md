@@ -2,7 +2,7 @@
 
 This note explains the hook subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`.
+Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`.
 
 ## Concurrency model
 
@@ -24,14 +24,14 @@ The ledger:
 - The ledger backs exact duplicate detection (`fail_if_already_hooked`) through an atomic check-and-reserve ( `try_reserve_hook`). The reservation commits only after backend create and fallible setup succeed, and it rolls back on any create failure.
 - The two refusal mechanisms carry two codes, because the caller's correct response differs. `ErrorCode::TargetAlreadyHookedByThisKit` comes from the ledger. `ErrorCode::TargetAlreadyHookedByAnotherModule` comes from the foreign-prologue decode that runs only when the ledger has no record.
 - The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants.
-- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot and refuse with `ErrorCode::LayerConflict` from underneath a newer local layer.
+- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot. Under a newer local layer, an Active hook bypasses in place of a write, and a restored hook gets `ErrorCode::LayerConflict` (`[B-16]`).
 - The ledger's state is never-destroyed storage, so a hook owned by a namespace-scope object can still tear down at static-destruction time.
 
 VmtHook and teardown:
 
 - `VmtHook` serializes object-vptr create/apply/remove/teardown transitions through a setup-time object gate, with per-method state still protected by its SRWLOCK.
 - The destructor applies the loader-lock leaf discipline. Under the loader lock it leaks the backend and `record_intentional_leak`s instead of a restore. It keeps the counted module reference it took at install, which maps the trampoline/detour code.
-- It restores only on a positive byte witness. Otherwise it pins the whole backend and keeps the ledger entry.
+- Inline and mid `Hook` teardown restores only on an `OwnedPatch` witness. A `Foreign` or `Indeterminate` witness retires the hook as residue (`[B-104]`), and a failed restore over its own patch pins the whole backend. Both keep the ledger entry. `VmtHook` teardown restores an object word only through the compare-exchange in `[B-66]`, and a rejected exchange pins the clone.
 - Clean x64 mid teardown reclaims the published route after the backend proves that it is idle. Public `mid_at` reserves route capacity before publication. An idle chain returns its gateway, trampoline, allocator block, and unwind records, and refunds its charge. A failed proof retains the chain and its charge. `Hook::~Hook` records that retention as a `LeakSubsystem::HookManager` leak with a warning.
 
   The proof requires a restored target, zero route entries, and a closed route. Each other thread is suspended in turn, and its instruction pointer must be outside the gateway and trampoline. Each suspended thread's committed stack is checked for relocated-call return addresses. The current thread's stack receives the same check. The scan excludes dormant fiber stacks. Counted displaced execution covers their route lifetime.
@@ -55,7 +55,7 @@ VmtHook and teardown:
   `Lifecycle.MidRouteSurvivesDormantFiber` and `Lifecycle.MidRouteSurvivesExceptionContinuation` verify saved execution after teardown. `Lifecycle.MidRouteUnwindSettlesRouteOwnership` verifies permanent retention after unwind. The other `Lifecycle.MidRoute*` cases verify normal exits, selected resumes, bypass execution, register preservation, unwind records, and idle reclamation.
 
   The [process route coordinator](#process-route-coordinator) owns dependencies across participants. `Lifecycle.RouteCopiesRetainLayeredDependencies`, `Lifecycle.RouteCopiesRetainInlineDependencies`, and `Lifecycle.RouteCopiesRetainOverlappingDependencies` verify that contract after both loader references drop. The local idle proof remains under `Lifecycle.PublishedMidRouteReclaimsUnlessParked`.
-- A retained id still counts in newer-layer counting for the process lifetime. The pinned backend is still installed, so a layer underneath it must stay refused. Ids append newest-last, so a layer installed after a pin still tears down normally.
+- A retained id still counts in newer-layer counting for the process lifetime, and so does a residue id. Both positions stay in the target chain, so a layer underneath either one never writes the target. An Active layer there bypasses, and teardown retires it as residue. Ids append newest-last, so a layer installed after a pin still tears down normally.
 - `Hook::release()` and `VmtHook::release()` are the caller-requested form of the same pin and book their leak identically.
 
 Hot-path mechanism: None. Install and teardown are setup/control-plane. The per-hook gate mutex serializes `call()`, and the handle's own storage must outlive a concurrent call.
@@ -68,9 +68,22 @@ The process owns one 49,152-byte non-executable mapping and two handles. The pay
 
 `safetyhook::ProcessCoordinator` in `external/safetyhook/include/safetyhook/os.hpp` owns the lock order, the acquisition limit, owner reacquisition, and the shared layer order. Create holds the coordinator through the original-byte snapshot and record publication. Patch transactions and reclamation scans acquire it before any protection change or thread suspension. DMK teardown acquires it before a route closes, because the coordinator wait export can be that route.
 
-Each record identifies a target, its patched byte count, creation order, generated ranges, enable state, and continuation state. A live newer record blocks an older toggle. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
+Each record identifies a target, its patched byte count, creation order, generated ranges, enable state, and continuation state. A live newer record blocks a target write by an older layer. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
 
-Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses older layers.
+Every x64 trampoline that the patched backend emits ends with a relay cell, which other participants read under the coordinator. A 16-byte footer fills the last bytes of the trampoline allocation: the body offset, the layout `RELAY_CELL_LAYOUT` (1), the hook kind, and a seal. The seal is a fixed value XOR the address of the seal word. The 8-aligned body holds the state (Owned or Vacant), a 64-bit FNV-1a identity of the hook name, and the target. It also holds the switch word and route word addresses and up to 32 saved original bytes. The format is frozen, and a reader treats a footer that fails the seal or the layout as an opaque layer (`[B-105]`).
+
+A layer that retires without a restore switches off, drains, and marks its cell Vacant under the coordinator. Its record stays live, enabled, and unretained, and nothing frees its trampoline. The switch word is the relay slot of an inline hook, or the route state of a mid or routed hook. Inside its create hold and before any allocation, a create claims the newest record on its target that passes every check:
+
+- The record is enabled and not retained.
+- The footer seal and layout match. The kind matches the request: E9 or FF for an inline request, mid for a mid request, and routed for a routed request.
+- The state is Vacant, the identity matches the request hook name, and the body target equals the record target.
+- The saved byte count equals the patch size of the record.
+- The switch word lies inside a range that the record names and holds the trampoline start, or the route state is CLOSED.
+- The target window differs from the saved original bytes.
+
+The claim changes the state from Vacant to Owned with one compare-exchange. It writes no target byte and adds no record. A mid or routed claim writes its destination into the route word while the route stays CLOSED. The claimed hook starts bypassed, never restores, and vacates at teardown. When no cell passes, the create installs fresh on top.
+
+Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses a target write by an older layer.
 
 When another thread holds the coordinator throughout teardown, DMK makes at most four acquisitions per disarmed mid hook and two per armed hook. The coordinator timeout budgets total eight and four seconds, respectively, apart from scheduler delay.
 
@@ -78,7 +91,7 @@ The [refusal measurements](../analysis/coordinator_refusal_v4/README.md) record 
 
 Retained DMK routes also preserve their adapter and counted module reference. A DMK drain failure or a destroy lock failure records its leaked route as retained.
 
-Foreign libraries outside this protocol remain outside its guarantee. The existing target-lifetime and saved-context contracts still apply. No public coordinator API or package target exists.
+Foreign libraries outside this protocol remain outside its guarantee. A DMK layer under foreign bytes never writes over them, and an Active one bypasses (`[B-97]`). The existing target-lifetime and saved-context contracts still apply. No public coordinator API or package target exists.
 
 `Lifecycle.RouteCopies*` verifies these contracts:
 
@@ -126,7 +139,17 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - reclamation of a published routed chain after an idle proof, with retention recorded for later proofs on the same target,
 - mid-route ownership through displaced execution, terminal exits, and transaction redirects,
 - preservation of the first E9 failure when the FF fallback fails without an allocation error,
-- process coordination for patch order, route records, and reclamation across participants.
+- process coordination for patch order, route records, and reclamation across participants,
+- an 8-aligned relay slot in every x64 trampoline, which one atomic store can retarget,
+- a relay in the far-hook trampoline, so the target holds the relay address and never the detour,
+- a bypass API (`bypass_supported()`, `bypass()`, `resume()`, `bypassed()`) that stores the relay slot or the route state with no target write,
+- read-only coordinator layer queries (`layer_count()`, `free_record_count()`, `records_at()`) over version 1 records,
+- an idle proof before a non-routed trampoline free, which retains the trampoline with `RouteRetentionReason::IdleProofFailed` on failure,
+- a route-local test control word, so a retained gateway in a seam build reads no image data,
+- a sealed relay cell at the end of every x64 trampoline,
+- `vacate()` on inline and mid hooks, which marks a bypassed position Vacant and leaves the object inert,
+- a `PositionClaim` create argument that claims a Vacant position of the same hook name,
+- a claimed mode that writes no target byte and no record field and frees nothing.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 
@@ -144,11 +167,11 @@ A configured build tree leaves the submodule working tree dirty, because the pat
 
 ### [B-16]
 
-`disable()` restores the saved prologue. A layered prologue can reference an older route, so teardown must proceed newest-first. The local ledger refuses an older local handle, and the process coordinator refuses an older participant's toggle. `Hook::enable()` and `Hook::disable()` own the resulting error codes, and `Lifecycle.RouteCopiesReportLayerConflict` verifies the coordinator refusal. An out-of-order destructor retains the older backend. The process coordinator owns the cross-participant contract above.
+A restore writes the saved prologue over the target. Below a newer layer that write clobbers the newer layer, and a layered prologue can reference an older route. Only the newest unclaimed layer over its own patch therefore restores. Every other Active layer bypasses (`[B-104]`), and teardown vacates its position (`[B-105]`). The local ledger finds a newer local layer, and a coordinator refusal of the restore finds a newer participant. `Hook::enable()` and `Hook::disable()` own the error codes, and `Lifecycle.RouteCopiesReportLayerConflict` verifies that an arm over restored bytes stays refused.
 
-Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) does not provide the required newest-first teardown contract. Code that holds layered same-target handles in a container must not rely on a container drop for rollback. Tear them down back-to-front (`pop_back`) or use a commit-on-success transaction, never `~vector`. This is the `install_all` rollback trap, fixed by its internal `InstallRollback` guard.
+Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) gives no newest-first order, so a lower layer then retires as residue instead of a restore. The `install_all` rollback therefore tears its rows down back-to-front through its internal `InstallRollback` guard.
 
-For caller-held sets of hooks, prefer `hook::HookStack`: a move-only owner that drains newest-first in its destructor, move-assignment, and `clear()`. The safe order is then guaranteed by construction rather than by caller discipline. Do not reach for a bare `std::vector<Hook>` when the hooks can be layered.
+For caller-held sets of hooks, prefer `hook::HookStack`. This move-only owner drains newest-first in its destructor, move-assignment, and `clear()`, so each of its layers can restore.
 
 ### [B-41]
 
@@ -229,10 +252,35 @@ The backend commits its mutation inside a thread-trapping transaction that can s
 
 Never short-circuit the witness on a backend failure. A committed restore makes the target unable to enter this hook and authorizes backend destruction, while a committed exact patch publishes `Active` with `BackendFailed`. Destruction frees a previously published x64 routed chain only after the idle proof ("Clean x64 mid teardown"). A retained chain stays capacity-accounted and is independent of the byte witness.
 
-A committed restore followed by `Foreign` or `Indeterminate` remains conservatively `Active` with `DisableFailed`. A newer layer can chain through the trampoline, and unreadable bytes prove no absence. Reassert the backend's retained state before that publication, so `is_enabled()` and a later owned-patch retry agree. Conversely, `Original` clears a stale backend flag before backend destruction, so a contained exception is never retried from SafetyHook's noexcept destructor. Both toggles write unconditionally, so `Foreign` and `Indeterminate` are refused before the call. Teardown pins them.
+A committed restore followed by `Foreign` or `Indeterminate` remains conservatively `Active` with `DisableFailed`. A newer layer can chain through the trampoline, and unreadable bytes prove no absence. Reassert the backend's retained state before that publication, so `is_enabled()` and a later owned-patch retry agree. Conversely, `Original` clears a stale backend flag before backend destruction, so a contained exception is never retried from SafetyHook's noexcept destructor. Both toggles write unconditionally, so neither runs over `Foreign` or `Indeterminate`. An Active hook bypasses in place of that write (`[B-104]`), and a restored hook refuses.
 
-An idempotent toggle accepts only the witness its published state claims. Active requires exact `OwnedPatch`. Disabled requires `Original`. The opposite exact witness proves external byte drift. The toggle rewrites state, population, gate callable, and backend flag before the ordinary transition. `Foreign` and `Indeterminate` remain refusals.
+An idempotent toggle accepts only the witness its published state claims. Active requires exact `OwnedPatch`. Disabled requires `Original`, except for a bypassed hook, whose patch stays in the chain. The opposite exact witness proves external byte drift. The toggle rewrites state, population, gate callable, and backend flag before the ordinary transition. `Foreign` and `Indeterminate` remain refusals.
 
 The internal rewrite emits no event, while the completed transition emits one. `HookBackendOwnership.IdempotentEnableReconcilesOriginal` and `HookBackendOwnership.IdempotentDisableReconcilesOwnedPatch` verify both polarities.
 
 The vendored patch makes the backend's enabled flag change at the byte-mutation callback, supports witness-backed reconciliation, and preserves patch provenance across disable/re-enable (see `[B-01]`). A re-pin that drops any of those properties silently re-opens this class.
+
+### [B-104]
+
+A non-routed x64 hook writes `E9 rel32`, or a far `FF 25` jump, at the target. Both land on the relay at the end of its trampoline: `jmp qword ptr [rip+disp32]` over an 8-aligned slot that holds the detour. A newer layer relocates the lower jump to the same absolute relay, so every path into the lower detour crosses that slot. A retirement stores the trampoline start into the slot with one `seq_cst` store. The chain then runs the newer layer, the lower relay, the lower trampoline, and the rest of the target. That path holds jumps only, so the caller frame, the return address, and the unwind state stay unchanged.
+
+The store needs no trap, no protection change, and no instruction-cache flush, because the relay reads the slot as data. A thread at the relay reads either the old detour or the trampoline start, and both stay mapped. A mid or routed layer closes its route in place of the store. The bypass is correct under a newer layer that chains and under a hijack that does not chain. The byte witness therefore does not have to tell the two apart.
+
+`~Hook` of a layer that cannot restore drains a mid route while it is CLOSING, then switches off and vacates its position (`[B-105]`). The residue keeps its ledger creation-order entry and books `LeakSubsystem::HookResidue` once. After the switch, no new call enters its detour, so it releases its module reference (`[B-44]`). A thread already inside a raw detour stays under caller-owned quiescence, as for a top restore.
+
+An unclaimed layer that exceeds the residue budget of the `~Hook` contract keeps the pin and books `HookManager`. A full registry fails every inline and mid create that claims no Vacant position, in every copy, so the guard stops a reload loop first. A claimed layer skips the guard, because its vacate adds no position. The `~Hook` contract lists every other cause that keeps the pin.
+
+### [B-105]
+
+A position claim keeps the chain depth constant across reloads. Without it, each lower retirement leaves a position and each successor stacks a new one, so alternate reloads of two copies reach the residue budget. The claim is memory-safe for these reasons:
+
+- A thread at a relay reads one aligned word. Every value stored there is mapped code: the trampoline start, the old detour before the bypass, or the new detour.
+- Nobody frees a Vacant cell or removes its record. The creator object is inert, the claimant holds an unowned view, and the creator allocator is never destroyed.
+- A mid or routed cell turns Vacant only after its route drained while CLOSING, so no thread reads the route word during a claim.
+- An inline cell turns Vacant after the switch store, with no drain. A thread still inside the old detour stays under caller-owned quiescence (`[B-104]`). The claim writes no relay slot, and the slot keeps the trampoline start until the claimed hook enables.
+- The record range covers the whole trampoline allocation, so a live record locates its cell. A read inside that range under the coordinator needs no fault guard.
+- Vacate and claim write no record field, so `top()` and `dependencies()` answer as they do for any residue.
+
+The target-window check refuses a cell whose target is back at its original bytes, because no chain reaches that position. A claim keeps the chain position. Under a layer that does not chain, the successor stays unreachable, as its predecessor was. A claimed cell can sit below an unclaimed hook that the same copy created earlier. The ledger counts the claimed hook as newer, so the unclaimed hook vacates in place of a restore, and its own successor claims it.
+
+A change to the cell format must bump `RELAY_CELL_LAYOUT`, because a reader claims only a layout that it implements. `HookBackendRelayCell.SealRejectsALegacyTrampoline` verifies that a trampoline without a sealed cell stays an opaque layer.

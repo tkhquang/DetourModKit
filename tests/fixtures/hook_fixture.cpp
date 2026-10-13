@@ -40,8 +40,8 @@ namespace dmk_test::hook_fixture
         return r;
     }
 
-    // Oldest-first teardown retains the older backend. This dedicated target stays patched for the process lifetime and
-    // cannot serve another case.
+    // Oldest-first teardown leaves the older layer as residue. This dedicated target stays patched for the process
+    // lifetime and cannot serve another case.
     DMK_PROOF_TARGET int leak_target_layered(int a, int b)
     {
         volatile int r = a + b;

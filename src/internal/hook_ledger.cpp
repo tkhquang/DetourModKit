@@ -143,14 +143,14 @@ namespace DetourModKit
         {
             if (inert())
             {
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
-                // Without the lock the newer-live count is unknowable. Fail closed to a positive count so a teardown
-                // caller leaks its backend rather than restoring bytes a newer layer may still depend on.
-                return 1;
+                // Without the lock the newer-live count is unknowable. The positive sentinel makes a teardown caller
+                // leak its backend rather than restore bytes that a newer layer can still depend on.
+                return SLOT_UNAVAILABLE;
             }
             auto it = m_by_target->find(target);
             if (it == m_by_target->end())
@@ -186,24 +186,24 @@ namespace DetourModKit
         {
             if (inert())
             {
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             std::unique_lock<std::mutex> guard = lock_state();
             if (!guard.owns_lock())
             {
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             auto it = m_by_target->find(target);
             if (it == m_by_target->end())
             {
                 // Without the ledger entry there is no serialization guarantee. Fail closed.
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             const auto order_found = std::find(it->second.order.begin(), it->second.order.end(), id);
             if (order_found == it->second.order.end())
             {
                 // An unknown id cannot safely claim this target's write right. Fail closed.
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             try
             {
@@ -211,9 +211,9 @@ namespace DetourModKit
             }
             catch (...)
             {
-                // Could not claim the slot. Fail closed: report a positive count so the caller refuses or leaks rather
-                // than writing bytes without the guarantee. The id was never queued, so nothing leaks.
-                return 1;
+                // The slot claim failed. The sentinel makes the caller refuse or leak rather than write bytes
+                // without the guarantee. The id was never queued, so nothing leaks.
+                return SLOT_UNAVAILABLE;
             }
             // Wait our turn behind any installer already mid-patch on this target (front of pending), exactly as an
             // installer does. Once this id is front, no install is touching the target's prologue.
@@ -231,13 +231,13 @@ namespace DetourModKit
             const auto current = m_by_target->find(target);
             if (current == m_by_target->end())
             {
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             const std::vector<std::uint64_t> &order = current->second.order;
             const auto found = std::find(order.begin(), order.end(), id);
             if (found == order.end())
             {
-                return 1;
+                return SLOT_UNAVAILABLE;
             }
             return static_cast<std::size_t>(std::distance(std::next(found), order.end()));
         }

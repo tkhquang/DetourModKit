@@ -208,6 +208,28 @@ namespace DetourModKit::detail
         }
     }
 
+    /// Reports whether the backend owns a position that it claimed from an earlier hook generation.
+    template <class BackendVariant> [[nodiscard]] bool backend_claimed(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(backend, false, [](const auto &one) noexcept { return one.claimed(); });
+    }
+
+    /**
+     * @brief Switches the backend off (@p on false) or back on without a target write.
+     * @details An inline hook stores its relay slot, and a mid hook stores its route state. Neither waits.
+     * @return False when the backend cannot switch, so the caller keeps its published state.
+     */
+    template <class BackendVariant> [[nodiscard]] bool switch_backend(BackendVariant &backend, bool on) noexcept
+    {
+        return backend_value_or(backend, false, [on](auto &one) noexcept { return on ? one.resume() : one.bypass(); });
+    }
+
+    /// Hands a bypassed and drained backend's position to a later generation. See safetyhook::InlineHook::vacate.
+    template <class BackendVariant> [[nodiscard]] bool vacate_backend(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(backend, false, [](auto &one) noexcept { return one.vacate(); });
+    }
+
     /// Returns the current target-byte witness, or Indeterminate when no backend is reachable.
     template <class BackendVariant> [[nodiscard]] detail::PatchWitness witness_of(BackendVariant &backend) noexcept
     {

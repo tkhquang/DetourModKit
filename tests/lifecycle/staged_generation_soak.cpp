@@ -12,9 +12,11 @@
 
 #include "internal/input_intercept.hpp"
 
+#include "staged_generation_host.hpp"
 #include "staged_generation_protocol.hpp"
 #include "staged_generation_tls.hpp"
 #include "tls_census.hpp"
+#include "../fixtures/quiet_window.hpp"
 
 #include <array>
 #include <atomic>
@@ -26,14 +28,11 @@
 #include <fstream>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
-#include <process.h>
 #include <windows.h>
 
 extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
@@ -46,16 +45,23 @@ extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(
 namespace
 {
     using namespace std::chrono_literals;
+    using staged_gen::Generation;
+    using staged_gen::load_generation;
+    using staged_gen::make_log_name;
+    using staged_gen::make_staged_generation_path;
+    using staged_gen::module_owns;
+    using staged_gen::remove_unmapped_staged_file_best_effort;
+    using staged_gen::resolve;
+    using staged_gen::stage_copy;
+    using staged_gen::unload_generation;
+    using staged_gen::wait_for_unmap;
 
     constexpr int SKIP_EXIT_CODE = 77;
     constexpr int SETUP_FAILURE = 2;
     constexpr int SOAK_CYCLES = 100;
     constexpr int TLS_OWNERSHIP_FAILURE = 3;
     constinit staged_gen::TlsLedger s_tls_ledger;
-    constexpr unsigned STAGED_COPY_CANDIDATE_LIMIT = 1024;
 
-    constexpr DWORD UNLOAD_POLL_BUDGET_MS = 3000;
-    constexpr DWORD UNLOAD_POLL_STEP_MS = 10;
     constexpr auto PARK_BUDGET = 10s;
     constexpr WORD XINPUT_GET_STATE_EX_ORDINAL = 100;
     constexpr DWORD XINPUT_PROBE_INDEX = 2;
@@ -144,42 +150,16 @@ namespace
         (void)registered;
     }
 
-    /// Creates a visible ownerless top-level window or returns nullptr on a headless host.
+    /// Creates a quiet ownerless top-level window or returns nullptr on a headless host.
     [[nodiscard]] HWND make_test_window() noexcept
     {
         ensure_window_class_registered();
-        const HWND window = CreateWindowExW(
-            0,
-            TEST_WINDOW_CLASS,
-            L"DMK Staged Gen",
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            200,
-            150,
-            nullptr,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr
-        );
-        if (window != nullptr)
-        {
-            ShowWindow(window, SW_SHOWNA);
-        }
-        return window;
+        return dmk_test::create_quiet_window(TEST_WINDOW_CLASS, L"DMK Staged Gen");
     }
 
     [[nodiscard]] UniqueModule load_module(const char *name) noexcept
     {
         return UniqueModule{::LoadLibraryA(name)};
-    }
-
-    [[nodiscard]] std::string make_log_name(std::string_view stem)
-    {
-        static std::atomic<unsigned> s_counter{0};
-        const unsigned nonce = s_counter.fetch_add(1, std::memory_order_relaxed);
-        return std::string{stem} + ".p" + std::to_string(static_cast<unsigned long>(_getpid())) + "_n" +
-               std::to_string(nonce) + ".log";
     }
 
     [[nodiscard]] bool proxy_result_matches(XInputGetStateFn get_state) noexcept
@@ -188,202 +168,6 @@ namespace
         state.dwPacketNumber = 0xFFFFFFFFu;
         const DWORD result = get_state(XINPUT_PROBE_INDEX, &state);
         return result == ERROR_DEVICE_NOT_CONNECTED && state.dwPacketNumber == XINPUT_PROBE_INDEX;
-    }
-
-    [[nodiscard]] bool module_owns(const void *address) noexcept
-    {
-        HMODULE owner = nullptr;
-        const BOOL ok = ::GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(address),
-            &owner
-        );
-        return ok != FALSE && owner != nullptr;
-    }
-
-    [[nodiscard]] bool wait_for_unmap(const void *marker) noexcept
-    {
-        DWORD waited = 0;
-        while (module_owns(marker) && waited < UNLOAD_POLL_BUDGET_MS)
-        {
-            ::Sleep(UNLOAD_POLL_STEP_MS);
-            waited += UNLOAD_POLL_STEP_MS;
-        }
-        return !module_owns(marker);
-    }
-
-    /**
-     * @struct Generation
-     * @brief One loaded staged copy and every export the scenarios drive.
-     */
-    struct Generation
-    {
-        std::filesystem::path path;
-        HMODULE module = nullptr;
-        const void *marker = nullptr;
-        staged_gen::InitFn init = nullptr;
-        staged_gen::ShutdownFn shutdown = nullptr;
-        staged_gen::TagFn tag = nullptr;
-        staged_gen::StatusFn status = nullptr;
-        staged_gen::ArmParkFn arm_park = nullptr;
-        staged_gen::ReleaseParkFn release_park = nullptr;
-        staged_gen::WaitParkedFn wait_parked = nullptr;
-
-        [[nodiscard]] staged_gen::Status read_status() const noexcept
-        {
-            staged_gen::Status snapshot{};
-            status(&snapshot);
-            return snapshot;
-        }
-    };
-
-    template <class Fn> [[nodiscard]] Fn resolve(HMODULE module, const char *symbol) noexcept
-    {
-        return reinterpret_cast<Fn>(reinterpret_cast<void *>(::GetProcAddress(module, symbol)));
-    }
-
-    /// Builds a staged-generation path from the current process ID and @p nonce.
-    [[nodiscard]] std::filesystem::path
-    make_staged_generation_path(const std::filesystem::path &directory, unsigned nonce)
-    {
-        return directory / ("staged_generation.p" + std::to_string(static_cast<unsigned long>(_getpid())) + "_g" +
-                            std::to_string(nonce) + ".dll");
-    }
-
-    /// Copies the source image to a per-process unique name and rewrites the tag bytes to @p tag_value.
-    [[nodiscard]] bool stage_copy(const std::string &tag_value, std::filesystem::path &staged)
-    {
-        static std::atomic<unsigned> s_counter{0};
-        std::error_code error;
-        const std::filesystem::path source = std::filesystem::current_path(error) / staged_gen::SOURCE_MODULE_NAME;
-        if (error)
-        {
-            std::fprintf(stderr, "stage_copy: current_path failed: %s (%d)\n", error.message().c_str(), error.value());
-            return false;
-        }
-
-        bool copied = false;
-        for (unsigned attempt = 0; attempt < STAGED_COPY_CANDIDATE_LIMIT; ++attempt)
-        {
-            const unsigned nonce = s_counter.fetch_add(1, std::memory_order_relaxed);
-            std::filesystem::path candidate = make_staged_generation_path(source.parent_path(), nonce);
-            error.clear();
-            if (std::filesystem::copy_file(source, candidate, error))
-            {
-                staged = std::move(candidate);
-                copied = true;
-                break;
-            }
-            if (error != std::errc::file_exists)
-            {
-                std::fprintf(
-                    stderr,
-                    "stage_copy: copy_file failed for %s: %s (%d)\n",
-                    candidate.string().c_str(),
-                    error.message().c_str(),
-                    error.value()
-                );
-                return false;
-            }
-        }
-        if (!copied)
-        {
-            std::fprintf(stderr, "stage_copy: no free candidate after %u attempts\n", STAGED_COPY_CANDIDATE_LIMIT);
-            return false;
-        }
-
-        std::fstream file(staged, std::ios::in | std::ios::out | std::ios::binary);
-        if (!file)
-        {
-            std::fprintf(stderr, "stage_copy: open failed for %s\n", staged.string().c_str());
-            return false;
-        }
-        // One bulk read. A per-character read of the coverage-instrumented copy costs seconds per generation.
-        file.seekg(0, std::ios::end);
-        const std::streamoff staged_size = file.tellg();
-        if (staged_size <= 0)
-        {
-            std::fprintf(stderr, "stage_copy: size read failed for %s\n", staged.string().c_str());
-            return false;
-        }
-        file.seekg(0, std::ios::beg);
-        std::vector<char> bytes(static_cast<std::size_t>(staged_size));
-        if (!file.read(bytes.data(), staged_size))
-        {
-            std::fprintf(stderr, "stage_copy: image read failed for %s\n", staged.string().c_str());
-            return false;
-        }
-        const std::string_view needle{staged_gen::TAG_MARKER};
-        const auto found = std::string_view{bytes.data(), bytes.size()}.find(needle);
-        if (found == std::string_view::npos)
-        {
-            std::fprintf(stderr, "stage_copy: tag marker missing from %s\n", staged.string().c_str());
-            return false;
-        }
-        const std::size_t tag_at = found + needle.size();
-        if (tag_at + staged_gen::TAG_LENGTH > bytes.size())
-        {
-            std::fprintf(stderr, "stage_copy: tag range exceeds %s\n", staged.string().c_str());
-            return false;
-        }
-        for (std::size_t i = 0; i < staged_gen::TAG_LENGTH; ++i)
-        {
-            bytes[tag_at + i] = i < tag_value.size() ? tag_value[i] : '0';
-        }
-        file.seekp(static_cast<std::streamoff>(tag_at), std::ios::beg);
-        file.write(bytes.data() + tag_at, static_cast<std::streamsize>(staged_gen::TAG_LENGTH));
-        if (!file)
-        {
-            std::fprintf(stderr, "stage_copy: tag write failed for %s\n", staged.string().c_str());
-            return false;
-        }
-        return true;
-    }
-
-    [[nodiscard]] bool load_generation(const std::string &tag_value, Generation &generation)
-    {
-        if (!stage_copy(tag_value, generation.path))
-        {
-            return false;
-        }
-        generation.module = ::LoadLibraryW(generation.path.c_str());
-        if (generation.module == nullptr)
-        {
-            return false;
-        }
-        generation.marker =
-            reinterpret_cast<const void *>(::GetProcAddress(generation.module, staged_gen::MARKER_SYMBOL));
-        generation.init = resolve<staged_gen::InitFn>(generation.module, staged_gen::INIT_SYMBOL);
-        generation.shutdown = resolve<staged_gen::ShutdownFn>(generation.module, staged_gen::SHUTDOWN_SYMBOL);
-        generation.tag = resolve<staged_gen::TagFn>(generation.module, staged_gen::TAG_SYMBOL);
-        generation.status = resolve<staged_gen::StatusFn>(generation.module, staged_gen::STATUS_SYMBOL);
-        generation.arm_park = resolve<staged_gen::ArmParkFn>(generation.module, staged_gen::ARM_PARK_SYMBOL);
-        generation.release_park =
-            resolve<staged_gen::ReleaseParkFn>(generation.module, staged_gen::RELEASE_PARK_SYMBOL);
-        generation.wait_parked = resolve<staged_gen::WaitParkedFn>(generation.module, staged_gen::WAIT_PARKED_SYMBOL);
-        return generation.marker != nullptr && generation.init != nullptr && generation.shutdown != nullptr &&
-               generation.tag != nullptr && generation.status != nullptr && generation.arm_park != nullptr &&
-               generation.release_park != nullptr && generation.wait_parked != nullptr;
-    }
-
-    [[nodiscard]] bool unload_generation(Generation &generation) noexcept
-    {
-        if (generation.module == nullptr)
-        {
-            return true;
-        }
-        if (::FreeLibrary(generation.module) == 0)
-        {
-            return false;
-        }
-        generation.module = nullptr;
-        return true;
-    }
-
-    void remove_unmapped_staged_file_best_effort(const Generation &generation) noexcept
-    {
-        std::error_code error;
-        (void)std::filesystem::remove(generation.path, error);
     }
 
     int run_existing_candidate_uses_fresh_name()
@@ -1255,26 +1039,61 @@ namespace
         }
         remove_unmapped_staged_file_best_effort(failed_generation);
 
-        Generation retained_generation;
-        if (!load_generation("HOOKREFUSE", retained_generation))
+        std::fprintf(stderr, "OK: partial Init rolled back and the failed generation unmapped\n");
+        return 0;
+    }
+
+    /**
+     * @brief Retires a lower generation under a newer host hook, then lets a successor claim the vacated position.
+     * @details The lower generation reads the host patch as foreign at teardown, so its hook bypasses and vacates. The
+     *          successor installs with the same hook name and a different bonus.
+     */
+    int run_layered_host()
+    {
+        constexpr const char *scenario = "layered-host";
+        constexpr const char *layered_hook_name = "staged_gen_layered_hook";
+        constexpr int lower_bonus = 1000;
+        constexpr int successor_bonus = 3000;
+        const auto fail_layered = [](const char *what) noexcept
         {
-            return fail("partial-init", "failed to stage the HookManager refusal generation");
+            s_hook_rival_original.store(nullptr, std::memory_order_release);
+            return fail(scenario, what);
+        };
+
+        // The host reference keeps the target mapped after each generation releases its own reference.
+        UniqueModule target_module = load_module(staged_gen::HOOK_TARGET_MODULE_NAME);
+        if (!target_module)
+        {
+            return fail(scenario, "failed to load the required hook target fixture");
         }
-        options = {};
-        const std::string retained_log_name = make_log_name("staged_gen_hook_refusal");
-        options.log_file = retained_log_name.c_str();
-        if (retained_generation.init(&options) == 0)
+        const TargetFn target = resolve<TargetFn>(target_module.get(), staged_gen::HOOK_TARGET_SYMBOL);
+        if (target == nullptr)
         {
-            return fail("partial-init", "the HookManager refusal generation did not start");
+            return fail(scenario, "the hook target fixture did not export the required symbol");
+        }
+        constexpr int base = 19;
+        constexpr int modifier = 6;
+        constexpr int original_result = base + modifier;
+        if (target(base, modifier) != original_result)
+        {
+            return fail(scenario, "the hook target fixture did not return its baseline result");
         }
 
-        const staged_gen::Status before_generation_call = retained_generation.read_status();
-        const int chained_result = target(base, modifier);
-        const staged_gen::Status after_generation_call = retained_generation.read_status();
-        if (chained_result == original_result ||
-            after_generation_call.hook_calls != before_generation_call.hook_calls + 1)
+        Generation lower;
+        staged_gen::InitOptions options{};
+        options.hook_name = layered_hook_name;
+        options.detour_bonus = lower_bonus;
+        const std::string lower_log_name = make_log_name("staged_gen_layered_lower");
+        options.log_file = lower_log_name.c_str();
+        if (!load_generation("LAYERLOW", lower) || lower.init(&options) == 0)
         {
-            return fail("partial-init", "the generation's base hook did not establish the refusal premise");
+            return fail(scenario, "the lower generation did not start");
+        }
+        const std::uint64_t lower_calls_before = lower.read_status().hook_calls;
+        if (target(base, modifier) != original_result + lower_bonus ||
+            lower.read_status().hook_calls != lower_calls_before + 1)
+        {
+            return fail(scenario, "the lower generation's hook did not establish the layered premise");
         }
 
         DetourModKit::hook::InlineRequest request{
@@ -1285,66 +1104,128 @@ namespace
         auto installed = DetourModKit::hook::inline_at(std::move(request), &hook_rival_detour);
         if (!installed)
         {
-            return fail("partial-init", "the host failed to create the newer hook layer");
+            return fail(scenario, "the host failed to create the newer hook layer");
         }
         {
             DetourModKit::hook::Hook newer = std::move(*installed);
             s_hook_rival_original.store(newer.original<TargetFn>(), std::memory_order_release);
-            s_hook_rival_calls.store(0, std::memory_order_relaxed);
             if (!newer.enable())
             {
-                s_hook_rival_original.store(nullptr, std::memory_order_release);
-                return fail("partial-init", "the host failed to arm the newer hook layer");
+                return fail_layered("the host failed to arm the newer hook layer");
+            }
+            // A generation's Init probes also cross the rival, so each host call counts from its own snapshot.
+            const auto host_call_returns = [target](int expected) noexcept
+            {
+                const std::uint64_t rival_before = s_hook_rival_calls.load(std::memory_order_relaxed);
+                return target(base, modifier) == expected &&
+                       s_hook_rival_calls.load(std::memory_order_relaxed) == rival_before + 1;
+            };
+
+            const std::uint64_t layered_calls_before = lower.read_status().hook_calls;
+            if (!host_call_returns(original_result + lower_bonus) ||
+                lower.read_status().hook_calls != layered_calls_before + 1)
+            {
+                return fail_layered("the newer host hook did not forward through the lower generation");
             }
 
-            const std::uint64_t hook_calls_before_layered_call = retained_generation.read_status().hook_calls;
-            if (target(base, modifier) != chained_result || s_hook_rival_calls.load(std::memory_order_relaxed) != 1 ||
-                retained_generation.read_status().hook_calls != hook_calls_before_layered_call + 1)
+            const staged_gen::Status before_retirement = lower.read_status();
+            if (lower.shutdown() == 0)
             {
-                s_hook_rival_original.store(nullptr, std::memory_order_release);
-                return fail("partial-init", "the newer host hook did not forward through the generation");
+                return fail_layered("Shutdown refused the lower generation under the newer host hook");
+            }
+            const staged_gen::Status retired = lower.read_status();
+            if (retired.hook_manager_leaks != before_retirement.hook_manager_leaks ||
+                retired.hook_residue_leaks != before_retirement.hook_residue_leaks + 1 || retired.hook_module_pins != 0)
+            {
+                return fail_layered("the lower teardown did not retire its hook as one residue");
+            }
+            if (retired.coordinator_live != before_retirement.coordinator_live ||
+                retired.coordinator_retained != before_retirement.coordinator_retained ||
+                retired.coordinator_vacant != before_retirement.coordinator_vacant + 1)
+            {
+                return fail_layered("the retired position did not stay one live Vacant record");
+            }
+            if (!host_call_returns(original_result) || lower.read_status().hook_calls != retired.hook_calls)
+            {
+                return fail_layered("the host chain did not skip the retired lower detour");
             }
 
-            const std::uint64_t leaks_before = retained_generation.read_status().hook_manager_leaks;
-            if (retained_generation.shutdown() != 0)
+            const void *const lower_marker = lower.marker;
+            if (!unload_generation(lower) || !wait_for_unmap(lower_marker))
             {
-                s_hook_rival_original.store(nullptr, std::memory_order_release);
-                return fail("partial-init", "Shutdown accepted unload below the newer host hook");
+                return fail_layered("the retired lower generation stayed mapped");
             }
-            const staged_gen::Status refused = retained_generation.read_status();
-            if (refused.hook_manager_leaks == 0 || refused.hook_manager_leaks <= leaks_before)
+            remove_unmapped_staged_file_best_effort(lower);
+            if (!host_call_returns(original_result))
             {
-                s_hook_rival_original.store(nullptr, std::memory_order_release);
-                return fail("partial-init", "the refused HookManager teardown did not book its retained layer");
+                return fail_layered("the host chain did not survive the lower unmap");
             }
 
-            const std::uint64_t hook_calls_before_refused_call = refused.hook_calls;
-            if (target(base, modifier) != chained_result || s_hook_rival_calls.load(std::memory_order_relaxed) != 2 ||
-                retained_generation.read_status().hook_calls != hook_calls_before_refused_call + 1)
+            Generation successor;
+            if (!load_generation("LAYERNEXT", successor))
             {
-                s_hook_rival_original.store(nullptr, std::memory_order_release);
-                return fail("partial-init", "the refused generation did not remain callable through the newer hook");
+                return fail_layered("failed to stage the successor generation");
             }
+            const staged_gen::Status vacated = successor.read_status();
+            options.detour_bonus = successor_bonus;
+            const std::string successor_log_name = make_log_name("staged_gen_layered_successor");
+            options.log_file = successor_log_name.c_str();
+            if (successor.init(&options) == 0)
+            {
+                return fail_layered("the successor generation did not arm over the vacated position");
+            }
+            const staged_gen::Status claimed = successor.read_status();
+            if (claimed.coordinator_live != vacated.coordinator_live ||
+                claimed.coordinator_retained != vacated.coordinator_retained ||
+                claimed.coordinator_vacant + 1 != vacated.coordinator_vacant)
+            {
+                return fail_layered("the successor added a record instead of claiming the vacated position");
+            }
+            if (!host_call_returns(original_result + successor_bonus) ||
+                successor.read_status().hook_calls != claimed.hook_calls + 1)
+            {
+                return fail_layered("the successor bonus did not reach the host call result");
+            }
+
+            // A claimed position vacates again and books no residue, so the next successor finds it.
+            if (successor.shutdown() == 0)
+            {
+                return fail_layered("Shutdown refused the successor over its claimed position");
+            }
+            const staged_gen::Status successor_retired = successor.read_status();
+            if (successor_retired.hook_manager_leaks != claimed.hook_manager_leaks ||
+                successor_retired.hook_residue_leaks != claimed.hook_residue_leaks ||
+                successor_retired.hook_module_pins != 0 ||
+                successor_retired.coordinator_live != claimed.coordinator_live ||
+                successor_retired.coordinator_vacant != claimed.coordinator_vacant + 1)
+            {
+                return fail_layered("the claimed position did not vacate again with no new residue");
+            }
+            if (!host_call_returns(original_result))
+            {
+                return fail_layered("the host chain did not skip the retired successor detour");
+            }
+            const void *const successor_marker = successor.marker;
+            if (!unload_generation(successor) || !wait_for_unmap(successor_marker))
+            {
+                return fail_layered("the retired successor generation stayed mapped");
+            }
+            remove_unmapped_staged_file_best_effort(successor);
         }
         s_hook_rival_original.store(nullptr, std::memory_order_release);
 
-        target_module.reset();
-        if (!module_owns(reinterpret_cast<const void *>(target)))
+        namespace diag = DetourModKit::diagnostics;
+        if (diag::intentional_leak_count(diag::LeakSubsystem::HookManager) != 0 ||
+            target(base, modifier) != original_result)
         {
-            return fail("partial-init", "the refused generation did not retain the hook target module");
-        }
-        if (!module_owns(retained_generation.marker))
-        {
-            return fail("partial-init", "the generation loader reference did not remain mapped");
-        }
-        const std::uint64_t hook_calls_before_hand_back = retained_generation.read_status().hook_calls;
-        if (target(base, modifier) != chained_result ||
-            retained_generation.read_status().hook_calls != hook_calls_before_hand_back + 1)
-        {
-            return fail("partial-init", "the retained generation did not survive newer-hook hand-back");
+            return fail(scenario, "the newer host hook did not restore over the vacated position");
         }
 
-        std::fprintf(stderr, "OK: partial Init rolled back and HookManager refusal retained a callable generation\n");
+        std::fprintf(
+            stderr,
+            "OK: the lower generation retired under the newer host hook and unmapped, and its successor claimed the "
+            "vacated position\n"
+        );
         return 0;
     }
 
@@ -1530,6 +1411,10 @@ int main(int argc, char **argv)
     {
         return run_partial_init();
     }
+    if (scenario == "layered-host")
+    {
+        return run_layered_host();
+    }
     if (scenario == "foreign-xinput-background")
     {
         return run_foreign_xinput(true);
@@ -1549,7 +1434,7 @@ int main(int argc, char **argv)
         "resources-generation-tls-leak|soak|local-wheel-retention|"
         "uninstall-call-site|"
         "parked-callback|drain-retry|"
-        "partial-init|foreign-xinput|foreign-xinput-background|candidate-collision\n",
+        "partial-init|layered-host|foreign-xinput|foreign-xinput-background|candidate-collision\n",
         argc > 0 ? argv[0] : "staged_generation_soak"
     );
     return SETUP_FAILURE;

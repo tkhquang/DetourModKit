@@ -138,6 +138,12 @@ namespace
         return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
     }
 
+    std::size_t residue_count()
+    {
+        namespace diagnostics = DetourModKit::diagnostics;
+        return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookResidue);
+    }
+
     // The callee keeps a trampoline return address on the stack while its instruction pointer stays outside the route.
     std::atomic<bool> s_callee_hold{false};
     std::atomic<bool> s_callee_entered{false};
@@ -526,6 +532,8 @@ namespace
             );
             return base_code + 5;
         }
+        // The retained newer layer leaves the ledger, and its disabled record does not block a restore. Each older
+        // layer then restores as the top layer and retains as a dependent route, never as a residue.
         if (leak_count() - leaks_before != static_cast<std::size_t>(layers))
         {
             std::fprintf(
@@ -1298,11 +1306,17 @@ int main(int argc, char **argv)
     }
 
     // One block per parked layer, two for the call-site teardowns with a thread still returning, and nothing else.
+    // Each retention keeps its route and its module reference, so it books HookManager and never HookResidue.
     const std::size_t leaks = leak_count();
     if (leaks != 5)
     {
         std::fprintf(stderr, "FAIL: the run booked %zu HookManager leaks, expected exactly 5\n", leaks);
         return 70;
+    }
+    if (const std::size_t residue = residue_count(); residue != 0)
+    {
+        std::fprintf(stderr, "FAIL: the run booked %zu HookResidue events, expected none\n", residue);
+        return 71;
     }
     std::puts("PASS: a published mid hook reclaims its route chain unless a thread is parked inside it");
     return 0;

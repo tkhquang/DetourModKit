@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "eb0f9328bd50ab55dd24fdeabfaf554dff93bc65d8b55d01600287a0b2247906"
+EXPECTED_PATCH_SHA256 = "5d5342bc1dcdabb7e6a2a4b890e9b32211ea9c40cf9ee1c6d1dacb4e246aafe0"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -89,7 +89,7 @@ PR43_SENTINELS = [
     "m_enabled ? cancel_route_rundown() : finish_route_rundown();",  # post-commit errors resolve from mutation truth
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route
-    "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
+    "constexpr size_t ROUTED_STUB_SIZE = 404",  # mid stub carries a stable exit pointer
     "if (auto result = set_mid_route(); !result)",  # mid entry stays admitted across the generated stub
     "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
     "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
@@ -234,6 +234,26 @@ PROCESS_COORDINATOR_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PROCESS_COORDINATOR_SENTINELS
+
+# A lower layer retires by its own relay slot, and a successor claims the vacated relay cell.
+RELAY_RETIREMENT_SENTINELS = [
+    "align_up(src + sizeof(JmpFF), alignof(uint64_t))",  # the relay slot is 8-aligned ...
+    "std::atomic_ref<uint64_t>{*reinterpret_cast<uint64_t*>(address)}.store(value, std::memory_order_seq_cst);",
+    "m_relay_offset != 0 ? m_trampoline.data() + m_relay_offset : m_destination",  # ... far hooks route through it
+    "if (!trampoline_idle()) {",  # a restored trampoline frees only after an idle proof
+    "m_route_control->test_control.store(&m_route_control->local_test_control",  # retention leaves image data
+    "footer.seal != (RELAY_CELL_SEAL ^ seal_address) || footer.layout != RELAY_CELL_LAYOUT",  # a cell is sealed
+    "exchange_cell_state(cell, RELAY_CELL_OWNED, RELAY_CELL_VACANT)",  # vacate hands the cell on ...
+    "exchange_cell_state(cell, RELAY_CELL_VACANT, RELAY_CELL_OWNED)",  # ... and a claim takes it once
+    "std::equal(body.original, body.original + body.original_size, m_target)",  # a pristine window refuses
+    "control->state.load(std::memory_order_seq_cst) != ROUTE_CLOSED",  # a routed claim needs a closed route
+    "if (m_claimed) {",  # a claimed hook writes no target byte and no record
+    "size_t ProcessCoordinator::records_at(",  # the claim reads the version 1 records ...
+    "size_t ProcessCoordinator::layer_count(",  # ... and the budget guard counts layers ...
+    "size_t ProcessCoordinator::free_record_count(",  # ... and free records
+]
+
+REQUIRED_SENTINELS += RELAY_RETIREMENT_SENTINELS
 
 
 def patch_files(patch_dir: Path):

@@ -32,6 +32,8 @@ namespace DetourModKit
             constinit std::atomic<EventDispatcher<HookLifecycleEvent> *> s_hook_lifecycle{nullptr};
 
             constexpr std::size_t LEAK_SUBSYSTEM_COUNT = static_cast<std::size_t>(LeakSubsystem::Count);
+            // Snapshot::intentional_leaks indexes by value, so an existing bucket never moves.
+            static_assert(static_cast<std::size_t>(LeakSubsystem::HookResidue) + 1 == LEAK_SUBSYSTEM_COUNT);
 
             // One independent event tally per subsystem. Relaxed throughout: the counters carry no ordering obligation
             // toward any other state.

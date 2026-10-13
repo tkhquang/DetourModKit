@@ -399,7 +399,8 @@ namespace
         return 0;
     }
 
-    // An older toggle under a live newer participant writes nothing and reports LayerConflict.
+    // Under a live newer participant, an older arm over restored bytes writes nothing and reports LayerConflict. An
+    // older restore bypasses the older detour and writes nothing.
     int report_layer_conflict(
         Participant &first,
         Participant &second,
@@ -414,17 +415,21 @@ namespace
             first.run(Command::EnableLayerConflict) == 0 || std::memcmp(page, code.data(), code.size()) != 0 ||
             target() != 37 || second.run(Command::Reset) != 0)
             return fail("an older participant arm did not report LayerConflict");
-        // The disarmed newer layer saved the older patch as its prologue, so an older restore erases that patch.
         if (first.run(Command::Enable) == 0)
             return fail("the older participant did not arm after the newer layer retired");
         std::array<unsigned char, 16> armed{};
         std::memcpy(armed.data(), page, armed.size());
+        // The disarmed newer layer saved the older patch as its prologue, so an older restore erases that patch. The
+        // coordinator refuses that restore, and the older layer bypasses in its place. No caller reaches its detour.
         if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 ||
-            std::memcmp(page, armed.data(), armed.size()) != 0 || first.run(Command::DisableLayerConflict) == 0 ||
-            std::memcmp(page, armed.data(), armed.size()) != 0 || second.run(Command::Reset) != 0 ||
-            first.run(Command::Disable) == 0 || std::memcmp(page, code.data(), code.size()) != 0 ||
-            first.run(Command::Reset) != 0)
-            return fail("an older participant restore did not report LayerConflict");
+            std::memcmp(page, armed.data(), armed.size()) != 0 || first.run(Command::Disable) == 0 ||
+            first.run(Command::Enabled) != 0 || std::memcmp(page, armed.data(), armed.size()) != 0 || target() != 37 ||
+            first.run(Command::Hits) != 0)
+            return fail("an older participant restore under a newer participant did not bypass");
+        // After the newer layer retires, the bypassed older layer is the top layer over its own patch and restores.
+        if (second.run(Command::Reset) != 0 || first.run(Command::Disable) == 0 ||
+            std::memcmp(page, code.data(), code.size()) != 0 || first.run(Command::Reset) != 0)
+            return fail("the bypassed older participant did not restore after the newer layer retired");
         return 0;
     }
 
@@ -479,6 +484,293 @@ namespace
             return fail("a coordinator refusal of a toggle or teardown restore was not reported");
         return 0;
     }
+
+    using Window = std::array<unsigned char, 16>;
+
+    Window window_of(const unsigned char *page) noexcept
+    {
+        Window bytes{};
+        std::memcpy(bytes.data(), page, bytes.size());
+        return bytes;
+    }
+
+    bool mapped(const void *address) noexcept
+    {
+        HMODULE owner{};
+        return GetModuleHandleExW(
+                   GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                   static_cast<LPCWSTR>(address),
+                   &owner
+               ) != FALSE;
+    }
+
+    // Releases the host reference and reports whether the image unmapped. A handler that the unmapped image left
+    // registered fails the next throw.
+    bool unloads(Participant &participant)
+    {
+        const auto *const address = reinterpret_cast<const void *>(participant.command);
+        FreeLibrary(participant.module);
+        participant.module = nullptr;
+        if (mapped(address))
+            return false;
+        bool caught = false;
+        try
+        {
+            throw 37;
+        }
+        catch (int value)
+        {
+            caught = value == 37;
+        }
+        return caught;
+    }
+
+    constexpr std::uintptr_t LOWER_LAYER = 0;
+    constexpr std::uintptr_t UPPER_LAYER = 1;
+    constexpr int POSITION_CLAIMS = 100;
+
+    std::uintptr_t
+    on_layer(const Participant &legacy, std::uintptr_t layer, Command command, void *argument = nullptr) noexcept
+    {
+        return legacy.run(Command::SelectLayer, reinterpret_cast<void *>(layer)) != 0 ? legacy.run(command, argument)
+                                                                                      : 0;
+    }
+
+    // Both copies hook through inline_at. The older copy bypasses under the newer one, retires as a vacant position,
+    // and unmaps while the newer chain runs. A reloaded copy then claims that position by its hook name.
+    int retire_older_inline_under_newer_inline(Participant &first, Participant &second, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (first.run(Command::InstallInline, page) == 0 || target() != 37 || first.run(Command::Hits) != 1)
+            return fail("the older inline hook did not execute");
+        const Window older_patch = window_of(page);
+        if (second.run(Command::InstallInline, page) == 0 || target() != 37 || second.run(Command::Hits) != 1 ||
+            first.run(Command::Hits) != 2)
+            return fail("the newer inline hook did not chain to the older one");
+        const Window newer_patch = window_of(page);
+        // The bypass and the resume write no target byte, so only the hit counts show the switch of the older detour.
+        if (first.run(Command::Disable) == 0 || first.run(Command::Enabled) != 0 || window_of(page) != newer_patch ||
+            target() != 37 || second.run(Command::Hits) != 2 || first.run(Command::Hits) != 2)
+            return fail("the older inline hook did not bypass under the newer one");
+        if (first.run(Command::Enable) == 0 || window_of(page) != newer_patch || target() != 37 ||
+            second.run(Command::Hits) != 3 || first.run(Command::Hits) != 3 || first.run(Command::Disable) == 0)
+            return fail("the bypassed older hook did not re-arm without a target write");
+        if (first.run(Command::Reset) != 0 || first.run(Command::Residue) != 1 || first.run(Command::ModulePins) != 0 ||
+            second.run(Command::Records) != 2 || second.run(Command::Vacant) != 1 || window_of(page) != newer_patch)
+            return fail("the older inline hook did not retire as a vacant position");
+        if (!unloads(first) || target() != 37 || second.run(Command::Hits) != 4)
+            return fail("the retired older copy did not unmap under the running newer chain");
+        // The newer layer is the top layer, so it restores the older patch, which reaches only the vacant relay.
+        if (second.run(Command::Disable) == 0 || window_of(page) != older_patch || target() != 37 ||
+            second.run(Command::Hits) != 4 || second.run(Command::Reset) != 0 || second.run(Command::Records) != 1 ||
+            second.run(Command::Vacant) != 1)
+            return fail("the newer inline hook did not restore over the vacant position");
+        Participant successor{"route_copy_a.dll"};
+        if (successor.command == nullptr || successor.run(Command::InstallInline, page) == 0 ||
+            second.run(Command::Records) != 1 || second.run(Command::Vacant) != 0 || window_of(page) != older_patch ||
+            target() != 37 || successor.run(Command::Hits) != 1)
+            return fail("a reloaded copy did not claim the vacant position");
+        if (successor.run(Command::Reset) != 0 || successor.run(Command::Residue) != 0 ||
+            second.run(Command::Records) != 1 || second.run(Command::Vacant) != 1 || window_of(page) != older_patch ||
+            target() != 37 || successor.run(Command::Hits) != 1 || !unloads(successor))
+            return fail("the claimed position did not vacate and unmap at teardown");
+        return 0;
+    }
+
+    // A legacy copy below a new copy keeps the 4.3.0 answers. Its disable refuses under the newer record and writes
+    // nothing. Its teardown pins with the detour live and the image mapped. The new upper layer toggles and restores
+    // as the top layer.
+    int legacy_lower_stays_refused(Participant &legacy, Participant &upper, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (legacy.run(Command::InstallInline, page) == 0 || target() != 37 || legacy.run(Command::Hits) != 1)
+            return fail("the legacy hook did not execute");
+        const Window lower_patch = window_of(page);
+        if (upper.run(Command::InstallInline, page) == 0 || target() != 37 || upper.run(Command::Hits) != 1 ||
+            legacy.run(Command::Hits) != 2)
+            return fail("the new upper hook did not chain to the legacy hook");
+        const Window upper_patch = window_of(page);
+        if (legacy.run(Command::Top) != 0 || legacy.run(Command::DisableLayerConflict) == 0 ||
+            legacy.run(Command::Enabled) == 0 || window_of(page) != upper_patch || target() != 37 ||
+            upper.run(Command::Hits) != 2 || legacy.run(Command::Hits) != 3)
+            return fail("the legacy lower hook did not refuse its disable under the newer record");
+        if (legacy.run(Command::Reset) != 1 || legacy.run(Command::ModulePins) != 1 || window_of(page) != upper_patch ||
+            upper.run(Command::Records) != 2 || target() != 37 || upper.run(Command::Hits) != 3 ||
+            legacy.run(Command::Hits) != 4)
+            return fail("the legacy lower hook did not pin with its detour live");
+        if (upper.run(Command::Disable) == 0 || window_of(page) != lower_patch || target() != 37 ||
+            upper.run(Command::Hits) != 3 || legacy.run(Command::Hits) != 5 || upper.run(Command::Enable) == 0 ||
+            window_of(page) != upper_patch)
+            return fail("the new upper hook did not toggle as the top layer");
+        if (upper.run(Command::Reset) != 0 || upper.run(Command::Residue) != 0 || window_of(page) != lower_patch ||
+            upper.run(Command::Records) != 1 || upper.run(Command::Vacant) != 0 || target() != 37 ||
+            legacy.run(Command::Hits) != 6)
+            return fail("the new upper hook did not restore over the pinned legacy hook");
+        // The pin holds a module reference of its own, so the legacy image stays mapped for the session.
+        const auto *const legacy_image = reinterpret_cast<const void *>(legacy.command);
+        FreeLibrary(legacy.module);
+        legacy.module = nullptr;
+        if (!mapped(legacy_image) || target() != 37)
+            return fail("the pinned legacy hook lost its image");
+        return 0;
+    }
+
+    // A new copy below a legacy copy bypasses, retires as a vacant position, and unmaps. The legacy upper layer keeps
+    // its top() answer, and it still toggles and restores.
+    int new_lower_retires_under_legacy_upper(Participant &lower, Participant &legacy, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (lower.run(Command::InstallInline, page) == 0 || target() != 37 || lower.run(Command::Hits) != 1)
+            return fail("the new lower hook did not execute");
+        const Window lower_patch = window_of(page);
+        if (legacy.run(Command::InstallInline, page) == 0 || target() != 37 || legacy.run(Command::Hits) != 1 ||
+            lower.run(Command::Hits) != 2)
+            return fail("the legacy upper hook did not chain to the new lower hook");
+        const Window upper_patch = window_of(page);
+        if (lower.run(Command::Disable) == 0 || lower.run(Command::Enabled) != 0 || window_of(page) != upper_patch ||
+            target() != 37 || legacy.run(Command::Hits) != 2 || lower.run(Command::Hits) != 2 ||
+            legacy.run(Command::Top) == 0)
+            return fail("the new lower hook did not bypass under the legacy upper hook");
+        if (lower.run(Command::Reset) != 0 || lower.run(Command::Residue) != 1 || lower.run(Command::ModulePins) != 0 ||
+            legacy.run(Command::Records) != 2 || legacy.run(Command::Vacant) != 1 || window_of(page) != upper_patch)
+            return fail("the new lower hook did not retire as a vacant position");
+        if (!unloads(lower) || target() != 37 || legacy.run(Command::Hits) != 3)
+            return fail("the retired lower copy did not unmap under the legacy upper hook");
+        if (legacy.run(Command::Top) == 0 || legacy.run(Command::Disable) == 0 || window_of(page) != lower_patch ||
+            target() != 37 || legacy.run(Command::Hits) != 3 || legacy.run(Command::Enable) == 0 ||
+            window_of(page) != upper_patch || target() != 37 || legacy.run(Command::Hits) != 4)
+            return fail("the legacy upper hook did not toggle as the top layer");
+        if (legacy.run(Command::Reset) != 0 || window_of(page) != lower_patch || legacy.run(Command::Records) != 1 ||
+            legacy.run(Command::Vacant) != 1 || target() != 37 || legacy.run(Command::Hits) != 4)
+            return fail("the legacy upper hook did not restore over the vacant position");
+        return 0;
+    }
+
+    // The legacy copy holds one layer below and one above a position that two new copies claim and vacate in turn.
+    // A claim and a vacate write no record field, so the record count and each legacy top() answer stay unchanged.
+    int legacy_around_claimed_position(
+        Participant &first,
+        Participant &second,
+        const Participant &legacy,
+        unsigned char *page
+    )
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (on_layer(legacy, LOWER_LAYER, Command::InstallInline, page) == 0 ||
+            first.run(Command::InstallInline, page) == 0 || target() != 37 || first.run(Command::Hits) != 1 ||
+            on_layer(legacy, LOWER_LAYER, Command::Hits) != 1)
+            return fail("the position did not chain to the legacy lower hook");
+        const Window position_patch = window_of(page);
+        if (on_layer(legacy, UPPER_LAYER, Command::InstallInline, page) == 0 || first.run(Command::Reset) != 0 ||
+            first.run(Command::Residue) != 1 || legacy.run(Command::Records) != 3 || legacy.run(Command::Vacant) != 1)
+            return fail("the position did not retire as a vacant position between the legacy hooks");
+        const Window upper_patch = window_of(page);
+        std::uintptr_t lower_hits = on_layer(legacy, LOWER_LAYER, Command::Hits);
+        std::uintptr_t upper_hits = on_layer(legacy, UPPER_LAYER, Command::Hits);
+        std::array<std::uintptr_t, 2> claim_hits{second.run(Command::Hits), first.run(Command::Hits)};
+        for (int claim = 0; claim < POSITION_CLAIMS; ++claim)
+        {
+            Participant &successor = claim % 2 == 0 ? second : first;
+            std::uintptr_t &successor_hits = claim_hits[static_cast<std::size_t>(claim % 2)];
+            if (successor.run(Command::InstallInline, page) == 0 || legacy.run(Command::Records) != 3 ||
+                legacy.run(Command::Vacant) != 0 || window_of(page) != upper_patch || target() != 37 ||
+                successor.run(Command::Hits) != ++successor_hits ||
+                on_layer(legacy, UPPER_LAYER, Command::Hits) != ++upper_hits ||
+                on_layer(legacy, LOWER_LAYER, Command::Hits) != ++lower_hits)
+                return fail("a successor did not claim the position between the legacy hooks");
+            if (on_layer(legacy, LOWER_LAYER, Command::Top) != 0 ||
+                on_layer(legacy, LOWER_LAYER, Command::DisableLayerConflict) == 0 ||
+                on_layer(legacy, LOWER_LAYER, Command::Enabled) == 0 || window_of(page) != upper_patch ||
+                on_layer(legacy, UPPER_LAYER, Command::Top) == 0 ||
+                on_layer(legacy, UPPER_LAYER, Command::Disable) == 0 || window_of(page) != position_patch ||
+                on_layer(legacy, UPPER_LAYER, Command::Enable) == 0 || window_of(page) != upper_patch)
+                return fail("a claimed position changed a top() answer of a legacy hook");
+            if (successor.run(Command::Reset) != 0 || legacy.run(Command::Records) != 3 ||
+                legacy.run(Command::Vacant) != 1 || window_of(page) != upper_patch)
+                return fail("a claimed position did not vacate at teardown");
+        }
+        if (first.run(Command::Residue) != 1 || second.run(Command::Residue) != 0 ||
+            first.run(Command::ModulePins) != 0 || second.run(Command::ModulePins) != 0)
+            return fail("a claimed position booked a residue or kept a module reference");
+        // The upper legacy hook restores as the top layer. The lower one stays under the vacant record, so it pins.
+        if (on_layer(legacy, UPPER_LAYER, Command::Reset) != 0 || window_of(page) != position_patch ||
+            on_layer(legacy, LOWER_LAYER, Command::Reset) != 1 || legacy.run(Command::Records) != 2 ||
+            legacy.run(Command::Vacant) != 1 || window_of(page) != position_patch || target() != 37 ||
+            on_layer(legacy, LOWER_LAYER, Command::Hits) != lower_hits + 1)
+            return fail("the legacy hooks did not keep the 4.3.0 teardown around the vacant position");
+        return 0;
+    }
+
+    // A fresh lower layer under a newer layer keeps the 4.3.0 pin when fewer than 64 process records stay free. The
+    // registry fills around the two live records, so the retirement reads no free record.
+    int residue_budget_floor_pins(Participant &first, Participant &second, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (first.run(Command::InstallInline, page) == 0 || second.run(Command::InstallInline, page) == 0 ||
+            target() != 37 || first.run(Command::Hits) != 1 || second.run(Command::Hits) != 1)
+            return fail("the two inline layers did not chain");
+        const Window armed = window_of(page);
+        const auto filled = first.run(Command::Fill);
+        const auto pins = first.run(Command::Reset);
+        const bool pinned = pins == 1 && first.run(Command::Residue) == 0 && first.run(Command::ModulePins) == 1 &&
+                            second.run(Command::Records) == 512 && second.run(Command::Vacant) == 0 &&
+                            window_of(page) == armed && target() == 37 && first.run(Command::Hits) == 2;
+        first.run(Command::Clear);
+        if (filled != 510 || !pinned)
+            return fail("a fresh lower layer below the free-record floor did not keep its pin");
+        // The pinned record stays live and its detour reachable. The newer layer restores over the lower patch as
+        // the top layer.
+        if (second.run(Command::Reset) != 0 || second.run(Command::Records) != 1 || second.run(Command::Vacant) != 0 ||
+            target() != 37 || first.run(Command::Hits) != 3)
+            return fail("the newer inline hook did not restore over the pinned layer");
+        return 0;
+    }
+
+    // A bypassed mid route stays closed through a retirement whose restore is refused. The newer participant holds
+    // the coordinator, so each acquisition of the retirement waits its full timeout, and a host thread calls the
+    // target throughout. The park before the destination admits only a LIVE route, so a reached park proves a
+    // reopen. The unusable coordinator fails the residue budget check, so the retirement keeps the 4.3.0 pin.
+    int retirement_keeps_bypassed_route_closed(Participant &first, Participant &second, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        if (first.run(Command::Install, page) == 0 || target() != 37 || first.run(Command::Hits) != 1 ||
+            second.run(Command::Install, page) == 0 || target() != 37 || second.run(Command::Hits) != 1 ||
+            first.run(Command::Hits) != 2)
+            return fail("the two mid layers did not chain");
+        const Window layered = window_of(page);
+        if (first.run(Command::Disable) == 0 || first.run(Command::Enabled) != 0 || target() != 37 ||
+            first.run(Command::Hits) != 2 || second.run(Command::Hits) != 2)
+            return fail("the older mid hook did not bypass under the newer participant");
+        first.run(Command::HoldDestination);
+        std::atomic<bool> stop{false};
+        std::thread caller(
+            [&target, &stop]() -> void
+            {
+                while (!stop.load(std::memory_order_acquire))
+                    (void)target();
+            }
+        );
+        std::uintptr_t retired = 0;
+        const bool held = while_held(second, [&first, &retired]() -> void { retired = first.run(Command::Reset); });
+        const auto reached = first.run(Command::EntryReached);
+        first.run(Command::ReleaseEntry);
+        stop.store(true, std::memory_order_release);
+        caller.join();
+        if (!held)
+            return fail("the newer participant did not hold the coordinator");
+        if (retired != 1 || first.run(Command::Residue) != 0 || first.run(Command::ModulePins) != 1 ||
+            window_of(page) != layered)
+            return fail("the retirement under an unusable coordinator did not keep the pin");
+        if (reached != 0)
+            return fail("the retirement reopened the bypassed route before its drain");
+        // The host thread drove the newer callback throughout, so only its delta across one more call is fixed.
+        const auto newer_hits = second.run(Command::Hits);
+        if (target() != 37 || first.run(Command::Hits) != 2 || second.run(Command::Hits) != newer_hits + 1)
+            return fail("a caller reached the retired callback");
+        if (second.run(Command::Reset) != 0 || target() != 37 || first.run(Command::Hits) != 2)
+            return fail("the newer mid hook did not restore over the pinned layer");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -492,7 +784,9 @@ int main(int argc, char **argv)
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
         scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "stale-layer-conflict" &&
         scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
-        scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page")
+        scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page" &&
+        scenario != "retire-inline" && scenario != "legacy-lower" && scenario != "legacy-upper" &&
+        scenario != "legacy-around-claim" && scenario != "budget-floor" && scenario != "retire-closed-route")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -520,6 +814,24 @@ int main(int argc, char **argv)
         return reconcile_stale_state_before_layer_conflict(first, second, page, code);
     if (scenario == "refusal-cause")
         return report_coordinator_refusal(first, second, page);
+    if (scenario == "retire-inline")
+        return retire_older_inline_under_newer_inline(first, second, page);
+    if (scenario == "budget-floor")
+        return residue_budget_floor_pins(first, second, page);
+    if (scenario == "retire-closed-route")
+        return retirement_keeps_bypassed_route_closed(first, second, page);
+    if (scenario == "legacy-lower" || scenario == "legacy-upper" || scenario == "legacy-around-claim")
+    {
+        Participant legacy{"route_copy_legacy.dll"};
+        if (legacy.command == nullptr || legacy.command == first.command || legacy.command == second.command ||
+            legacy.run(Command::Identity) != identity)
+            return fail("the legacy participant did not share the data owner");
+        if (scenario == "legacy-lower")
+            return legacy_lower_stays_refused(legacy, first, page);
+        if (scenario == "legacy-upper")
+            return new_lower_retires_under_legacy_upper(first, legacy, page);
+        return legacy_around_claimed_position(first, second, legacy, page);
+    }
     if (scenario == "scans")
         return serialize(first, second, false);
     if (scenario == "stub-page" || scenario == "wait-export" || scenario == "stub-thread")
@@ -534,6 +846,21 @@ int main(int argc, char **argv)
         if (second.run(Command::Records) != 0 || second.run(Command::Install, page) == 0 || target() != 37 ||
             second.run(Command::Reset) != 0 || first.run(Command::Records) != 0)
             return fail("a refused registration left stale state");
+        // A vacant position holds one record of the bound. A claim adds no record, so a successor takes the position
+        // while the registry is full.
+        if (first.run(Command::InstallInline, page) == 0 || second.run(Command::InstallInline, page) == 0 ||
+            first.run(Command::Disable) == 0 || first.run(Command::Reset) != 0 || first.run(Command::Residue) != 1 ||
+            second.run(Command::Records) != 2 || second.run(Command::Vacant) != 1)
+            return fail("the older inline hook did not retire as a vacant position");
+        const auto filled = first.run(Command::Fill);
+        const bool claimed =
+            first.run(Command::InstallInline, page) != 0 && second.run(Command::Vacant) == 0 && target() == 37;
+        const bool vacated = first.run(Command::Reset) == 0 && second.run(Command::Vacant) == 1;
+        first.run(Command::Clear);
+        if (filled != 510 || !claimed || !vacated || second.run(Command::Records) != 2)
+            return fail("a vacant position did not hold its record of the bound or refused its claim");
+        if (second.run(Command::Reset) != 0 || first.run(Command::Records) != 1 || target() != 37)
+            return fail("the newer inline hook did not restore over the vacant position");
         return 0;
     }
     const auto install = scenario == "layers-inline" ? Command::InstallInline : Command::Install;
@@ -630,12 +957,18 @@ int main(int argc, char **argv)
     const auto older = first.run(Command::Trampoline);
     if (second.run(Command::Install, page) == 0 || target() != 37 || second.run(Command::Hits) != 1)
         return fail("the newer hook did not execute");
-    if (first.run(Command::Disable) != 0)
-        return fail("an older participant changed the newer layer");
+    // The older layer cannot restore under the newer layer, so it bypasses its detour and writes no target byte.
+    const auto newer_patch = window_of(page);
+    const auto older_hits = first.run(Command::Hits);
+    if (first.run(Command::Disable) == 0 || first.run(Command::Enabled) != 0 || window_of(page) != newer_patch ||
+        target() != 37 || second.run(Command::Hits) != 2 || first.run(Command::Hits) != older_hits)
+        return fail("an older participant did not bypass under the newer layer");
+    // In the two leak scenarios, the newer teardown restores its saved prologue, which is the older patch. The bypassed
+    // older layer is then the top layer over its own patch, so its second disable restores the target.
     if (scenario == "drain-leak")
     {
         second.run(Command::SelfReset);
-        if (target() != 37 || second.run(Command::Hits) != 2 || first.run(Command::Disable) == 0 ||
+        if (target() != 37 || second.run(Command::Hits) != 3 || first.run(Command::Disable) == 0 ||
             std::memcmp(page, code.data(), code.size()) != 0 || first.run(Command::Reset) != 1 || !executable(older))
             return fail("a leaked newer route blocked the older layer or lost its dependency");
         return 0;
