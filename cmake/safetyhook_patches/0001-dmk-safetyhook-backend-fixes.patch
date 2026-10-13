@@ -109,7 +109,7 @@ index c05d06f..53c7df5 100644
      static void combine_adjacent_freenodes(Memory& memory);
      [[nodiscard]] static std::expected<uint8_t*, Error> allocate_nearby_memory(
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..dcb2835 100644
+index 58801fa..8ad898e 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
 @@ -8,6 +8,7 @@
@@ -367,21 +367,27 @@ index 58801fa..dcb2835 100644
      /// @brief Create an inline hook with a given Allocator.
      /// @param allocator The allocator to use.
      /// @param target The address of the function to hook.
-@@ -171,9 +361,11 @@ public:
+@@ -168,12 +358,17 @@ public:
+     InlineHook(InlineHook&& other) noexcept;
+     InlineHook& operator=(const InlineHook&) = delete;
+     InlineHook& operator=(InlineHook&& other) noexcept;
++    /// @note Runs reset(). The loader-lock rule of reset() applies.
      ~InlineHook();
  
      /// @brief Reset the hook.
 -    /// @details This will restore the original function and remove the hook.
-+    /// @details This will restore the original function and remove the hook. A published routed chain is freed when
-+    ///          the idle proof of threads_idle_outside succeeds and retained otherwise (see route_retained()).
++    /// @details This will restore the original function and remove the hook. A committed patch frees its trampoline,
++    ///          or its published routed chain, only when the idle proof of threads_idle_outside succeeds. Otherwise
++    ///          reset() retains the storage (see route_retained()).
      /// @note This is called automatically in the destructor.
 -    void reset();
-+    /// @note Never call this under the loader lock while a route is published: the idle proof suspends threads.
++    /// @note Never call this under the loader lock once a patch is committed, with or without a published route.
++    ///       The idle proof suspends threads.
 +    void reset() noexcept;
  
      /// @brief Get a pointer to the target.
      /// @return A pointer to the target.
-@@ -208,6 +400,113 @@ public:
+@@ -208,6 +403,113 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_original_bytes; }
  
@@ -495,7 +501,7 @@ index 58801fa..dcb2835 100644
      /// @brief Calls the original function.
      /// @tparam RetT The return type of the function.
      /// @tparam ...Args The argument types of the function.
-@@ -349,29 +648,112 @@ public:
+@@ -349,29 +651,112 @@ public:
  private:
      friend class MidHook;
  
