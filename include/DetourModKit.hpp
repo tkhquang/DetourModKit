@@ -35,6 +35,7 @@
 #include "DetourModKit/scan.hpp"
 #include "DetourModKit/session.hpp"
 #include "DetourModKit/sighealth.hpp"
+#include "DetourModKit/staged_reload.hpp"
 #include "DetourModKit/detail/worker.hpp"
 
 #endif // DETOURMODKIT_HPP

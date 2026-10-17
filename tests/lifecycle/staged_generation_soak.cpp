@@ -471,20 +471,22 @@ namespace
                 generation.read_status().lifecycle_events != INIT_LIFECYCLE_EVENTS)
                 return fail("resources", "six mid callbacks, one dispatched event, and 14 hook events did not execute");
             const std::size_t initialized_tls = dmk_lifecycle::free_tls_indices();
-            // A retained route refuses the reload verdict and books one HookManager leak. A diagnostics subscription
-            // that outlives ~Session refuses it with one Diagnostics leak.
+            // A retained route books one HookManager leak and requires a restart. A diagnostics subscription that
+            // outlives ~Session books one Diagnostics leak and retains the image.
             const int verdict = generation.shutdown();
             const std::size_t shutdown_tls = dmk_lifecycle::free_tls_indices();
             const auto status = generation.read_status();
             if (status.lifecycle_events != SHUTDOWN_LIFECYCLE_EVENTS)
                 return fail("resources", "the diagnostics subscription did not observe every hook removal");
-            if (retain && (verdict != 0 || status.hook_manager_leaks != 1 || status.total_intentional_leaks != 1 ||
-                           status.parked_result != 3))
+            if (retain &&
+                (verdict != static_cast<int>(DMK_STAGED_RELOAD_RESTART_REQUIRED) || status.hook_manager_leaks != 1 ||
+                 status.total_intentional_leaks != 1 || status.parked_result != 3))
                 return fail("resources", "the parked route was not retained, reported, and bypassed");
-            if (retain_diagnostics &&
-                (verdict != 0 || status.diagnostics_leaks != 1 || status.total_intentional_leaks != 1))
-                return fail("resources", "the live diagnostics subscription did not refuse the reload with one leak");
-            if (!retain && !retain_diagnostics && (verdict == 0 || status.total_intentional_leaks != 0))
+            if (retain_diagnostics && (verdict != static_cast<int>(DMK_STAGED_RELOAD_RETAINED) ||
+                                       status.diagnostics_leaks != 1 || status.total_intentional_leaks != 1))
+                return fail("resources", "the live diagnostics subscription did not retain the image with one leak");
+            if (!retain && !retain_diagnostics &&
+                (verdict != static_cast<int>(DMK_STAGED_RELOAD_OK) || status.total_intentional_leaks != 0))
                 return fail("resources", "a clean generation retained a route or a diagnostics index");
             if (cycle == 0)
                 coordinator_identity = status.coordinator_identity;
@@ -714,9 +716,9 @@ namespace
                 return fail("soak", "the live generation did not own the resident host lease");
             }
 
-            if (generation.shutdown() == 0)
+            if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_OK))
             {
-                return fail("soak", "a clean generation's Shutdown did not accept the reload");
+                return fail("soak", "a clean generation's Shutdown did not return OK");
             }
 
             const staged_gen::Status after = generation.read_status();
@@ -800,9 +802,9 @@ namespace
             {
                 return fail("local-wheel-retention", "the generation did not book exactly one message-hook keepalive");
             }
-            if (generation.shutdown() == 0)
+            if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_RETAINED))
             {
-                return fail("local-wheel-retention", "the generation's Shutdown did not accept the reload");
+                return fail("local-wheel-retention", "the keepalive did not make Shutdown retain the image");
             }
             // The keepalive is permanent: it survives the generation's own teardown and pins its module past
             // FreeLibrary. The local backend never reports a clean unload.
@@ -942,8 +944,8 @@ namespace
             return fail(scenario, "the binding callback never parked inside DetourModKit");
         }
 
-        // A callback parked inside DetourModKit makes the drain refuse, so Shutdown returns the reload refusal.
-        if (generation.shutdown() != 0)
+        // A callback parked inside DetourModKit makes the drain refuse, so Shutdown returns REFUSED.
+        if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_REFUSED))
         {
             generation.release_park();
             return fail(scenario, "Shutdown accepted the reload while a callback was parked");
@@ -954,10 +956,15 @@ namespace
         const auto deadline = std::chrono::steady_clock::now() + PARK_BUDGET;
         while (std::chrono::steady_clock::now() < deadline)
         {
-            if (generation.shutdown() != 0)
+            const int verdict = generation.shutdown();
+            if (verdict == static_cast<int>(DMK_STAGED_RELOAD_OK))
             {
                 accepted = true;
                 break;
+            }
+            if (verdict != static_cast<int>(DMK_STAGED_RELOAD_REFUSED))
+            {
+                return fail(scenario, "the retried Shutdown returned neither REFUSED nor OK");
             }
             std::this_thread::sleep_for(5ms);
         }
@@ -1129,9 +1136,9 @@ namespace
             }
 
             const staged_gen::Status before_retirement = lower.read_status();
-            if (lower.shutdown() == 0)
+            if (lower.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_OK))
             {
-                return fail_layered("Shutdown refused the lower generation under the newer host hook");
+                return fail_layered("Shutdown did not return OK for the lower generation under the newer host hook");
             }
             const staged_gen::Status retired = lower.read_status();
             if (retired.hook_manager_leaks != before_retirement.hook_manager_leaks ||
@@ -1188,9 +1195,9 @@ namespace
             }
 
             // A claimed position vacates again and books no residue, so the next successor finds it.
-            if (successor.shutdown() == 0)
+            if (successor.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_OK))
             {
-                return fail_layered("Shutdown refused the successor over its claimed position");
+                return fail_layered("Shutdown did not return OK for the successor over its claimed position");
             }
             const staged_gen::Status successor_retired = successor.read_status();
             if (successor_retired.hook_manager_leaks != claimed.hook_manager_leaks ||
@@ -1309,10 +1316,10 @@ namespace
                 return fail("foreign-xinput", "the newer XInput layer did not forward through the generation");
             }
 
-            if (generation.shutdown() == 0)
+            if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_RETAINED))
             {
                 s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "Shutdown refused the inert retained XInput pair");
+                return fail("foreign-xinput", "the retained XInput pair did not make Shutdown retain the image");
             }
             const staged_gen::Status after = generation.read_status();
             if (after.xinput_installed != 0 || after.xinput_self_pins != 1 || after.xinput_target_pins != 1 ||

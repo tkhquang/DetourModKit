@@ -30,6 +30,52 @@ namespace
     std::atomic<HANDLE> s_worker_thread{nullptr};
     std::atomic<int> s_worker_damage{0};
     std::uint64_t s_worker_join_failures = 0;
+
+    std::atomic<DWORD> s_detour_park_thread_id{0};
+    std::atomic<bool> s_detour_park_entered{false};
+    std::atomic<bool> s_detour_park_release{false};
+    HANDLE s_detour_park_thread = nullptr;
+    ApplyDamageFn s_detour_park_original = nullptr;
+
+    std::uint64_t s_shutdown_calls = 0;
+    std::uint32_t s_first_shutdown_result = 0;
+    std::uint32_t s_last_shutdown_result = 0;
+    std::uint64_t s_busy_probe_damage = 0;
+    std::uint64_t s_busy_left_generation_live = 0;
+
+    /// Holds the parked thread inside the counted detour and forwards every other call.
+    int parked_original(int amount, int resist) noexcept
+    {
+        if (::GetCurrentThreadId() == s_detour_park_thread_id.load(std::memory_order_acquire))
+        {
+            s_detour_park_entered.store(true, std::memory_order_release);
+            const ULONGLONG deadline = ::GetTickCount64() + 10'000;
+            while (!s_detour_park_release.load(std::memory_order_acquire) && ::GetTickCount64() < deadline)
+                ::Sleep(1);
+        }
+        return s_detour_park_original(amount, resist);
+    }
+
+    DWORD WINAPI detour_park_body(void *) noexcept
+    {
+        s_detour_park_thread_id.store(::GetCurrentThreadId(), std::memory_order_release);
+        (void)demo_apply_damage(100, 10);
+        return 0;
+    }
+
+    /// Releases the parked call, waits for its thread to exit, and restores the sample original.
+    [[nodiscard]] bool release_detour_park() noexcept
+    {
+        s_detour_park_release.store(true, std::memory_order_release);
+        if (s_detour_park_thread == nullptr)
+            return true;
+        if (::WaitForSingleObject(s_detour_park_thread, 5000) != WAIT_OBJECT_0)
+            return false;
+        ::CloseHandle(s_detour_park_thread);
+        s_detour_park_thread = nullptr;
+        s_original.store(s_detour_park_original, std::memory_order_release);
+        return true;
+    }
 } // namespace
 
 /** @brief Injects the owned provider before the actual sample Init. */
@@ -77,6 +123,55 @@ extern "C" __declspec(dllexport) void DMK_WHEELHOST_CALL example_proof_snapshot(
     out[16] = s_worker_expired.load(std::memory_order_acquire) ? 1 : 0;
     out[17] = s_worker_join_failures;
     out[18] = static_cast<std::uint64_t>(s_worker_damage.load(std::memory_order_acquire));
+    out[19] = s_shutdown_calls;
+    out[20] = s_first_shutdown_result;
+    out[21] = s_last_shutdown_result;
+    out[22] = s_busy_probe_damage;
+    out[23] = s_busy_left_generation_live;
+}
+
+/** @brief Records each sample Shutdown result. The first BUSY probes the armed hook, then releases the parked call. */
+extern "C" __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Shutdown() noexcept
+{
+    const std::uint32_t result = example_shutdown();
+    if (s_shutdown_calls++ == 0)
+        s_first_shutdown_result = result;
+    s_last_shutdown_result = result;
+    if (result == DMK_STAGED_RELOAD_BUSY && s_detour_park_thread != nullptr)
+    {
+        s_busy_left_generation_live = s_session.has_value() && s_heartbeat.has_value() && s_hooks.size() == 1 ? 1 : 0;
+        s_busy_probe_damage = static_cast<std::uint64_t>(demo_apply_damage(100, 10));
+        if (!release_detour_park())
+            s_busy_left_generation_live = 0;
+    }
+    return result;
+}
+
+/** @brief Parks one call inside the counted detour until the next BUSY Shutdown releases it. */
+extern "C" __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL example_proof_park_detour() noexcept
+{
+    const ApplyDamageFn original = s_original.load(std::memory_order_acquire);
+    if (original == nullptr || s_detour_park_thread != nullptr)
+        return 0;
+    s_detour_park_original = original;
+    s_original.store(&parked_original, std::memory_order_release);
+    s_detour_park_thread = ::CreateThread(nullptr, 0, &detour_park_body, nullptr, 0, nullptr);
+    if (s_detour_park_thread == nullptr)
+    {
+        s_original.store(original, std::memory_order_release);
+        return 0;
+    }
+    const ULONGLONG deadline = ::GetTickCount64() + 5000;
+    while (!s_detour_park_entered.load(std::memory_order_acquire))
+    {
+        if (::GetTickCount64() >= deadline)
+        {
+            (void)release_detour_park();
+            return 0;
+        }
+        ::Sleep(1);
+    }
+    return 1;
 }
 
 /** @brief Releases the worker and waits for its native thread, which includes runtime cleanup. */
@@ -213,15 +308,10 @@ extern "C" __declspec(dllexport) void DMK_WHEELHOST_CALL example_proof_release_c
     s_callback_release.store(true, std::memory_order_release);
 }
 
-/** @brief Records a leak without a module pin or latches an unsafe hook verdict. */
+/** @brief Records a leak without a module pin, or the HookManager leak of a detour that stays reachable. */
 extern "C" __declspec(dllexport) void DMK_WHEELHOST_CALL example_proof_fault(std::uint32_t mode) noexcept
 {
-    if (mode == 1)
-    {
-        dmk::diagnostics::record_intentional_leak(dmk::diagnostics::LeakSubsystem::Input);
-    }
-    else
-    {
-        s_hook_restore_failed = true;
-    }
+    dmk::diagnostics::record_intentional_leak(
+        mode == 1 ? dmk::diagnostics::LeakSubsystem::Input : dmk::diagnostics::LeakSubsystem::HookManager
+    );
 }

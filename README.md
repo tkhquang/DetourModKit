@@ -350,7 +350,7 @@ Each header's Doxygen comments are the API source of truth. Task-oriented guides
 
 | Module | Purpose | Header | Guide |
 | --- | --- | --- | --- |
-| **Session and Bootstrap** | RAII process lifetime with ordered teardown and DllMain scaffolding | [`DetourModKit.hpp`](include/DetourModKit.hpp), [`session.hpp`](include/DetourModKit/session.hpp) | [Hot-Reload](docs/guides/hot-reload/README.md) |
+| **Session and Bootstrap** | RAII process lifetime with ordered teardown and DllMain scaffolding | [`DetourModKit.hpp`](include/DetourModKit.hpp), [`session.hpp`](include/DetourModKit/session.hpp), [`staged_reload.hpp`](include/DetourModKit/staged_reload.hpp) | [Hot-Reload](docs/guides/hot-reload/README.md) |
 | **Stoppable Worker** | RAII named `std::jthread` wrapper with loader-lock-safe teardown | [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp) | |
 
 ### Observability & messaging

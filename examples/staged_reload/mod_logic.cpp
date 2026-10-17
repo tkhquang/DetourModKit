@@ -11,7 +11,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <optional>
@@ -34,6 +33,12 @@ namespace
     constexpr auto HEARTBEAT_INTERVAL = 1s;
     constexpr auto HEARTBEAT_POLL = 100ms;
 
+    /// Bounds the wait of one Shutdown for calls inside the detour. The loader retries a BUSY result.
+    constexpr auto RETIREMENT_DEADLINE = 100ms;
+
+    /// The oldest loader ABI that Init accepts. ABI 2 has the same request layout.
+    constexpr std::uint32_t MIN_LOADER_ABI_VERSION = 2;
+
     std::optional<dmk::Session> s_session;
     dmk::hook::HookStack s_hooks;
     std::optional<dmk::StoppableWorker> s_heartbeat;
@@ -41,9 +46,9 @@ namespace
     std::atomic<std::uint64_t> s_hook_calls{0};
     std::atomic<std::uint64_t> s_combo_presses{0};
     std::atomic<bool> s_bonus_enabled{true};
-    // Latches the first failed hook restore. A retry must never convert retained patched bytes into an unload
-    // acceptance.
-    bool s_hook_restore_failed = false;
+    dmk::staged_reload::Baseline s_baseline;
+    // Zero until Init accepts a request, so a failed stage never returns a value that its loader does not know.
+    std::uint32_t s_loader_abi_version = 0;
     bool s_worker_retirement_failed = false;
 
     /**
@@ -82,35 +87,6 @@ namespace
         return !s_worker_retirement_failed;
     }
 
-    /**
-     * @brief Clears hooks and latches any restoration failure.
-     * @return true only when every hook target returns to its original bytes.
-     */
-    [[nodiscard]] bool clear_generation_hooks() noexcept
-    {
-        namespace diag = dmk::diagnostics;
-        const std::size_t hook_pins_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
-        s_hooks.clear();
-        s_hook_restore_failed =
-            s_hook_restore_failed || diag::intentional_leak_count(diag::LeakSubsystem::HookManager) != hook_pins_before;
-        if (!s_hook_restore_failed)
-        {
-            s_original.store(nullptr, std::memory_order_release);
-        }
-        return !s_hook_restore_failed;
-    }
-
-    [[nodiscard]] std::uint32_t retirement_verdict() noexcept
-    {
-        if (s_hook_restore_failed || s_worker_retirement_failed)
-        {
-            return 0;
-        }
-        namespace diag = dmk::diagnostics;
-        const bool retained = diag::total_module_pins() != 0 || diag::total_intentional_leaks() != 0;
-        return retained ? DMK_STAGED_RELOAD_RETAINED : DMK_STAGED_RELOAD_OK;
-    }
-
     /// Drops each reclaimable generation resource after a failed Init step.
     void roll_back_generation() noexcept
     {
@@ -118,7 +94,7 @@ namespace
         {
             return;
         }
-        (void)clear_generation_hooks();
+        s_hooks.clear();
         s_session.reset();
     }
 } // namespace
@@ -143,14 +119,18 @@ extern "C"
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const StagedReloadInitRequest *request) noexcept
     {
+        // A HookManager leak means that a detour of this image stays reachable, so no generation starts beside it.
         if (request == nullptr || request->struct_size < sizeof(StagedReloadInitRequest) ||
-            request->abi_version != DMK_STAGED_RELOAD_ABI_VERSION || request->generation_id == 0 ||
-            request->wheel_host == nullptr || request->expected_host_identity == 0 ||
+            request->abi_version < MIN_LOADER_ABI_VERSION || request->abi_version > DMK_STAGED_RELOAD_ABI_VERSION ||
+            request->generation_id == 0 || request->wheel_host == nullptr || request->expected_host_identity == 0 ||
             request->wheel_host->host_identity != request->expected_host_identity || s_session.has_value() ||
-            s_hook_restore_failed || s_worker_retirement_failed)
+            s_worker_retirement_failed ||
+            dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) != 0)
         {
             return 0;
         }
+        s_baseline = dmk::staged_reload::capture();
+        s_loader_abi_version = request->abi_version;
         try
         {
             auto started = dmk::Session::start(
@@ -174,13 +154,10 @@ extern "C"
                 true
             );
 
-            auto installed = dmk::hook::inline_at(
-                dmk::hook::InlineRequest{
-                    .name = "demo_apply_damage",
-                    .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)},
-                },
-                &apply_damage_detour
-            );
+            auto installed = dmk::hook::inline_at<&apply_damage_detour>(dmk::hook::InlineRequest{
+                .name = "demo_apply_damage",
+                .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)},
+            });
             if (!installed)
             {
                 roll_back_generation();
@@ -212,7 +189,7 @@ extern "C"
             s_session->scope().add(std::move(combo));
             s_session->ini().load(std::format("{}.ini", MOD_NAME));
 
-            // This worker is the sample target's only caller. Teardown checks its module reference before hook removal.
+            // This worker calls the sample target. HookStack::retire drains its calls before Shutdown stops it.
             s_heartbeat.emplace(
                 std::format("{}.heartbeat", MOD_NAME),
                 [](const std::stop_token &token) -> void
@@ -261,29 +238,33 @@ extern "C"
     }
 
     /**
-     * @brief Retires feature state before the loader releases or retains this image.
-     * @return Zero refuses retirement. OK permits release. RETAINED requires the loader's module reference.
-     * @note Pin and leak counts affect image retention after callback drain and hook restoration succeed.
+     * @brief Retires the generation before the loader releases or retains this image.
+     * @return A DetourModKit/abi/staged_reload.h value. BUSY leaves the generation live. REFUSED keeps it mapped after
+     *         a failed worker join or callback drain, and a retry can succeed after the drain.
+     * @note The loader calls this from its control thread, off the loader lock.
      */
     __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Shutdown() noexcept
     {
+        // The retirement runs first, so a BUSY or Refused result changes nothing that the generation needs.
+        const dmk::hook::HookRetirement retirement = s_hooks.retire(RETIREMENT_DEADLINE);
+        if (retirement.outcome != dmk::hook::RetirementOutcome::Retired)
+        {
+            return dmk::staged_reload::verdict(retirement, s_baseline, s_loader_abi_version);
+        }
         if (!stop_generation_workers())
         {
-            return 0;
+            return DMK_STAGED_RELOAD_REFUSED;
         }
-        if (!s_session.has_value())
+        if (s_session.has_value())
         {
-            return retirement_verdict();
+            // Revert every raw memory::patch_code or write_bytes change here, before the drain. This sample makes none.
+            if (dmk::prepare_logic_dll_unload_all() != dmk::LogicDllUnloadStatus::SafeToUnload)
+            {
+                return DMK_STAGED_RELOAD_REFUSED;
+            }
+            s_session.reset(); // Ordered teardown can retain XInput here.
         }
-        // Revert every raw memory::patch_code or write_bytes change here, before the drain. This sample makes none.
-        (void)clear_generation_hooks();
-        if (dmk::prepare_logic_dll_unload_all() != dmk::LogicDllUnloadStatus::SafeToUnload)
-        {
-            return 0;
-        }
-        s_session.reset(); // Ordered teardown can retain XInput here.
-
-        return retirement_verdict();
+        return dmk::staged_reload::verdict(retirement, s_baseline, s_loader_abi_version);
     }
 } // extern "C"
 

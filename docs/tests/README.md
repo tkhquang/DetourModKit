@@ -178,7 +178,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_session_header.cpp` | `session.hpp` compiles alone |
 | `test_sighealth.cpp` | Signature health |
 | `test_srw_shared_mutex.cpp` | `SrwSharedMutex` |
-| `test_staged_reload.cpp` | The `abi/staged_reload.h` values |
+| `test_staged_reload.cpp` | The `abi/staged_reload.h` values and the `staged_reload::verdict` truth table |
 | `test_string.cpp` | `string::trim` in `format.hpp` |
 | `test_string_xref.cpp` | `scan::find_string_xref` |
 | `test_trap_protect.cpp` | Per-region protection restore |
