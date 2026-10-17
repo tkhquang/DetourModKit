@@ -1940,7 +1940,7 @@ dmk_add_raw_proof(NAME Lifecycle.RoutedBypassWaitsForCompleteCallerReturn
   COMMAND $<TARGET_FILE:routed_bypass_continuation> scan-wait
   WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
-dmk_add_raw_proof(NAME Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan
+dmk_add_raw_proof(NAME Lifecycle.RoutedBypassReclaimsAfterThreadExitDuringScan
   COMMAND $<TARGET_FILE:routed_bypass_continuation> thread-exit
   WORKING_DIRECTORY $<TARGET_FILE_DIR:routed_bypass_continuation>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")

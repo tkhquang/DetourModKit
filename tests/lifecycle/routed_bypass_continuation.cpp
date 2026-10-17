@@ -339,16 +339,15 @@ namespace
                 const bool provider_mapped = is_mapped(page);
                 const bool trampoline_mapped = is_mapped(trampoline);
                 const bool native_caller_live = !drain || WaitForSingleObject(s_caller_thread, 0) == WAIT_TIMEOUT;
-                const bool expected_retention = scenario == Scenario::ThreadExit;
+                // A caller that exited before its suspension runs no code, so the pass skips its refused suspension
+                // and the route reclaims.
+                const bool caller_exited = scenario == Scenario::ThreadExit;
                 const bool reclaimed = after.logical_charged == before.logical_charged &&
                                        after.committed_charged == before.committed_charged;
-                const bool retained = after.logical_charged > before.logical_charged &&
-                                      after.committed_charged > before.committed_charged;
                 const bool valid =
                     provider_released && xinput_module_refs_held() == 0 && (!drain || s_result == EXPECTED_VALUE) &&
-                    (expected_retention ? provider_mapped && trampoline_mapped && retained &&
-                                              s_suspend_refused.load() && !native_caller_live
-                                        : !provider_mapped && !trampoline_mapped && reclaimed && native_caller_live);
+                    !provider_mapped && !trampoline_mapped && reclaimed &&
+                    (caller_exited ? s_suspend_refused.load() && !native_caller_live : native_caller_live);
                 if (drain)
                 {
                     SetEvent(s_workers_done);
@@ -362,15 +361,16 @@ namespace
                     std::fprintf(
                         stderr,
                         "FAIL: bypass reclaim verdict: provider=%d trampoline=%d native_caller_live=%d "
-                        "logical=%llu committed=%llu refs=%zu result=%lu expected_retention=%d\n",
+                        "suspend_refused=%d logical=%llu committed=%llu refs=%zu result=%lu caller_exited=%d\n",
                         provider_mapped,
                         trampoline_mapped,
                         native_caller_live,
+                        s_suspend_refused.load(),
                         static_cast<unsigned long long>(after.logical_charged - before.logical_charged),
                         static_cast<unsigned long long>(after.committed_charged - before.committed_charged),
                         static_cast<std::size_t>(xinput_module_refs_held()),
                         s_result,
-                        expected_retention
+                        caller_exited
                     );
                     return 6;
                 }

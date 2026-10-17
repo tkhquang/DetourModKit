@@ -43,9 +43,11 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "fixtures/hook_fixture.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
+#include "fixtures/thread_load.hpp"
 #include "internal/diagnostics_population.hpp"
 #include "test_alloc_probe.hpp"
 
@@ -135,6 +137,10 @@ namespace DetourModKit::detail
     extern void (*g_hook_backend_disable_probe)() noexcept;
     extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
     extern void (*g_vmt_before_capture_probe)() noexcept;
+    [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
+    [[nodiscard]] std::size_t backend_idle_snapshot_walks_for_test() noexcept;
+    void fail_backend_next_thread_lookup_for_test(bool fail) noexcept;
+    [[nodiscard]] bool backend_idle_pass_for_test(void *begin, void *end) noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -4677,5 +4683,142 @@ TEST(HookToggleWarning, CoordinatorRefusedDisableNamesTheNewerParticipant)
     EXPECT_FALSE(hook.is_enabled());
     EXPECT_EQ(read_prologue_span(page), pristine) << "the second disable did not restore";
     EXPECT_EQ(call_target(page), LEAF_RESULT);
+}
+#endif // DMK_ENABLE_TEST_SEAMS
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    using DetourModKit::detail::backend_idle_pass_calls_for_test;
+    using DetourModKit::detail::backend_idle_pass_for_test;
+    using DetourModKit::detail::backend_idle_snapshot_walks_for_test;
+    using DetourModKit::detail::fail_backend_next_thread_lookup_for_test;
+    using dmk_test::ParkedThreads;
+    using dmk_test::SpinningThreads;
+    using dmk_test::THREAD_LOAD_BOUND;
+    using dmk_test::hook_fixture::SuspendedThreadAt;
+
+    /// The bound of one pass under saturated cores. One suspension at a time took 7.1 s for the same load.
+    constexpr std::chrono::seconds SATURATED_PASS_BOUND{2};
+
+    /// Runs one idle pass over the whole of @p page.
+    [[nodiscard]] bool page_pass_idle(const dmk_test::ScratchPage &page) noexcept
+    {
+        auto *const begin = static_cast<std::uint8_t *>(page.base());
+        return backend_idle_pass_for_test(begin, begin + dmk_test::ScratchPage::PAGE_SIZE);
+    }
+
+    /**
+     * @brief Runs up to three idle passes over @p page and reports whether one was clean.
+     * @details A thread that exits during a pass, such as a loader worker, reads busy for that pass only.
+     */
+    [[nodiscard]] bool page_idle(const dmk_test::ScratchPage &page) noexcept
+    {
+        constexpr int ATTEMPTS = 3;
+        for (int attempt = 0; attempt < ATTEMPTS; ++attempt)
+        {
+            if (page_pass_idle(page))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Makes the NtGetNextThread lookup fail for the scope.
+    struct NextThreadLookupFailure
+    {
+        NextThreadLookupFailure() noexcept { fail_backend_next_thread_lookup_for_test(true); }
+        ~NextThreadLookupFailure() noexcept { fail_backend_next_thread_lookup_for_test(false); }
+        NextThreadLookupFailure(const NextThreadLookupFailure &) = delete;
+        NextThreadLookupFailure &operator=(const NextThreadLookupFailure &) = delete;
+    };
+
+    DWORD WINAPI exits_at_once(void *) noexcept
+    {
+        return 0;
+    }
+} // namespace
+
+// The walk opens the threads of this process only, so a thread that starts after 200 others still reads busy inside the
+// range. A pass that walked a thread snapshot instead fails the walk count.
+TEST(HookBackendIdleProof, WalkOpensEveryOtherThreadOfTheProcess)
+{
+    constexpr std::size_t PARKED = 200;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    const ParkedThreads parked{PARKED};
+    ASSERT_TRUE(parked.wait_until_started(PARKED));
+    const std::size_t passes_before = backend_idle_pass_calls_for_test();
+    const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
+
+    EXPECT_TRUE(page_idle(page)) << "a pass with no thread inside the range read busy";
+    {
+        const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
+        ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
+        EXPECT_FALSE(page_pass_idle(page)) << "the walk missed the thread inside the range";
+    }
+    EXPECT_GE(backend_idle_pass_calls_for_test(), passes_before + 2);
+    EXPECT_EQ(backend_idle_snapshot_walks_for_test(), walks_before) << "a pass walked a thread snapshot";
+}
+
+// The walk returns a thread that exited while its handle stays open. Its suspension fails on a signaled handle, so the
+// pass skips it and reads idle.
+TEST(HookBackendIdleProof, ExitedThreadWithAnOpenHandleReadsIdle)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    const HANDLE exited = CreateThread(nullptr, 0, &exits_at_once, nullptr, 0, nullptr);
+    ASSERT_NE(exited, nullptr);
+    ASSERT_EQ(WaitForSingleObject(exited, static_cast<DWORD>(THREAD_LOAD_BOUND.count() * 1000)), WAIT_OBJECT_0);
+    const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
+
+    const bool idle = page_idle(page);
+    (void)CloseHandle(exited);
+    EXPECT_TRUE(idle) << "an exited thread with an open handle kept the pass busy";
+    EXPECT_EQ(backend_idle_snapshot_walks_for_test(), walks_before) << "the pass walked a thread snapshot";
+}
+
+TEST(HookBackendIdleProof, MissingNextThreadExportFallsBackToTheSnapshot)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    const NextThreadLookupFailure lookup_failure;
+    const std::size_t passes_before = backend_idle_pass_calls_for_test();
+    const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
+
+    EXPECT_TRUE(page_idle(page)) << "a snapshot pass with no thread inside the range read busy";
+    {
+        const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
+        ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
+        EXPECT_FALSE(page_pass_idle(page)) << "the snapshot pass missed the thread inside the range";
+    }
+    const std::size_t passes = backend_idle_pass_calls_for_test() - passes_before;
+    EXPECT_GE(passes, 2u);
+    EXPECT_EQ(backend_idle_snapshot_walks_for_test() - walks_before, passes) << "a pass skipped the snapshot fallback";
+}
+
+// Every core spins while 150 threads wait. A pass that suspends every thread first frees the cores, so each waiting
+// thread answers its context read at once. The thread inside the range starts last, so the pass reads every thread.
+TEST(HookBackendIdleProof, SaturatedCoresFinishWithinTheBound)
+{
+    constexpr std::size_t PARKED = 150;
+    const std::size_t spinners = std::max<std::size_t>(std::thread::hardware_concurrency(), 1) + 8;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    const ParkedThreads parked{PARKED};
+    ASSERT_TRUE(parked.wait_until_started(PARKED));
+    const SpinningThreads spinning{spinners};
+    ASSERT_TRUE(spinning.wait_until_started(spinners));
+    const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
+    ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
+
+    const auto started = std::chrono::steady_clock::now();
+    const bool idle = page_pass_idle(page);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_FALSE(idle) << "the pass missed the thread inside the range";
+    EXPECT_LT(elapsed, SATURATED_PASS_BOUND)
+        << "one pass took " << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms with "
+        << spinners << " spinning threads";
 }
 #endif // DMK_ENABLE_TEST_SEAMS

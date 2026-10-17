@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "5d5342bc1dcdabb7e6a2a4b890e9b32211ea9c40cf9ee1c6d1dacb4e246aafe0"
+EXPECTED_PATCH_SHA256 = "6091eff2c5f74004e19ed9f9b4d0b0574cec9f60c3d68cc6025f93db7cdb0621"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -184,9 +184,9 @@ REQUIRED_SENTINELS += VMT_SENTINELS
 
 # PR-06 additions: a published routed chain is reclaimed after an idle proof. Code tokens only, as above.
 PR06_SENTINELS = [
-    "threads_idle_outside",  # the teardown idle proof suspends each other thread in turn ...
+    "threads_idle_outside",  # the teardown idle proof suspends every other thread ...
     "CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)",  # ... after every handle was opened, so nothing allocates ...
-    "GetThreadContext(thread, &context)",  # ... and reads only the control context
+    "GetThreadContext(handles.at(i), &context)",  # ... and reads only the control context
     "reclaim_published_route",  # a chain that passes the proof is freed with its records ...
     "refund_route_chain",  # ... and its charge is given back
     "register_retained_route",  # a retained chain joins later proofs on the same target
@@ -254,6 +254,20 @@ RELAY_RETIREMENT_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += RELAY_RETIREMENT_SENTINELS
+
+# An idle pass costs one stop of this process's threads, and a retirement proves its trampolines in one pass.
+RETIREMENT_COST_SENTINELS = [
+    'GetProcAddress(ntdll, "NtGetNextThread")',  # the pass walks only this process's threads ...
+    "THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE",  # ... skips the current thread by its id ...
+    "WaitForSingleObject(m_handles[i], 0) != WAIT_OBJECT_0",  # ... skips only a thread that exited ...
+    "bool inside = !handles.suspend_all();",  # ... stops every other thread before the first read ...
+    "handles.resume_all();",  # ... and resumes every stopped thread
+    "defer_release && coordinator.layer_count(m_trampoline.data()) == 1",  # a hook alone on its window waits ...
+    "void InlineHook::reclaim_deferred(",  # ... for one pass over every waiting trampoline ...
+    "hook->reclaim_restored_trampoline(coordinator);",  # ... and a refused pass falls back to each hook's proof
+]
+
+REQUIRED_SENTINELS += RETIREMENT_COST_SENTINELS
 
 
 def patch_files(patch_dir: Path):

@@ -18,6 +18,7 @@
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
+#include <xmmintrin.h>
 
 #include "DetourModKit/hook.hpp"
 
@@ -34,15 +35,6 @@ using namespace dmk_test::hook_fixture;
 namespace DetourModKit::detail
 {
     // Mirrors src/internal/hook_backend.hpp, which this binary cannot include because it names the backend headers.
-    enum class CountedDrainStage : std::uint8_t
-    {
-        AfterFirstPass,
-        BetweenCounterReads,
-        AfterCounterReads,
-    };
-
-    extern void (*g_counted_drain_probe)(CountedDrainStage) noexcept;
-
     struct CountedThunkProbe
     {
         void *entry{nullptr};
@@ -619,6 +611,100 @@ namespace
         s_void_detour_calls.fetch_add(1, std::memory_order_relaxed);
     }
 
+    /// The Win64 convention returns an __m128 in a vector register and passes one by a pointer to a caller copy.
+    using VectorFn = __m128 (*)(__m128, float, __m128);
+    using Lanes = std::array<float, 4>;
+
+    DMK_PROOF_TARGET __m128 vector_target(__m128 a, float scale, __m128 b)
+    {
+        volatile float weight = scale;
+        const __m128 scaled = _mm_mul_ps(a, _mm_set1_ps(weight));
+        return _mm_sub_ps(scaled, _mm_shuffle_ps(b, b, _MM_SHUFFLE(0, 1, 2, 3)));
+    }
+
+    // GCC drops the may_alias attribute of __m128 inside a template argument and warns, as inline_at<Detour> notes.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+    std::atomic<VectorFn> s_vector_original{nullptr};
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
+    DMK_TEST_NOINLINE __m128 vector_detour(__m128 a, float scale, __m128 b) noexcept
+    {
+        const __m128 forwarded = s_vector_original.load(std::memory_order_acquire)(a, scale, b);
+        return _mm_add_ps(forwarded, _mm_set1_ps(static_cast<float>(FLOAT_DELTA)));
+    }
+
+    [[nodiscard]] Lanes lanes_of(__m128 value) noexcept
+    {
+        Lanes lanes{};
+        _mm_storeu_ps(lanes.data(), value);
+        return lanes;
+    }
+
+    /// Adds the delta of @ref vector_detour to each lane, in the same single-precision addition.
+    [[nodiscard]] Lanes with_vector_delta(Lanes lanes) noexcept
+    {
+        for (float &lane : lanes)
+        {
+            lane += static_cast<float>(FLOAT_DELTA);
+        }
+        return lanes;
+    }
+
+    /// Ten arguments of six kinds: four in registers by position, and six on the stack.
+    using MixedTenFn = double (*)(
+        std::int32_t,
+        double,
+        float,
+        std::int64_t,
+        const std::int32_t *,
+        float,
+        std::uint8_t,
+        double,
+        std::int16_t,
+        SmallPod
+    );
+
+    DMK_PROOF_TARGET double mixed_ten_target(
+        std::int32_t a,
+        double b,
+        float c,
+        std::int64_t d,
+        const std::int32_t *e,
+        float f,
+        std::uint8_t g,
+        double h,
+        std::int16_t i,
+        SmallPod j
+    )
+    {
+        volatile double sum = a * 1.0 + b * 2.0 + c * 3.0 + static_cast<double>(d) * 4.0 + *e * 5.0 + f * 6.0 +
+                              g * 7.0 + h * 8.0 + i * 9.0 + (j.x * 10.0 - j.y * 11.0);
+        return sum;
+    }
+
+    std::atomic<MixedTenFn> s_mixed_ten_original{nullptr};
+
+    DMK_TEST_NOINLINE double mixed_ten_detour(
+        std::int32_t a,
+        double b,
+        float c,
+        std::int64_t d,
+        const std::int32_t *e,
+        float f,
+        std::uint8_t g,
+        double h,
+        std::int16_t i,
+        SmallPod j
+    ) noexcept
+    {
+        return s_mixed_ten_original.load(std::memory_order_acquire)(a, b, c, d, e, f, g, h, i, j) + FLOAT_DELTA;
+    }
+
     /**
      * @brief Checks the detour forms that the counted inline_at admits and the forms that it rejects.
      * @details The checks run in a template, so only the instantiation from a test case evaluates them.
@@ -639,6 +725,14 @@ namespace
         static_assert(CountedSignature<void (*)() noexcept, Frame>::valid);
         static_assert(CountedSignature<void (*)(int &, MovePayload &&, const std::string &) noexcept, Frame>::valid);
         static_assert(CountedSignature<LargePod (*)(Frame, SmallPod, LargePod, double, float) noexcept, Frame>::valid);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+        static_assert(CountedSignature<__m128 (*)(Frame, __m128, float, __m128) noexcept, Frame>::valid);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         return true;
     }
 
@@ -775,86 +869,6 @@ namespace
     using DetourModKit::detail::counted_thunk_for_test;
     using DetourModKit::detail::CountedDrainStage;
     using DetourModKit::detail::CountedThunkProbe;
-
-    /// Installs @p probe as the counted drain probe for the scope and restores the prior probe.
-    class CountedDrainProbeScope
-    {
-    public:
-        explicit CountedDrainProbeScope(void (*probe)(CountedDrainStage) noexcept) noexcept
-            : m_previous(DetourModKit::detail::g_counted_drain_probe)
-        {
-            DetourModKit::detail::g_counted_drain_probe = probe;
-        }
-        ~CountedDrainProbeScope() noexcept { DetourModKit::detail::g_counted_drain_probe = m_previous; }
-        CountedDrainProbeScope(const CountedDrainProbeScope &) = delete;
-        CountedDrainProbeScope &operator=(const CountedDrainProbeScope &) = delete;
-        CountedDrainProbeScope(CountedDrainProbeScope &&) = delete;
-        CountedDrainProbeScope &operator=(CountedDrainProbeScope &&) = delete;
-
-    private:
-        void (*m_previous)(CountedDrainStage) noexcept;
-    };
-
-    /**
-     * @brief A thread that never runs. It starts suspended with its instruction pointer at one address.
-     * @details The drain proof reads the context of each thread, so the thread stands for a call stopped at that
-     *          address. The destructor terminates it.
-     */
-    class SuspendedThreadAt
-    {
-    public:
-        explicit SuspendedThreadAt(void *address) noexcept
-        {
-            m_thread = CreateThread(nullptr, 0, &never_runs, nullptr, CREATE_SUSPENDED, nullptr);
-            if (m_thread == nullptr)
-            {
-                return;
-            }
-            CONTEXT context{};
-            context.ContextFlags = CONTEXT_CONTROL;
-            if (GetThreadContext(m_thread, &context) == FALSE)
-            {
-                return;
-            }
-            context.Rip = reinterpret_cast<DWORD64>(address);
-            if (SetThreadContext(m_thread, &context) == FALSE)
-            {
-                return;
-            }
-            CONTEXT check{};
-            check.ContextFlags = CONTEXT_CONTROL;
-            m_ready = GetThreadContext(m_thread, &check) != FALSE && check.Rip == context.Rip;
-        }
-
-        ~SuspendedThreadAt() noexcept { terminate(); }
-
-        SuspendedThreadAt(const SuspendedThreadAt &) = delete;
-        SuspendedThreadAt &operator=(const SuspendedThreadAt &) = delete;
-        SuspendedThreadAt(SuspendedThreadAt &&) = delete;
-        SuspendedThreadAt &operator=(SuspendedThreadAt &&) = delete;
-
-        /// Reports whether the thread exists with the requested instruction pointer.
-        [[nodiscard]] bool ready() const noexcept { return m_ready; }
-
-        /// Ends the thread before it runs.
-        void terminate() noexcept
-        {
-            if (m_thread == nullptr)
-            {
-                return;
-            }
-            (void)TerminateThread(m_thread, 0);
-            (void)WaitForSingleObject(m_thread, static_cast<DWORD>(PARK_BOUND.count() * 1000));
-            (void)CloseHandle(m_thread);
-            m_thread = nullptr;
-        }
-
-    private:
-        static DWORD WINAPI never_runs(void *) noexcept { return 0; }
-
-        HANDLE m_thread{nullptr};
-        bool m_ready{false};
-    };
 
     using SplitEntry =
         DetourModKit::hook::detail::CountedSignature<decltype(&split_detour), CallerFrame>::entry<&split_detour>;
@@ -1259,6 +1273,141 @@ TEST(HookCounted, ForwardsFloatingPointArgumentsAndResults)
     expect_restored(stack, 2);
     EXPECT_EQ(dmk_test::call_unfolded(&blend_target, 1.5f, 2.5, -3.5f, 4.5, 5.5f, -6.5), blend_pristine);
     EXPECT_EQ(dmk_test::call_unfolded(&shrink_target, 8.0, 0.5f, 3, -1.5f, 2.25f), shrink_pristine);
+}
+
+// The thunk returns an __m128 in its vector register and forwards two __m128 arguments, each through a pointer to a
+// caller copy, around a float in a vector register.
+TEST(HookCounted, ForwardsVectorArgumentsAndAVectorResult)
+{
+    const __m128 first = _mm_setr_ps(1.5f, -2.0f, 3.25f, 4.0f);
+    const __m128 second = _mm_setr_ps(-0.5f, 6.0f, 7.75f, -8.0f);
+    const Lanes pristine = lanes_of(dmk_test::call_unfolded(&vector_target, first, 2.0f, second));
+    ASSERT_NE(lanes_of(dmk_test::call_unfolded(&vector_target, second, 2.0f, first)), pristine)
+        << "the target cannot tell swapped vector arguments";
+    HookStack stack;
+    ASSERT_NO_FATAL_FAILURE(arm_counted<&vector_detour>(stack, "CountedVector", &vector_target, s_vector_original));
+
+    EXPECT_EQ(lanes_of(dmk_test::call_unfolded(&vector_target, first, 2.0f, second)), with_vector_delta(pristine));
+    EXPECT_EQ(
+        lanes_of(dmk_test::call_unfolded(&vector_target, second, -3.0f, first)),
+        with_vector_delta(lanes_of(dmk_test::call_unfolded(s_vector_original.load(), second, -3.0f, first)))
+    );
+
+    expect_restored(stack, 1);
+    EXPECT_EQ(lanes_of(dmk_test::call_unfolded(&vector_target, first, 2.0f, second)), pristine);
+}
+
+// Ten arguments of six kinds take the integer and vector registers by position. The stack carries a pointer, a float,
+// a byte, a double, a short, and an eight-byte struct.
+TEST(HookCounted, ForwardsTenMixedArgumentsIntact)
+{
+    const std::int32_t pointed = 7;
+    const std::int32_t other_pointed = -9;
+    const SmallPod pod{
+        .x = 11,
+        .y = -3,
+    };
+    const SmallPod other_pod{
+        .x = -2,
+        .y = 5,
+    };
+    constexpr std::int64_t WIDE = std::int64_t{1} << 40;
+    const double pristine = dmk_test::call_unfolded(
+        &mixed_ten_target,
+        -5,
+        2.5,
+        0.75f,
+        WIDE,
+        &pointed,
+        -1.25f,
+        std::uint8_t{200},
+        3.5,
+        std::int16_t{-300},
+        pod
+    );
+    ASSERT_NE(
+        dmk_test::call_unfolded(
+            &mixed_ten_target,
+            -5,
+            2.5,
+            0.75f,
+            WIDE,
+            &pointed,
+            -1.25f,
+            std::uint8_t{201},
+            3.5,
+            std::int16_t{-300},
+            pod
+        ),
+        pristine
+    ) << "the target cannot tell a changed stack argument";
+    HookStack stack;
+    ASSERT_NO_FATAL_FAILURE(
+        arm_counted<&mixed_ten_detour>(stack, "CountedMixedTen", &mixed_ten_target, s_mixed_ten_original)
+    );
+
+    EXPECT_EQ(
+        dmk_test::call_unfolded(
+            &mixed_ten_target,
+            -5,
+            2.5,
+            0.75f,
+            WIDE,
+            &pointed,
+            -1.25f,
+            std::uint8_t{200},
+            3.5,
+            std::int16_t{-300},
+            pod
+        ),
+        pristine + FLOAT_DELTA
+    );
+    EXPECT_EQ(
+        dmk_test::call_unfolded(
+            &mixed_ten_target,
+            9,
+            -0.125,
+            4.5f,
+            -WIDE,
+            &other_pointed,
+            0.5f,
+            std::uint8_t{3},
+            -7.25,
+            std::int16_t{1234},
+            other_pod
+        ),
+        dmk_test::call_unfolded(
+            s_mixed_ten_original.load(),
+            9,
+            -0.125,
+            4.5f,
+            -WIDE,
+            &other_pointed,
+            0.5f,
+            std::uint8_t{3},
+            -7.25,
+            std::int16_t{1234},
+            other_pod
+        ) + FLOAT_DELTA
+    );
+
+    expect_restored(stack, 1);
+    EXPECT_EQ(
+        dmk_test::call_unfolded(
+            &mixed_ten_target,
+            -5,
+            2.5,
+            0.75f,
+            WIDE,
+            &pointed,
+            -1.25f,
+            std::uint8_t{200},
+            3.5,
+            std::int16_t{-300},
+            pod
+        ),
+        pristine
+    );
 }
 
 // A small struct travels in one register, and a large one through a pointer to a caller copy. A large result returns

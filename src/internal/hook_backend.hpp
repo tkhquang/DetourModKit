@@ -221,13 +221,36 @@ namespace DetourModKit
             Vacated,
             /// The backend leaked with its detour possibly reachable. HookManager counts it.
             Pinned,
+            /// The hook restored its target, and HookAccess::finish_deferred_restore reports how it ends.
+            Deferred,
         };
 
         namespace detail
         {
+            /// The counted drain proof that a teardown relies on.
+            enum class CountedDrainProof : std::uint8_t
+            {
+                /// The teardown switches the relay off and drains the counted detour itself.
+                Required,
+                /// HookStack::retire switched every relay of its stack off and drained every counted detour.
+                ProvenByRetire,
+            };
+
             /// The access path of hook.cpp and hook_retirement.cpp to the private state of a Hook.
             struct HookAccess
             {
+                /**
+                 * @brief A restored inline hook whose trampoline waits for the one idle pass of HookStack::retire.
+                 * @details The teardown released the ledger entry. The Impl keeps the trampoline, its process record,
+                 *          and the module reference until @ref finish_deferred_restore.
+                 */
+                struct DeferredRestore
+                {
+                    std::unique_ptr<Hook::Impl> impl;
+                    std::string name;
+                    bool was_active{false};
+                };
+
                 /// Returns the backend state of @p hook, or nullptr for a disengaged handle.
                 [[nodiscard]] static Hook::Impl *impl(const Hook &hook) noexcept { return hook.m_impl.get(); }
 
@@ -238,8 +261,20 @@ namespace DetourModKit
                     return Hook(std::move(impl), std::move(gate));
                 }
 
-                /// Runs the ~Hook contract on @p hook and reports how it ended. The handle ends disengaged.
-                [[nodiscard]] static TeardownOutcome teardown(Hook &hook) noexcept;
+                /**
+                 * @brief Runs the ~Hook contract on @p hook and reports how it ended. The handle ends disengaged.
+                 * @param deferred Receives a restored inline hook whose trampoline waits for
+                 *        safetyhook::InlineHook::reclaim_deferred, while its reserved capacity lasts. Null releases
+                 *        every trampoline at once.
+                 */
+                [[nodiscard]] static TeardownOutcome teardown(
+                    Hook &hook,
+                    CountedDrainProof proof,
+                    std::vector<DeferredRestore> *deferred = nullptr
+                ) noexcept;
+
+                /// Completes the teardown of @p restore after the batch reclaim and reports how it ended.
+                [[nodiscard]] static TeardownOutcome finish_deferred_restore(DeferredRestore &restore) noexcept;
 
                 /**
                  * @brief Installs a disabled inline hook whose relay jumps to @p destination, after the preflight
@@ -334,6 +369,18 @@ namespace DetourModKit
 
         /// Returns the number of page-protection calls made by backend trap transactions.
         [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+
+        /// Returns the number of backend idle passes, so a proof can count the passes of one operation.
+        [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
+
+        /// Returns the number of backend idle passes that walked a thread snapshot in place of NtGetNextThread.
+        [[nodiscard]] std::size_t backend_idle_snapshot_walks_for_test() noexcept;
+
+        /// Makes the backend lookup of NtGetNextThread fail while @p fail is true.
+        void fail_backend_next_thread_lookup_for_test(bool fail) noexcept;
+
+        /// Runs one backend idle pass over [@p begin, @p end) with no return site and reports whether it was clean.
+        [[nodiscard]] bool backend_idle_pass_for_test(void *begin, void *end) noexcept;
 
         /// Closes backend trap-transaction admission and retires its vectored handler.
         void retire_backend_trap_runtime_for_test() noexcept;

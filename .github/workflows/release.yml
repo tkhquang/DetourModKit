@@ -760,7 +760,8 @@ jobs:
             --require hook.counted_inline_entry_reached_the_detour \
             --require hook.residue_hops_1_skipped_every_detour \
             --require hook.residue_hops_16_skipped_every_detour \
-            --require hook.mid_closed_entry_skipped_the_callback
+            --require hook.mid_closed_entry_skipped_the_callback \
+            --require hook.retire_counted_restored_every_hook
         shell: bash
 
       - name: Upload benchmark evidence

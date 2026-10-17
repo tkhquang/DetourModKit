@@ -233,7 +233,7 @@ Keep debugger symbols from the same build as each staged DLL. A debugger can cac
 
 ### Inline detour quiescence
 
-A prologue rewrite uses execute traps instead of a process-wide thread freeze. The backend removes execute permission and tracks patch windows during the rewrite. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. That handler does not drain detour bodies or code outside those windows. Route reclamation separately suspends other threads in turn for its idle proof. The [hook note](../../design/hooking.md#concurrency-model) defines that proof.
+A prologue rewrite uses execute traps instead of a process-wide thread freeze. The backend removes execute permission and tracks patch windows during the rewrite. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. That handler does not drain detour bodies or code outside those windows. Route reclamation separately suspends every other thread once per pass for its idle proof. The [hook note](../../design/hooking.md#concurrency-model) defines that proof.
 
 A fixed sleep cannot prove quiescence. A counter inside the detour also misses a caller that selected the detour before its counter entry. The counted `inline_at<&Detour>` form owns that proof (`[B-106]`). `HookStack::retire` drains its calls and returns Busy while one stays. The raw `inline_at(request, detour)` form requires caller quiescence before teardown, as the [`inline_at` contract](../../../include/DetourModKit/hook.hpp) states. The reference sample uses the counted form, so it retires its hook before it joins its heartbeat worker.
 

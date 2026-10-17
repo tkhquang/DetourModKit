@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "DetourModKit/diagnostics.hpp"
@@ -1982,6 +1984,7 @@ namespace DetourModKit::detail
     void clear_backend_coordinator_fill_for_test() noexcept;
     void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
     [[nodiscard]] std::size_t backend_toggle_exception_catches_for_test() noexcept;
+    [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -3070,5 +3073,184 @@ TEST(HookStackTest, BusyRetireLeavesEveryCellOwned)
 
     upper.reset();
     EXPECT_EQ(call_unfolded(&cell_owned_target, 5), pristine);
+}
+
+namespace
+{
+    using DetourModKit::detail::backend_idle_pass_calls_for_test;
+    using DetourModKit::detail::CountedDrainStage;
+
+    /// The counted hooks of the largest pass-count case, as many as the field retirement held.
+    constexpr std::size_t PASS_COUNT_HOOKS = 29;
+    /// The runs of one pass-count case. The fewest passes discount a pass that a thread exit made busy.
+    constexpr int PASS_COUNT_RUNS = 3;
+    /// Two counted drain passes and one trampoline proof.
+    constexpr std::size_t RETIRE_IDLE_PASSES = 3;
+
+    DMK_PROOF_SEEDED_TARGET(fallback_free_target, 431)
+    DMK_PROOF_SEEDED_TARGET(fallback_busy_target, 433)
+    DMK_PROOF_SEEDED_TARGET(fallback_last_target, 439)
+
+    /// A `.proof` target whose body differs for each @p Index, so no two instances fold.
+    template <std::size_t Index> DMK_PROOF_TARGET int pass_count_target(int value)
+    {
+        constexpr std::uint32_t SEED_VALUE = 1001u + 2u * static_cast<std::uint32_t>(Index);
+        volatile std::uint32_t accumulator = static_cast<std::uint32_t>(value) * SEED_VALUE;
+        for (std::uint32_t i = 0; i < 8; ++i)
+        {
+            accumulator = accumulator + ((accumulator >> 3) ^ (i * SEED_VALUE));
+            accumulator = accumulator ^ (accumulator << 5);
+        }
+        return static_cast<int>(accumulator & 0xFFFFu);
+    }
+
+    /// The counted detour of one pass-count hook. No case calls it.
+    template <std::size_t Index> int pass_count_detour(int value) noexcept
+    {
+        return value + static_cast<int>(Index) + 1;
+    }
+
+    /// Installs a counted hook of @p Detour on @p target, pushes it onto @p stack, arms it, and stores it in @p pushed.
+    template <auto Detour>
+    void push_counted_hook(HookStack &stack, std::string name, Address target, Hook **pushed = nullptr)
+    {
+        Result<Hook> created = inline_at<Detour>(InlineRequest{
+            .name = std::move(name),
+            .target = target,
+        });
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        Hook &hook = stack.push(std::move(*created));
+        ASSERT_TRUE(hook.enable().has_value());
+        if (pushed != nullptr)
+        {
+            *pushed = &hook;
+        }
+    }
+
+    /// Installs and arms a counted hook on pass_count_target<Index> when @p Index is below @p count.
+    template <std::size_t Index> void push_pass_count_hook(HookStack &stack, std::size_t count)
+    {
+        if (Index < count)
+        {
+            push_counted_hook<&pass_count_detour<Index>>(
+                stack,
+                "PassCount" + std::to_string(Index),
+                addr_of(&pass_count_target<Index>)
+            );
+        }
+    }
+
+    /// Installs and arms counted hooks on the first @p count pass-count targets.
+    template <std::size_t... Index>
+    void push_pass_count_hooks(HookStack &stack, std::size_t count, std::index_sequence<Index...>)
+    {
+        (push_pass_count_hook<Index>(stack, count), ...);
+    }
+
+    /// The counted drains of one retirement: one for each clean first pass.
+    std::atomic<std::size_t> s_drain_runs{0};
+
+    void count_drain_run(CountedDrainStage stage) noexcept
+    {
+        if (stage == CountedDrainStage::AfterFirstPass)
+        {
+            s_drain_runs.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+} // namespace
+
+// The retirement drains every counted detour once. The commit then tears each hook down with no drain of its own, so 1
+// and 16 counted hooks each run one drain.
+TEST(HookStackTest, RetireRunsNoRepeatedCountedDrain)
+{
+    for (const std::size_t count : {std::size_t{1}, std::size_t{16}})
+    {
+        std::size_t fewest = std::numeric_limits<std::size_t>::max();
+        for (int run = 0; run < PASS_COUNT_RUNS && fewest > 1; ++run)
+        {
+            HookStack stack;
+            push_pass_count_hooks(stack, count, std::make_index_sequence<PASS_COUNT_HOOKS>{});
+            ASSERT_EQ(stack.size(), count);
+            s_drain_runs.store(0, std::memory_order_relaxed);
+            HookRetirement retired{};
+            {
+                const CountedDrainProbeScope scope{&count_drain_run};
+                retired = stack.retire(RETIRE_DEADLINE);
+            }
+            ASSERT_EQ(retired.outcome, RetirementOutcome::Retired);
+            ASSERT_EQ(retired.restored, count);
+            fewest = std::min(fewest, s_drain_runs.load(std::memory_order_relaxed));
+        }
+        EXPECT_EQ(fewest, 1u) << count << " counted hooks ran " << fewest << " counted drains";
+    }
+}
+
+// One counted drain and one trampoline proof cover every hook, so 1, 8, and 29 counted hooks run the same passes.
+TEST(HookStackTest, RetireRunsAConstantNumberOfIdlePasses)
+{
+    for (const std::size_t count : {std::size_t{1}, std::size_t{8}, PASS_COUNT_HOOKS})
+    {
+        std::size_t fewest = std::numeric_limits<std::size_t>::max();
+        for (int run = 0; run < PASS_COUNT_RUNS && fewest > RETIRE_IDLE_PASSES; ++run)
+        {
+            HookStack stack;
+            push_pass_count_hooks(stack, count, std::make_index_sequence<PASS_COUNT_HOOKS>{});
+            ASSERT_EQ(stack.size(), count);
+            const std::size_t before = backend_idle_pass_calls_for_test();
+            const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+            const std::size_t passes = backend_idle_pass_calls_for_test() - before;
+            ASSERT_EQ(retired.outcome, RetirementOutcome::Retired);
+            ASSERT_EQ(retired.restored, count);
+            fewest = std::min(fewest, passes);
+        }
+        EXPECT_EQ(fewest, RETIRE_IDLE_PASSES) << count << " counted hooks ran " << fewest << " idle passes";
+    }
+}
+
+// A thread stopped in one trampoline refuses the batch proof. Each hook then runs its own proof, so that hook keeps its
+// trampoline as HookResidue, and the other two free their trampolines and records.
+TEST(HookStackTest, RetireBatchProofFallsBackPerHook)
+{
+    const std::array<std::uint8_t, 16> busy_pristine = entry_bytes(&fallback_busy_target);
+    const int free_pristine = call_unfolded(&fallback_free_target, 5);
+    const int busy_pristine_result = call_unfolded(&fallback_busy_target, 5);
+    const int last_pristine = call_unfolded(&fallback_last_target, 5);
+
+    HookStack stack;
+    Hook *busy = nullptr;
+    ASSERT_NO_FATAL_FAILURE(
+        push_counted_hook<&pass_count_detour<100>>(stack, "FallbackFree", addr_of(&fallback_free_target))
+    );
+    ASSERT_NO_FATAL_FAILURE(
+        push_counted_hook<&pass_count_detour<101>>(stack, "FallbackBusy", addr_of(&fallback_busy_target), &busy)
+    );
+    ASSERT_NO_FATAL_FAILURE(
+        push_counted_hook<&pass_count_detour<102>>(stack, "FallbackLast", addr_of(&fallback_last_target))
+    );
+    auto *const trampoline = reinterpret_cast<void *>(busy->original<EchoFn>());
+    ASSERT_NE(trampoline, nullptr);
+    const BackendCoordinatorCounts before = backend_coordinator_counts_for_test();
+    const std::size_t residue_before = hook_residue_leaks();
+    const std::size_t manager_before = hook_manager_leaks();
+
+    HookRetirement retired{};
+    {
+        const SuspendedThreadAt stopped{trampoline};
+        ASSERT_TRUE(stopped.ready()) << "the synthetic thread did not take the trampoline address";
+        retired = stack.retire(RETIRE_DEADLINE);
+    }
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 3u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(hook_residue_leaks(), residue_before + 1) << "the busy trampoline was not kept";
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    const BackendCoordinatorCounts after = backend_coordinator_counts_for_test();
+    EXPECT_EQ(after.retained, before.retained + 1) << "the busy trampoline record was not retained";
+    EXPECT_EQ(after.free, before.free + 2) << "an idle trampoline kept its record";
+    EXPECT_EQ(after.live + 3, before.live);
+    EXPECT_EQ(entry_bytes(&fallback_busy_target), busy_pristine);
+    EXPECT_EQ(call_unfolded(&fallback_free_target, 5), free_pristine);
+    EXPECT_EQ(call_unfolded(&fallback_busy_target, 5), busy_pristine_result);
+    EXPECT_EQ(call_unfolded(&fallback_last_target, 5), last_pristine);
 }
 #endif

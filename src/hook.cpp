@@ -165,6 +165,38 @@ namespace DetourModKit::detail
         return safetyhook::g_trap_protect_calls.load(std::memory_order_relaxed);
     }
 
+    std::size_t backend_idle_pass_calls_for_test() noexcept
+    {
+        return safetyhook::g_idle_pass_calls.load(std::memory_order_relaxed);
+    }
+
+    std::size_t backend_idle_snapshot_walks_for_test() noexcept
+    {
+        return safetyhook::g_idle_pass_snapshot_walks.load(std::memory_order_relaxed);
+    }
+
+    void fail_backend_next_thread_lookup_for_test(bool fail) noexcept
+    {
+        safetyhook::g_next_thread_lookup_failure.store(fail);
+    }
+
+    bool backend_idle_pass_for_test(void *begin, void *end) noexcept
+    {
+        const std::array<safetyhook::AddressRange, 1> ranges{{{
+            static_cast<std::uint8_t *>(begin),
+            static_cast<std::uint8_t *>(end),
+        }}};
+        try
+        {
+            const std::expected<bool, safetyhook::OsError> idle = safetyhook::threads_idle_outside(ranges, {});
+            return idle.has_value() && *idle;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     void retire_backend_trap_runtime_for_test() noexcept
     {
         safetyhook::retire_trap_runtime_for_test();
@@ -1729,14 +1761,15 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Destroys the restored backend, then releases its adapter slot, ledger entry, and module reference.
-         * @details The caller holds the target install-serialization slot. The helper releases it. A retained route
-         *          keeps the Impl, the adapter slot, and the module reference pinned.
+         * @brief Finishes a restored backend that release_backend tore down, then releases its adapter slot, ledger
+         *        entry, and module reference.
+         * @details A caller that holds the target install-serialization slot passes @p ledger, and the helper releases
+         *          it. A retained route keeps the Impl, the adapter slot, and the module reference pinned.
          */
         template <class HookImpl>
         hook::TeardownOutcome reclaim_restored_backend(
             std::unique_ptr<HookImpl> &impl,
-            detail::HookLedger &ledger,
+            detail::HookLedger *ledger,
             const std::string &name,
             std::uintptr_t target,
             std::uint64_t ledger_id,
@@ -1749,8 +1782,7 @@ namespace DetourModKit
             // install parked on this slot. The caller still executes this module's code and the host holds its own
             // load reference, so this release is never the terminal one.
             const HMODULE self_ref = static_cast<HMODULE>(impl->self_ref);
-            // The route verdict must outlive backend reset, so the helper reads it before it destroys the Impl.
-            (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.reset(); });
+            // The route verdict must outlive the Impl, so the helper reads it first.
             const bool route_retained = backend_value_or(
                 impl->backend,
                 false,
@@ -1786,7 +1818,10 @@ namespace DetourModKit
             {
                 DetourModKit::detail::release_mid_adapter_slot(mid_slot);
             }
-            (void)ledger.release_hook(target, ledger_id);
+            if (ledger != nullptr)
+            {
+                (void)ledger->release_hook(target, ledger_id);
+            }
             if (pin_references)
             {
                 (void)log().try_log(
@@ -2186,10 +2221,14 @@ namespace DetourModKit
 
         Hook::~Hook() noexcept
         {
-            (void)detail::HookAccess::teardown(*this);
+            (void)detail::HookAccess::teardown(*this, detail::CountedDrainProof::Required);
         }
 
-        TeardownOutcome detail::HookAccess::teardown(Hook &hook) noexcept
+        TeardownOutcome detail::HookAccess::teardown(
+            Hook &hook,
+            CountedDrainProof proof,
+            std::vector<DeferredRestore> *deferred
+        ) noexcept
         {
             std::unique_ptr<Hook::Impl> &impl = hook.m_impl;
             // Take the gate reference out for the complete teardown. A pinned caller keeps the gate alive through its
@@ -2263,7 +2302,7 @@ namespace DetourModKit
             }
 
             // A counted detour drains before the layer decision, so the wait holds no ledger slot (`[B-106]`).
-            if (impl->counted)
+            if (impl->counted && proof == CountedDrainProof::Required)
             {
                 if (const char *const blocked = drain_counted_hook(impl->backend, *impl->counted))
                 {
@@ -2341,8 +2380,22 @@ namespace DetourModKit
                 return TeardownOutcome::Pinned;
             }
 
+            // The reserved capacity keeps the push free of allocation.
+            const bool defer = deferred != nullptr && deferred->size() < deferred->capacity();
+            if (DetourModKit::detail::release_backend(impl->backend, defer))
+            {
+                (void)ledger.release_hook(target, ledger_id);
+                deferred->push_back(
+                    DeferredRestore{
+                        .impl = std::move(impl),
+                        .name = std::move(name),
+                        .was_active = was_active,
+                    }
+                );
+                return TeardownOutcome::Deferred;
+            }
             const TeardownOutcome reclaimed =
-                reclaim_restored_backend(impl, ledger, name, target, ledger_id, has_mid_slot, mid_slot);
+                reclaim_restored_backend(impl, &ledger, name, target, ledger_id, has_mid_slot, mid_slot);
             emit_lifecycle(
                 name,
                 ledger_id,
@@ -2350,6 +2403,31 @@ namespace DetourModKit
                 diagnostics::HookTransition::Removed,
                 RemovalPopulationState{
                     .was_active = was_active,
+                }
+            );
+            return reclaimed;
+        }
+
+        TeardownOutcome detail::HookAccess::finish_deferred_restore(DeferredRestore &restore) noexcept
+        {
+            const std::uintptr_t target = restore.impl->target;
+            const std::uint64_t ledger_id = restore.impl->ledger_id;
+            const TeardownOutcome reclaimed = reclaim_restored_backend(
+                restore.impl,
+                nullptr,
+                restore.name,
+                target,
+                ledger_id,
+                false,
+                DetourModKit::detail::MID_ADAPTER_CAPACITY
+            );
+            emit_lifecycle(
+                restore.name,
+                ledger_id,
+                diagnostics::HookKind::Inline,
+                diagnostics::HookTransition::Removed,
+                RemovalPopulationState{
+                    .was_active = restore.was_active,
                 }
             );
             return reclaimed;

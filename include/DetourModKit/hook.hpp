@@ -660,7 +660,12 @@ namespace DetourModKit
              *
              *          Callers of a closed mid route wait at its gateway, so each route drains for at most the closing
              *          budget of ~Hook. That budget is 4e9 time-stamp counter ticks, about one to four seconds.
-             * @note Setup/control-plane only: the drain suspends threads in turn and can wait up to @p deadline.
+             *
+             *          Each idle pass stops every other thread of the process once, for the length of the pass. One
+             *          counted drain and one trampoline proof cover all inline hooks, so their pass count does not grow
+             *          with the hook count. A restored hook that shares its patch window with another layer adds one
+             *          pass, and each mid hook adds two.
+             * @note Setup/control-plane only: the drain can wait up to @p deadline.
              */
             [[nodiscard]] HookRetirement retire(std::chrono::milliseconds deadline) noexcept;
 
@@ -714,7 +719,16 @@ namespace DetourModKit
          */
         template <auto Detour> [[nodiscard]] Result<Hook> inline_at(InlineRequest request)
         {
+            // GCC drops the may_alias attribute of a vector type such as __m128 inside a template argument and warns.
+            // The thunk forwards such a value by the ABI of the vector type, which that attribute does not change.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
             using Signature = detail::CountedSignature<decltype(Detour), CallerFrame>;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
             static_assert(
                 Signature::valid,
                 "inline_at<Detour> needs a noexcept, non-variadic detour whose parameters and result are references or "

@@ -158,7 +158,7 @@ BENCHMARK_CHECK_PROGRAM = (
     "--require corpus.canonical_prologue_exceeds_fail_threshold "
     "--require hook.raw_inline_entry_reached_the_detour --require hook.counted_inline_entry_reached_the_detour "
     "--require hook.residue_hops_1_skipped_every_detour --require hook.residue_hops_16_skipped_every_detour "
-    "--require hook.mid_closed_entry_skipped_the_callback",
+    "--require hook.mid_closed_entry_skipped_the_callback --require hook.retire_counted_restored_every_hook",
 )
 
 # Three steps whose bodies a token scanner cannot read: PowerShell treats a trailing backslash inside a
@@ -840,7 +840,7 @@ WORKFLOW_SOURCE_SHA256 = {
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
     PR_CHECK: "96575ad2b33298ede32262e29f47ac5e3a94839a1453bbb6dd9f372b160a4eb8",
     QUALITY: "79fb14f0c0ac91507a193a24eeaaae0237754da13e3e054cef2a3d771cd8964e",
-    RELEASE: "58e419a35ce0d671b6e0e555e46a7d270e9e4edd46666f30e62f1973e96310a0",
+    RELEASE: "bffa7d74371f66e7679159c6625a8f9d362a62d1215fdd7ff07a0c0a629dc7b7",
     SANITIZERS: "b32257522340ab589b06cfb93c867df0fb526107a301e4fd74833372d6ae306b",
     SIMD: "8824ad65838c14465826c71c8a3ab5504e050ea43bf8112ccec813cc47b45800",
 }
