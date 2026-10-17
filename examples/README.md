@@ -13,7 +13,7 @@ A sample carries no compatibility promise.
 >
 > The default development policy retains retired DLLs within budgets and loads fresh staged images. It never falls back to old-image `Init()`.
 >
-> A failed callback drain, worker join, or hook teardown blocks replacement. Follow the [hot-reload guide](../docs/guides/hot-reload/README.md).
+> A failed callback drain or worker join blocks replacement. A busy hook retirement retries, and a reachable detour requires a restart. Follow the [hot-reload guide](../docs/guides/hot-reload/README.md).
 
 This pair implements the default development policy and resident wheel host from the guide.
 
@@ -21,9 +21,9 @@ This pair implements the default development policy and resident wheel host from
 
 | File | Role |
 | --- | --- |
-| `mod_loader.cpp` | It owns one process-lifetime wheel host, creates unique staged names, probes lease release, and releases or retains retired images. It links only `DetourModKit::WheelHost`. |
-| `mod_logic.cpp` | It owns one generation, selects required `ExternalHost`, and implements the typed `Shutdown()` refusal boundary. It links the full archive. |
-| `protocol.h` | It defines the fixed-width request that carries the host table, host identity, and generation id across the DLL boundary. |
+| `mod_loader.cpp` | It owns one process-lifetime wheel host, creates unique staged names, probes lease release, retries a busy `Shutdown()`, and releases or retains retired images. It links only `DetourModKit::WheelHost`. |
+| `mod_logic.cpp` | It owns one generation, selects required `ExternalHost`, and retires its counted hook through `HookStack::retire` and `staged_reload::verdict`. It links the full archive. |
+| `protocol.h` | It defines the fixed-width request that carries the host table, host identity, and generation id across the DLL boundary. The result values come from `DetourModKit/abi/staged_reload.h`. |
 
 The loader starts the wheel host once before the first logic load. An accepted logic shutdown closes its lease and retires feature state.
 

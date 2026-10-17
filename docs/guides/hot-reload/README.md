@@ -140,7 +140,7 @@ Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only
 Before teardown, reserve count capacity for both the current generation and a failed successor. Check retained bytes plus the current file size before teardown. Check the successor file size against the available byte budget before its load.
 
 1. Serialize reload requests.
-2. Call `Shutdown()` off the loader lock. If it refuses, stop the current reload. Preserve the mapped image after a refusal. Log each refusal.
+2. Call `Shutdown()` off the loader lock. Retry `DMK_STAGED_RELOAD_BUSY` within a bound. For any other result except `DMK_STAGED_RELOAD_OK` and `DMK_STAGED_RELOAD_RETAINED`, stop the current reload and keep the image mapped. After `DMK_STAGED_RELOAD_RESTART_REQUIRED`, also request a game restart. Log each refusal.
 3. With `ExternalHost`, open a loader probe lease. If it opens, close that probe lease. If either call fails, request a game restart.
 4. If `Shutdown()` returns `DMK_STAGED_RELOAD_RETAINED`, keep the loader reference. Otherwise, save a code address and call `FreeLibrary` once. If release fails, request a restart.
 5. After reference release, probe the saved address before any successor load. Charge every retained generation against both budgets.
@@ -153,7 +153,11 @@ flowchart TD
     Request["Serialized reload request"] ==> Budget{"Retention budget available?"}
     Budget ==>|No| Restart["Preserve mapped images<br/>Request a restart"]
     Budget ==>|Yes| Shutdown{"Shutdown verdict?"}
-    Shutdown ==>|Refused| Retry["Keep the image mapped<br/>Retry after quiescence"]
+    Shutdown ==>|BUSY| Bound{"Retry bound left?"}
+    Bound ==>|Yes| Shutdown
+    Bound ==>|No| Live["Keep the generation live<br/>Retry on a later request"]
+    Shutdown ==>|REFUSED| Mapped["Keep the image mapped<br/>Retry on a later request"]
+    Shutdown ==>|RESTART_REQUIRED| Restart
     Shutdown ==>|OK or RETAINED| Lease{"ExternalHost probe succeeds?"}
     Lease ==>|No| Restart
     Lease ==>|Yes| Verdict{"Resources retained?"}
@@ -181,7 +185,7 @@ Retirement ends the generation's feature behavior. Unmap releases its image. A r
 
 Use bounded retained generations with either wheel backend. `ExternalHost` removes the wheel pin from the logic image, but XInput retention remains possible.
 
-The example distinguishes successful feature teardown from image reclamation. `Shutdown()` returns zero after an unsafe teardown, `DMK_STAGED_RELOAD_OK` after clean retirement, or `DMK_STAGED_RELOAD_RETAINED` after retirement with resources.
+`Shutdown()` returns a value of [`abi/staged_reload.h`](../../../include/DetourModKit/abi/staged_reload.h). The example computes it with [`staged_reload::verdict`](../../../include/DetourModKit/staged_reload.hpp) from the `HookStack::retire` result and the baseline that `Init()` captured. That header lists each rule. The example returns `DMK_STAGED_RELOAD_REFUSED` itself after a failed worker join or callback drain.
 
 For `DMK_STAGED_RELOAD_RETAINED`, keep the loader's own module reference until process exit. A leak counter does not prove that the leaked resource holds a module pin.
 
@@ -191,7 +195,7 @@ The development policy accepts leak counts after the [Shutdown sequence](#topolo
 
 An inline or mid hook that cannot restore its target retires by bypass. Causes include a newer layer in any participant, foreign or unreadable target bytes, and a claimed position. The hook switches its detour off without a target write and leaves its position for the next generation with the same hook name. It releases its module reference, so the image can unmap. Each position records one `LeakSubsystem::HookResidue` leak at its first retirement. A restored inline trampoline that fails its idle proof also stays as `HookResidue`.
 
-A hook keeps its executable route, with its detour reachable, when teardown cannot prove that no new call enters it. The `~Hook` contract in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) lists every cause. The retained route keeps its module reference, so the image stays mapped. DMK records a `LeakSubsystem::HookManager` leak and logs the cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator). The reference sample refuses retirement after any new `HookManager` leak during `HookStack::clear()`, even when target restoration succeeds.
+A hook keeps its executable route, with its detour reachable, when teardown cannot prove that no new call enters it. The `~Hook` contract in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) lists every cause. The retained route keeps its module reference, so the image stays mapped. DMK records a `LeakSubsystem::HookManager` leak and logs the cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator). A `HookManager` leak above the baseline makes the verdict `DMK_STAGED_RELOAD_RESTART_REQUIRED`, even when target restoration succeeds.
 
 Each linked copy with a published trap gateway retains one executable page and one data page, even after clean image unmap. The [generation resource proof](../../design/testing.md#generation-resource-proof) records the budget for executable bytes on each toolchain.
 
@@ -225,11 +229,11 @@ Keep debugger symbols from the same build as each staged DLL. A debugger can cac
 
 ## What DetourModKit guarantees across an unload
 
-### Inline detour removal requires caller quiescence
+### Inline detour quiescence
 
 A prologue rewrite uses execute traps instead of a process-wide thread freeze. The backend removes execute permission and tracks patch windows during the rewrite. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. That handler does not drain detour bodies or code outside those windows. Route reclamation separately suspends other threads in turn for its idle proof. The [hook note](../../design/hooking.md#concurrency-model) defines that proof.
 
-A fixed sleep cannot prove quiescence. A detour counter also misses a caller that selected the detour before its counter entry. The [`inline_at` contract](../../../include/DetourModKit/hook.hpp) requires caller quiescence before teardown. The reference sample joins its heartbeat worker, which is its target's only caller. A game inline hook requires an equivalent proof for game-owned callers.
+A fixed sleep cannot prove quiescence. A counter inside the detour also misses a caller that selected the detour before its counter entry. The counted `inline_at<&Detour>` form owns that proof (`[B-106]`). `HookStack::retire` drains its calls and returns Busy while one stays. The raw `inline_at(request, detour)` form requires caller quiescence before teardown, as the [`inline_at` contract](../../../include/DetourModKit/hook.hpp) states. The reference sample uses the counted form, so it retires its hook before it joins its heartbeat worker.
 
 DMK owns rundown for mid callbacks and counted displaced execution. The [`mid_at` contract](../../../include/DetourModKit/hook.hpp) requires callers to quiesce saved contexts outside that execution.
 
@@ -284,7 +288,7 @@ Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown.
 
 Use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) for cooperative workers. Normal destruction from another thread requests stop and joins without a timeout. Self-thread teardown transfers the join and module reference to the lifecycle reaper. Neither `is_running() == false` nor self-thread teardown proves that the body exited.
 
-A failed worker join can detach the body and retain its module reference. The example checks `Worker` pins after heartbeat destruction, before hook or `Session` teardown. A residual pin permanently refuses retirement and preserves those dependencies, even after the worker owner disappears. The example has no independent thread-exit proof, so a later body exit does not permit a retry to retire it. This guard applies to `Shutdown()` and initialization rollback.
+A failed worker join can detach the body and retain its module reference. The example checks `Worker` pins after heartbeat destruction, before `Session` teardown. A residual pin permanently refuses retirement and preserves the `Session`, even after the worker owner disappears. The example has no independent thread-exit proof, so a later body exit does not permit a retry to retire it. This guard applies to `Shutdown()` and initialization rollback.
 
 When teardown lacks permission to block, the worker detaches without a stop request and retains its module reference. A prior stop request remains visible, but this branch adds none. If that branch must terminate the body, publish a separate cancellation flag with sufficient lifetime.
 
@@ -298,14 +302,16 @@ If cleanup needs a worker or game-thread route, complete it before you stop that
 
 Apply this `Shutdown()` order:
 
-1. Stop and join every consumer worker.
-2. Drop dispatcher subscriptions. Quiesce their emitters.
-3. Retire external callback registrations and quiesce every hook caller.
-4. Revert direct game-memory patches after their writers stop.
-5. Clear the `HookStack` newest-first and latch any teardown that books `HookManager`.
+1. Call `HookStack::retire`. If the outcome is not Retired, return `staged_reload::verdict` and change nothing else.
+2. Stop and join every consumer worker.
+3. Drop dispatcher subscriptions. Quiesce their emitters.
+4. Retire external callback registrations.
+5. Revert direct game-memory patches after their writers stop.
 6. Call `prepare_logic_dll_unload*` and require `SafeToUnload`.
 7. Destroy the `Session`.
-8. Read the module-pin and leak counters, then compute the retirement verdict.
+8. Return `staged_reload::verdict` with the baseline that `staged_reload::capture()` took at the start of `Init()`.
+
+A raw inline detour keeps caller-owned quiescence. If the stack holds a raw inline hook, quiesce its callers before step 1.
 
 The [`prepare_logic_dll_unload*` preconditions](../../../include/DetourModKit/session.hpp) require consumer hooks and subscriptions to retire before the typed drain. Keep callback state valid through that drain, which can deliver a held binding's final release callback.
 
@@ -366,7 +372,9 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | Symptom | Check | Safe response |
 | --- | --- | --- |
 | The revision does not change. | Check the staged file name and exported revision source. | If the revision translation unit did not recompile, compare DLL hashes. |
-| `Shutdown()` refuses the unload. | Check parked callbacks, workers, subscriptions, hook restore, and pin counters. | Keep the DLL mapped. Retry recoverable refusals off the loader lock. Restart after a latched worker or hook failure. |
+| `Shutdown()` returns `DMK_STAGED_RELOAD_BUSY`. | Check for a thread that stays inside a counted detour. | Retry off the loader lock. The generation stays live. |
+| `Shutdown()` returns `DMK_STAGED_RELOAD_REFUSED`. | Check parked callbacks, workers, and subscriptions. | Keep the DLL mapped. Retry after the callback drains. Restart after a latched worker failure. |
+| `Shutdown()` returns `DMK_STAGED_RELOAD_RESTART_REQUIRED`. | Check the `HookManager` leak and the log line that names the retained hook. | Keep the DLL mapped and restart the game. |
 | A log line reads `refused disable: another writer owns the prologue`. | Check the DetourModKit version of the mod that logged it. A lower copy built with 4.3.0 or earlier refuses under a newer layer. | Rebuild that mod with DMK 4.4.0, or restart the game. |
 | The lease probe fails. | Check both the open and close status. | Keep the DLL mapped and request a game restart. |
 | `FreeLibrary` fails. | Check the loader's module handle and release result. | Request a game restart. |
@@ -407,7 +415,7 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | `LayeredReloadAlternatingCopiesKeepConstantDepth` | The two copies of raw inline hooks reload in turn 1000 times. From cycle 2 on, the live record count, free record count, Vacant count, and private RWX bytes stay equal at each cycle end. No generation books `HookManager`, and only the first lower generation books `HookResidue`. |
 | `LayeredReloadMidSuccessorClaimsClosedRoute` | Two copies of mid hooks reload in turn 64 times in both install orders. The same counts stay equal at each cycle end. |
 | `LayeredReloadClaimedPositionUnderForeignChainingLayer` | A successor claims a vacated position under a host stub that chains, and the stub bytes stay untouched. |
-| `LayeredReloadResidueBudgetFallsBackToPin` | With position claims refused, the residue budget engages. The next lower generation books `HookManager`, and its Shutdown refuses. |
+| `LayeredReloadResidueBudgetFallsBackToPin` | With position claims refused, the residue budget engages. The next lower generation books `HookManager`, and its Shutdown returns `DMK_STAGED_RELOAD_RESTART_REQUIRED`. |
 | `LayeredReloadParkedCountedDetourDefersRetirement` | A thread parks inside a counted detour. `HookStack::retire` returns Busy and changes nothing, so every hook stays armed. After the release, the retry retires the copy and it unmaps. |
 | `LayeredReloadSelfRetirementIsRefused` | A counted detour calls `HookStack::retire` on its own stack. The call returns Refused with `ReentrantCallRejected` and changes nothing. |
 | `LayeredReloadCountedLowerCopyUnmaps` | Two copies of counted hooks reload in both install orders, under a foreign chaining stub and a hijack, and at each hand-back point. Each teardown mode runs on its own export: `HookStack::retire`, destroy, and disable-first. The lower copy unmaps, and its successor claims the vacated position. |
@@ -418,9 +426,10 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | --- | --- |
 | `StagedExampleConsumeLoadsFreshRetainedSuccessor` | INI gamepad Consume, an active wheel-host lease, retained XInput, distinct successor bytes, retired callbacks, and Consume on/off/on transitions. |
 | `StagedExampleUnpinnedLeakKeepsLoaderReference` | A leak without a pin retains the loader reference and permits fresh bytes. |
-| `StagedExampleUnsafeTeardownRefusesSuccessor` | A simulated hook-teardown failure blocks a successor and repeated `Init()`. |
-| `StagedExampleParkedCallbackRefusesThenRetires` | A parked callback refuses retirement after worker join. Callback release permits a retry, clean unmap, and a fresh successor. |
-| `StagedExampleWorkerJoinFailureRefusesSuccessor` | A failed join preserves the parked worker's dependencies and refuses every successor, including after native thread exit. |
+| `StagedExampleUnsafeTeardownRefusesSuccessor` | A `HookManager` leak makes `Shutdown()` return `DMK_STAGED_RELOAD_RESTART_REQUIRED`. The loader keeps the image, latches a restart, and calls neither `Shutdown()` nor `Init()` again. |
+| `StagedExampleBusyRetirementRetries` | A call parked inside the counted detour makes `Shutdown()` return `DMK_STAGED_RELOAD_BUSY` with every hook armed, the worker live, and the `Session` live. The loader retries within its bound, and the image unmaps. |
+| `StagedExampleParkedCallbackRefusesThenRetires` | A parked callback refuses retirement after hook retirement and worker join. Callback release permits a retry, clean unmap, and a fresh successor. |
+| `StagedExampleWorkerJoinFailureRefusesSuccessor` | A failed join preserves the `Session` and the worker reference, and it refuses every successor, including after native thread exit. The released worker calls the restored target. |
 | `StagedExampleWorkerJoinFailureStopsRollback` | The rollback helper preserves dependencies after a failed join, including retries after the worker owner disappears. |
 | `StagedExampleBudgetsStopBeforeTeardown` | Count and byte limits preserve the current generation. |
 | `StagedExampleFailedInitRollsBack` | Failed initialization retires and unmaps before a retry. |

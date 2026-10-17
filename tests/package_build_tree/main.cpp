@@ -16,6 +16,8 @@
 
 #include <DetourModKit.hpp>
 
+#include <cstdint>
+
 // The library never overrides _ITERATOR_DEBUG_LEVEL, so an MSVC Debug consumer must sit at the debug STL's own
 // (nonzero) level; level 0 here could only come from a test-only pin on the consumer's compile line.
 #if defined(_MSC_VER) && defined(_DEBUG) && _ITERATOR_DEBUG_LEVEL == 0
@@ -33,5 +35,15 @@ int main()
 {
     // is_target_hooked reaches the hook engine and therefore proves the safetyhook -> Zydis -> Zycore archives still
     // arrive through $<LINK_ONLY:...> despite the PRIVATE link.
-    return DetourModKit::hook::is_target_hooked(DetourModKit::Address{}) ? 1 : 0;
+    if (DetourModKit::hook::is_target_hooked(DetourModKit::Address{}))
+    {
+        return 1;
+    }
+    const DetourModKit::hook::HookRetirement busy{.outcome = DetourModKit::hook::RetirementOutcome::Busy};
+    const std::uint32_t verdict = DetourModKit::staged_reload::verdict(
+        busy,
+        DetourModKit::staged_reload::capture(),
+        DMK_STAGED_RELOAD_ABI_VERSION
+    );
+    return verdict == DMK_STAGED_RELOAD_BUSY ? 0 : 2;
 }

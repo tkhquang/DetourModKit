@@ -35,9 +35,9 @@ namespace
         return original != nullptr ? original(user, state) : ERROR_INVALID_FUNCTION;
     }
 
-    [[nodiscard]] std::array<std::uint64_t, 19> snapshot(HMODULE module)
+    [[nodiscard]] std::array<std::uint64_t, 24> snapshot(HMODULE module)
     {
-        std::array<std::uint64_t, 19> out{};
+        std::array<std::uint64_t, 24> out{};
         resolve<SnapshotFn>(module, "example_proof_snapshot")(out.data());
         return out;
     }
@@ -150,37 +150,39 @@ namespace
         if (before[2] != 1 || before[5] != 1 || before[6] != 1 || before[12] != 1 || before[13] != 1 ||
             before[14] != 1 || before[15] != 0 || before[16] != 0)
             return fail("The parked worker did not retain its live hook dependencies.");
-        const auto dependencies_intact = [module]() -> bool
+        // Shutdown retires the counted hook before it stops the worker. Rollback stops the worker first.
+        const auto dependencies_intact = [module](bool hook_live) -> bool
         {
             const auto state = snapshot(module);
+            const std::uint64_t hooks = hook_live ? 1 : 0;
             return s_current && s_current->module == module && s_generation_counter == 1 && s_retained_count == 0 &&
-                   !s_restart_required && state[0] == 1 && state[2] == 1 && state[5] == 1 && state[6] == 1 &&
-                   state[7] == 0 && state[12] == 1 && state[13] == 1 && state[16] == 0 && state[17] == 1;
+                   !s_restart_required && state[0] == 1 && state[2] == 1 && state[5] == hooks && state[6] == 1 &&
+                   state[7] == 0 && state[12] == 1 && state[13] == hooks && state[16] == 0 && state[17] == 1;
         };
         if (rollback)
         {
             roll_back_worker();
-            if (!dependencies_intact() || snapshot(module)[15] != 0)
+            if (!dependencies_intact(true) || snapshot(module)[15] != 0)
                 return fail("Rollback retired dependencies before the worker exited.");
             roll_back_worker();
-            if (!dependencies_intact() || snapshot(module)[15] != 0)
+            if (!dependencies_intact(true) || snapshot(module)[15] != 0)
                 return fail("Repeated rollback bypassed the failed worker join.");
         }
         reload_once();
-        if (!dependencies_intact() || snapshot(module)[15] != 0)
-            return fail("A failed worker join retired dependencies or accepted a successor.");
+        if (!dependencies_intact(false) || snapshot(module)[15] != 0)
+            return fail("A failed worker join released the Session or accepted a successor.");
         reload_once();
-        if (!dependencies_intact() || snapshot(module)[15] != 0)
+        if (!dependencies_intact(false) || snapshot(module)[15] != 0)
             return fail("A reload retry bypassed the failed worker join.");
         if (!release.finish())
             return fail("The released worker did not exit before its deadline.");
         const auto exited = snapshot(module);
-        if (exited[15] != 1 || exited[18] != 115 || exited[8] != before[8] + 1)
-            return fail("The released worker lost its original hook path.");
+        if (exited[15] != 1 || exited[18] != 90 || exited[8] != before[8])
+            return fail("The released worker did not call the restored target.");
         reload_once();
-        if (!dependencies_intact())
+        if (!dependencies_intact(false))
             return fail("Worker exit cleared the permanent teardown refusal.");
-        std::puts("The failed worker join preserves dependencies and refuses every successor.");
+        std::puts("The failed worker join preserves the Session and refuses every successor.");
         return 0;
     }
 
@@ -313,9 +315,37 @@ namespace
         {
             resolve<FaultFn>(first_module, "example_proof_fault")(2);
             reload_once();
-            if (!s_current || s_current->module != first_module || s_generation_counter != 1 ||
-                snapshot(first_module)[0] != 1 || s_retained_count != 0)
-                return fail("Unsafe teardown did not stop the successor or repeated Init.");
+            const auto refused = snapshot(first_module);
+            if (!s_current || s_current->module != first_module || s_generation_counter != 1 || !s_restart_required ||
+                s_retained_count != 0 || refused[0] != 1 || refused[19] != 1 ||
+                refused[21] != DMK_STAGED_RELOAD_RESTART_REQUIRED)
+                return fail("A reachable detour did not keep the image and latch a restart.");
+            reload_once();
+            if (s_generation_counter != 1 || snapshot(first_module)[0] != 1 || snapshot(first_module)[19] != 1)
+                return fail("The restart latch allowed another Shutdown or Init.");
+            return 0;
+        }
+        if (scenario == "busy")
+        {
+            const auto park_detour = resolve<WorkerControlFn>(first_module, "example_proof_park_detour");
+            if (park_detour == nullptr || park_detour() != 1)
+                return fail("No call parked inside the counted detour.");
+            const std::uint32_t verdict = shut_down(*s_current);
+            const auto retried = snapshot(first_module);
+            if (verdict != DMK_STAGED_RELOAD_OK || s_restart_required || retried[19] != 2 ||
+                retried[20] != DMK_STAGED_RELOAD_BUSY || retried[21] != DMK_STAGED_RELOAD_OK || retried[22] != 115 ||
+                retried[23] != 1 || retried[2] != 0 || retried[13] != 0)
+                return fail("A BUSY Shutdown changed the generation, or the loader did not retry it.");
+            const void *const old_address = s_current->unmap_address;
+            if (!unload_current() || s_current || s_retained_count != 0 || !wait_for_unmap(old_address))
+                return fail("The retired generation did not unmap after the retried Shutdown.");
+            if (!write_build(fixture, 2) || !load_generation() || !s_current ||
+                std::string_view{s_current->revision()} != "0000000000000002" || snapshot(s_current->module)[0] != 1)
+                return fail("The successor did not initialize from fresh bytes.");
+            if (!unload_current() || wheel_host_stop() != DMK_WHEELHOST_OK)
+                return fail("The busy proof did not retire its successor.");
+            ::DestroyWindow(window);
+            std::puts("Busy: the parked call kept every hook armed, the loader retried, and the image unmapped.");
             return 0;
         }
         if (scenario == "budget")
@@ -434,7 +464,8 @@ int main(int argc, char **argv)
     const std::string_view scenario{argv[2]};
     if (scenario != "retained" && scenario != "leak" && scenario != "refused" && scenario != "budget" &&
         scenario != "failed-init" && scenario != "missing-export" && scenario != "directory-collision" &&
-        scenario != "drain-retry" && scenario != "worker-join-failure" && scenario != "worker-rollback-failure")
+        scenario != "drain-retry" && scenario != "busy" && scenario != "worker-join-failure" &&
+        scenario != "worker-rollback-failure")
         return fail("Unknown sample proof scenario.");
     try
     {

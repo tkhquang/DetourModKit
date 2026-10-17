@@ -46,6 +46,7 @@ src/scan_rip_relative.cpp
 src/scan_string_xref.cpp
 src/session.cpp
 src/sighealth.cpp
+src/staged_reload.cpp
 src/worker.cpp
 
 src/internal/async_logger.cpp

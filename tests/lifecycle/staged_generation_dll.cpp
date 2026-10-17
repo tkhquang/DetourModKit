@@ -12,6 +12,7 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/session.hpp"
+#include "DetourModKit/staged_reload.hpp"
 
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
@@ -89,6 +90,7 @@ namespace
     bool s_external_wheel = false;
     // A teardown delta permanently refuses another Init or unload verdict for this mapped generation.
     bool s_hook_teardown_refused = false;
+    DetourModKit::staged_reload::Baseline s_baseline;
 
     std::atomic<TargetFn> s_original{nullptr};
     std::atomic<std::uint64_t> s_hook_calls{0};
@@ -353,11 +355,12 @@ namespace
         return !s_hook_teardown_refused;
     }
 
-    /// Returns the refusal of StagedShutdown: DMK_STAGED_RELOAD_RESTART_REQUIRED after a Retire-mode pin, otherwise 0.
+    /// Returns the refusal of StagedShutdown: DMK_STAGED_RELOAD_RESTART_REQUIRED after a pin, otherwise REFUSED.
     [[nodiscard]] int shutdown_refusal() noexcept
     {
-        const bool retire_mode = s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::Retire);
-        return retire_mode && s_hook_teardown_refused ? static_cast<int>(DMK_STAGED_RELOAD_RESTART_REQUIRED) : 0;
+        return static_cast<int>(
+            s_hook_teardown_refused ? DMK_STAGED_RELOAD_RESTART_REQUIRED : DMK_STAGED_RELOAD_REFUSED
+        );
     }
 
     /// Rolls back reclaimable state while a retained hook preserves its trampoline and target-module reference.
@@ -496,6 +499,7 @@ extern "C"
         {
             return 0;
         }
+        s_baseline = staged_reload::capture();
         try
         {
             s_drain_timeout_ms = options->drain_timeout_ms;
@@ -715,24 +719,21 @@ extern "C"
     __declspec(dllexport) int dmk_staged_shutdown() noexcept
     {
         using namespace DetourModKit;
-        namespace diag = diagnostics;
 
         if (!s_session.has_value())
         {
-            return 0;
+            return static_cast<int>(DMK_STAGED_RELOAD_REFUSED);
         }
         const bool retire_mode = s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::Retire);
+        // The other modes tear down through clear_generation_hooks, so the counters carry their verdict.
+        hook::HookRetirement retirement{};
         if (retire_mode)
         {
             // The stack retires before the session drain, so Busy and Refused keep every hook and the Session.
-            const hook::HookRetirement retirement = retire_generation_stack();
-            if (retirement.outcome == hook::RetirementOutcome::Busy)
+            retirement = retire_generation_stack();
+            if (retirement.outcome != hook::RetirementOutcome::Retired)
             {
-                return static_cast<int>(DMK_STAGED_RELOAD_BUSY);
-            }
-            if (retirement.outcome == hook::RetirementOutcome::Refused)
-            {
-                return static_cast<int>(DMK_STAGED_RELOAD_REFUSED);
+                return static_cast<int>(staged_reload::verdict(retirement, s_baseline, DMK_STAGED_RELOAD_ABI_VERSION));
             }
             if (retirement.pinned != 0)
             {
@@ -750,13 +751,13 @@ extern "C"
         if (s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::DisableFirst) &&
             !disable_generation_hooks_newest_first())
         {
-            return 0;
+            return static_cast<int>(DMK_STAGED_RELOAD_REFUSED);
         }
 
         std::thread parked_caller;
         if (s_retain_mid && !retire_mode && !park_mid_caller(parked_caller))
         {
-            return 0;
+            return static_cast<int>(DMK_STAGED_RELOAD_REFUSED);
         }
         const bool hooks_released = clear_generation_hooks();
         if (parked_caller.joinable())
@@ -765,7 +766,6 @@ extern "C"
             safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
             parked_caller.join();
         }
-        const bool external_wheel = s_external_wheel;
         s_subscription.reset();
         // Dropped after the hooks clear, so the subscription observes each removal.
         if (!s_retain_diagnostics)
@@ -788,31 +788,9 @@ extern "C"
             s_target_lib = nullptr;
         }
 
-        // Read the guide's refusal boundary after ~Session so XInput retention is visible. The reserved WndProc
-        // reason never counts, and the local wheel pin is MessageHookKeepalive. A retired hook releases its Hook
-        // reference, so both pin checks admit a HookResidue.
-        const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
-        const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
-        const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
-        const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
-        const std::size_t input_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Input);
-        // No caller reaches the detour of a HookResidue, so it does not block the unmap.
-        const std::size_t blocking_leaks =
-            diag::total_intentional_leaks() - diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
-        const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
-                                  (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
-        // A kept diagnostics index can belong to a handler that still runs in this image.
-        const bool diagnostics_released = diag::intentional_leak_count(diag::LeakSubsystem::Diagnostics) == 0;
-        // The local MessageHook backend retains at most one permanent keepalive. It never cleanly unloads; the
-        // retained pin is the safety authority, and Shutdown still accepts the reload with it held.
-        const bool local_backend_safe = wndproc == 0 && message_hook <= 1 && xinput_inert && diagnostics_released &&
-                                        diag::total_module_pins() == message_hook + xinput_self + xinput_targets;
-        const bool external_backend_safe = wndproc == 0 && message_hook == 0 && xinput_self == 0 &&
-                                           xinput_targets == 0 && input_leaks == 0 && blocking_leaks == 0 &&
-                                           diag::total_module_pins() == 0;
+        // Read the verdict after ~Session, so that XInput retention and the local wheel keepalive count.
         s_external_wheel = false;
-        return (hooks_released && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1
-                                                                                                 : shutdown_refusal();
+        return static_cast<int>(staged_reload::verdict(retirement, s_baseline, DMK_STAGED_RELOAD_ABI_VERSION));
     }
 } // extern "C"
 

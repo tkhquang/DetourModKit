@@ -1964,13 +1964,16 @@ dmk_add_raw_proof(NAME Lifecycle.InlineSelfTeardownReportsRetention
   WORKING_DIRECTORY $<TARGET_FILE_DIR:mid_route_retention>
   TEST_TIMEOUT 30 LABELS "lifecycle-proof")
 
-# The proof compiles both checked-in sources. Fixture wrappers control input, worker failure, and byte tags.
+# The proof compiles both checked-in sources. Fixture wrappers control input, worker failure, a parked detour call,
+# and byte tags. The Shutdown wrapper records each result.
 set(_dmk_staged_example_source "${PROJECT_SOURCE_DIR}/examples/staged_reload/mod_logic.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dmk_staged_example_source}")
 file(READ "${_dmk_staged_example_source}" _dmk_staged_example_text)
 string(REPLACE "DMK_WHEELHOST_CALL Init(" "DMK_WHEELHOST_CALL example_init("
   _dmk_staged_example_text "${_dmk_staged_example_text}")
 string(REPLACE "DMK_WHEELHOST_CALL Revision()" "DMK_WHEELHOST_CALL example_revision()"
+  _dmk_staged_example_text "${_dmk_staged_example_text}")
+string(REPLACE "DMK_WHEELHOST_CALL Shutdown()" "DMK_WHEELHOST_CALL example_shutdown()"
   _dmk_staged_example_text "${_dmk_staged_example_text}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/staged_example_logic_source.cpp" "${_dmk_staged_example_text}")
 add_library(staged_example_logic SHARED staged_example_logic.cpp)
@@ -1995,6 +1998,7 @@ set(staged_example_proofs
   Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference leak
   Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor refused
   Lifecycle.StagedExampleParkedCallbackRefusesThenRetires drain-retry
+  Lifecycle.StagedExampleBusyRetirementRetries busy
   Lifecycle.StagedExampleWorkerJoinFailureRefusesSuccessor worker-join-failure
   Lifecycle.StagedExampleWorkerJoinFailureStopsRollback worker-rollback-failure
   Lifecycle.StagedExampleBudgetsStopBeforeTeardown budget

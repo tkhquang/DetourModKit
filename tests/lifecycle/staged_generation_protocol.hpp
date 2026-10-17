@@ -69,8 +69,8 @@ namespace staged_gen
     /**
      * @enum TeardownMode
      * @brief The hook teardown sequence that StagedShutdown runs.
-     * @details Destroy and DisableFirst return the 4.3.0 values: 0 for a refusal and 1 for an unmap. Only Retire
-     *          returns the ABI 3 values of DetourModKit/abi/staged_reload.h.
+     * @details Every mode returns a DetourModKit/abi/staged_reload.h value. After the teardown, staged_reload::verdict
+     *          decides it.
      */
     enum class TeardownMode : int
     {
@@ -83,11 +83,9 @@ namespace staged_gen
         DisableFirst = 1,
         /**
          * @brief Holds the hooks in a HookStack and runs HookStack::retire before the session drain.
-         * @details Busy returns DMK_STAGED_RELOAD_BUSY, and Refused returns DMK_STAGED_RELOAD_REFUSED. Both keep
-         *          every hook and the Session, so a retry can succeed. A pinned hook returns
-         *          DMK_STAGED_RELOAD_RESTART_REQUIRED and refuses every later Init. Otherwise the checks of Destroy
-         *          decide between DMK_STAGED_RELOAD_OK and DMK_STAGED_RELOAD_REFUSED. InitOptions::retain_mid does
-         *          not apply.
+         * @details Busy returns DMK_STAGED_RELOAD_BUSY, and Refused returns DMK_STAGED_RELOAD_RESTART_REQUIRED. Both
+         *          keep every hook and the Session. A pinned hook also returns DMK_STAGED_RELOAD_RESTART_REQUIRED and
+         *          refuses every later Init. InitOptions::retain_mid does not apply.
          */
         Retire = 2,
     };
@@ -243,9 +241,9 @@ namespace staged_gen
     using InitFn = int (*)(const InitOptions *options) noexcept;
 
     /**
-     * @brief Runs the guide's Shutdown sequence and returns its refusal-boundary verdict.
-     * @details The loader must keep a refused generation mapped. @ref TeardownMode owns the verdict values of each
-     *          mode.
+     * @brief Runs the guide's Shutdown sequence and returns a DetourModKit/abi/staged_reload.h value.
+     * @details A failed drain, disable, or park returns DMK_STAGED_RELOAD_REFUSED, or RESTART_REQUIRED after a pin.
+     *          @ref TeardownMode owns the values of the Retire mode.
      */
     using ShutdownFn = int (*)() noexcept;
 

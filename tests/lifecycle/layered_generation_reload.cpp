@@ -285,15 +285,10 @@ namespace
         return family;
     }
 
-    /**
-     * @brief Returns the Shutdown verdict of a retirement of @p family that pins when @p pinned is true.
-     * @details The Retire mode returns the ABI 3 values. Every other mode returns the 4.3.0 values 0 and 1.
-     */
-    [[nodiscard]] int expected_verdict(const Family &family, bool pinned) noexcept
+    /// Returns the Shutdown verdict of a retirement that pins when @p pinned is true. Every mode returns ABI 3 values.
+    [[nodiscard]] int expected_verdict(bool pinned) noexcept
     {
-        if (family.teardown == TeardownMode::Retire)
-            return static_cast<int>(pinned ? DMK_STAGED_RELOAD_RESTART_REQUIRED : DMK_STAGED_RELOAD_OK);
-        return pinned ? 0 : 1;
+        return static_cast<int>(pinned ? DMK_STAGED_RELOAD_RESTART_REQUIRED : DMK_STAGED_RELOAD_OK);
     }
 
     /// The family state that a retire call which changes nothing leaves as it was.
@@ -517,7 +512,7 @@ namespace
             const bool restored = retirement == Retirement::Restore;
             const bool pinned = retirement == Retirement::PinOverBudget;
             const bool vacated = retirement == Retirement::VacateFresh || retirement == Retirement::VacateClaimed;
-            if (verdict != expected_verdict(family, pinned))
+            if (verdict != expected_verdict(pinned))
                 return fail(family, pinned ? "Shutdown accepted a pin over the residue budget" : "Shutdown refused");
             if (family.teardown == TeardownMode::Retire)
             {
