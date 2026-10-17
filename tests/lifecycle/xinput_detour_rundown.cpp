@@ -1429,7 +1429,7 @@ namespace
             std::fprintf(stderr, "FAIL: the complete base layer did not establish the suppression premise\n");
             return 60;
         }
-        const XInputGetStateFn retained_trampoline = xinput_trampoline();
+        const XInputGetStateFn primary_chain = xinput_trampoline();
         const bool maintained = install_xinput(0);
         const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
         if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary ||
@@ -1443,20 +1443,34 @@ namespace
             return 61;
         }
 
+        namespace diag = DetourModKit::diagnostics;
+        const std::size_t keepalive_pins = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
+        const std::size_t target_pins = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
         s_newer_calls.store(0, std::memory_order_relaxed);
         uninstall();
-        if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
+        if (xinput_installed() || DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 0 ||
+            diag::module_pin_count(diag::ModulePinReason::XInputKeepalive) + 1 != keepalive_pins ||
+            diag::module_pin_count(diag::ModulePinReason::XInputTarget) != target_pins)
         {
-            std::fprintf(stderr, "FAIL: layered teardown did not retain the raw trampoline chain\n");
+            std::fprintf(stderr, "FAIL: layered teardown did not retire the pair by route bypass\n");
             return 54;
         }
 
+        s_body_entered.store(false, std::memory_order_relaxed);
+        set_xinput_detour_body_seam(&note_detour_body);
         XINPUT_STATE state{};
         const DWORD target_result = get_state(0, &state);
+        set_xinput_detour_body_seam(nullptr);
         if (s_newer_calls.load(std::memory_order_relaxed) != 1 || !legal_xinput_result(target_result))
         {
             std::fprintf(stderr, "FAIL: raw teardown overwrote the newer XInput patch\n");
             return 56;
+        }
+        if (s_body_entered.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: the closed route still entered the retired detour\n");
+            return 59;
         }
         const auto original_result = newer.try_call<DWORD, DWORD, XINPUT_STATE *>(0, &state);
         if (!original_result || !legal_xinput_result(*original_result))
@@ -1471,9 +1485,11 @@ namespace
             std::fprintf(stderr, "FAIL: could not remove the newer XInput layer after the proof\n");
             return 58;
         }
-        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != retained_trampoline)
+        // A claim adopts the vacated trampoline, and the hand-back makes its witness exact again.
+        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != primary_chain ||
+            !xinput_pair_coverage_for_test().primary)
         {
-            std::fprintf(stderr, "FAIL: retained storage did not recover through the existing hook after hand-back\n");
+            std::fprintf(stderr, "FAIL: the successor did not claim the vacated position after hand-back\n");
             return 55;
         }
         uninstall();
@@ -1484,10 +1500,8 @@ namespace
 
     // A newer layer over the primary alone must not let the optional Ex prologue be restored on its own. Teardown
     // classifies both windows before it mutates either, so a primary already owned by a newer layer at that read
-    // retains the Ex hook, its trampoline, and the pair's keepalives. The primary-refuses-after-Ex-committed direction
-    // is the same guarantee reached by compensation instead of by classification; run_primary_disable_exception_case
-    // owns it. The same-module proxy is used because it guarantees a distinct ordinal-100 target in the pinned module
-    // on every host.
+    // retires both members by route bypass with no byte write. run_primary_disable_exception_case owns the
+    // primary-refuses-after-Ex-committed direction. The same-module proxy guarantees a distinct ordinal-100 target.
     int run_newer_layer_ex_pair_case()
     {
         const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
@@ -1545,7 +1559,8 @@ namespace
             std::fprintf(stderr, "FAIL: the complete local pair did not establish the suppression premise\n");
             return 80;
         }
-        const XInputGetStateFn retained_trampoline = xinput_trampoline();
+        const XInputGetStateFn primary_chain = xinput_trampoline();
+        const XInputGetStateFn ex_chain = DetourModKit::detail::xinput_ex_trampoline();
         const bool maintained = install_xinput(0);
         const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
         if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary || !degraded.ex ||
@@ -1560,13 +1575,17 @@ namespace
             return 81;
         }
 
+        std::array<std::uint8_t, ARM_RACE_SPAN> ex_patch{};
+        std::memcpy(ex_patch.data(), get_state_ex_target, ARM_RACE_SPAN);
         uninstall();
-        if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
+        if (xinput_installed() || DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 0 || xinput_trampoline() != nullptr ||
+            DetourModKit::detail::xinput_ex_trampoline() != nullptr)
         {
-            std::fprintf(stderr, "FAIL: a foreign primary window did not retain the raw hook pair\n");
+            std::fprintf(stderr, "FAIL: a foreign primary window did not retire the pair by route bypass\n");
             return 76;
         }
-        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        if (std::memcmp(get_state_ex_target, ex_patch.data(), ARM_RACE_SPAN) != 0)
         {
             std::fprintf(stderr, "FAIL: the Ex hook was restored on its own while the primary stayed patched\n");
             return 78;
@@ -1577,24 +1596,25 @@ namespace
         if (!legal_xinput_result(get_state_ex(0, &state)) || !legal_xinput_result(get_state(0, &state)) ||
             s_newer_calls.load(std::memory_order_relaxed) != 1)
         {
-            std::fprintf(stderr, "FAIL: the retained pair's forwarding chains are not both callable\n");
+            std::fprintf(stderr, "FAIL: the bypassed pair's forwarding chains are not both callable\n");
             return 79;
         }
 
         if (!newer.disable())
         {
-            std::fprintf(stderr, "FAIL: could not hand the retained primary back after the local-pair proof\n");
+            std::fprintf(stderr, "FAIL: could not hand the bypassed primary back after the local-pair proof\n");
             return 82;
         }
-        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != retained_trampoline)
+        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != primary_chain ||
+            DetourModKit::detail::xinput_ex_trampoline() != ex_chain)
         {
-            std::fprintf(stderr, "FAIL: the retained local pair did not recover through its existing primary hook\n");
+            std::fprintf(stderr, "FAIL: the successor did not claim both vacated positions\n");
             return 83;
         }
         const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
         if (!recovered.primary || !recovered.ex)
         {
-            std::fprintf(stderr, "FAIL: the retained local pair republished without both exact patches\n");
+            std::fprintf(stderr, "FAIL: the claimed local pair republished without both exact patches\n");
             return 84;
         }
         uninstall();

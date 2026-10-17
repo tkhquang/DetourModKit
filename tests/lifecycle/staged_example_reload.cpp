@@ -35,9 +35,9 @@ namespace
         return original != nullptr ? original(user, state) : ERROR_INVALID_FUNCTION;
     }
 
-    [[nodiscard]] std::array<std::uint64_t, 24> snapshot(HMODULE module)
+    [[nodiscard]] std::array<std::uint64_t, 25> snapshot(HMODULE module)
     {
-        std::array<std::uint64_t, 24> out{};
+        std::array<std::uint64_t, 25> out{};
         resolve<SnapshotFn>(module, "example_proof_snapshot")(out.data());
         return out;
     }
@@ -368,7 +368,7 @@ namespace
             return 0;
         }
         std::optional<safetyhook::InlineHook> rival;
-        if (scenario == "retained")
+        if (scenario == "newer-xinput-layer")
         {
             if (!wait_for_mask(primary, extended, true))
                 return fail("INI Consume did not suppress both controller exports.");
@@ -383,6 +383,14 @@ namespace
             s_rival_original.store(rival->original<StateFn>(), std::memory_order_release);
             if (!rival->enable())
                 return fail("The newer XInput layer did not enable.");
+            // The pair under the newer layer retires by route bypass, so Shutdown releases the image.
+            const std::uint32_t verdict = shut_down(*s_current);
+            const auto old = snapshot(first_module);
+            if (verdict != DMK_STAGED_RELOAD_OK || old[0] != 1 || old[2] != 0 || old[3] != 0 || old[24] != 2)
+                return fail("The pair under the newer XInput layer did not retire by route bypass.");
+            const void *const old_address = s_current->unmap_address;
+            if (!unload_current() || s_current || s_retained_count != 0 || !wait_for_unmap(old_address))
+                return fail("The retired image stayed mapped under the newer XInput layer.");
         }
         else if (scenario == "leak")
         {
@@ -394,22 +402,24 @@ namespace
         if (!s_current || s_current->path == first_path || s_restart_required ||
             std::string_view{s_current->revision()} != "0000000000000002")
             return fail("The successor did not execute the new build bytes.");
-        if (scenario == "retained" || scenario == "leak")
+        if (scenario == "leak")
         {
             if (s_current->module == first_module || s_retained_count != 1 ||
                 s_retained_loader_refs[0] != first_module || s_retained_bytes == 0)
                 return fail("The retired image lost its loader reference or budget charge.");
             const auto old = snapshot(first_module);
-            if (old[0] != 1 || old[2] != 0 || (scenario == "retained" ? old[3] != 1 : old[4] != 0))
+            if (old[0] != 1 || old[2] != 0 || old[4] != 0)
                 return fail("Retirement left old feature state or invalid pin ownership.");
-            if (!wait_for_mask(primary, extended, scenario == "retained"))
+            if (!wait_for_mask(primary, extended, false))
                 return fail("Controller behavior did not survive the fresh successor.");
             if (snapshot(first_module)[1] != old[1] || snapshot(s_current->module)[0] != 1)
                 return fail("The old image received feature callbacks or another Init.");
         }
-        if (scenario == "retained")
+        if (scenario == "newer-xinput-layer")
         {
-            const auto old_presses = snapshot(first_module)[1];
+            if (!wait_for_mask(primary, extended, true) || snapshot(s_current->module)[0] != 1)
+                return fail("The successor did not consume through the claimed XInput pair.");
+            // Each retired generation unmaps, so no retained image remains to receive a callback.
             for (unsigned revision = 3; revision <= 4; ++revision)
             {
                 const bool consume = revision == 4;
@@ -417,11 +427,10 @@ namespace
                 if (!write_ini(consume) || !write_build(fixture, revision))
                     return fail("The INI transition or fresh build write failed.");
                 reload_once();
-                if (!s_current || s_restart_required || s_current->path == prior_path ||
+                if (!s_current || s_restart_required || s_retained_count != 0 || s_current->path == prior_path ||
                     std::string_view{s_current->revision()} != std::format("{:016}", revision) ||
-                    !wait_for_mask(primary, extended, consume) || snapshot(first_module)[1] != old_presses ||
-                    snapshot(s_current->module)[0] != 1)
-                    return fail("An INI Consume transition blocked fresh code or revived an old generation.");
+                    !wait_for_mask(primary, extended, consume) || snapshot(s_current->module)[0] != 1)
+                    return fail("An INI Consume transition blocked fresh code or kept an old generation.");
             }
         }
         if (!unload_current() || !wait_for_mask(primary, extended, false))
@@ -446,7 +455,7 @@ namespace
             if (!output.good())
                 return fail("The directory collision control did not write its anchor.");
         }
-        const int result = run(fixture, "retained");
+        const int result = run(fixture, "newer-xinput-layer");
         if (result != 0)
             return result;
         std::ifstream input(anchor, std::ios::binary);
@@ -462,7 +471,7 @@ int main(int argc, char **argv)
     if (argc != 3)
         return fail("A fixture path and scenario are required.");
     const std::string_view scenario{argv[2]};
-    if (scenario != "retained" && scenario != "leak" && scenario != "refused" && scenario != "budget" &&
+    if (scenario != "newer-xinput-layer" && scenario != "leak" && scenario != "refused" && scenario != "budget" &&
         scenario != "failed-init" && scenario != "missing-export" && scenario != "directory-collision" &&
         scenario != "drain-retry" && scenario != "busy" && scenario != "worker-join-failure" &&
         scenario != "worker-rollback-failure")

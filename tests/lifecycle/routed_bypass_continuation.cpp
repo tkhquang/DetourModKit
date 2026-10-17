@@ -143,6 +143,21 @@ namespace
         return EXPECTED_VALUE;
     }
 
+    /**
+     * @brief Zeroes the dead stack below the frame of its caller.
+     * @details A finished call through the hook can leave the trampoline return site in a slot that a later frame never
+     *          writes. The idle proof reads the raw stack of the tearing-down thread, so that stale word refuses the
+     *          clean reclaim that the proof requires.
+     */
+    __declspec(noinline) void clear_dead_stack() noexcept
+    {
+        volatile std::uint8_t dead[64 * 1024];
+        for (std::size_t index = 0; index < sizeof(dead); ++index)
+        {
+            dead[index] = 0;
+        }
+    }
+
     void call_target() noexcept
     {
         s_caller_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
@@ -312,6 +327,7 @@ namespace
                     releaser = std::thread{&release_callee_later};
                     set_xinput_clean_release_seam(&release_parked_caller);
                 }
+                clear_dead_stack();
                 uninstall();
                 set_xinput_clean_release_seam(nullptr);
                 if (drain)

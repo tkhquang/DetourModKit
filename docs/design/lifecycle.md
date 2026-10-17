@@ -121,6 +121,11 @@ A close is legal only once no live thread can still be inside the use. That is e
 - Preallocate the aligned XInput retention cell before hook publication.
 - If the 10 ms XInput drain expires, transfer the hooks and keepalives into that cell.
 - Retain receipt TLS and shared scope ownership with reachable XInput chains.
+- If a newer layer owns either XInput prologue, retire the pair by route bypass (`[B-104]`).
+- Retire a pair with a claimed position the same way.
+- Release the self keepalive after that retirement.
+- Keep the provider references of each fresh position for the process lifetime.
+- Use the transfer when that retirement exceeds the residue budget.
 - Use the same transfer when either restore lacks an `Original` witness.
 - Republish the required trampoline chain after that transfer.
 - Leave logical XInput interception disarmed after that transfer.

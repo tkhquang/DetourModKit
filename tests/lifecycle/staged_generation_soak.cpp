@@ -1316,54 +1316,121 @@ namespace
                 return fail("foreign-xinput", "the newer XInput layer did not forward through the generation");
             }
 
-            if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_RETAINED))
+            const auto fail_foreign = [](const char *what) noexcept -> int
             {
                 s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "the retained XInput pair did not make Shutdown retain the image");
+                return fail("foreign-xinput", what);
+            };
+            // Only explicit host probes count. A successor Init can probe the pair on this thread too.
+            const auto host_probe_forwards = [get_state]() noexcept -> bool
+            {
+                const std::uint64_t before = s_xinput_rival_calls.load(std::memory_order_relaxed);
+                return proxy_result_matches(get_state) &&
+                       s_xinput_rival_calls.load(std::memory_order_relaxed) == before + 1;
+            };
+
+            const staged_gen::Status armed = generation.read_status();
+            if (generation.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_OK))
+            {
+                return fail_foreign("the bypassed XInput pair did not let Shutdown release the image");
             }
             const staged_gen::Status after = generation.read_status();
-            if (after.xinput_installed != 0 || after.xinput_self_pins != 1 || after.xinput_target_pins != 1 ||
-                after.hook_manager_leaks != 0)
+            if (after.xinput_installed != 0 || after.xinput_self_pins != 0 || after.xinput_target_pins != 1 ||
+                after.hook_manager_leaks != 0 || after.hook_residue_leaks != 2)
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "teardown did not retain exactly the inert local XInput pair");
+                return fail_foreign("teardown did not retire the pair by route bypass with only its provider pin");
             }
-            if (!proxy_result_matches(get_state) || s_xinput_rival_calls.load(std::memory_order_relaxed) != 2)
+            if (!host_probe_forwards())
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "the revoked generation did not forward through the newer layer");
+                return fail_foreign("the revoked generation did not forward through the newer layer");
+            }
+            const void *const marker = generation.marker;
+            if (!unload_generation(generation) || !wait_for_unmap(marker))
+            {
+                return fail_foreign("the bypassed generation stayed mapped");
+            }
+            remove_unmapped_staged_file_best_effort(generation);
+            if (!host_probe_forwards())
+            {
+                return fail_foreign("the closed route did not forward after the generation unmapped");
             }
 
-            if (!unload_generation(generation))
+            // Each successor claims the vacated pair, so the reloads add no record and no residue.
+            const auto set_connected = reinterpret_cast<void(WINAPI *)(BOOL)>(
+                reinterpret_cast<void *>(::GetProcAddress(proxy.get(), "dmk_xinput_set_success_state"))
+            );
+            if (set_connected == nullptr)
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "FreeLibrary rejected the retained generation loader reference");
+                return fail_foreign("the XInput proxy exposes no connection control");
             }
-            if (!module_owns(generation.marker))
+            constexpr int FOREIGN_RELOADS = 20;
+            for (int cycle = 1; cycle <= FOREIGN_RELOADS; ++cycle)
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "the XInput self-pin did not keep the generation mapped");
+                Generation successor;
+                if (!load_generation("FOREIGN" + std::to_string(cycle), successor))
+                {
+                    return fail_foreign("failed to stage a successor under the newer layer");
+                }
+                const std::string successor_log = make_log_name("staged_gen_foreign_successor");
+                staged_gen::InitOptions successor_options{};
+                successor_options.enable_consume_gamepad = 1;
+                successor_options.log_file = successor_log.c_str();
+                // The claimed primary sits beneath the newer layer, so its coverage is observed and needs a connected
+                // controller. Host probes need the disconnected result, so the connection lasts only through Init.
+                set_connected(TRUE);
+                const bool covered =
+                    successor.init(&successor_options) != 0 && successor.read_status().xinput_installed != 0;
+                set_connected(FALSE);
+                if (!covered)
+                {
+                    return fail_foreign("a successor did not cover the claimed XInput pair");
+                }
+                const staged_gen::Status claimed = successor.read_status();
+                if (claimed.coordinator_live != armed.coordinator_live ||
+                    claimed.coordinator_vacant != armed.coordinator_vacant)
+                {
+                    return fail_foreign("a successor added records instead of claiming the vacated pair");
+                }
+                if (successor.shutdown() != static_cast<int>(DMK_STAGED_RELOAD_OK))
+                {
+                    return fail_foreign("Shutdown did not release a successor over its claimed pair");
+                }
+                const staged_gen::Status retired = successor.read_status();
+                if (retired.xinput_self_pins != 0 || retired.xinput_target_pins != 0 ||
+                    retired.hook_residue_leaks != 0 || retired.coordinator_live != after.coordinator_live ||
+                    retired.coordinator_vacant != after.coordinator_vacant)
+                {
+                    return fail_foreign("a claimed pair did not vacate again with no new residue or pin");
+                }
+                const void *const successor_marker = successor.marker;
+                if (!unload_generation(successor) || !wait_for_unmap(successor_marker))
+                {
+                    return fail_foreign("a retired successor stayed mapped");
+                }
+                remove_unmapped_staged_file_best_effort(successor);
             }
-            if (!proxy_result_matches(get_state) || s_xinput_rival_calls.load(std::memory_order_relaxed) != 3)
+            if (!host_probe_forwards())
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "the retained generation did not forward after FreeLibrary");
+                return fail_foreign("the vacated pair did not forward after the reloads");
             }
 
             if (!newer.disable())
             {
-                s_xinput_rival_original.store(nullptr, std::memory_order_release);
-                return fail("foreign-xinput", "the host failed to return ownership to the retained generation");
+                return fail_foreign("the host failed to hand the prologue back over the vacated pair");
             }
             s_xinput_rival_original.store(nullptr, std::memory_order_release);
-            if (!proxy_result_matches(get_state) || s_xinput_rival_calls.load(std::memory_order_relaxed) != 3)
+            const std::uint64_t handed_back = s_xinput_rival_calls.load(std::memory_order_relaxed);
+            if (!proxy_result_matches(get_state) || s_xinput_rival_calls.load(std::memory_order_relaxed) != handed_back)
             {
-                return fail("foreign-xinput", "the retained generation did not survive newer-layer hand-back");
+                return fail("foreign-xinput", "the vacated pair did not forward after newer-layer hand-back");
             }
         }
         s_xinput_rival_original.store(nullptr, std::memory_order_release);
 
-        std::fprintf(stderr, "OK: the retained XInput route survived revocation, FreeLibrary, and hand-back\n");
+        std::fprintf(
+            stderr,
+            "OK: the XInput pair retired by route bypass, its image unmapped, and 20 successors claimed it\n"
+        );
         return 0;
     }
 } // namespace

@@ -453,7 +453,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.XInputRouteDiagnosticsStayLatchedOutsideLocks
     Lifecycle.XInputStaleProbeCannotPublishOverSuccessor
     Lifecycle.XInputLayeredProofRejectsAnUnknownScenario
-    Lifecycle.XInputNewerLayerRetainsExPair
+    Lifecycle.XInputNewerLayerRetiresExPair
     Lifecycle.XInputCommittedArmInversionRetainsTrampoline
     Lifecycle.XInputUnownedExportDoesNotStrandThePair
     Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair
@@ -603,7 +603,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.DiagnosticsTlsIndexProcessExitSkipsTheRelease
     Lifecycle.DiagnosticsTlsIndexTeardownWithAnUntrackedEmitNeverWaits
     Lifecycle.TlsIndexReturnProofRejectsAnUnknownScenario
-    Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor
+    Lifecycle.StagedExampleConsumeUnmapsUnderNewerXInputLayer
     Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference
     Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor
     Lifecycle.StagedExampleParkedCallbackRefusesThenRetires
@@ -617,7 +617,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
     Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception
-    Lifecycle.StagedGenerationForeignXInputRetainsThePair
+    Lifecycle.StagedGenerationForeignXInputRetiresThePair
     Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes
     Lifecycle.StagedGenerationParkedCallbackRefusesReload
     Lifecycle.StagedGenerationReleasedCallbackAllowsReload

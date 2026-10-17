@@ -79,6 +79,8 @@ REQUIRED_XINPUT_PROOFS = (
     "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
     "Lifecycle.XInputRetainedPairRecoversALostPrimary",
     "Lifecycle.XInputPollLoopMaintainsAPublishedPair",
+    "Lifecycle.XInputNewerLayerSurvivesRawTeardown",
+    "Lifecycle.XInputNewerLayerRetiresExPair",
 )
 REQUIRED_SOAK_PROOFS = REQUIRED_INPUT_PROOFS + REQUIRED_LOADER_PROOFS + REQUIRED_XINPUT_PROOFS
 

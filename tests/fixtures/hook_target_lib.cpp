@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <xinput.h>
 
 extern "C"
 {
@@ -53,6 +54,34 @@ extern "C"
     // C++, which dllexport cannot apply to.
     __declspec(dllexport) extern const unsigned char dmk_scan_marker[16] =
         {0xA7, 0x3C, 0xF1, 0x88, 0x5E, 0x22, 0xD9, 0x04, 0x6B, 0xB0, 0x1F, 0x97, 0x4A, 0xE3, 0x7D, 0x50};
+
+    // An XInput-shaped pair for the XInput route cases. A position that retires by bypass stays on this private module
+    // and never on the runtime that other cases hook. The packet bases differ, so the linker cannot fold the bodies.
+    __declspec(noinline) DWORD WINAPI dmk_fixture_xinput_get_state(DWORD user_index, XINPUT_STATE *state)
+    {
+        volatile DWORD packet = 0x4000u + user_index;
+        if (state == nullptr)
+        {
+            return ERROR_BAD_ARGUMENTS;
+        }
+        *state = XINPUT_STATE{};
+        state->dwPacketNumber = packet;
+        state->Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        return user_index < XUSER_MAX_COUNT ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    __declspec(noinline) DWORD WINAPI dmk_fixture_xinput_get_state_ex(DWORD user_index, XINPUT_STATE *state)
+    {
+        volatile DWORD packet = 0x6000u + user_index;
+        if (state == nullptr)
+        {
+            return ERROR_BAD_ARGUMENTS;
+        }
+        *state = XINPUT_STATE{};
+        state->dwPacketNumber = packet;
+        state->Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        return user_index < XUSER_MAX_COUNT ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)

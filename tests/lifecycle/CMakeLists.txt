@@ -1031,7 +1031,7 @@ dmk_add_raw_proof(NAME Lifecycle.XInputNewerLayerSurvivesRawTeardown
   SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
-dmk_add_raw_proof(NAME Lifecycle.XInputNewerLayerRetainsExPair
+dmk_add_raw_proof(NAME Lifecycle.XInputNewerLayerRetiresExPair
   COMMAND $<TARGET_FILE:xinput_detour_rundown> newer-layer-ex
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
@@ -1675,7 +1675,7 @@ endwhile()
 
 # These scenarios use deterministic fixtures or no platform fixture. Exit 77 reports a failure.
 set(staged_generation_required_proofs
-  Lifecycle.StagedGenerationForeignXInputRetainsThePair       foreign-xinput
+  Lifecycle.StagedGenerationForeignXInputRetiresThePair       foreign-xinput
   Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes foreign-xinput-background
   Lifecycle.StagedGenerationParkedCallbackRefusesReload       parked-callback
   Lifecycle.StagedGenerationReleasedCallbackAllowsReload      drain-retry
@@ -1994,7 +1994,7 @@ add_dependencies(dmk_lifecycle_proof_hosts staged_example_reload)
 
 set(staged_example_proofs
   Lifecycle.StagedExampleExistingDirectoryUsesFreshName directory-collision
-  Lifecycle.StagedExampleConsumeLoadsFreshRetainedSuccessor retained
+  Lifecycle.StagedExampleConsumeUnmapsUnderNewerXInputLayer newer-xinput-layer
   Lifecycle.StagedExampleUnpinnedLeakKeepsLoaderReference leak
   Lifecycle.StagedExampleUnsafeTeardownRefusesSuccessor refused
   Lifecycle.StagedExampleParkedCallbackRefusesThenRetires drain-retry
