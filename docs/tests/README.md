@@ -231,7 +231,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `veh_*.cpp` | MinGW guarded-read handler after an unmap |
 | `tls_*`, `process_exit_release_dll.cpp`, `input_tls_exhaustion.cpp` | Image-owned TLS return, native allocation isolation, input delivery with no TLS index |
 | `input_reshape_retirement.cpp`, `test_input_gate_abba.cpp`, `input_control_thread_shutdown.cpp`, `input_self_shutdown.cpp`, `*input_loader_detach*`, `input_seam_cleanup.hpp` | Reshape disposal, gate teardown, shutdown from a callback, loader detach |
-| `xinput_*` | Hook lifetime, paired exact and observed routes, raw samples across ten independent copies |
+| `xinput_*` | Hook lifetime, paired exact and observed routes, route-bypass retirement under a newer layer, raw samples across ten independent copies |
 | `cache_shutdown_stall.cpp` | Cache shutdown with a stalled reader |
 | `*bootstrap*`, `session_detach_terminal.cpp`, `test_full_lifecycle.cpp`, `test_config_servicer_self_retire.cpp` | Bootstrap module reference, detach after a drain, full lifecycles, servicer self-retirement |
 | `*logic_*` | Logic-DLL unmap after typed teardown |
@@ -245,7 +245,7 @@ TLS refusal proofs override only the executable import cell. Windows DLLs retain
 
 `Lifecycle.RoutedBypassDrainsBeforeReclaim` keeps both workers alive and waits for the caller's full return before native suspension. The caller returns to a separate driver fiber stack before its native event wait. The provider resumes after a drain pause, without a fixed time delay. `Lifecycle.RoutedBypassWaitsForCompleteCallerReturn` delays the return notice until the first scan requests it. `Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan` verifies native suspension refusal and charged retention after a snapshotted caller exits. Each route uses a 30-second timeout.
 
-The foreign XInput proof counts explicit host probes by native thread identity. `Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes` verifies a concurrent caller without a change to the exact host count or retained pair assertions.
+The foreign XInput proof counts explicit host probes by native thread identity. `Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes` verifies a concurrent caller without a change to the exact host count or route-bypass assertions. Both foreign XInput scenarios then reload 20 successors under the same newer layer and require constant live and Vacant record counts. Each successor connects the proxy controller only through `Init()`, because a claimed pair under that layer publishes observed coverage.
 
 The XInput diagnostic routes use `xinput_layered_consume` as separate required `lifecycle-proof` processes. Each route has a 60-second timeout.
 

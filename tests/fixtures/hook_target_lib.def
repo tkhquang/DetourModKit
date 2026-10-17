@@ -6,6 +6,8 @@
 ; function. They occupy separate name-table entries and separate ordinals, yet AddressOfFunctions carries the same
 ; RVA for both, so a single patch to compute_damage breaks both names at once. A quorum that treats them as two
 ; independent signals reports corroboration that no second physical source backs.
+;
+; XInputGetState and ordinal 100 give the XInput route cases the export shape that the install resolves.
 LIBRARY hook_target_lib
 EXPORTS
     compute_damage
@@ -16,3 +18,5 @@ EXPORTS
     dmk_scan_marker DATA
     dmk_export_alias_one = compute_damage
     dmk_export_alias_two = compute_damage
+    XInputGetState = dmk_fixture_xinput_get_state
+    dmk_fixture_xinput_get_state_ex @100 NONAME

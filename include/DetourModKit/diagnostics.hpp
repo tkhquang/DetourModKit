@@ -88,9 +88,13 @@ namespace DetourModKit
             LifecycleReaper,
             /// Reserved inert value for the WndProc keepalive. It keeps its numeric value and never counts.
             WndprocKeepalive,
-            /// Tracks the XInput self-reference until a rollback or uninstall that retains no XInput chain.
+            /// Tracks the XInput self-reference while an XInput chain can reach the detours of this module.
             XInputKeepalive,
-            /// Tracks an XInput provider reference paired with @ref XInputKeepalive.
+            /**
+             * @brief Tracks an XInput provider reference.
+             * @details A fresh position that retires by route bypass keeps this reference for the process lifetime,
+             *          because its bypassed chain still forwards to the provider.
+             */
             XInputTarget,
             /// Tracks the permanent message-hook keepalive from the first successful local-backend hook publication.
             MessageHookKeepalive,

@@ -128,6 +128,7 @@ extern "C" __declspec(dllexport) void DMK_WHEELHOST_CALL example_proof_snapshot(
     out[21] = s_last_shutdown_result;
     out[22] = s_busy_probe_damage;
     out[23] = s_busy_left_generation_live;
+    out[24] = dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookResidue);
 }
 
 /** @brief Records each sample Shutdown result. The first BUSY probes the armed hook, then releases the parked call. */

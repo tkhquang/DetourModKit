@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@
 #include "internal/input_poller.hpp"
 #include "test_alloc_probe.hpp"
 #include "DetourModKit/diagnostics.hpp"
+#include "DetourModKit/hook.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
@@ -48,6 +50,7 @@ using DetourModKit::detail::set_message_unhook_failure_for_test;
 using DetourModKit::detail::set_wheel_drain_timeout_for_test;
 using DetourModKit::detail::set_wheel_finalize_entry_seam;
 using DetourModKit::detail::set_wheel_process_focus_for_test;
+using DetourModKit::detail::set_xinput_detour_body_seam;
 using DetourModKit::detail::set_xinput_module_override_for_test;
 using DetourModKit::detail::step_gamepad_suppress;
 using DetourModKit::detail::step_wheel_pulse;
@@ -2063,6 +2066,134 @@ TEST(InterceptXInputTest, InstallAndCleanUninstallBookAndReleaseTheTypedPinReaso
         << "a witnessed clean uninstall must release the provider bookings";
 
     FreeLibrary(xinput);
+}
+
+namespace
+{
+    std::atomic<XInputGetStateFn> s_newer_xinput_original{nullptr};
+    std::atomic<int> s_newer_xinput_calls{0};
+    std::atomic<int> s_xinput_detour_bodies{0};
+
+    DWORD WINAPI newer_xinput_layer(DWORD user_index, XINPUT_STATE *state) noexcept
+    {
+        s_newer_xinput_calls.fetch_add(1, std::memory_order_relaxed);
+        const XInputGetStateFn original = s_newer_xinput_original.load(std::memory_order_acquire);
+        return original != nullptr ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    void count_xinput_detour_body() noexcept
+    {
+        s_xinput_detour_bodies.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::array<std::uint8_t, 16> entry_window(const std::uint8_t *target) noexcept
+    {
+        std::array<std::uint8_t, 16> bytes{};
+        std::memcpy(bytes.data(), target, bytes.size());
+        return bytes;
+    }
+} // namespace
+
+// The pair installs on the private hook_target_lib exports, because each retired position stays in the process.
+TEST(InterceptXInputTest, ForeignLayerTeardownRetiresByRouteBypassAndTheSuccessorClaims)
+{
+    namespace diag = DetourModKit::diagnostics;
+    const HMODULE fixture = LoadLibraryW(L"hook_target_lib.dll");
+    ASSERT_NE(fixture, nullptr) << "hook_target_lib.dll did not load: " << GetLastError();
+    auto *const primary = reinterpret_cast<std::uint8_t *>(GetProcAddress(fixture, "XInputGetState"));
+    auto *const extended = reinterpret_cast<std::uint8_t *>(GetProcAddress(fixture, MAKEINTRESOURCEA(100)));
+    ASSERT_NE(primary, nullptr);
+    ASSERT_NE(extended, nullptr);
+    ASSERT_NE(primary, extended);
+    const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary));
+    const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(extended));
+    set_xinput_module_override_for_test(fixture);
+
+    const std::uint64_t owner = next_intercept_owner();
+    ASSERT_TRUE(install_xinput(0, owner));
+    const XInputGetStateFn primary_chain = xinput_trampoline();
+    const XInputGetStateFn ex_chain = xinput_ex_trampoline();
+    ASSERT_NE(primary_chain, nullptr);
+    ASSERT_NE(ex_chain, nullptr);
+
+    hook::InlineRequest request{
+        .name = "XInputUnitNewerLayer",
+        .target = Address{reinterpret_cast<std::uintptr_t>(primary)},
+        .options = {.prologue = hook::Prologue::Relocate},
+    };
+    auto layered = hook::inline_at(std::move(request), &newer_xinput_layer);
+    ASSERT_TRUE(layered.has_value());
+    hook::Hook newer = std::move(*layered);
+    s_newer_xinput_original.store(newer.original<XInputGetStateFn>(), std::memory_order_release);
+    ASSERT_TRUE(newer.enable().has_value());
+
+    const std::array<std::uint8_t, 16> primary_bytes = entry_window(primary);
+    const std::array<std::uint8_t, 16> ex_bytes = entry_window(extended);
+    const std::size_t residue_before = diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
+    const std::size_t input_before = diag::intentional_leak_count(diag::LeakSubsystem::Input);
+    const std::size_t keepalive_before = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
+    const std::size_t target_before = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
+
+    uninstall(owner);
+    EXPECT_FALSE(xinput_installed());
+    EXPECT_FALSE(xinput_permanent_primary_retained()) << "a newer layer still latched the retained pair";
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+    EXPECT_EQ(xinput_trampoline(), nullptr);
+    EXPECT_EQ(xinput_ex_trampoline(), nullptr);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before - 1)
+        << "the bypassed pair kept the self keepalive";
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputTarget), target_before)
+        << "the bypassed chain forwards to the provider, so its references stay";
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookResidue), residue_before + 2);
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::Input), input_before);
+    EXPECT_EQ(entry_window(primary), primary_bytes) << "the retirement wrote the newer layer's prologue";
+    EXPECT_EQ(entry_window(extended), ex_bytes) << "the retirement wrote the ordinal-100 prologue";
+
+    s_xinput_detour_bodies.store(0, std::memory_order_relaxed);
+    s_newer_xinput_calls.store(0, std::memory_order_relaxed);
+    set_xinput_detour_body_seam(&count_xinput_detour_body);
+    XINPUT_STATE state{};
+    EXPECT_EQ(get_state(0, &state), static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_EQ(state.dwPacketNumber, 0x4000u);
+    EXPECT_EQ(get_state_ex(0, &state), static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_EQ(state.dwPacketNumber, 0x6000u);
+    EXPECT_EQ(s_newer_xinput_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(s_xinput_detour_bodies.load(std::memory_order_relaxed), 0) << "a closed route entered the detour";
+
+    // A claim adopts the vacated trampoline. A fresh hook allocates another one.
+    const std::uint64_t successor = next_intercept_owner();
+    EXPECT_TRUE(install_xinput(0, successor)) << "the successor did not cover the claimed pair by observation";
+    EXPECT_EQ(xinput_trampoline(), primary_chain) << "the successor did not claim the primary position";
+    EXPECT_EQ(xinput_ex_trampoline(), ex_chain) << "the successor did not claim the ordinal-100 position";
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before);
+    s_xinput_detour_bodies.store(0, std::memory_order_relaxed);
+    EXPECT_EQ(get_state(0, &state), static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_GT(s_xinput_detour_bodies.load(std::memory_order_relaxed), 0) << "the claimed route skipped the detour";
+
+    ASSERT_TRUE(newer.disable().has_value());
+    EXPECT_TRUE(install_xinput(0, successor));
+    const auto exact = detail::xinput_pair_coverage_for_test();
+    EXPECT_TRUE(exact.primary) << "a hand-back did not give the claimed primary exact coverage";
+    EXPECT_TRUE(exact.ex);
+
+    uninstall(successor);
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookResidue), residue_before + 2)
+        << "a claimed position booked new residue";
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before - 1);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputTarget), target_before)
+        << "a claimed position kept another provider reference";
+    EXPECT_EQ(get_state(0, &state), static_cast<DWORD>(ERROR_SUCCESS));
+
+    // The next generation claims the same positions again.
+    const std::uint64_t third = next_intercept_owner();
+    EXPECT_TRUE(install_xinput(0, third));
+    EXPECT_EQ(xinput_trampoline(), primary_chain);
+    uninstall(third);
+    set_xinput_detour_body_seam(nullptr);
+    s_newer_xinput_original.store(nullptr, std::memory_order_release);
+    set_xinput_module_override_for_test(nullptr);
+    FreeLibrary(fixture);
 }
 
 TEST(InterceptXInputTest, NonOwnerPollerConstructionCannotReplaceActiveOwnersConsumeRules)

@@ -1,3 +1,4 @@
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
 #include "internal/input_intercept.hpp"
 
@@ -6,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -77,10 +79,18 @@ extern "C" BOOL WINAPI dmk_xinput_copy_installed() noexcept
     return DetourModKit::detail::xinput_installed() ? TRUE : FALSE;
 }
 
-/** @brief Reports the retained provider references after this copy stops. */
+/**
+ * @brief Reports the install references in bits 0-7, the XInputKeepalive pins in bits 8-15, and the XInputTarget pins
+ *        in bits 16-23 of this copy.
+ */
 extern "C" DWORD WINAPI dmk_xinput_copy_module_refs() noexcept
 {
-    return static_cast<DWORD>(DetourModKit::detail::xinput_module_refs_held());
+    namespace diag = DetourModKit::diagnostics;
+    const auto field = [](std::size_t value, unsigned shift) noexcept -> DWORD
+    { return static_cast<DWORD>(value < 0xFFu ? value : 0xFFu) << shift; };
+    return field(static_cast<std::size_t>(DetourModKit::detail::xinput_module_refs_held()), 0) |
+           field(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), 8) |
+           field(diag::module_pin_count(diag::ModulePinReason::XInputTarget), 16);
 }
 
 /** @brief Separates exact patch evidence from scoped route observations. */

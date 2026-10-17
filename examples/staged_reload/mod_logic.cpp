@@ -262,7 +262,7 @@ extern "C"
             {
                 return DMK_STAGED_RELOAD_REFUSED;
             }
-            s_session.reset(); // Ordered teardown can retain XInput here.
+            s_session.reset(); // A drain timeout or the residue budget can still retain XInput here.
         }
         return dmk::staged_reload::verdict(retirement, s_baseline, s_loader_abi_version);
     }
