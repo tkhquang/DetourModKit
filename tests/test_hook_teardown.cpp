@@ -26,6 +26,7 @@
 #include "fixtures/proof_section.hpp"
 #include "fixtures/hook_fixture.hpp"
 #include "fixtures/log_capture.hpp"
+#include "fixtures/loader_lock_scope.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -167,26 +168,6 @@ namespace
     int layer_state_detour_top(int x)
     {
         return x + 2000;
-    }
-
-    /// Copies the first bytes of a function's entry, the span an inline patch overwrites.
-    template <class Fn> [[nodiscard]] std::array<std::uint8_t, 16> entry_bytes(Fn *fn) noexcept
-    {
-        std::array<std::uint8_t, 16> bytes{};
-        std::memcpy(bytes.data(), reinterpret_cast<const void *>(fn), bytes.size());
-        return bytes;
-    }
-
-    /// A pin whose detour stays reachable books here.
-    [[nodiscard]] std::size_t hook_manager_leaks() noexcept
-    {
-        return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
-    }
-
-    /// A retired layer that keeps backend storage while no path reaches its detour books here.
-    [[nodiscard]] std::size_t hook_residue_leaks() noexcept
-    {
-        return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookResidue);
     }
 } // namespace
 
@@ -2443,5 +2424,651 @@ TEST(HookLayerBypass, FreeRecordFloorDecidesResidueOrPin)
     upper.reset();
     EXPECT_EQ(call_unfolded(&budget_floor_target, 5), pristine + SUCCESSOR_DELTA) << "the pin lost its detour";
     EXPECT_TRUE(is_target_hooked(target));
+}
+#endif
+
+namespace
+{
+    /// The bound of a retirement that a parked call keeps Busy.
+    constexpr std::chrono::milliseconds BUSY_RETIRE_DEADLINE{100};
+    /// The bound of a retirement that has to succeed.
+    constexpr std::chrono::milliseconds RETIRE_DEADLINE{2000};
+
+    DMK_PROOF_SEEDED_TARGET(stack_reference_target, 181)
+    DMK_PROOF_SEEDED_TARGET(retire_lower_target, 191)
+    DMK_PROOF_SEEDED_TARGET(retire_top_target, 193)
+    DMK_PROOF_SEEDED_TARGET(deadline_counted_target, 197)
+    DMK_PROOF_SEEDED_TARGET(deadline_raw_target, 199)
+    DMK_PROOF_SEEDED_TARGET(deadline_mid_target, 263)
+
+    std::atomic<int> s_deadline_mid_entries{0};
+
+    void count_deadline_mid_entry(MidContext &) noexcept
+    {
+        s_deadline_mid_entries.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// The counted form of chain_detour.
+    template <int Case, int Delta> int counted_chain_detour(int value) noexcept
+    {
+        return call_unfolded(chain_next<Case, Delta>.load(std::memory_order_acquire), value) + Delta;
+    }
+
+    /// Installs a disabled counted layer whose detour adds @p Delta to the result of its own trampoline.
+    template <int Case, int Delta>
+    [[nodiscard]] Result<Hook> install_counted_chain_layer(const char *name, Address target)
+    {
+        Result<Hook> created = inline_at<&counted_chain_detour<Case, Delta>>(InlineRequest{
+            .name = name,
+            .target = target,
+        });
+        if (created.has_value())
+        {
+            chain_next<Case, Delta>.store(created->original<ChainFn>(), std::memory_order_release);
+        }
+        return created;
+    }
+
+    /// Installs a disabled counted @ref parked_detour on @p target and points it at its trampoline.
+    template <int Case> [[nodiscard]] Result<Hook> install_parked_layer(const char *name, Address target)
+    {
+        Result<Hook> created = inline_at<&parked_detour<Case>>(InlineRequest{
+            .name = name,
+            .target = target,
+        });
+        if (created.has_value())
+        {
+            park_signals<Case>.next.store(created->original<ChainFn>(), std::memory_order_release);
+        }
+        return created;
+    }
+
+    /// Installs a chain layer on @p target, pushes it onto @p stack, and arms it.
+    template <int Case, int Delta> void push_armed_chain_layer(HookStack &stack, const char *name, Address target)
+    {
+        Result<Hook> created = install_chain_layer<Case, Delta>(name, target);
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        ASSERT_TRUE(stack.push(std::move(*created)).enable().has_value());
+    }
+} // namespace
+
+// The stack keeps each hook in its own allocation, so a reference from the first push stays valid while later pushes
+// grow the stack.
+TEST(HookStackTest, PushReferencesSurviveLaterPushes)
+{
+    const Address target = addr_of(&stack_reference_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    const int pristine = call_unfolded(&stack_reference_target, 5);
+    constexpr int ALL_LAYERS = BASE_DELTA + TOP_DELTA + SUCCESSOR_DELTA + UPPER_SUCCESSOR_DELTA + FOREIGN_DELTA;
+    {
+        HookStack stack;
+        Result<Hook> base_created = install_chain_layer<21, BASE_DELTA>("ReferenceBase", target);
+        ASSERT_TRUE(base_created.has_value()) << base_created.error().message();
+        Hook &base = stack.push(std::move(*base_created));
+        ASSERT_TRUE(base.enable().has_value());
+        ASSERT_NO_FATAL_FAILURE((push_armed_chain_layer<21, TOP_DELTA>(stack, "ReferenceSecond", target)));
+        ASSERT_NO_FATAL_FAILURE((push_armed_chain_layer<21, SUCCESSOR_DELTA>(stack, "ReferenceThird", target)));
+        ASSERT_NO_FATAL_FAILURE((push_armed_chain_layer<21, UPPER_SUCCESSOR_DELTA>(stack, "ReferenceFourth", target)));
+        ASSERT_NO_FATAL_FAILURE((push_armed_chain_layer<21, FOREIGN_DELTA>(stack, "ReferenceFifth", target)));
+        ASSERT_EQ(stack.size(), 5u);
+        ASSERT_EQ(call_unfolded(&stack_reference_target, 5), pristine + ALL_LAYERS);
+
+        EXPECT_EQ(base.name(), "ReferenceBase");
+        EXPECT_TRUE(base.is_enabled());
+        // The base layer sits under four newer layers, so its disable bypasses it in place.
+        ASSERT_TRUE(base.disable().has_value());
+        EXPECT_FALSE(base.is_enabled());
+        EXPECT_EQ(call_unfolded(&stack_reference_target, 5), pristine + ALL_LAYERS - BASE_DELTA);
+        ASSERT_TRUE(base.enable().has_value());
+        EXPECT_EQ(call_unfolded(&stack_reference_target, 5), pristine + ALL_LAYERS);
+    }
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&stack_reference_target, 5), pristine);
+}
+
+// A stack layer under a newer layer outside the stack retires by bypass and vacates its position. The top layer of the
+// stack on another target restores. The outside layer still reaches the original through the vacated position.
+TEST(HookStackTest, RetireRestoresTopAndBypassesLower)
+{
+    const Address lower_target = addr_of(&retire_lower_target);
+    const Address top_target = addr_of(&retire_top_target);
+    ASSERT_FALSE(is_target_hooked(lower_target));
+    ASSERT_FALSE(is_target_hooked(top_target));
+    const int lower_pristine = call_unfolded(&retire_lower_target, 5);
+    const int top_pristine = call_unfolded(&retire_top_target, 5);
+    const std::array<std::uint8_t, 16> top_pristine_bytes = entry_bytes(&retire_top_target);
+
+    HookStack stack;
+    Result<Hook> lower_created = install_counted_chain_layer<22, BASE_DELTA>("RetireLower", lower_target);
+    ASSERT_TRUE(lower_created.has_value()) << lower_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*lower_created)).enable().has_value());
+    Result<Hook> outside_created = install_chain_layer<22, TOP_DELTA>("RetireOutsideUpper", lower_target);
+    ASSERT_TRUE(outside_created.has_value()) << outside_created.error().message();
+    std::optional<Hook> outside{std::move(*outside_created)};
+    ASSERT_TRUE(outside->enable().has_value());
+    Result<Hook> top_created = install_counted_chain_layer<23, BASE_DELTA>("RetireTop", top_target);
+    ASSERT_TRUE(top_created.has_value()) << top_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*top_created)).enable().has_value());
+    ASSERT_EQ(call_unfolded(&retire_lower_target, 5), lower_pristine + TOP_DELTA + BASE_DELTA);
+    ASSERT_EQ(call_unfolded(&retire_top_target, 5), top_pristine + BASE_DELTA);
+    const std::array<std::uint8_t, 16> lower_armed = entry_bytes(&retire_lower_target);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.refusal, ErrorCode::Ok);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(retired.vacated, 1u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_TRUE(stack.empty());
+    EXPECT_EQ(hook_residue_leaks(), residue_before + 1);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_EQ(entry_bytes(&retire_lower_target), lower_armed) << "the vacate wrote the target";
+    EXPECT_EQ(call_unfolded(&retire_lower_target, 5), lower_pristine + TOP_DELTA)
+        << "the outside layer does not reach the original through the vacated position";
+    EXPECT_EQ(entry_bytes(&retire_top_target), top_pristine_bytes);
+    EXPECT_EQ(call_unfolded(&retire_top_target, 5), top_pristine);
+    EXPECT_FALSE(is_target_hooked(top_target));
+
+    outside.reset();
+    EXPECT_EQ(call_unfolded(&retire_lower_target, 5), lower_pristine);
+}
+
+// A Busy retirement leaves a counted, a raw, and a mid hook exactly as before. Each one stays enabled and reachable,
+// and no target byte changes.
+TEST(HookStackTest, RetireDeadlineLeavesEveryHookAsBefore)
+{
+    const int counted_pristine = call_unfolded(&deadline_counted_target, 5);
+    const int raw_pristine = call_unfolded(&deadline_raw_target, 5);
+    const int mid_pristine = call_unfolded(&deadline_mid_target, 5);
+
+    HookStack stack;
+    Result<Hook> counted_created = install_parked_layer<24>("DeadlineCounted", addr_of(&deadline_counted_target));
+    ASSERT_TRUE(counted_created.has_value()) << counted_created.error().message();
+    Hook &counted = stack.push(std::move(*counted_created));
+    ASSERT_TRUE(counted.enable().has_value());
+    Result<Hook> raw_created = install_chain_layer<24, TOP_DELTA>("DeadlineRaw", addr_of(&deadline_raw_target));
+    ASSERT_TRUE(raw_created.has_value()) << raw_created.error().message();
+    Hook &raw = stack.push(std::move(*raw_created));
+    ASSERT_TRUE(raw.enable().has_value());
+    Result<Hook> mid_created = mid_at(
+        MidRequest{
+            .name = "DeadlineMid",
+            .target = addr_of(&deadline_mid_target),
+        },
+        &count_deadline_mid_entry
+    );
+    ASSERT_TRUE(mid_created.has_value()) << mid_created.error().message();
+    Hook &mid = stack.push(std::move(*mid_created));
+    ASSERT_TRUE(mid.enable().has_value());
+    const std::array<std::uint8_t, 16> counted_armed = entry_bytes(&deadline_counted_target);
+    const std::array<std::uint8_t, 16> raw_armed = entry_bytes(&deadline_raw_target);
+    const std::array<std::uint8_t, 16> mid_armed = entry_bytes(&deadline_mid_target);
+
+    ParkedCall call{park_signals<24>, &deadline_counted_target, 5};
+    ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the detour";
+    const HookRetirement busy = stack.retire(BUSY_RETIRE_DEADLINE);
+    ASSERT_EQ(busy.outcome, RetirementOutcome::Busy);
+    EXPECT_EQ(busy.refusal, ErrorCode::Ok);
+    EXPECT_EQ(busy.in_flight, 1u);
+    EXPECT_EQ(busy.restored + busy.vacated + busy.pinned, 0u);
+    EXPECT_EQ(stack.size(), 3u);
+    EXPECT_TRUE(counted.is_enabled());
+    EXPECT_TRUE(raw.is_enabled());
+    EXPECT_TRUE(mid.is_enabled());
+    EXPECT_EQ(entry_bytes(&deadline_counted_target), counted_armed);
+    EXPECT_EQ(entry_bytes(&deadline_raw_target), raw_armed);
+    EXPECT_EQ(entry_bytes(&deadline_mid_target), mid_armed);
+    EXPECT_EQ(call_unfolded(&deadline_counted_target, 5), counted_pristine + PARKED_DELTA)
+        << "the counted relay stayed off";
+    EXPECT_EQ(call_unfolded(&deadline_raw_target, 5), raw_pristine + TOP_DELTA) << "the raw relay stayed off";
+    const int mid_entries = s_deadline_mid_entries.load(std::memory_order_relaxed);
+    EXPECT_EQ(call_unfolded(&deadline_mid_target, 5), mid_pristine);
+    EXPECT_EQ(s_deadline_mid_entries.load(std::memory_order_relaxed), mid_entries + 1) << "the mid route stayed closed";
+
+    EXPECT_EQ(call.release_and_join(), counted_pristine + PARKED_DELTA);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 3u);
+    EXPECT_EQ(retired.vacated, 0u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(call_unfolded(&deadline_counted_target, 5), counted_pristine);
+    EXPECT_EQ(call_unfolded(&deadline_raw_target, 5), raw_pristine);
+    EXPECT_EQ(call_unfolded(&deadline_mid_target, 5), mid_pristine);
+    EXPECT_FALSE(is_target_hooked(addr_of(&deadline_mid_target)));
+}
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(reopen_counted_target, 379)
+    DMK_PROOF_SEEDED_TARGET(reopen_raw_target, 383)
+    DMK_PROOF_SEEDED_TARGET(reopen_mid_target, 389)
+    DMK_PROOF_SEEDED_TARGET(unbounded_retire_target, 401)
+    DMK_PROOF_SEEDED_TARGET(shared_first_target, 409)
+    DMK_PROOF_SEEDED_TARGET(shared_second_target, 419)
+
+    std::atomic<int> s_reopen_mid_entries{0};
+    std::atomic<bool> s_reopen_mid_armed{false};
+    std::atomic<bool> s_reopen_mid_parked{false};
+    std::atomic<bool> s_reopen_mid_released{false};
+
+    /// Counts each entry. The next armed entry parks until its release or @ref PARK_BOUND.
+    void park_reopen_mid_entry(MidContext &) noexcept
+    {
+        s_reopen_mid_entries.fetch_add(1, std::memory_order_relaxed);
+        if (!s_reopen_mid_armed.exchange(false, std::memory_order_acq_rel))
+        {
+            return;
+        }
+        s_reopen_mid_parked.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + PARK_BOUND;
+        while (!s_reopen_mid_released.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    /// Releases the parked mid callback on every exit path.
+    struct MidCallbackRelease
+    {
+        ~MidCallbackRelease() noexcept
+        {
+            s_reopen_mid_armed.store(false, std::memory_order_release);
+            s_reopen_mid_released.store(true, std::memory_order_release);
+        }
+    };
+
+    /// Waits up to @ref PARK_BOUND for @p flag and reports whether it turned true.
+    [[nodiscard]] bool wait_until_set(const std::atomic<bool> &flag) noexcept
+    {
+        const auto deadline = std::chrono::steady_clock::now() + PARK_BOUND;
+        while (!flag.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        {
+            Sleep(1);
+        }
+        return flag.load(std::memory_order_acquire);
+    }
+
+    /// The shared parked detour forwards here, so a call of either target returns its argument plus the delta.
+    DMK_TEST_NOINLINE int shared_detour_next(int value)
+    {
+        return value;
+    }
+} // namespace
+
+// The Busy comes from the CLOSING drain of the mid route, after the counted drain passed. The undo reopens the route
+// and switches both relays back on, so each hook runs again while the parked callback stays in flight.
+TEST(HookStackTest, RetireDeadlineReopensAClosedMidRoute)
+{
+    const int counted_pristine = call_unfolded(&reopen_counted_target, 5);
+    const int raw_pristine = call_unfolded(&reopen_raw_target, 5);
+    const int mid_pristine = call_unfolded(&reopen_mid_target, 5);
+
+    HookStack stack;
+    Result<Hook> counted_created =
+        install_counted_chain_layer<28, BASE_DELTA>("ReopenCounted", addr_of(&reopen_counted_target));
+    ASSERT_TRUE(counted_created.has_value()) << counted_created.error().message();
+    Hook &counted = stack.push(std::move(*counted_created));
+    ASSERT_TRUE(counted.enable().has_value());
+    Result<Hook> raw_created = install_chain_layer<28, TOP_DELTA>("ReopenRaw", addr_of(&reopen_raw_target));
+    ASSERT_TRUE(raw_created.has_value()) << raw_created.error().message();
+    Hook &raw = stack.push(std::move(*raw_created));
+    ASSERT_TRUE(raw.enable().has_value());
+    Result<Hook> mid_created = mid_at(
+        MidRequest{
+            .name = "ReopenMid",
+            .target = addr_of(&reopen_mid_target),
+        },
+        &park_reopen_mid_entry
+    );
+    ASSERT_TRUE(mid_created.has_value()) << mid_created.error().message();
+    Hook &mid = stack.push(std::move(*mid_created));
+    ASSERT_TRUE(mid.enable().has_value());
+    const std::array<std::uint8_t, 16> counted_armed = entry_bytes(&reopen_counted_target);
+    const std::array<std::uint8_t, 16> raw_armed = entry_bytes(&reopen_raw_target);
+    const std::array<std::uint8_t, 16> mid_armed = entry_bytes(&reopen_mid_target);
+
+    s_reopen_mid_parked.store(false, std::memory_order_release);
+    s_reopen_mid_released.store(false, std::memory_order_release);
+    s_reopen_mid_armed.store(true, std::memory_order_release);
+    std::atomic<int> parked_result{0};
+    std::jthread caller([&parked_result]
+                        { parked_result.store(call_unfolded(&reopen_mid_target, 5), std::memory_order_release); });
+    // Declared after the caller, so the release precedes the join on every exit path.
+    const MidCallbackRelease release;
+    ASSERT_TRUE(wait_until_set(s_reopen_mid_parked)) << "the call never reached the mid callback";
+    const int parked_entries = s_reopen_mid_entries.load(std::memory_order_relaxed);
+
+    HookRetirement busy{};
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Info};
+        busy = stack.retire(BUSY_RETIRE_DEADLINE);
+        text = capture.read_all();
+    }
+    ASSERT_EQ(busy.outcome, RetirementOutcome::Busy);
+    EXPECT_EQ(busy.refusal, ErrorCode::Ok);
+    EXPECT_EQ(busy.in_flight, 0u);
+    EXPECT_NE(text.find("a mid callback stayed inside its route past the deadline"), std::string::npos) << text;
+    EXPECT_EQ(busy.restored + busy.vacated + busy.pinned, 0u);
+    EXPECT_EQ(stack.size(), 3u);
+    EXPECT_TRUE(counted.is_enabled());
+    EXPECT_TRUE(raw.is_enabled());
+    EXPECT_TRUE(mid.is_enabled());
+    EXPECT_EQ(entry_bytes(&reopen_counted_target), counted_armed);
+    EXPECT_EQ(entry_bytes(&reopen_raw_target), raw_armed);
+    EXPECT_EQ(entry_bytes(&reopen_mid_target), mid_armed);
+    EXPECT_EQ(call_unfolded(&reopen_counted_target, 5), counted_pristine + BASE_DELTA)
+        << "the counted relay stayed off";
+    EXPECT_EQ(call_unfolded(&reopen_raw_target, 5), raw_pristine + TOP_DELTA) << "the raw relay stayed off";
+    EXPECT_EQ(call_unfolded(&reopen_mid_target, 5), mid_pristine);
+    EXPECT_EQ(s_reopen_mid_entries.load(std::memory_order_relaxed), parked_entries + 1)
+        << "the mid route stayed closed";
+
+    s_reopen_mid_released.store(true, std::memory_order_release);
+    caller.join();
+    EXPECT_EQ(parked_result.load(std::memory_order_acquire), mid_pristine);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 3u);
+    EXPECT_EQ(retired.vacated + retired.pinned, 0u);
+    EXPECT_EQ(call_unfolded(&reopen_counted_target, 5), counted_pristine);
+    EXPECT_EQ(call_unfolded(&reopen_raw_target, 5), raw_pristine);
+    EXPECT_EQ(call_unfolded(&reopen_mid_target, 5), mid_pristine);
+    EXPECT_FALSE(is_target_hooked(addr_of(&reopen_mid_target)));
+}
+
+// The largest deadline saturates and does not overflow, so the retirement waits for a parked call that another thread
+// releases later.
+TEST(HookStackTest, RetireWithTheLargestDeadlineWaitsForTheCall)
+{
+    const int pristine = call_unfolded(&unbounded_retire_target, 5);
+    HookStack stack;
+    Result<Hook> created = install_parked_layer<30>("UnboundedRetire", addr_of(&unbounded_retire_target));
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*created)).enable().has_value());
+
+    ParkedCall call{park_signals<30>, &unbounded_retire_target, 5};
+    ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the detour";
+    const auto started = std::chrono::steady_clock::now();
+    std::jthread releaser(
+        []
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{200});
+            park_signals<30>.released.store(true, std::memory_order_release);
+        }
+    );
+    const HookRetirement retired = stack.retire(std::chrono::milliseconds::max());
+    const auto waited = std::chrono::steady_clock::now() - started;
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired) << "the largest deadline expired at once";
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_GE(waited, std::chrono::milliseconds{150}) << "the retirement did not wait for the parked call";
+    EXPECT_EQ(call.release_and_join(), pristine + PARKED_DELTA);
+    EXPECT_EQ(call_unfolded(&unbounded_retire_target, 5), pristine);
+}
+
+// Two hooks of one detour share its counters. The drain sums that block once, so one parked call reads as one.
+TEST(HookStackTest, RetireCountsASharedDetourCallOnce)
+{
+    const int first_pristine = call_unfolded(&shared_first_target, 5);
+    const int second_pristine = call_unfolded(&shared_second_target, 5);
+    park_signals<31>.next.store(&shared_detour_next, std::memory_order_release);
+
+    HookStack stack;
+    Result<Hook> first_created = inline_at<&parked_detour<31>>(InlineRequest{
+        .name = "SharedDetourFirst",
+        .target = addr_of(&shared_first_target),
+    });
+    ASSERT_TRUE(first_created.has_value()) << first_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*first_created)).enable().has_value());
+    Result<Hook> second_created = inline_at<&parked_detour<31>>(InlineRequest{
+        .name = "SharedDetourSecond",
+        .target = addr_of(&shared_second_target),
+    });
+    ASSERT_TRUE(second_created.has_value()) << second_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*second_created)).enable().has_value());
+    ASSERT_EQ(call_unfolded(&shared_first_target, 5), 5 + PARKED_DELTA);
+    ASSERT_EQ(call_unfolded(&shared_second_target, 5), 5 + PARKED_DELTA);
+
+    ParkedCall call{park_signals<31>, &shared_first_target, 5};
+    ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the detour";
+    const HookRetirement busy = stack.retire(BUSY_RETIRE_DEADLINE);
+    ASSERT_EQ(busy.outcome, RetirementOutcome::Busy);
+    EXPECT_EQ(busy.refusal, ErrorCode::Ok);
+    EXPECT_EQ(busy.in_flight, 1u) << "the drain summed the shared counters once for each hook";
+    EXPECT_EQ(stack.size(), 2u);
+
+    EXPECT_EQ(call.release_and_join(), 5 + PARKED_DELTA);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 2u);
+    EXPECT_EQ(call_unfolded(&shared_first_target, 5), first_pristine);
+    EXPECT_EQ(call_unfolded(&shared_second_target, 5), second_pristine);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(loader_lock_retire_target, 269)
+    DMK_PROOF_SEEDED_TARGET(budget_retire_target, 271)
+    DMK_PROOF_SEEDED_TARGET(cell_owned_target, 277)
+    DMK_PROOF_SEEDED_TARGET(floor_pair_target, 397)
+    DMK_PROOF_SEEDED_TARGET(disabled_upper_target, 421)
+
+    /// The free records that the residue budget refuses: one below its floor of 64.
+    constexpr std::size_t BELOW_RESIDUE_FLOOR = 63;
+} // namespace
+
+TEST(HookStackTest, RetireUnderLoaderLockIsBusy)
+{
+    const Address target = addr_of(&loader_lock_retire_target);
+    const int pristine = call_unfolded(&loader_lock_retire_target, 5);
+    HookStack stack;
+    Result<Hook> created = install_counted_chain_layer<25, BASE_DELTA>("LoaderLockRetire", target);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    Hook &hook = stack.push(std::move(*created));
+    ASSERT_TRUE(hook.enable().has_value());
+    const std::array<std::uint8_t, 16> armed = entry_bytes(&loader_lock_retire_target);
+
+    HookRetirement busy{};
+    {
+        const dmk_test::ForcedLoaderProbe held;
+        busy = stack.retire(RETIRE_DEADLINE);
+    }
+    ASSERT_EQ(busy.outcome, RetirementOutcome::Busy);
+    EXPECT_EQ(busy.refusal, ErrorCode::LoaderLockActive);
+    EXPECT_EQ(busy.in_flight, 0u);
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_TRUE(hook.is_enabled());
+    EXPECT_EQ(entry_bytes(&loader_lock_retire_target), armed);
+    EXPECT_EQ(call_unfolded(&loader_lock_retire_target, 5), pristine + BASE_DELTA);
+
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(call_unfolded(&loader_lock_retire_target, 5), pristine);
+}
+
+// A fresh stack layer under a newer outside layer can only vacate. With 63 free process records, that vacate exceeds
+// the residue budget, so the retirement refuses and changes nothing. With the records back, it retires.
+TEST(HookStackTest, RetireOverTheResidueBudgetIsRefused)
+{
+    struct FillGuard
+    {
+        ~FillGuard() noexcept { clear_backend_coordinator_fill_for_test(); }
+    };
+    const FillGuard fill_guard;
+    const Address target = addr_of(&budget_retire_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    const int pristine = call_unfolded(&budget_retire_target, 5);
+
+    HookStack stack;
+    Result<Hook> lower_created = install_counted_chain_layer<26, BASE_DELTA>("BudgetRetireLower", target);
+    ASSERT_TRUE(lower_created.has_value()) << lower_created.error().message();
+    Hook &lower = stack.push(std::move(*lower_created));
+    ASSERT_TRUE(lower.enable().has_value());
+    Result<Hook> upper_created = install_chain_layer<26, TOP_DELTA>("BudgetRetireUpper", target);
+    ASSERT_TRUE(upper_created.has_value()) << upper_created.error().message();
+    std::optional<Hook> upper{std::move(*upper_created)};
+    ASSERT_TRUE(upper->enable().has_value());
+    ASSERT_EQ(call_unfolded(&budget_retire_target, 5), pristine + TOP_DELTA + BASE_DELTA);
+    const std::array<std::uint8_t, 16> armed = entry_bytes(&budget_retire_target);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+
+    const std::size_t free_now = backend_coordinator_counts_for_test().free;
+    ASSERT_GT(free_now, BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(fill_backend_coordinator_for_test(free_now - BELOW_RESIDUE_FLOOR), free_now - BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(backend_coordinator_counts_for_test().free, BELOW_RESIDUE_FLOOR);
+    const HookRetirement refused = stack.retire(RETIRE_DEADLINE);
+    ASSERT_EQ(refused.outcome, RetirementOutcome::Refused);
+    EXPECT_EQ(refused.refusal, ErrorCode::LayerResidueLimitReached);
+    EXPECT_EQ(refused.restored + refused.vacated + refused.pinned, 0u);
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_TRUE(lower.is_enabled());
+    EXPECT_EQ(entry_bytes(&budget_retire_target), armed);
+    EXPECT_EQ(call_unfolded(&budget_retire_target, 5), pristine + TOP_DELTA + BASE_DELTA)
+        << "the refused retirement left the lower relay off";
+    EXPECT_EQ(hook_residue_leaks(), residue_before);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+
+    clear_backend_coordinator_fill_for_test();
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.vacated, 1u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(hook_residue_leaks(), residue_before + 1);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_EQ(call_unfolded(&budget_retire_target, 5), pristine + TOP_DELTA);
+
+    upper.reset();
+    EXPECT_EQ(call_unfolded(&budget_retire_target, 5), pristine);
+}
+
+// Two stack layers on one target both restore, the upper one first, so the retirement leaves no residue position. With
+// 63 free process records the residue budget therefore passes, and the retirement books no HookResidue.
+TEST(HookStackTest, RetireRestoresSameTargetLayersBelowTheResidueFloor)
+{
+    struct FillGuard
+    {
+        ~FillGuard() noexcept { clear_backend_coordinator_fill_for_test(); }
+    };
+    const FillGuard fill_guard;
+    const Address target = addr_of(&floor_pair_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    const int pristine = call_unfolded(&floor_pair_target, 5);
+    const std::array<std::uint8_t, 16> pristine_bytes = entry_bytes(&floor_pair_target);
+
+    HookStack stack;
+    Result<Hook> lower_created = install_counted_chain_layer<29, BASE_DELTA>("FloorPairLower", target);
+    ASSERT_TRUE(lower_created.has_value()) << lower_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*lower_created)).enable().has_value());
+    Result<Hook> upper_created = install_chain_layer<29, TOP_DELTA>("FloorPairUpper", target);
+    ASSERT_TRUE(upper_created.has_value()) << upper_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*upper_created)).enable().has_value());
+    ASSERT_EQ(call_unfolded(&floor_pair_target, 5), pristine + TOP_DELTA + BASE_DELTA);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+
+    const std::size_t free_now = backend_coordinator_counts_for_test().free;
+    ASSERT_GT(free_now, BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(fill_backend_coordinator_for_test(free_now - BELOW_RESIDUE_FLOOR), free_now - BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(backend_coordinator_counts_for_test().free, BELOW_RESIDUE_FLOOR);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    clear_backend_coordinator_fill_for_test();
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired) << "the residue budget refused two layers that restore";
+    EXPECT_EQ(retired.refusal, ErrorCode::Ok);
+    EXPECT_EQ(retired.restored, 2u);
+    EXPECT_EQ(retired.vacated, 0u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_TRUE(stack.empty());
+    EXPECT_EQ(hook_residue_leaks(), residue_before);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_EQ(entry_bytes(&floor_pair_target), pristine_bytes);
+    EXPECT_EQ(call_unfolded(&floor_pair_target, 5), pristine);
+    EXPECT_FALSE(is_target_hooked(target));
+}
+
+// A disabled upper stack layer leaves the lower patch at the target, so the commit restores the upper layer and then
+// the lower one. With 63 free process records the residue budget therefore passes, and the retirement refuses nothing.
+TEST(HookStackTest, RetireRestoresADisabledUpperLayerBelowTheResidueFloor)
+{
+    struct FillGuard
+    {
+        ~FillGuard() noexcept { clear_backend_coordinator_fill_for_test(); }
+    };
+    const FillGuard fill_guard;
+    const Address target = addr_of(&disabled_upper_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    const int pristine = call_unfolded(&disabled_upper_target, 5);
+    const std::array<std::uint8_t, 16> pristine_bytes = entry_bytes(&disabled_upper_target);
+
+    HookStack stack;
+    Result<Hook> lower_created = install_counted_chain_layer<32, BASE_DELTA>("DisabledUpperLower", target);
+    ASSERT_TRUE(lower_created.has_value()) << lower_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*lower_created)).enable().has_value());
+    Result<Hook> upper_created = install_chain_layer<32, TOP_DELTA>("DisabledUpperTop", target);
+    ASSERT_TRUE(upper_created.has_value()) << upper_created.error().message();
+    const Hook &upper = stack.push(std::move(*upper_created));
+    ASSERT_FALSE(upper.is_enabled());
+    ASSERT_EQ(call_unfolded(&disabled_upper_target, 5), pristine + BASE_DELTA);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+
+    const std::size_t free_now = backend_coordinator_counts_for_test().free;
+    ASSERT_GT(free_now, BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(fill_backend_coordinator_for_test(free_now - BELOW_RESIDUE_FLOOR), free_now - BELOW_RESIDUE_FLOOR);
+    ASSERT_EQ(backend_coordinator_counts_for_test().free, BELOW_RESIDUE_FLOOR);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    clear_backend_coordinator_fill_for_test();
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired)
+        << "the residue budget refused a disabled upper layer that restores";
+    EXPECT_EQ(retired.refusal, ErrorCode::Ok);
+    EXPECT_EQ(retired.restored, 2u);
+    EXPECT_EQ(retired.vacated, 0u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_TRUE(stack.empty());
+    EXPECT_EQ(hook_residue_leaks(), residue_before);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_EQ(entry_bytes(&disabled_upper_target), pristine_bytes);
+    EXPECT_EQ(call_unfolded(&disabled_upper_target, 5), pristine);
+    EXPECT_FALSE(is_target_hooked(target));
+}
+
+// No cell turns Vacant before the commit, so a Busy retirement leaves the lower layer's cell Owned. The later
+// retirement vacates exactly that one cell.
+TEST(HookStackTest, BusyRetireLeavesEveryCellOwned)
+{
+    const Address target = addr_of(&cell_owned_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    const int pristine = call_unfolded(&cell_owned_target, 5);
+
+    HookStack stack;
+    Result<Hook> lower_created = install_parked_layer<27>("CellOwnedLower", target);
+    ASSERT_TRUE(lower_created.has_value()) << lower_created.error().message();
+    ASSERT_TRUE(stack.push(std::move(*lower_created)).enable().has_value());
+    Result<Hook> upper_created = install_chain_layer<27, TOP_DELTA>("CellOwnedUpper", target);
+    ASSERT_TRUE(upper_created.has_value()) << upper_created.error().message();
+    std::optional<Hook> upper{std::move(*upper_created)};
+    ASSERT_TRUE(upper->enable().has_value());
+
+    ParkedCall call{park_signals<27>, &cell_owned_target, 5};
+    ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the detour";
+    const std::size_t vacant_before = backend_coordinator_counts_for_test().vacant;
+    const HookRetirement busy = stack.retire(BUSY_RETIRE_DEADLINE);
+    EXPECT_EQ(busy.outcome, RetirementOutcome::Busy);
+    EXPECT_EQ(busy.in_flight, 1u);
+    EXPECT_EQ(backend_coordinator_counts_for_test().vacant, vacant_before) << "a Busy retirement vacated a cell";
+
+    EXPECT_EQ(call.release_and_join(), pristine + PARKED_DELTA + TOP_DELTA);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.vacated, 1u);
+    EXPECT_EQ(backend_coordinator_counts_for_test().vacant, vacant_before + 1);
+    EXPECT_EQ(call_unfolded(&cell_owned_target, 5), pristine + TOP_DELTA);
+
+    upper.reset();
+    EXPECT_EQ(call_unfolded(&cell_owned_target, 5), pristine);
 }
 #endif

@@ -24,6 +24,7 @@ The performance list in `AGENTS.md` defines the protected scope. The proof sourc
 - `RttiTest.FindInTable_WarmCacheRevalidatesGenerationTwicePerCall` pins the two generation probes on the `PointerTableCache` warm path.
 - `RttiReverseProof.TypeIdentityWarmMatchesRevalidatesGenerationEachCall` pins the one generation probe for each warm `TypeIdentity::matches`.
 - `RttiReverseProof.TypeIdentityWarmMatchesReadsPeHeaders` pins the guarded PE-header reads that probe costs.
+- `HookCounted.ThunkRangeCoversEntryAndReturn` pins the counted thunk shape for a scalar signature: one call inside its counted window and none outside it.
 
 Code review compares every other hot-path change against this inventory.
 

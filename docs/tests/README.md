@@ -131,11 +131,13 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_heal_scheduler.cpp` | `HealScheduler`, healed slots |
 | `test_hook.cpp` | Install core, `mid_at`, `install_all`, ledger, publication |
 | `test_hook_backend.cpp` | Backend transactions, exception containment |
+| `test_hook_counted.cpp` | Counted `inline_at<Detour>`, `CallerFrame`, the counted drain proof |
+| `test_hook_counted_hardened.cpp` | The counted thunk under `-fstack-protector-all` |
 | `test_hook_fault_proof.cpp` | Every hook `*FaultProof` suite |
 | `test_hook_inline.cpp` | `inline_at`, prologue policy, duplicates, `Hook::call` |
 | `test_hook_integration.cpp` | Hooks on `hook_target_lib.dll` |
 | `test_hook_loader.cpp` | Hook loader-lock boundary |
-| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, in-flight drain |
+| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, `HookStack::retire`, in-flight drain |
 | `test_hook_vmt.cpp` | `vmt_for`, `apply_to`, `remove_from`, method hooks |
 | `test_input.cpp` | Binding registration and query core, `KeyStateCache` |
 | `test_input_codes.cpp` | `InputCode` and `Trigger` names, `InputCodeHash` |
@@ -176,6 +178,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_session_header.cpp` | `session.hpp` compiles alone |
 | `test_sighealth.cpp` | Signature health |
 | `test_srw_shared_mutex.cpp` | `SrwSharedMutex` |
+| `test_staged_reload.cpp` | The `abi/staged_reload.h` values |
 | `test_string.cpp` | `string::trim` in `format.hpp` |
 | `test_string_xref.cpp` | `scan::find_string_xref` |
 | `test_trap_protect.cpp` | Per-region protection restore |
@@ -275,6 +278,9 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` | `layered_generation_reload` |
 | `Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer` | `layered_generation_reload` |
 | `Lifecycle.LayeredReloadResidueBudgetFallsBackToPin` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadParkedCountedDetourDefersRetirement` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadSelfRetirementIsRefused` | `layered_generation_reload` |
+| `Lifecycle.LayeredReloadCountedLowerCopyUnmaps` | `layered_generation_reload` |
 | `Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline` | `route_copy_host` |
 | `Lifecycle.RouteCopiesLegacyLowerStaysRefused` | `route_copy_host` |
 | `Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper` | `route_copy_host` |
@@ -282,7 +288,7 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.RouteCopiesResidueBudgetFloorPins` | `route_copy_host` |
 | `Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed` | `route_copy_host` |
 
-`Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` is the constancy soak. It runs 1000 reload cycles under a 1200-second timeout and returns skip code 77 under ASan. `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` runs 128 mid reload cycles under a 600-second timeout.
+`Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` is the constancy soak. It runs 1000 reload cycles under a 1200-second timeout and returns skip code 77 under ASan. `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` runs 128 mid reload cycles under a 600-second timeout. `Lifecycle.LayeredReloadCountedLowerCopyUnmaps` runs 51 generations under a 300-second timeout.
 
 ## Staged example proof
 

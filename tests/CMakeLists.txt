@@ -142,6 +142,13 @@ if(DMK_BUILD_TESTS)
   )
   list(SORT TEST_SOURCES)
 
+  # test_hook_counted_hardened.cpp proves that the counted thunk opts out of the stack protector. GCC and Clang
+  # protect every function of that file. MSVC keeps its default /GS, which the thunk already declines.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/test_hook_counted_hardened.cpp"
+      PROPERTIES COMPILE_OPTIONS "-fstack-protector-all")
+  endif()
+
   # psapi serves the cross-module hook tests; other Win32 dependencies propagate from DetourModKit.
   # hook_fixture.cpp defines the hook targets that several hook suites share, once for the whole binary.
   dmk_add_gtest_proof(
@@ -629,6 +636,9 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute
     Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer
     Lifecycle.LayeredReloadResidueBudgetFallsBackToPin
+    Lifecycle.LayeredReloadParkedCountedDetourDefersRetirement
+    Lifecycle.LayeredReloadSelfRetirementIsRefused
+    Lifecycle.LayeredReloadCountedLowerCopyUnmaps
     Lifecycle.StagedGenerationExistingCandidateUsesFreshName
     Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
     Lifecycle.VmtUnreadableModuleHeader
@@ -642,7 +652,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 314)
+    --minimum 317)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

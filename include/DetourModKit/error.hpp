@@ -130,6 +130,8 @@ namespace DetourModKit
         MidHookCapacityExhausted,
         /// The hook module refuses mutation under its loader-lock precondition.
         LoaderLockActive,
+        /// A retirement refused with no change, because a layer that cannot restore exceeds the residue budget.
+        LayerResidueLimitReached,
 
         // Scan (0x02xx).
         /// No candidates were supplied to the cascade.
@@ -420,6 +422,8 @@ namespace DetourModKit
             return "MidHookCapacityExhausted";
         case ErrorCode::LoaderLockActive:
             return "LoaderLockActive";
+        case ErrorCode::LayerResidueLimitReached:
+            return "LayerResidueLimitReached";
         case ErrorCode::EmptyCandidates:
             return "EmptyCandidates";
         case ErrorCode::NoMatch:

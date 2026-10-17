@@ -2,8 +2,9 @@
  * @file staged_generation_dll.cpp
  * @brief Defines one reloadable test generation with its own DetourModKit archive.
  * @details The fixture runs the guide's Init and Shutdown sequence. The host controls each test seam before poll start.
- *          It hooks the external hook target with a raw inline or a mid hook. It also exercises in-image mid hooks, an
- *          input binding, a subscribed dispatcher, and both diagnostics dispatchers, and omits VMT hooks.
+ *          It hooks the external hook target with a raw inline, a counted inline, or a mid hook. It also exercises
+ *          in-image mid hooks, an input binding, a subscribed dispatcher, and both diagnostics dispatchers, and omits
+ *          VMT hooks.
  */
 
 #include "DetourModKit/diagnostics.hpp"
@@ -74,7 +75,13 @@ namespace
     // install. Static destruction also runs newest first, because an array destroys its last element first.
     std::array<std::optional<DetourModKit::hook::Hook>, HOOK_CAPACITY> s_held_hooks;
     std::size_t s_held_hook_count = 0;
+    /// Owns the generation's hooks in install order in the Retire mode, in place of s_held_hooks.
+    DetourModKit::hook::HookStack s_hook_stack;
     int s_teardown_mode = 0;
+    std::atomic<int> s_detour_park{0};
+    std::atomic<std::uint64_t> s_retire_calls{0};
+    std::atomic<std::uint64_t> s_self_retire_calls{0};
+    DetourModKit::hook::HookRetirement s_last_retirement{};
     std::atomic<int> s_detour_bonus{0};
     HMODULE s_target_lib = nullptr;
     HMODULE s_xinput_proxy = nullptr;
@@ -114,11 +121,14 @@ namespace
     }
 
     /**
-     * @brief Moves @p hook into the next free slot of s_held_hooks.
-     * @return Null when the generation already holds HOOK_CAPACITY hooks. The hook is then destroyed.
+     * @brief Pushes @p hook onto s_hook_stack in the Retire mode, or moves it into the next free slot of s_held_hooks.
+     * @return Null when the slot array already holds HOOK_CAPACITY hooks. The hook is then destroyed.
+     * @throws std::bad_alloc If the stack push fails. The stack then destroys the hook.
      */
     [[nodiscard]] DetourModKit::hook::Hook *hold_hook(DetourModKit::hook::Hook hook)
     {
+        if (s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::Retire))
+            return &s_hook_stack.push(std::move(hook));
         if (s_held_hook_count == HOOK_CAPACITY)
             return nullptr;
         DetourModKit::hook::Hook &held = s_held_hooks[s_held_hook_count].emplace(std::move(hook));
@@ -197,9 +207,53 @@ namespace
     std::atomic<bool> s_park_entered{false};
     std::atomic<bool> s_park_release{false};
 
+    /// Reports the park as entered, then waits for ReleaseParkFn or PARK_WAIT_LIMIT.
+    void hold_park() noexcept
+    {
+        s_park_entered.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
+        while (!s_park_release.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        {
+            ::Sleep(1);
+        }
+    }
+
+    /// Runs HookStack::retire on s_hook_stack with the drain deadline and records the result for StatusFn.
+    [[nodiscard]] DetourModKit::hook::HookRetirement retire_generation_stack() noexcept
+    {
+        const DetourModKit::hook::HookRetirement retirement =
+            s_hook_stack.retire(std::chrono::milliseconds{s_drain_timeout_ms});
+        s_last_retirement = retirement;
+        s_retire_calls.fetch_add(1, std::memory_order_relaxed);
+        return retirement;
+    }
+
     int compute_damage_detour(int base, int modifier)
     {
         s_hook_calls.fetch_add(1, std::memory_order_relaxed);
+        const TargetFn original = s_original.load(std::memory_order_acquire);
+        return original != nullptr ? original(base, modifier) + s_detour_bonus.load(std::memory_order_relaxed)
+                                   : UNCHAINED_RESULT;
+    }
+
+    /// Takes the armed InitOptions::detour_park action on one call, then chains as compute_damage_detour does.
+    int compute_damage_counted_detour(int base, int modifier) noexcept
+    {
+        s_hook_calls.fetch_add(1, std::memory_order_relaxed);
+        const int park = s_detour_park.load(std::memory_order_relaxed);
+        if (park != static_cast<int>(staged_gen::DetourPark::None) &&
+            s_park_armed.exchange(false, std::memory_order_acq_rel))
+        {
+            if (park == static_cast<int>(staged_gen::DetourPark::SelfRetire))
+            {
+                s_self_retire_calls.fetch_add(1, std::memory_order_relaxed);
+                (void)retire_generation_stack();
+            }
+            else
+            {
+                hold_park();
+            }
+        }
         const TargetFn original = s_original.load(std::memory_order_acquire);
         return original != nullptr ? original(base, modifier) + s_detour_bonus.load(std::memory_order_relaxed)
                                    : UNCHAINED_RESULT;
@@ -217,6 +271,20 @@ namespace
         );
     }
 
+    /// Creates the disabled @ref staged_gen::HookKind @p kind hook named @p name on @p address.
+    [[nodiscard]] DetourModKit::Result<DetourModKit::hook::Hook>
+    create_target_hook(int kind, const std::string &name, DetourModKit::Address address)
+    {
+        using namespace DetourModKit;
+        if (kind == static_cast<int>(staged_gen::HookKind::Mid))
+            return hook::mid_at(hook::MidRequest{.name = name, .target = address}, &compute_damage_mid_callback);
+        if (kind == static_cast<int>(staged_gen::HookKind::Counted))
+            return hook::inline_at<&compute_damage_counted_detour>(
+                hook::InlineRequest{.name = name, .target = address}
+            );
+        return hook::inline_at(hook::InlineRequest{.name = name, .target = address}, &compute_damage_detour);
+    }
+
     /**
      * @brief Installs the InitOptions::hook_kind hook on @p target, then arms it.
      * @return False after a create or arm failure. A created hook stays held for the rollback.
@@ -231,9 +299,7 @@ namespace
         {
             safetyhook::force_ff_hook_for_test(true);
         }
-        Result<hook::Hook> installed =
-            mid ? hook::mid_at(hook::MidRequest{.name = name, .target = address}, &compute_damage_mid_callback)
-                : hook::inline_at(hook::InlineRequest{.name = name, .target = address}, &compute_damage_detour);
+        Result<hook::Hook> installed = create_target_hook(options.hook_kind, name, address);
         // A claim runs no backend setup, so the one-shot request can survive it. Later installs stay near.
         safetyhook::force_ff_hook_for_test(false);
         hook::Hook *const held = installed ? hold_hook(std::move(*installed)) : nullptr;
@@ -275,6 +341,7 @@ namespace
         {
             s_held_hooks[s_held_hook_count - 1].reset();
         }
+        s_hook_stack.clear();
         if (diag::intentional_leak_count(diag::LeakSubsystem::HookManager) != hook_leaks_before)
         {
             s_hook_teardown_refused = true;
@@ -284,6 +351,13 @@ namespace
             s_original.store(nullptr, std::memory_order_release);
         }
         return !s_hook_teardown_refused;
+    }
+
+    /// Returns the refusal of StagedShutdown: DMK_STAGED_RELOAD_RESTART_REQUIRED after a Retire-mode pin, otherwise 0.
+    [[nodiscard]] int shutdown_refusal() noexcept
+    {
+        const bool retire_mode = s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::Retire);
+        return retire_mode && s_hook_teardown_refused ? static_cast<int>(DMK_STAGED_RELOAD_RESTART_REQUIRED) : 0;
     }
 
     /// Rolls back reclaimable state while a retained hook preserves its trampoline and target-module reference.
@@ -369,6 +443,15 @@ extern "C"
         out->hook_residue_leaks = diag::intentional_leak_count(diag::LeakSubsystem::HookResidue);
         out->hook_module_pins = diag::module_pin_count(diag::ModulePinReason::Hook);
         out->coordinator_vacant = coordinator.vacant;
+        out->retire_calls = s_retire_calls.load(std::memory_order_relaxed);
+        out->retire_outcome = static_cast<int>(s_last_retirement.outcome);
+        out->retire_refusal = static_cast<int>(s_last_retirement.refusal);
+        out->retire_restored = s_last_retirement.restored;
+        out->retire_vacated = s_last_retirement.vacated;
+        out->retire_pinned = s_last_retirement.pinned;
+        out->retire_in_flight = s_last_retirement.in_flight;
+        out->self_retire_calls = s_self_retire_calls.load(std::memory_order_relaxed);
+        out->held_hooks = s_held_hook_count + s_hook_stack.size();
     }
 
     /// Implements @ref staged_gen::ArmParkFn.
@@ -418,6 +501,7 @@ extern "C"
             s_drain_timeout_ms = options->drain_timeout_ms;
             s_external_wheel = options->wheel_host != nullptr;
             s_teardown_mode = options->teardown_mode;
+            s_detour_park.store(options->detour_park, std::memory_order_relaxed);
             s_detour_bonus.store(options->detour_bonus, std::memory_order_relaxed);
             detail::g_hook_position_claims_refused_for_test.store(
                 options->refuse_position_claims != 0,
@@ -452,10 +536,10 @@ extern "C"
             }
 
             s_target_lib = ::LoadLibraryA(staged_gen::HOOK_TARGET_MODULE_NAME);
+            const char *const symbol =
+                options->target_symbol != nullptr ? options->target_symbol : staged_gen::HOOK_TARGET_SYMBOL;
             TargetFn volatile target = reinterpret_cast<TargetFn>(
-                s_target_lib != nullptr
-                    ? reinterpret_cast<void *>(::GetProcAddress(s_target_lib, staged_gen::HOOK_TARGET_SYMBOL))
-                    : nullptr
+                s_target_lib != nullptr ? reinterpret_cast<void *>(::GetProcAddress(s_target_lib, symbol)) : nullptr
             );
             if (target == nullptr)
             {
@@ -511,16 +595,9 @@ extern "C"
                         .combos = {{.keys = {keyboard_key(PROBE_VK)}, .modifiers = {}}},
                         .on_press = []() noexcept
                         {
-                            if (!s_park_armed.load(std::memory_order_acquire))
+                            if (s_park_armed.load(std::memory_order_acquire))
                             {
-                                return;
-                            }
-                            s_park_entered.store(true, std::memory_order_release);
-                            const auto deadline = std::chrono::steady_clock::now() + PARK_WAIT_LIMIT;
-                            while (!s_park_release.load(std::memory_order_acquire) &&
-                                   std::chrono::steady_clock::now() < deadline)
-                            {
-                                ::Sleep(1);
+                                hold_park();
                             }
                         },
                     }
@@ -644,12 +721,30 @@ extern "C"
         {
             return 0;
         }
+        const bool retire_mode = s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::Retire);
+        if (retire_mode)
+        {
+            // The stack retires before the session drain, so Busy and Refused keep every hook and the Session.
+            const hook::HookRetirement retirement = retire_generation_stack();
+            if (retirement.outcome == hook::RetirementOutcome::Busy)
+            {
+                return static_cast<int>(DMK_STAGED_RELOAD_BUSY);
+            }
+            if (retirement.outcome == hook::RetirementOutcome::Refused)
+            {
+                return static_cast<int>(DMK_STAGED_RELOAD_REFUSED);
+            }
+            if (retirement.pinned != 0)
+            {
+                s_hook_teardown_refused = true;
+            }
+        }
         // A refusal tells the loader to keep the DLL mapped. The callback drain stays closed until a retry completes.
         const bool drained = prepare_logic_dll_unload_all(std::chrono::milliseconds{s_drain_timeout_ms}) ==
                              LogicDllUnloadStatus::SafeToUnload;
         if (!drained)
         {
-            return 0;
+            return shutdown_refusal();
         }
         // The disable-first consumer latches a refused disable and destroys nothing, so the loader keeps it mapped.
         if (s_teardown_mode == static_cast<int>(staged_gen::TeardownMode::DisableFirst) &&
@@ -659,7 +754,7 @@ extern "C"
         }
 
         std::thread parked_caller;
-        if (s_retain_mid && !park_mid_caller(parked_caller))
+        if (s_retain_mid && !retire_mode && !park_mid_caller(parked_caller))
         {
             return 0;
         }
@@ -716,7 +811,8 @@ extern "C"
                                            xinput_targets == 0 && input_leaks == 0 && blocking_leaks == 0 &&
                                            diag::total_module_pins() == 0;
         s_external_wheel = false;
-        return (hooks_released && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1 : 0;
+        return (hooks_released && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1
+                                                                                                 : shutdown_refusal();
     }
 } // extern "C"
 

@@ -53,6 +53,7 @@ BACKEND_SOURCE_ISLANDS = {
     "src/hook.cpp",                       # hook lifecycle: install verbs, handle teardown, VMT surface
     "src/hook_toggle.cpp",                # Hook::enable / Hook::disable over the shared toggle publication order
     "src/hook_mid_context.cpp",           # the hook::MidContext accessor bridge over the backend register frame
+    "src/hook_retirement.cpp",            # HookStack::retire, the counted thunk decode, and its drain proof
     "src/internal/hook_backend_visit.hpp",  # nothrow visitation/toggle primitives over the backend variant
     "src/internal/input_intercept.cpp",   # the XInput/window-subclass active-input layer, owning its own inline hooks
     # src/internal/mid_hook_adapter.hpp: the exactly typed mid-hook dispatch pool and its pool-state TU
@@ -266,6 +267,7 @@ ALLOWED_DETAIL_HEADERS = {
     "event_dispatcher.hpp",  # EventDispatcher<T> template returned by-reference from public diagnostics.hpp
     "worker.hpp",            # StoppableWorker utility kept reachable via the DetourModKit.hpp umbrella
     "drift_manifest.hpp",    # drift-report persistence kept reachable via the DetourModKit.hpp umbrella
+    "counted_entry.hpp",     # counted thunk template that public hook::inline_at<Detour> instantiates
 }
 
 

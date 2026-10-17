@@ -22,6 +22,7 @@ src/event_dispatcher.cpp
 src/filesystem.cpp
 src/hook.cpp
 src/hook_mid_context.cpp
+src/hook_retirement.cpp
 src/hook_toggle.cpp
 src/input.cpp
 src/input_codes.cpp

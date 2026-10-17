@@ -39,6 +39,10 @@ def test_ledger_registration_is_rejected() -> None:
     expect_offenders("lib.a:hook_ledger.cpp.obj:          U __imp_atexit\n", 1)
 
 
+def test_retirement_registration_is_rejected() -> None:
+    expect_offenders("lib.a:hook_retirement.cpp.obj:      U atexit\n", 1)
+
+
 def test_mid_adapter_registration_is_rejected() -> None:
     expect_offenders("lib.a:mid_hook_adapter.cpp.obj:     U atexit\n", 1)
 

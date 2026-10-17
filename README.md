@@ -20,7 +20,9 @@ Two integration methods exist. Method 1 builds from source as a submodule. Metho
 
 ### ABI compatibility
 
-Read this before you choose a method. DetourModKit is a C++23 **static** library with a C++ API. Its only `extern "C"` block, in `DetourModKit/abi/wheel_host.h`, declares the C ABI of the opt-in resident wheel host. The archive bakes in the compiler's name mangling, its exception model, and the layout of every standard-library type that crosses the API. That set covers `std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside `Result<T>`. None of it is stable across toolchains.
+Read this before you choose a method. DetourModKit is a C++23 **static** library with a C++ API. The archive bakes in the compiler's name mangling, its exception model, and the layout of every standard-library type that crosses the API. That set covers `std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside `Result<T>`. None of it is stable across toolchains.
+
+Two C ABI headers live in `DetourModKit/abi/`. The only `extern "C"` block, in `wheel_host.h`, declares the C ABI of the opt-in resident wheel host. `staged_reload.h` defines the result values of a staged-reload shutdown export.
 
 | Axis | Requirement | Failure mode |
 | --- | --- | --- |
@@ -170,7 +172,7 @@ bool g_greeting_enabled = true;
 // hook::Hook is move-only with no default constructor, so a global lives in an optional.
 std::optional<dmk::hook::Hook> g_print_hook;
 
-void __stdcall Detour_PrintMessage(const char *message, int type)
+void __stdcall Detour_PrintMessage(const char *message, int type) noexcept
 {
     // original<Fn>() is the unguarded fast path. It is non-null only while the hook is engaged.
     // Use call<Ret>(args...) instead when a teardown can race this detour.
@@ -192,9 +194,10 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
                            [](bool v) { g_greeting_enabled = v; }, true);
     session.ini().load("MyMod.ini");   // load after the binds, so file values reach them
 
-    // inline_at resolves the ladder at install time and performs the function cast internally.
+    // inline_at<&Detour> resolves the ladder at install time and counts each call into the detour.
+    // Off the loader lock, the handle's destructor waits for those calls before it restores the target.
     // The hook comes back DISABLED. The target is not patched until enable() below.
-    auto installed = dmk::hook::inline_at(
+    auto installed = dmk::hook::inline_at<&Detour_PrintMessage>(
         dmk::hook::InlineRequest{
             .name = "PrintMessage_Hook",
             .target = dmk::scan::OwnedScanRequest{
@@ -205,8 +208,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
                 .pages = dmk::scan::Pages::Executable,
                 .require_executable_result = true,
             },
-        },
-        &Detour_PrintMessage);
+        });
     if (!installed)
     {
         session.log().error("Install failed: {}", installed.error().message());
@@ -262,7 +264,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved)
 ```
 
 > [!WARNING]
-> See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for dynamic unload and caller-owned hook quiescence.
+> See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for dynamic unload. A counted hook drains its own calls, and a raw `inline_at(request, detour)` hook leaves quiescence to the caller.
 
 ## Configuration File Example
 

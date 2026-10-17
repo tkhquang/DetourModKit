@@ -8,19 +8,15 @@
  * Inline/mid validation covers the backend's unchecked decode footprint. VMT validation captures the object word for
  * DMK's detached-snapshot clone and guarded publication path. These declarations are internal and are never installed.
  *
- * @warning No function here may span a call into the hooking backend (safetyhook::InlineHook::create / enable /
- *          disable, safetyhook::MidHook::create, safetyhook::VmtHook::create / apply). DMK's guarded primitives recover
- *          from a fault by abandoning the faulting frame (__builtin_longjmp on MinGW, an asynchronous unwind under
- *          /EHsc on MSVC), and neither runs destructors, so a claimed fault abandons every lock and owner the frame
- *          held. InlineHook::enable holds its own mutex and the backend's virtual_protect_mutex across the patch, so a
- *          claimed fault would strand both locked for the life of the process and leave the target page
- *          writable-executable; the VMT clone path holds the process-wide object gate across its backend call, so a
- *          claimed fault there deadlocks every later VMT operation and leaks the clone's executable allocation.
- *          Validate before the backend call; never span it with a guard.
+ * @warning Never span a call into the hooking backend with a function here. A guarded primitive abandons the frame
+ *          that faulted, and no destructor runs. A claimed fault inside InlineHook::enable strands its locks for the
+ *          process and leaves the target page writable and executable. A claimed fault in the VMT clone path strands
+ *          the process-wide object gate. Validate before the backend call.
  */
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace DetourModKit
@@ -35,25 +31,17 @@ namespace DetourModKit
 
         /**
          * @brief Largest byte offset the backend may read from a target before the target is known to be safe.
-         * @details The backend hands its decoder a fixed 15-byte buffer at each instruction pointer, unclamped by any
-         *          region bound, and walks until it has covered a jump's worth of prologue. Its indirect-jump fallback
-         *          (6-byte jump plus an 8-byte absolute address = 14) is the deeper of the two walks, so the last
-         *          instruction it decodes can begin at target + 13 and read through target + 27. The fallback is
-         *          reachable whenever the near-jump attempt fails after a clean decode, so this bound is not
-         *          hypothetical. These sizes are private to the backend's implementation and are not exported by its
-         *          headers, so they cannot be queried and must be mirrored here; re-derive them when the backend is
-         *          repinned. @ref InlineHookFaultProof.WindowBoundaryMatchesBackendSteal pins the value.
+         * @details The backend decodes from a fixed 15-byte buffer at each instruction, with no region bound. Its
+         *          indirect-jump fallback covers 14 bytes, so its last decode can start at target + 13 and read
+         *          through target + 27. The backend headers export none of these sizes, so re-derive them when the
+         *          backend changes. @ref InlineHookFaultProof.WindowBoundaryMatchesBackendSteal pins the value.
          */
         inline constexpr std::size_t BACKEND_MAX_STEAL_WINDOW = 28;
 
         /**
          * @brief Bytes written by the indirect-jump fallback and the conservative minimum for a bounded target.
-         * @details The fallback stores its 8-byte absolute destination inside the target, immediately after the 6-byte
-         *          jump, and NOP-fills to its stolen extent, so it writes at least 14 bytes at the target. Which form
-         *          runs is decided by whether the trampoline allocation lands within near-jump reach, which happens
-         *          inside the backend after this validation, so a target must satisfy the LARGER of the two minimums to
-         *          be safe under either. A function shorter than this would be hooked correctly by the near jump but
-         *          overwritten past its end by the fallback.
+         * @details The fallback writes a 6-byte jump and an 8-byte absolute address into the target. The backend
+         *          picks the jump form after this validation, so a bounded target must fit the larger minimum.
          */
         inline constexpr std::size_t BACKEND_FALLBACK_MIN_PATCH = 14;
 
@@ -63,6 +51,22 @@ namespace DetourModKit
          *          malformed.
          */
         inline constexpr std::size_t MAX_VMT_SLOTS = 4096;
+
+        /// A function's half-open extent as its unwind metadata declares it.
+        struct FunctionBound
+        {
+            std::uintptr_t lo{0};
+            std::uintptr_t hi{0};
+        };
+
+        /**
+         * @brief Returns the extent of the RUNTIME_FUNCTION that registers @p target, or nullopt when none does.
+         * @details A leaf function or JIT code declares none, which is not a refusal. A concurrent unload can withdraw
+         *          the exception directory, so the record is copied under the fault guard. An inverted or empty record
+         *          reads as absent. A chained entry names another fragment of a split function, so the lookup never
+         *          follows one.
+         */
+        [[nodiscard]] std::optional<FunctionBound> unwind_bound(std::uintptr_t target) noexcept;
 
         /// Why @ref validate_backend_steal_window refused a target, or @ref TargetWindowVerdict::Ok if it did not.
         enum class TargetWindowVerdict : std::uint8_t
@@ -86,17 +90,14 @@ namespace DetourModKit
 
         /**
          * @brief Decides whether @p target can be handed to the backend without risking a host fault.
-         * @details Requires [target, target + @ref BACKEND_MAX_STEAL_WINDOW) to be executable, committed and readable,
-         *          and requires @ref BACKEND_FALLBACK_MIN_PATCH bytes to fit inside the target's unwind-declared
-         *          function bound where one exists. Code that declares no unwind bound (a leaf function, or JIT-emitted
-         *          code) is accepted: absence of metadata is not evidence of an unsafe target.
+         * @details Requires [target, target + @ref BACKEND_MAX_STEAL_WINDOW) to be executable, committed, and
+         *          readable. Requires @ref BACKEND_FALLBACK_MIN_PATCH bytes inside the unwind bound of the target when
+         *          one exists. Code with no unwind bound, such as a leaf function or JIT code, passes.
          * @return @ref TargetWindowVerdict::Ok when the backend may proceed, else the refusal and its address.
-         * @note Conservative by construction. The window is a worst-case bound, so a valid function entry lying within
-         *       @ref BACKEND_MAX_STEAL_WINDOW of the end of its executable region is refused even though the backend
-         *       might have decoded it in fewer bytes. Refusing a hookable target returns a typed error; admitting an
-         *       unreadable one kills the host.
+         * @note The window is a worst-case bound. An entry within @ref BACKEND_MAX_STEAL_WINDOW of the end of its
+         *       executable region is refused, although the backend can need fewer bytes.
          * @warning A verdict describes the moment it was taken. A concurrent unmap can invalidate it before the caller
-         *          acts on it; this narrows the window and attributes failures, and does not eliminate the race.
+         *          acts on it. The check narrows that window and attributes the failure, but it does not close it.
          */
         [[nodiscard]] TargetWindowResult validate_backend_steal_window(std::uintptr_t target) noexcept;
 

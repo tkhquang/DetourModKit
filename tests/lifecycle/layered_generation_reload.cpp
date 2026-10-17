@@ -1,11 +1,14 @@
 /**
  * @file layered_generation_reload.cpp
  * @brief Proves layered reload of two separately linked DetourModKit copies on one external target.
- * @details Two tagged families of staged_generation_dll hook compute_damage in hook_target_lib. Each family has its
- *          own hook name and detour bonuses, so a call result names the layers that it crossed. The host installs no
- *          DMK hook. It reads the process route records through its own archive and writes each foreign layer as
- *          machine code. CTest removes the staged copies and their logs after exit.
+ * @details Two tagged families of staged_generation_dll hook one export of hook_target_lib. Each family has its own
+ *          hook name and detour bonuses, so a call result names the layers that it crossed. The host installs no DMK
+ *          hook. It reads the process route records through its own archive and writes each foreign layer as machine
+ *          code. CTest removes the staged copies and their logs after exit.
  */
+
+#include "DetourModKit/error.hpp"
+#include "DetourModKit/hook.hpp"
 
 #include "staged_generation_host.hpp"
 #include "staged_generation_protocol.hpp"
@@ -20,6 +23,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include <windows.h>
@@ -41,6 +45,9 @@ namespace DetourModKit::detail
 
 namespace
 {
+    using DetourModKit::ErrorCode;
+    using DetourModKit::hook::RetirementOutcome;
+    using staged_gen::DetourPark;
     using staged_gen::HookKind;
     using staged_gen::TeardownMode;
     using CoordinatorCounts = DetourModKit::detail::BackendCoordinatorCounts;
@@ -51,7 +58,32 @@ namespace
 
     constexpr int CALL_BASE = 19;
     constexpr int CALL_MODIFIER = 6;
-    constexpr int ORIGINAL_RESULT = CALL_BASE + CALL_MODIFIER;
+
+    /**
+     * @struct TargetExport
+     * @brief One hook_target_lib export and its result for CALL_BASE and CALL_MODIFIER.
+     */
+    struct TargetExport
+    {
+        const char *symbol = nullptr;
+        int original_result = 0;
+    };
+
+    /// compute_damage returns base + modifier.
+    constexpr TargetExport DAMAGE_EXPORT{
+        .symbol = staged_gen::HOOK_TARGET_SYMBOL,
+        .original_result = CALL_BASE + CALL_MODIFIER,
+    };
+    /// compute_armor returns defense * level.
+    constexpr TargetExport ARMOR_EXPORT{
+        .symbol = "compute_armor",
+        .original_result = CALL_BASE * CALL_MODIFIER,
+    };
+    /// compute_speed returns agility - bonus.
+    constexpr TargetExport SPEED_EXPORT{
+        .symbol = "compute_speed",
+        .original_result = CALL_BASE - CALL_MODIFIER,
+    };
 
     /// The bonus that the foreign layer that chains adds to each call result.
     constexpr int FOREIGN_BONUS = 100000;
@@ -67,6 +99,11 @@ namespace
     constexpr unsigned CONSTANT_DEPTH_CYCLES = 1000;
     /// The reloads of the mid soak in each install order.
     constexpr unsigned MID_CYCLES_PER_ORDER = 64;
+
+    /// Bounds the wait for a host call to park in a counted detour.
+    constexpr std::uint32_t PARK_BUDGET_MS = 10000;
+    /// The drain deadline of a family whose Shutdown runs while a call stays parked, so the BUSY verdict comes fast.
+    constexpr std::uint32_t BUSY_DRAIN_TIMEOUT_MS = 250;
 
 #if defined(__SANITIZE_ADDRESS__)
     // ASan keeps VEH wrapper pages for each copy, so the RWX census holds only in an uninstrumented process.
@@ -209,6 +246,8 @@ namespace
         bool refuse_position_claims = false;
         /// Gives every generation one log file, so a long loop leaves one file per family.
         bool reuse_log_name = false;
+        DetourPark park = DetourPark::None;
+        std::uint32_t drain_timeout_ms = 5000;
         staged_gen::Generation generation{};
         std::string log_name{};
         unsigned started = 0;
@@ -236,6 +275,34 @@ namespace
             .successor_bonus = 20000,
         };
     }
+
+    /// Switches @p family to the counted kind, the Retire teardown, and the detour @p park.
+    [[nodiscard]] Family counted_family(Family family, DetourPark park = DetourPark::None)
+    {
+        family.kind = HookKind::Counted;
+        family.teardown = TeardownMode::Retire;
+        family.park = park;
+        return family;
+    }
+
+    /**
+     * @brief Returns the Shutdown verdict of a retirement of @p family that pins when @p pinned is true.
+     * @details The Retire mode returns the ABI 3 values. Every other mode returns the 4.3.0 values 0 and 1.
+     */
+    [[nodiscard]] int expected_verdict(const Family &family, bool pinned) noexcept
+    {
+        if (family.teardown == TeardownMode::Retire)
+            return static_cast<int>(pinned ? DMK_STAGED_RELOAD_RESTART_REQUIRED : DMK_STAGED_RELOAD_OK);
+        return pinned ? 0 : 1;
+    }
+
+    /// The family state that a retire call which changes nothing leaves as it was.
+    struct Snapshot
+    {
+        staged_gen::Status status{};
+        CoordinatorCounts records{};
+        TargetWindow window{};
+    };
 
     /// Where a generation's hook lands at Init.
     enum class Placement
@@ -278,7 +345,10 @@ namespace
     class LayeredHost
     {
     public:
-        explicit LayeredHost(const char *scenario) noexcept : m_scenario(scenario) {}
+        explicit LayeredHost(const char *scenario, const TargetExport &target = DAMAGE_EXPORT) noexcept
+            : m_scenario(scenario), m_export(target)
+        {
+        }
 
         LayeredHost(const LayeredHost &) = delete;
         LayeredHost &operator=(const LayeredHost &) = delete;
@@ -294,9 +364,7 @@ namespace
 
         [[nodiscard]] bool fail(const Family &family, const char *what) const noexcept
         {
-            char message[256]{};
-            std::snprintf(message, sizeof(message), "%s generation %u: %s", family.tag, family.started, what);
-            return fail(message);
+            return fail(describe(family, what).data());
         }
 
         [[nodiscard]] bool fail_value(const char *what, std::uint64_t expected, std::uint64_t actual) const noexcept
@@ -311,6 +379,12 @@ namespace
                 actual
             );
             return fail(message);
+        }
+
+        [[nodiscard]] bool
+        fail_value(const Family &family, const char *what, std::uint64_t expected, std::uint64_t actual) const noexcept
+        {
+            return fail_value(describe(family, what).data(), expected, actual);
         }
 
         /// Prints the outcome, removes each unmapped staged copy, and returns the process exit code.
@@ -342,7 +416,10 @@ namespace
             return window;
         }
 
-        [[nodiscard]] const TargetWindow &pristine_window() const noexcept { return m_pristine; }
+        [[nodiscard]] int original_result() const noexcept { return m_export.original_result; }
+
+        /// Calls the target once with the probe arguments and checks nothing.
+        [[nodiscard]] int call_target() const noexcept { return m_target(CALL_BASE, CALL_MODIFIER); }
 
         [[nodiscard]] bool window_equals(const TargetWindow &expected, const char *what) const noexcept
         {
@@ -365,11 +442,10 @@ namespace
             m_target_module = ::LoadLibraryA(staged_gen::HOOK_TARGET_MODULE_NAME);
             if (m_target_module == nullptr)
                 return fail("failed to load the hook target fixture");
-            m_target = staged_gen::resolve<TargetFn>(m_target_module, staged_gen::HOOK_TARGET_SYMBOL);
+            m_target = staged_gen::resolve<TargetFn>(m_target_module, m_export.symbol);
             if (m_target == nullptr)
                 return fail("the hook target fixture did not export its symbol");
-            m_pristine = read_window();
-            return m_target(CALL_BASE, CALL_MODIFIER) == ORIGINAL_RESULT ||
+            return m_target(CALL_BASE, CALL_MODIFIER) == m_export.original_result ||
                    fail("the hook target did not return its baseline result");
         }
 
@@ -406,6 +482,9 @@ namespace
             options.hook_name = family.hook_name;
             options.far_hook = family.far_hook ? 1 : 0;
             options.refuse_position_claims = family.refuse_position_claims ? 1 : 0;
+            options.detour_park = static_cast<int>(family.park);
+            options.drain_timeout_ms = family.drain_timeout_ms;
+            options.target_symbol = m_export.symbol;
             ++family.started;
             family.active_bonus = bonus;
             if (family.generation.init(&options) == 0)
@@ -438,8 +517,18 @@ namespace
             const bool restored = retirement == Retirement::Restore;
             const bool pinned = retirement == Retirement::PinOverBudget;
             const bool vacated = retirement == Retirement::VacateFresh || retirement == Retirement::VacateClaimed;
-            if (verdict != (pinned ? 0 : 1))
+            if (verdict != expected_verdict(family, pinned))
                 return fail(family, pinned ? "Shutdown accepted a pin over the residue budget" : "Shutdown refused");
+            if (family.teardown == TeardownMode::Retire)
+            {
+                if (!retire_call_reads(family, before, after, RetirementOutcome::Retired, ErrorCode::Ok))
+                    return false;
+                if (after.retire_restored != (restored ? 1U : 0U) || after.retire_vacated != (vacated ? 1U : 0U) ||
+                    after.retire_pinned != (pinned ? 1U : 0U) || after.held_hooks != 0)
+                {
+                    return fail(family, "the retire counts do not match the retirement");
+                }
+            }
             const std::uint64_t manager_leaks = pinned ? 1U : 0U;
             if (after.hook_manager_leaks != before.hook_manager_leaks + manager_leaks)
                 return fail(family, pinned ? "the pin booked no HookManager leak" : "Shutdown booked HookManager");
@@ -466,6 +555,87 @@ namespace
             return restored || read_window() == window_before || fail(family, "the retirement wrote a target byte");
         }
 
+        /// Checks that exactly one retire call ran between @p before and @p after and ended as @p outcome.
+        [[nodiscard]] bool retire_call_reads(
+            const Family &family,
+            const staged_gen::Status &before,
+            const staged_gen::Status &after,
+            RetirementOutcome outcome,
+            ErrorCode refusal
+        ) const noexcept
+        {
+            if (after.retire_calls != before.retire_calls + 1)
+                return fail_value(family, "the retire call count differs", before.retire_calls + 1, after.retire_calls);
+            if (after.retire_outcome != static_cast<int>(outcome))
+            {
+                const auto expected = static_cast<std::uint64_t>(outcome);
+                const auto actual = static_cast<std::uint64_t>(after.retire_outcome);
+                return fail_value(family, "the retire outcome differs", expected, actual);
+            }
+            if (after.retire_refusal != static_cast<int>(refusal))
+            {
+                const auto expected = static_cast<std::uint64_t>(refusal);
+                const auto actual = static_cast<std::uint64_t>(after.retire_refusal);
+                return fail_value(family, "the retire refusal differs", expected, actual);
+            }
+            return true;
+        }
+
+        [[nodiscard]] Snapshot snapshot(const Family &family) const noexcept
+        {
+            return Snapshot{
+                .status = family.generation.read_status(),
+                .records = records(),
+                .window = read_window(),
+            };
+        }
+
+        /**
+         * @brief Checks that @p family keeps the hooks, the hook leak buckets, and the Hook module pins of @p before.
+         * @details The process records and the target bytes must also match @p before.
+         */
+        [[nodiscard]] bool unchanged_since(const Family &family, const Snapshot &before) const noexcept
+        {
+            const staged_gen::Status now = family.generation.read_status();
+            if (now.held_hooks == 0 || now.held_hooks != before.status.held_hooks)
+                return fail_value(family, "the held hook count changed", before.status.held_hooks, now.held_hooks);
+            if (now.hook_manager_leaks != before.status.hook_manager_leaks ||
+                now.hook_residue_leaks != before.status.hook_residue_leaks)
+            {
+                return fail(family, "the generation booked a hook leak");
+            }
+            if (now.hook_module_pins != before.status.hook_module_pins)
+                return fail(family, "the Hook module pin count changed");
+            const CoordinatorCounts counts = records();
+            if (counts.live != before.records.live || counts.vacant != before.records.vacant ||
+                counts.retained != before.records.retained || counts.free != before.records.free)
+            {
+                return fail(family, "the process record counts changed");
+            }
+            return read_window() == before.window || fail(family, "a target byte changed");
+        }
+
+        /**
+         * @brief Runs Shutdown while a call stays inside the counted detour of @p family.
+         * @details The verdict must be BUSY with one call in flight. The generation keeps every hook and its Session.
+         */
+        [[nodiscard]] bool retire_busy(const Family &family) const noexcept
+        {
+            const Snapshot before = snapshot(family);
+            const int verdict = family.generation.shutdown();
+            if (verdict != static_cast<int>(DMK_STAGED_RELOAD_BUSY))
+            {
+                const auto actual = static_cast<std::uint64_t>(verdict);
+                return fail_value(family, "Shutdown did not return BUSY", DMK_STAGED_RELOAD_BUSY, actual);
+            }
+            const staged_gen::Status after = family.generation.read_status();
+            if (!retire_call_reads(family, before.status, after, RetirementOutcome::Busy, ErrorCode::Ok))
+                return false;
+            if (after.retire_in_flight != 1)
+                return fail_value(family, "the Busy drain did not count one call in flight", 1, after.retire_in_flight);
+            return unchanged_since(family, before);
+        }
+
         [[nodiscard]] bool unload(Family &family) const noexcept
         {
             const void *const marker = family.generation.marker;
@@ -490,7 +660,7 @@ namespace
                 return fail("a call check names too many families");
             std::array<std::uint64_t, LIST_CAPACITY> crossed_before{};
             std::array<std::uint64_t, LIST_CAPACITY> skipped_before{};
-            int expected = m_foreign == ForeignLayer::Hijack ? HIJACK_RESULT : ORIGINAL_RESULT;
+            int expected = m_foreign == ForeignLayer::Hijack ? HIJACK_RESULT : m_export.original_result;
             if (m_foreign == ForeignLayer::Chaining)
                 expected += FOREIGN_BONUS;
             std::size_t index = 0;
@@ -597,6 +767,24 @@ namespace
         }
 
     private:
+        using Message = std::array<char, 256>;
+
+        /// Prefixes @p what with the tag, the hook name, and the generation number of @p family.
+        [[nodiscard]] static Message describe(const Family &family, const char *what) noexcept
+        {
+            Message message{};
+            std::snprintf(
+                message.data(),
+                message.size(),
+                "%s %s generation %u: %s",
+                family.tag,
+                family.hook_name,
+                family.started,
+                what
+            );
+            return message;
+        }
+
         [[nodiscard]] static bool tag_matches(const Family &family) noexcept
         {
             const std::string_view tag{family.tag};
@@ -610,23 +798,27 @@ namespace
         }
 
         const char *m_scenario;
+        TargetExport m_export;
         unsigned m_cycle = 0;
         HMODULE m_target_module = nullptr;
         TargetFn m_target = nullptr;
-        TargetWindow m_pristine{};
         ForeignLayer m_foreign = ForeignLayer::None;
         std::uint8_t *m_foreign_page = nullptr;
         std::array<std::uint8_t, RELATIVE_JUMP_BYTES> m_foreign_saved{};
         std::array<std::uint8_t, RELATIVE_JUMP_BYTES> m_foreign_patch{};
     };
 
+    /// A pass or a check over two copies on one host.
+    using LayeredPass = bool (*)(LayeredHost &host, Family &lower, Family &upper);
+
     /**
      * @brief Reloads @p lower under @p upper, then retires both copies.
      * @details The lower copy retires by bypass, unmaps, and leaves its position Vacant. Its successor claims that
      *          position under the upper copy. The claimed successor vacates again, and the upper copy restores. One
-     *          Vacant position stays on the target.
+     *          Vacant position stays on the target. A non-null @p probe runs before the first lower retirement.
      */
-    [[nodiscard]] bool reload_lower_under_upper(LayeredHost &host, Family &lower, Family &upper)
+    [[nodiscard]] bool
+    reload_lower_under_upper(LayeredHost &host, Family &lower, Family &upper, LayeredPass probe = nullptr)
     {
         const CoordinatorCounts baseline = LayeredHost::records();
         if (!host.start(lower, Placement::Fresh) || !host.call_crosses({&lower}))
@@ -634,12 +826,12 @@ namespace
         if (lower.far_hook && !holds_far_jump(host.read_window()))
             return host.fail(lower, "the far install did not write an indirect jump over the target");
         return host.start(upper, Placement::Fresh) && host.call_crosses({&lower, &upper}) &&
-               host.retire(lower, Retirement::VacateFresh) && host.call_crosses({&upper}, {&lower}) &&
-               host.unload(lower) && host.call_crosses({&upper}) && host.start(lower, Placement::Claim) &&
-               host.call_crosses({&lower, &upper}) && host.retire(lower, Retirement::VacateClaimed) &&
-               host.call_crosses({&upper}, {&lower}) && host.unload(lower) && host.retire(upper, Retirement::Restore) &&
-               host.call_crosses({}, {&upper}) && host.unload(upper) && host.call_crosses({}) &&
-               host.records_added(baseline, 1, 1);
+               (probe == nullptr || probe(host, lower, upper)) && host.retire(lower, Retirement::VacateFresh) &&
+               host.call_crosses({&upper}, {&lower}) && host.unload(lower) && host.call_crosses({&upper}) &&
+               host.start(lower, Placement::Claim) && host.call_crosses({&lower, &upper}) &&
+               host.retire(lower, Retirement::VacateClaimed) && host.call_crosses({&upper}, {&lower}) &&
+               host.unload(lower) && host.retire(upper, Retirement::Restore) && host.call_crosses({}, {&upper}) &&
+               host.unload(upper) && host.call_crosses({}) && host.records_added(baseline, 1, 1);
     }
 
     /**
@@ -740,79 +932,132 @@ namespace
         );
     }
 
-    int run_hand_back_before_shutdown()
+    /**
+     * @brief Retires @p upper before the Shutdown of @p lower, so the lower copy is the top layer at its Shutdown.
+     * @details Both copies restore, so the pass leaves the target bytes as it found them and books no residue.
+     */
+    [[nodiscard]] bool hand_back_before_shutdown(LayeredHost &host, Family &lower, Family &upper)
     {
-        LayeredHost host{"hand-back-before-shutdown"};
+        const CoordinatorCounts baseline = LayeredHost::records();
+        const TargetWindow window_before = host.read_window();
+        if (!host.start(lower, Placement::Fresh) || !host.call_crosses({&lower}))
+            return false;
+        const TargetWindow lower_patch = host.read_window();
+        return host.start(upper, Placement::Fresh) && host.call_crosses({&lower, &upper}) &&
+               host.retire(upper, Retirement::Restore) &&
+               host.window_equals(lower_patch, "the upper restore did not leave the lower patch") &&
+               host.call_crosses({&lower}, {&upper}) && host.unload(upper) && host.call_crosses({&lower}) &&
+               host.retire(lower, Retirement::Restore) &&
+               host.window_equals(window_before, "the lower restore did not leave the bytes under the pass") &&
+               host.call_crosses({}, {&lower}) && host.unload(lower) && host.call_crosses({}) &&
+               host.records_added(baseline, 0, 0);
+    }
+
+    /**
+     * @brief Retires @p upper between the Shutdown of @p lower and the Init of its successor.
+     * @details The successor claims the vacated position, which is then the top layer, and vacates it again.
+     */
+    [[nodiscard]] bool hand_back_before_successor_init(LayeredHost &host, Family &lower, Family &upper)
+    {
+        const CoordinatorCounts baseline = LayeredHost::records();
+        if (!host.start(lower, Placement::Fresh) || !host.call_crosses({&lower}))
+            return false;
+        const TargetWindow lower_patch = host.read_window();
+        return host.start(upper, Placement::Fresh) && host.call_crosses({&lower, &upper}) &&
+               host.retire(lower, Retirement::VacateFresh) && host.call_crosses({&upper}, {&lower}) &&
+               host.unload(lower) && host.retire(upper, Retirement::Restore) &&
+               host.window_equals(lower_patch, "the upper restore did not leave the vacated patch") &&
+               host.call_crosses({}, {&upper}) && host.unload(upper) && host.call_crosses({}) &&
+               host.start(lower, Placement::Claim) && host.call_crosses({&lower}) &&
+               host.retire(lower, Retirement::VacateClaimed) && host.call_crosses({}, {&lower}) && host.unload(lower) &&
+               host.call_crosses({}) && host.records_added(baseline, 1, 1);
+    }
+
+    /**
+     * @brief Retires @p upper after the successor of @p lower claimed the vacated position.
+     * @details The claimed position survives the upper restore and vacates again.
+     */
+    [[nodiscard]] bool hand_back_after_successor_init(LayeredHost &host, Family &lower, Family &upper)
+    {
+        const CoordinatorCounts baseline = LayeredHost::records();
+        if (!host.start(lower, Placement::Fresh) || !host.call_crosses({&lower}))
+            return false;
+        const TargetWindow lower_patch = host.read_window();
+        return host.start(upper, Placement::Fresh) && host.call_crosses({&lower, &upper}) &&
+               host.retire(lower, Retirement::VacateFresh) && host.call_crosses({&upper}, {&lower}) &&
+               host.unload(lower) && host.start(lower, Placement::Claim) && host.call_crosses({&lower, &upper}) &&
+               host.retire(upper, Retirement::Restore) &&
+               host.window_equals(lower_patch, "the upper restore did not leave the claimed patch") &&
+               host.call_crosses({&lower}, {&upper}) && host.unload(upper) && host.call_crosses({&lower}) &&
+               host.retire(lower, Retirement::VacateClaimed) && host.call_crosses({}, {&lower}) && host.unload(lower) &&
+               host.call_crosses({}) && host.records_added(baseline, 1, 1);
+    }
+
+    /**
+     * @brief Retires @p lower under a foreign stub that chains.
+     * @details The retirement writes none of the stub bytes, and calls skip the retired detour.
+     */
+    [[nodiscard]] bool retire_under_foreign_chain(LayeredHost &host, Family &lower)
+    {
+        const CoordinatorCounts baseline = LayeredHost::records();
+        return host.start(lower, Placement::Fresh) && host.call_crosses({&lower}) &&
+               host.install_foreign(ForeignLayer::Chaining) && host.call_crosses({&lower}) &&
+               host.retire(lower, Retirement::VacateFresh) && host.call_crosses({}, {&lower}) && host.unload(lower) &&
+               host.call_crosses({}) && host.remove_foreign() && host.call_crosses({}) &&
+               host.records_added(baseline, 1, 1);
+    }
+
+    /**
+     * @brief Retires @p lower under a foreign hijack that does not chain, then reloads it.
+     * @details The retirement writes none of the hijack bytes. After the hijack goes, the call reaches the original
+     *          through the Vacant relay, and the successor claims that position.
+     */
+    [[nodiscard]] bool retire_under_hijack(LayeredHost &host, Family &lower)
+    {
+        const CoordinatorCounts baseline = LayeredHost::records();
+        return host.start(lower, Placement::Fresh) && host.call_crosses({&lower}) &&
+               host.install_foreign(ForeignLayer::Hijack) && host.call_crosses({}, {&lower}) &&
+               host.retire(lower, Retirement::VacateFresh) && host.call_crosses({}, {&lower}) && host.unload(lower) &&
+               host.call_crosses({}) && host.remove_foreign() && host.call_crosses({}) &&
+               host.start(lower, Placement::Claim) && host.call_crosses({&lower}) &&
+               host.retire(lower, Retirement::VacateClaimed) && host.call_crosses({}, {&lower}) && host.unload(lower) &&
+               host.call_crosses({}) && host.records_added(baseline, 1, 1);
+    }
+
+    /// Runs @p pass over raw copies of both families on compute_damage and returns the process exit code.
+    int run_raw_pass(const char *scenario, LayeredPass pass, const char *outcome)
+    {
+        LayeredHost host{scenario};
         Family first = first_family("layered_first_hook");
         Family second = second_family("layered_second_hook");
-        if (!host.open_target() || !host.stage(first) || !host.stage(second))
-            return LayeredHost::finish(false, "", {&first, &second});
-        const CoordinatorCounts baseline = LayeredHost::records();
-        bool proved = host.start(first, Placement::Fresh) && host.call_crosses({&first});
-        const TargetWindow lower_patch = host.read_window();
-        // The upper copy hands the target back first, so the lower copy is the top layer at its Shutdown.
-        proved = proved && host.start(second, Placement::Fresh) && host.call_crosses({&first, &second}) &&
-                 host.retire(second, Retirement::Restore) &&
-                 host.window_equals(lower_patch, "the upper restore did not leave the lower patch") &&
-                 host.call_crosses({&first}, {&second}) && host.unload(second) && host.call_crosses({&first}) &&
-                 host.retire(first, Retirement::Restore) &&
-                 host.window_equals(host.pristine_window(), "the lower restore did not leave the original bytes") &&
-                 host.call_crosses({}, {&first}) && host.unload(first) && host.call_crosses({}) &&
-                 host.records_added(baseline, 0, 0);
-        return LayeredHost::finish(
-            proved,
-            "the upper copy handed the target back, and the lower copy restored it with no residue",
-            {&first, &second}
+        const bool proved = host.open_target() && host.stage(first) && host.stage(second) && pass(host, first, second);
+        return LayeredHost::finish(proved, outcome, {&first, &second});
+    }
+
+    int run_hand_back_before_shutdown()
+    {
+        return run_raw_pass(
+            "hand-back-before-shutdown",
+            &hand_back_before_shutdown,
+            "the upper copy handed the target back, and the lower copy restored it with no residue"
         );
     }
 
     int run_hand_back_before_successor_init()
     {
-        LayeredHost host{"hand-back-before-successor-init"};
-        Family first = first_family("layered_first_hook");
-        Family second = second_family("layered_second_hook");
-        if (!host.open_target() || !host.stage(first) || !host.stage(second))
-            return LayeredHost::finish(false, "", {&first, &second});
-        const CoordinatorCounts baseline = LayeredHost::records();
-        bool proved = host.start(first, Placement::Fresh) && host.call_crosses({&first});
-        const TargetWindow lower_patch = host.read_window();
-        proved = proved && host.start(second, Placement::Fresh) && host.call_crosses({&first, &second}) &&
-                 host.retire(first, Retirement::VacateFresh) && host.call_crosses({&second}, {&first}) &&
-                 host.unload(first) && host.retire(second, Retirement::Restore) &&
-                 host.window_equals(lower_patch, "the upper restore did not leave the vacated patch") &&
-                 host.call_crosses({}, {&second}) && host.unload(second) && host.call_crosses({}) &&
-                 host.start(first, Placement::Claim) && host.call_crosses({&first}) &&
-                 host.retire(first, Retirement::VacateClaimed) && host.call_crosses({}, {&first}) &&
-                 host.unload(first) && host.call_crosses({}) && host.records_added(baseline, 1, 1);
-        return LayeredHost::finish(
-            proved,
-            "the upper copy handed back before the successor Init, and the successor claimed the top position",
-            {&first, &second}
+        return run_raw_pass(
+            "hand-back-before-successor-init",
+            &hand_back_before_successor_init,
+            "the upper copy handed back before the successor Init, and the successor claimed the top position"
         );
     }
 
     int run_hand_back_after_successor_init()
     {
-        LayeredHost host{"hand-back-after-successor-init"};
-        Family first = first_family("layered_first_hook");
-        Family second = second_family("layered_second_hook");
-        if (!host.open_target() || !host.stage(first) || !host.stage(second))
-            return LayeredHost::finish(false, "", {&first, &second});
-        const CoordinatorCounts baseline = LayeredHost::records();
-        bool proved = host.start(first, Placement::Fresh) && host.call_crosses({&first});
-        const TargetWindow lower_patch = host.read_window();
-        proved = proved && host.start(second, Placement::Fresh) && host.call_crosses({&first, &second}) &&
-                 host.retire(first, Retirement::VacateFresh) && host.call_crosses({&second}, {&first}) &&
-                 host.unload(first) && host.start(first, Placement::Claim) && host.call_crosses({&first, &second}) &&
-                 host.retire(second, Retirement::Restore) &&
-                 host.window_equals(lower_patch, "the upper restore did not leave the claimed patch") &&
-                 host.call_crosses({&first}, {&second}) && host.unload(second) && host.call_crosses({&first}) &&
-                 host.retire(first, Retirement::VacateClaimed) && host.call_crosses({}, {&first}) &&
-                 host.unload(first) && host.call_crosses({}) && host.records_added(baseline, 1, 1);
-        return LayeredHost::finish(
-            proved,
-            "the claimed position survived the upper restore and vacated again",
-            {&first, &second}
+        return run_raw_pass(
+            "hand-back-after-successor-init",
+            &hand_back_after_successor_init,
+            "the claimed position survived the upper restore and vacated again"
         );
     }
 
@@ -820,14 +1065,7 @@ namespace
     {
         LayeredHost host{"foreign-chaining-layer"};
         Family first = first_family("layered_first_hook");
-        if (!host.open_target() || !host.stage(first))
-            return LayeredHost::finish(false, "", {&first});
-        const CoordinatorCounts baseline = LayeredHost::records();
-        const bool proved = host.start(first, Placement::Fresh) && host.call_crosses({&first}) &&
-                            host.install_foreign(ForeignLayer::Chaining) && host.call_crosses({&first}) &&
-                            host.retire(first, Retirement::VacateFresh) && host.call_crosses({}, {&first}) &&
-                            host.unload(first) && host.call_crosses({}) && host.remove_foreign() &&
-                            host.call_crosses({}) && host.records_added(baseline, 1, 1);
+        const bool proved = host.open_target() && host.stage(first) && retire_under_foreign_chain(host, first);
         return LayeredHost::finish(
             proved,
             "the lower copy retired under a foreign stub that chains, wrote none of its bytes, and unmapped",
@@ -839,18 +1077,7 @@ namespace
     {
         LayeredHost host{"non-chaining-hijack"};
         Family first = first_family("layered_first_hook");
-        if (!host.open_target() || !host.stage(first))
-            return LayeredHost::finish(false, "", {&first});
-        const CoordinatorCounts baseline = LayeredHost::records();
-        // After the hijack goes, the call reaches the original through the Vacant relay, and a successor claims it.
-        const bool proved = host.start(first, Placement::Fresh) && host.call_crosses({&first}) &&
-                            host.install_foreign(ForeignLayer::Hijack) && host.call_crosses({}, {&first}) &&
-                            host.retire(first, Retirement::VacateFresh) && host.call_crosses({}, {&first}) &&
-                            host.unload(first) && host.call_crosses({}) && host.remove_foreign() &&
-                            host.call_crosses({}) && host.start(first, Placement::Claim) &&
-                            host.call_crosses({&first}) && host.retire(first, Retirement::VacateClaimed) &&
-                            host.call_crosses({}, {&first}) && host.unload(first) && host.call_crosses({}) &&
-                            host.records_added(baseline, 1, 1);
+        const bool proved = host.open_target() && host.stage(first) && retire_under_hijack(host, first);
         return LayeredHost::finish(
             proved,
             "the lower copy retired under a hijack that does not chain and wrote none of its bytes",
@@ -1060,6 +1287,169 @@ namespace
         return LayeredHost::finish(host.fail("the residue budget did not engage"), "", {&first, &second});
     }
 
+    /**
+     * @brief Parks one host call in the lower counted detour and checks that Shutdown defers the retirement.
+     * @details Shutdown returns BUSY and keeps every hook armed, so a fresh call crosses both copies. After its
+     *          release, the parked call returns through both copies.
+     */
+    [[nodiscard]] bool parked_call_defers_retirement(LayeredHost &host, Family &lower, Family &upper)
+    {
+        std::atomic<int> parked_result{0};
+        std::atomic<bool> parked_returned{false};
+        lower.generation.arm_park();
+        std::thread caller;
+        try
+        {
+            caller = std::thread(
+                [&host, &parked_result, &parked_returned]() noexcept
+                {
+                    parked_result.store(host.call_target(), std::memory_order_relaxed);
+                    parked_returned.store(true, std::memory_order_release);
+                }
+            );
+        }
+        catch (...)
+        {
+            lower.generation.release_park();
+            return host.fail(lower, "the host failed to start the parked caller");
+        }
+        const bool parked =
+            lower.generation.wait_parked(PARK_BUDGET_MS) != 0 || host.fail(lower, "no call parked in the detour");
+        const bool deferred =
+            parked && host.retire_busy(lower) && host.call_crosses({&lower, &upper}) &&
+            (!parked_returned.load(std::memory_order_acquire) || host.fail(lower, "the parked call left early"));
+        lower.generation.release_park();
+        caller.join();
+        const int expected = host.original_result() + lower.active_bonus + upper.active_bonus;
+        return deferred && (parked_result.load(std::memory_order_relaxed) == expected ||
+                            host.fail(lower, "the released call did not cross both copies"));
+    }
+
+    /**
+     * @brief Arms one self-retirement in the lower counted detour and checks that the retire call changes nothing.
+     * @details The armed call runs HookStack::retire from inside the detour and still crosses both copies.
+     */
+    [[nodiscard]] bool self_retirement_changes_nothing(LayeredHost &host, Family &lower, Family &upper)
+    {
+        const Snapshot before = host.snapshot(lower);
+        lower.generation.arm_park();
+        const bool crossed = host.call_crosses({&lower, &upper});
+        lower.generation.release_park();
+        if (!crossed)
+            return false;
+        const staged_gen::Status after = lower.generation.read_status();
+        if (after.self_retire_calls != before.status.self_retire_calls + 1)
+            return host.fail(lower, "the armed call ran no self-retirement");
+        const RetirementOutcome refused = RetirementOutcome::Refused;
+        return host.retire_call_reads(lower, before.status, after, refused, ErrorCode::ReentrantCallRejected) &&
+               host.unchanged_since(lower, before) && host.call_crosses({&lower, &upper}) &&
+               (lower.generation.read_status().retire_calls == after.retire_calls ||
+                host.fail(lower, "an unarmed call ran a retire call"));
+    }
+
+    int run_parked_counted_detour()
+    {
+        LayeredHost host{"parked-counted-detour"};
+        Family first = counted_family(first_family("layered_first_hook"), DetourPark::Wait);
+        Family second = counted_family(second_family("layered_second_hook"));
+        first.drain_timeout_ms = BUSY_DRAIN_TIMEOUT_MS;
+        const bool proved = host.open_target() && host.stage(first) && host.stage(second) &&
+                            reload_lower_under_upper(host, first, second, &parked_call_defers_retirement);
+        return LayeredHost::finish(
+            proved,
+            "a parked counted call deferred the lower retirement with every hook armed, and the retry unmapped it",
+            {&first, &second}
+        );
+    }
+
+    int run_self_retirement()
+    {
+        LayeredHost host{"self-retirement"};
+        Family first = counted_family(first_family("layered_first_hook"), DetourPark::SelfRetire);
+        Family second = counted_family(second_family("layered_second_hook"));
+        const bool proved = host.open_target() && host.stage(first) && host.stage(second) &&
+                            reload_lower_under_upper(host, first, second, &self_retirement_changes_nothing);
+        return LayeredHost::finish(
+            proved,
+            "a counted detour that retired its own stack was refused, and the later Shutdown unmapped the copy",
+            {&first, &second}
+        );
+    }
+
+    /**
+     * @struct CountedTeardown
+     * @brief One teardown mode of the counted matrix and the export that holds the Vacant positions of that mode.
+     * @details The passes of one mode leave six Vacant positions. Three modes on one export leave 18, more than the
+     *          16 layers of the residue budget, so each mode takes its own export.
+     */
+    struct CountedTeardown
+    {
+        TeardownMode teardown;
+        const char *scenario;
+        TargetExport target;
+    };
+
+    constexpr std::array<CountedTeardown, 3> COUNTED_TEARDOWNS{{
+        {TeardownMode::Retire, "counted-lower-copy-retire", DAMAGE_EXPORT},
+        {TeardownMode::Destroy, "counted-lower-copy-destroy", ARMOR_EXPORT},
+        {TeardownMode::DisableFirst, "counted-lower-copy-disable-first", SPEED_EXPORT},
+    }};
+
+    /// Returns a counted copy of @p family under @p teardown that maps the staged file of @p staged.
+    [[nodiscard]] Family counted_copy(Family family, TeardownMode teardown, const Family &staged)
+    {
+        Family counted = counted_family(std::move(family));
+        counted.teardown = teardown;
+        counted.generation.path = staged.generation.path;
+        return counted;
+    }
+
+    /**
+     * @brief Runs every layered pass of the counted kind under @p mode.
+     * @details The passes cover both install orders, a foreign stub that chains, a hijack that does not chain, and
+     *          the three hand-back points. Each pass takes new hook names, so no install claims a position that an
+     *          earlier pass left Vacant.
+     */
+    [[nodiscard]] bool run_counted_teardown(const CountedTeardown &mode, const Family &first, const Family &second)
+    {
+        const TeardownMode teardown = mode.teardown;
+        Family first_shutdown = counted_copy(first_family("layered_counted_first_shutdown"), teardown, first);
+        Family second_shutdown = counted_copy(second_family("layered_counted_second_shutdown"), teardown, second);
+        Family first_field = counted_copy(first_family("layered_counted_first_field"), teardown, first);
+        Family second_field = counted_copy(second_family("layered_counted_second_field"), teardown, second);
+        Family second_reverse = counted_copy(second_family("layered_counted_second_reverse"), teardown, second);
+        Family first_reverse = counted_copy(first_family("layered_counted_first_reverse"), teardown, first);
+        Family chaining = counted_copy(first_family("layered_counted_chaining"), teardown, first);
+        Family hijack = counted_copy(first_family("layered_counted_hijack"), teardown, first);
+        Family first_before = counted_copy(first_family("layered_counted_first_before_init"), teardown, first);
+        Family second_before = counted_copy(second_family("layered_counted_second_before_init"), teardown, second);
+        Family first_after = counted_copy(first_family("layered_counted_first_after_init"), teardown, first);
+        Family second_after = counted_copy(second_family("layered_counted_second_after_init"), teardown, second);
+
+        LayeredHost host{mode.scenario, mode.target};
+        return host.open_target() && hand_back_before_shutdown(host, first_shutdown, second_shutdown) &&
+               reload_lower_under_upper(host, first_field, second_field) &&
+               reload_lower_under_upper(host, second_reverse, first_reverse) &&
+               retire_under_foreign_chain(host, chaining) && retire_under_hijack(host, hijack) &&
+               hand_back_before_successor_init(host, first_before, second_before) &&
+               hand_back_after_successor_init(host, first_after, second_after);
+    }
+
+    int run_counted_lower_copy()
+    {
+        LayeredHost host{"counted-lower-copy"};
+        Family first = first_family("layered_counted_first");
+        Family second = second_family("layered_counted_second");
+        bool proved = host.stage(first) && host.stage(second);
+        for (const CountedTeardown &mode : COUNTED_TEARDOWNS)
+            proved = proved && run_counted_teardown(mode, first, second);
+        return LayeredHost::finish(
+            proved,
+            "lower counted copies unmapped and successors claimed their positions in every teardown mode and pass",
+            {&first, &second}
+        );
+    }
+
     /// Maps one command-line token to its scenario.
     struct ScenarioEntry
     {
@@ -1067,7 +1457,7 @@ namespace
         int (*run)();
     };
 
-    constexpr std::array<ScenarioEntry, 14> SCENARIOS{{
+    constexpr std::array<ScenarioEntry, 17> SCENARIOS{{
         {"lower-copy-field-order", &run_lower_copy_field_order},
         {"lower-copy-reverse-order", &run_lower_copy_reverse_order},
         {"disable-first-consumer", &run_disable_first_consumer},
@@ -1082,6 +1472,9 @@ namespace
         {"mid-successor-claims-closed-route", &run_mid_successor_claims_closed_route},
         {"claimed-position-under-foreign-layer", &run_claimed_position_under_foreign_layer},
         {"residue-budget-pin", &run_residue_budget_pin},
+        {"parked-counted-detour", &run_parked_counted_detour},
+        {"self-retirement", &run_self_retirement},
+        {"counted-lower-copy", &run_counted_lower_copy},
     }};
 } // namespace
 

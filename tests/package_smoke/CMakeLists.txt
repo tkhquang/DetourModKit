@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-# C is enabled for wheel_host_c_probe.c, which compiles the installed wheel-host ABI header as C.
+# C is enabled for wheel_host_c_probe.c and staged_reload_c_probe.c, which compile the installed ABI headers as C.
 project(DetourModKitPackageSmoke LANGUAGES C CXX)
 
 # Intentionally do NOT set CMAKE_CXX_STANDARD here. The installed DetourModKit target carries cxx_std_23 as a
@@ -30,8 +30,8 @@ endif()
 
 # windows_macro_probe.cpp proves every public header compiles after <windows.h> without NOMINMAX (on MSVC
 # that includes the live min/max macros); main.cpp additionally asserts backend and macro absence at compile time.
-# wheel_host_c_probe.c proves the installed wheel-host ABI header compiles as C.
-add_executable(dmk_package_smoke main.cpp windows_macro_probe.cpp wheel_host_c_probe.c)
+# wheel_host_c_probe.c and staged_reload_c_probe.c prove the installed C ABI headers compile as C.
+add_executable(dmk_package_smoke main.cpp windows_macro_probe.cpp wheel_host_c_probe.c staged_reload_c_probe.c)
 target_link_libraries(dmk_package_smoke PRIVATE DetourModKit::DetourModKit)
 
 # Statically link the GCC runtime on MinGW. This is a CI-runner workaround, not a consumer recommendation: a
