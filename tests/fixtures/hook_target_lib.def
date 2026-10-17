@@ -1,4 +1,4 @@
-; Export table for the fixture DLL. The four compute_* functions and the scan marker are what the hook and scanner
+; Export table for the fixture DLL. The compute_* functions and the scan marker are what the hook and scanner
 ; tests resolve; they are listed explicitly because a module definition file replaces the linker's automatic export
 ; set on the GNU toolchain, so omitting one here would silently drop it.
 ;
@@ -12,6 +12,7 @@ EXPORTS
     compute_armor
     compute_speed
     compute_critical
+    compute_mixed_eight
     dmk_scan_marker DATA
     dmk_export_alias_one = compute_damage
     dmk_export_alias_two = compute_damage

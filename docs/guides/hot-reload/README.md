@@ -242,7 +242,7 @@ Hooks that share a target retire in any order, in one DMK copy or across copies 
 - A lower copy built with DMK 4.3.0 or earlier stays refused for the session, because its own code refuses the disable. Rebuild that mod with 4.4.0.
 - The next generation claims a vacated position when its hook name, target, and hook kind match. Keep hook names stable across builds. A renamed hook installs fresh on top.
 - The claim matches hook names across every DMK copy in the process. Give each hook a name that no other mod uses on the same target.
-- A position that no generation claims stays for the process. It keeps one process record and adds two jumps to each call.
+- A position that no generation claims stays for the process. It keeps one process record and adds two jumps to each call. `DetourModKit_bench_hook` measures those jumps as `hook.residue_hop_ns`: 0.7 ns per position on the development host under game load (MinGW release, nine-round medians, 2026-10-17). A chain of 16 positions costs about 10 ns more per call than a chain of one.
 - VMT hook stacks fall outside this rule. [Destroy stacked VMT hooks newest-first](../hooking/vmt-hook-config.md#destroy-stacked-vmt-hooks-newest-first).
 
 ### Session teardown owns one instance's subsystems
@@ -408,6 +408,9 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | `LayeredReloadMidSuccessorClaimsClosedRoute` | Two copies of mid hooks reload in turn 64 times in both install orders. The same counts stay equal at each cycle end. |
 | `LayeredReloadClaimedPositionUnderForeignChainingLayer` | A successor claims a vacated position under a host stub that chains, and the stub bytes stay untouched. |
 | `LayeredReloadResidueBudgetFallsBackToPin` | With position claims refused, the residue budget engages. The next lower generation books `HookManager`, and its Shutdown refuses. |
+| `LayeredReloadParkedCountedDetourDefersRetirement` | A thread parks inside a counted detour. `HookStack::retire` returns Busy and changes nothing, so every hook stays armed. After the release, the retry retires the copy and it unmaps. |
+| `LayeredReloadSelfRetirementIsRefused` | A counted detour calls `HookStack::retire` on its own stack. The call returns Refused with `ReentrantCallRejected` and changes nothing. |
+| `LayeredReloadCountedLowerCopyUnmaps` | Two copies of counted hooks reload in both install orders, under a foreign chaining stub and a hijack, and at each hand-back point. Each teardown mode runs on its own export: `HookStack::retire`, destroy, and disable-first. The lower copy unmaps, and its successor claims the vacated position. |
 
 [`staged_example_reload.cpp`](../../../tests/lifecycle/staged_example_reload.cpp) exercises both reference sources with a required resident wheel host and a synthetic controller. Its executable calls loader functions directly. It does not exercise the loader DLL entry point, control-thread startup, or F10 path.
 

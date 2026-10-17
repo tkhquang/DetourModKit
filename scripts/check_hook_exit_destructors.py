@@ -18,7 +18,7 @@ import sys
 EXIT_REGISTRATION = re.compile(r"\bU\s+(?:__imp_)?(?:__cxa_)?atexit\b")
 # The objects whose statics a late namespace-scope hook owner can outlive.
 HOOK_OBJECT = re.compile(
-    r":(?P<object>(?:mid_)?hook(?:_toggle|_mid_context|_ledger|_fault_boundary|_adapter)?\.cpp\.(?:obj|o)):",
+    r":(?P<object>(?:mid_)?hook(?:_toggle|_mid_context|_ledger|_fault_boundary|_adapter|_retirement)?\.cpp\.(?:obj|o)):",
     re.IGNORECASE,
 )
 REQUIRED_OBJECTS = {
@@ -27,6 +27,7 @@ REQUIRED_OBJECTS = {
     "hook_mid_context.cpp",
     "hook_ledger.cpp",
     "hook_fault_boundary.cpp",
+    "hook_retirement.cpp",
     "mid_hook_adapter.cpp",
 }
 

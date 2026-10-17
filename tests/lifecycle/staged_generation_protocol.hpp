@@ -1,6 +1,7 @@
 #ifndef DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 #define DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 
+#include "DetourModKit/abi/staged_reload.h"
 #include "DetourModKit/abi/wheel_host.h"
 
 #include <cstddef>
@@ -22,7 +23,7 @@ namespace staged_gen
     /// Names the fixture module that owns the public inline-hook target.
     inline constexpr const char *HOOK_TARGET_MODULE_NAME = "hook_target_lib.dll";
 
-    /// Names the export that each generation hooks.
+    /// Names the export that a generation hooks when InitOptions::target_symbol is null.
     inline constexpr const char *HOOK_TARGET_SYMBOL = "compute_damage";
 
     /// Names the synthetic XInput provider that all generations share.
@@ -61,21 +62,49 @@ namespace staged_gen
         Raw = 0,
         /// mid_at with a callback that adds the bonus to the modifier argument register.
         Mid = 1,
+        /// The counted inline_at with a noexcept detour that calls the trampoline.
+        Counted = 2,
     };
 
     /**
      * @enum TeardownMode
      * @brief The hook teardown sequence that StagedShutdown runs.
+     * @details Destroy and DisableFirst return the 4.3.0 values: 0 for a refusal and 1 for an unmap. Only Retire
+     *          returns the ABI 3 values of DetourModKit/abi/staged_reload.h.
      */
     enum class TeardownMode : int
     {
-        /// HookStack::clear destroys every hook, newest first.
+        /// Destroys every held hook, newest first.
         Destroy = 0,
         /**
          * @brief Disables every hook newest first, then destroys every hook.
          * @details A failed disable returns 0 before any destroy and keeps the Session, as a consumer latch does.
          */
         DisableFirst = 1,
+        /**
+         * @brief Holds the hooks in a HookStack and runs HookStack::retire before the session drain.
+         * @details Busy returns DMK_STAGED_RELOAD_BUSY, and Refused returns DMK_STAGED_RELOAD_REFUSED. Both keep
+         *          every hook and the Session, so a retry can succeed. A pinned hook returns
+         *          DMK_STAGED_RELOAD_RESTART_REQUIRED and refuses every later Init. Otherwise the checks of Destroy
+         *          decide between DMK_STAGED_RELOAD_OK and DMK_STAGED_RELOAD_REFUSED. InitOptions::retain_mid does
+         *          not apply.
+         */
+        Retire = 2,
+    };
+
+    /**
+     * @enum DetourPark
+     * @brief The action that the next counted detour call takes after ArmParkFn.
+     * @details One armed call takes the action, and later calls run the detour as usual.
+     */
+    enum class DetourPark : int
+    {
+        /// ArmParkFn arms only the press callback of the probe binding.
+        None = 0,
+        /// The call waits inside the detour until ReleaseParkFn, for at most 30 seconds.
+        Wait = 1,
+        /// The call runs HookStack::retire on the generation stack from inside the detour. Requires Retire.
+        SelfRetire = 2,
     };
 
     /**
@@ -143,6 +172,18 @@ namespace staged_gen
         int far_hook = 0;
         /// Withholds the position claim from every install of this copy when nonzero, so each install is fresh.
         int refuse_position_claims = 0;
+        /**
+         * @brief Selects the @ref DetourPark action of the counted detour. Requires HookKind::Counted.
+         * @details ArmParkFn also arms the press callback of the probe binding, so leave enable_probe_binding zero.
+         */
+        int detour_park = 0;
+        /**
+         * @brief Names the export of @ref HOOK_TARGET_MODULE_NAME that the hook takes. Null selects
+         *        @ref HOOK_TARGET_SYMBOL.
+         * @details HookKind::Mid requires HOOK_TARGET_SYMBOL, because only that export adds its second argument to
+         *          its result.
+         */
+        const char *target_symbol = nullptr;
     };
 
     /**
@@ -182,6 +223,20 @@ namespace staged_gen
         std::uint64_t hook_module_pins = 0;
         /// Process route records whose relay cell is Vacant.
         std::size_t coordinator_vacant = 0;
+        /// HookStack::retire calls of the Retire mode, from Shutdown or from a counted detour.
+        std::uint64_t retire_calls = 0;
+        /// The DetourModKit::hook::RetirementOutcome of the last retire call.
+        int retire_outcome = 0;
+        /// The DetourModKit::ErrorCode refusal of the last retire call.
+        int retire_refusal = 0;
+        std::uint32_t retire_restored = 0;
+        std::uint32_t retire_vacated = 0;
+        std::uint32_t retire_pinned = 0;
+        std::uint32_t retire_in_flight = 0;
+        /// Retire calls that a counted detour ran on its own generation stack.
+        std::uint64_t self_retire_calls = 0;
+        /// Hooks that the generation holds, in its slot array or its HookStack.
+        std::uint64_t held_hooks = 0;
     };
 
     /// Runs the guide's Init sequence and returns nonzero after every requested subsystem becomes live.
@@ -189,8 +244,8 @@ namespace staged_gen
 
     /**
      * @brief Runs the guide's Shutdown sequence and returns its refusal-boundary verdict.
-     * @details A drain refusal returns 0. The loader must keep the generation mapped and retry after callback
-     *          release.
+     * @details The loader must keep a refused generation mapped. @ref TeardownMode owns the verdict values of each
+     *          mode.
      */
     using ShutdownFn = int (*)() noexcept;
 
@@ -200,13 +255,16 @@ namespace staged_gen
     /// Fills @p out from this generation's state and counters.
     using StatusFn = void (*)(Status *out) noexcept;
 
-    /// Arms the probe-binding park and raises the probe key, so the next press callback enters and waits.
+    /**
+     * @brief Arms the probe-binding park and raises the probe key, so the next press callback enters and waits.
+     * @details InitOptions::detour_park also arms the next counted detour call.
+     */
     using ArmParkFn = void (*)() noexcept;
 
-    /// Lowers the probe key and releases a parked press callback.
+    /// Lowers the probe key and releases a parked press callback or counted detour call.
     using ReleaseParkFn = void (*)() noexcept;
 
-    /// Blocks until @p budget_ms expires and returns nonzero if a press callback parks.
+    /// Blocks until @p budget_ms expires and returns nonzero if a press callback or a counted detour call parks.
     using WaitParkedFn = int (*)(std::uint32_t budget_ms) noexcept;
 
     inline constexpr const char *INIT_SYMBOL = "dmk_staged_init";

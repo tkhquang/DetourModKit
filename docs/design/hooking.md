@@ -2,7 +2,7 @@
 
 This note explains the hook subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`.
+Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`.
 
 ## Concurrency model
 
@@ -106,7 +106,7 @@ Foreign libraries outside this protocol remain outside its guarantee. A DMK laye
 
 ## Backend confinement
 
-The public hook island is `src/hook.cpp`, `src/hook_toggle.cpp`, `src/hook_mid_context.cpp`, `src/internal/hook_backend.hpp`, `src/internal/hook_backend_visit.hpp`, `src/internal/mid_hook_adapter.hpp`, and `src/internal/mid_hook_adapter.cpp`.
+The public hook island is `src/hook.cpp`, `src/hook_toggle.cpp`, `src/hook_mid_context.cpp`, `src/hook_retirement.cpp`, `src/internal/hook_backend.hpp`, `src/internal/hook_backend_visit.hpp`, `src/internal/mid_hook_adapter.hpp`, and `src/internal/mid_hook_adapter.cpp`.
 
 The active input island contains `src/internal/input_intercept.cpp`. Other library sources must not include SafetyHook or name `safetyhook::`.
 
@@ -171,7 +171,7 @@ A restore writes the saved prologue over the target. Below a newer layer that wr
 
 Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) gives no newest-first order, so a lower layer then retires as residue instead of a restore. The `install_all` rollback therefore tears its rows down back-to-front through its internal `InstallRollback` guard.
 
-For caller-held sets of hooks, prefer `hook::HookStack`. This move-only owner drains newest-first in its destructor, move-assignment, and `clear()`, so each of its layers can restore.
+For caller-held sets of hooks, prefer `hook::HookStack`. This move-only owner drains newest-first in its destructor, move-assignment, and `clear()`, so each of its layers can restore. `HookStack::retire` switches every relay off and drains every counted detour and mid route before its newest-first commit (`[B-106]`).
 
 ### [B-41]
 
@@ -228,7 +228,7 @@ Code that DMK's backend generates, and that a destination call can raise through
 
 Generated code that adjusts RSP dynamically cannot be described this way (SafetyHook's mid stub), so a throw must still never reach it. A DMK-managed callback adapter must preserve the exact backend signature, contain every user exception, and own an enter/recheck/leave rundown. It reaches the user callback from a real DMK frame, which is the only place containment and in-flight accounting can live. The backend signature carries no user-data parameter, so each mid hook takes a distinct adapter function from a fixed pool to carry its identity.
 
-DMK cannot wrap a raw arbitrary-signature detour (`hook::inline_at`) that way, because `detail::inline_at_raw` receives it as an erased `void *` without the target's signature. It carries a documented no-throw contract and caller-owned quiescence instead. Document that requirement rather than encode it as a `noexcept` function type. The header already accepts ordinary function pointers, so the tightened type is a compatibility break.
+DMK cannot wrap a raw arbitrary-signature detour (`hook::inline_at(request, detour)`) that way, because `detail::inline_at_raw` receives it as an erased `void *` without the target's signature. It carries a documented no-throw contract and caller-owned quiescence instead. Document that requirement rather than encode it as a `noexcept` function type. The header already accepts ordinary function pointers, so the tightened type is a compatibility break. The counted `hook::inline_at<Detour>` keeps the signature, so it requires a `noexcept` detour and counts its calls (`[B-106]`).
 
 ### [B-85]
 
@@ -266,7 +266,7 @@ A non-routed x64 hook writes `E9 rel32`, or a far `FF 25` jump, at the target. B
 
 The store needs no trap, no protection change, and no instruction-cache flush, because the relay reads the slot as data. A thread at the relay reads either the old detour or the trampoline start, and both stay mapped. A mid or routed layer closes its route in place of the store. The bypass is correct under a newer layer that chains and under a hijack that does not chain. The byte witness therefore does not have to tell the two apart.
 
-`~Hook` of a layer that cannot restore drains a mid route while it is CLOSING, then switches off and vacates its position (`[B-105]`). The residue keeps its ledger creation-order entry and books `LeakSubsystem::HookResidue` once. After the switch, no new call enters its detour, so it releases its module reference (`[B-44]`). A thread already inside a raw detour stays under caller-owned quiescence, as for a top restore.
+`~Hook` of a layer that cannot restore drains a mid route while it is CLOSING, then switches off and vacates its position (`[B-105]`). The residue keeps its ledger creation-order entry and books `LeakSubsystem::HookResidue` once. After the switch, no new call enters its detour, so it releases its module reference (`[B-44]`). A counted detour drains before that point (`[B-106]`). A thread already inside a raw detour stays under caller-owned quiescence, as for a top restore.
 
 An unclaimed layer that exceeds the residue budget of the `~Hook` contract keeps the pin and books `HookManager`. A full registry fails every inline and mid create that claims no Vacant position, in every copy, so the guard stops a reload loop first. A claimed layer skips the guard, because its vacate adds no position. The `~Hook` contract lists every other cause that keeps the pin.
 
@@ -277,10 +277,26 @@ A position claim keeps the chain depth constant across reloads. Without it, each
 - A thread at a relay reads one aligned word. Every value stored there is mapped code: the trampoline start, the old detour before the bypass, or the new detour.
 - Nobody frees a Vacant cell or removes its record. The creator object is inert, the claimant holds an unowned view, and the creator allocator is never destroyed.
 - A mid or routed cell turns Vacant only after its route drained while CLOSING, so no thread reads the route word during a claim.
-- An inline cell turns Vacant after the switch store, with no drain. A thread still inside the old detour stays under caller-owned quiescence (`[B-104]`). The claim writes no relay slot, and the slot keeps the trampoline start until the claimed hook enables.
+- An inline cell turns Vacant after the switch store. A counted detour drained before it (`[B-106]`), and a thread still inside a raw detour stays under caller-owned quiescence (`[B-104]`). The claim writes no relay slot, and the slot keeps the trampoline start until the claimed hook enables.
 - The record range covers the whole trampoline allocation, so a live record locates its cell. A read inside that range under the coordinator needs no fault guard.
 - Vacate and claim write no record field, so `top()` and `dependencies()` answer as they do for any residue.
 
 The target-window check refuses a cell whose target is back at its original bytes, because no chain reaches that position. A claim keeps the chain position. Under a layer that does not chain, the successor stays unreachable, as its predecessor was. A claimed cell can sit below an unclaimed hook that the same copy created earlier. The ledger counts the claimed hook as newer, so the unclaimed hook vacates in place of a restore, and its own successor claims it.
 
 A change to the cell format must bump `RELAY_CELL_LAYOUT`, because a reader claims only a layout that it implements. `HookBackendRelayCell.SealRejectsALegacyTrampoline` verifies that a trampoline without a sealed cell stays an opaque layer.
+
+### [B-106]
+
+A raw detour leaves quiescence to the caller, and a caller counter misses a thread that passed the relay before its own entry. The counted form puts a DMK thunk between the relay and the detour. The thunk lives in the consumer image and runs on the stack of the game caller. The detour therefore sees the stack arguments of the caller, and `CallerFrame` names the return slot. The thunk increments a striped enter count, calls the detour through a volatile pointer, and then increments an exit count. Each increment is a `seq_cst` locked add (`[B-43]`).
+
+The drain proof runs after the relay sends every caller past the thunk. No thread enters the thunk after that store, so the stale entrants form a fixed set that only moves forward. Sequential suspension therefore suffices:
+
+- Pass 1 sees each stale entrant before its enter count, because its instruction pointer lies in the thunk.
+- Equal sums of exits read before enters prove an instant at which no counted call sat between enter and exit.
+- Pass 2 sees a thread that still runs the tail after its exit count.
+- A call that waits in a dormant fiber keeps the sums unequal, so the result is Busy, never an unmap.
+- Neither pass reads a saved thread context. A special user APC or an exception that interrupts uncounted thunk code therefore escapes the proof until the thread resumes. Only a tool that interrupts game threads at an arbitrary instruction can cause that.
+
+The proof holds only for straight-line thunk code inside one unchained `RUNTIME_FUNCTION`. The install therefore decodes the thunk and refuses a branch, a trap, or a shape without exactly two locked increments around a call. An unoptimized consumer build can call a runtime-check helper outside the counted window. The decode records the return of each such call, so the passes also read thread stacks for it. A stale stack word equal to such a return keeps the result Busy, and the install logs a warning for such a thunk. `CallerFrame` holds one pointer, because `/RTC1` checks a 16-byte frame temporary with a helper call after the exit count.
+
+`~Hook` runs the same proof with the 1 s route bound and keeps the pin on expiry. `HookStack::retire` switches every relay off first and then proves the counted detours. It then drains each mid route alone while it is CLOSING, so a callback of one route can still call through another. The commit runs last, which keeps a Busy or Refused result transactional. `HookCounted.*` and `HookStackTest.Retire*` prove the rule.

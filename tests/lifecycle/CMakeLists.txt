@@ -1728,7 +1728,9 @@ set(layered_generation_reload_proofs
   Lifecycle.LayeredReloadLowerMidCopyRetires                      lower-mid-copy
   Lifecycle.LayeredReloadFarHookRetires                           far-hook
   Lifecycle.LayeredReloadClaimedPositionUnderForeignChainingLayer claimed-position-under-foreign-layer
-  Lifecycle.LayeredReloadResidueBudgetFallsBackToPin              residue-budget-pin)
+  Lifecycle.LayeredReloadResidueBudgetFallsBackToPin              residue-budget-pin
+  Lifecycle.LayeredReloadParkedCountedDetourDefersRetirement      parked-counted-detour
+  Lifecycle.LayeredReloadSelfRetirementIsRefused                  self-retirement)
 while(layered_generation_reload_proofs)
   list(POP_FRONT layered_generation_reload_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}
@@ -1738,6 +1740,16 @@ while(layered_generation_reload_proofs)
     LABELS "lifecycle-proof")
   set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
 endwhile()
+
+# The counted matrix runs 51 generations in three teardown modes. A local Debug run takes about 18 seconds, so its
+# budget scales as the soak budgets below do.
+dmk_add_raw_proof(NAME Lifecycle.LayeredReloadCountedLowerCopyUnmaps
+  COMMAND $<TARGET_FILE:layered_generation_reload> counted-lower-copy
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 300
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.LayeredReloadCountedLowerCopyUnmaps PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
 
 # The constancy soak runs 1000 reloads, and the mid soak runs 128. Local Debug runs take about 150 and 45 seconds.
 # The budgets follow the 100-generation soak above, which covers a coverage-instrumented hosted runner. Under ASan

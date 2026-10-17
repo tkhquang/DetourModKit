@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-# C is enabled for wheel_host_c_probe.c, which compiles the wheel-host ABI header as C.
+# C is enabled for wheel_host_c_probe.c and staged_reload_c_probe.c, which compile the ABI headers as C.
 project(DetourModKitBuildTreeConsumer LANGUAGES C CXX)
 
 # Consume DetourModKit the way a vendoring mod does: add_subdirectory over the repository root with the default
@@ -13,7 +13,7 @@ project(DetourModKitBuildTreeConsumer LANGUAGES C CXX)
 # exported compile feature (main.cpp asserts the resulting language level).
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../.." detourmodkit)
 
-add_executable(dmk_build_tree_consumer main.cpp windows_macro_probe.cpp wheel_host_c_probe.c)
+add_executable(dmk_build_tree_consumer main.cpp windows_macro_probe.cpp wheel_host_c_probe.c staged_reload_c_probe.c)
 target_link_libraries(dmk_build_tree_consumer PRIVATE DetourModKit)
 
 # CI-runner workaround as in tests/package_smoke: embed the MinGW runtime so the proof binary is PATH-independent.
