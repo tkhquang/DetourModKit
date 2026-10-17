@@ -719,7 +719,16 @@ namespace DetourModKit
          */
         template <auto Detour> [[nodiscard]] Result<Hook> inline_at(InlineRequest request)
         {
+            // GCC drops the may_alias attribute of a vector type such as __m128 inside a template argument and warns.
+            // The thunk forwards such a value by the ABI of the vector type, which that attribute does not change.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
             using Signature = detail::CountedSignature<decltype(Detour), CallerFrame>;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
             static_assert(
                 Signature::valid,
                 "inline_at<Detour> needs a noexcept, non-variadic detour whose parameters and result are references or "

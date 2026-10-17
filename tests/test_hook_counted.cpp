@@ -622,7 +622,15 @@ namespace
         return _mm_sub_ps(scaled, _mm_shuffle_ps(b, b, _MM_SHUFFLE(0, 1, 2, 3)));
     }
 
+    // GCC drops the may_alias attribute of __m128 inside a template argument and warns, as inline_at<Detour> notes.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
     std::atomic<VectorFn> s_vector_original{nullptr};
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
     DMK_TEST_NOINLINE __m128 vector_detour(__m128 a, float scale, __m128 b) noexcept
     {
@@ -717,7 +725,14 @@ namespace
         static_assert(CountedSignature<void (*)() noexcept, Frame>::valid);
         static_assert(CountedSignature<void (*)(int &, MovePayload &&, const std::string &) noexcept, Frame>::valid);
         static_assert(CountedSignature<LargePod (*)(Frame, SmallPod, LargePod, double, float) noexcept, Frame>::valid);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
         static_assert(CountedSignature<__m128 (*)(Frame, __m128, float, __m128) noexcept, Frame>::valid);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         return true;
     }
 
