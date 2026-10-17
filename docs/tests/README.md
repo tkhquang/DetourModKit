@@ -132,6 +132,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_hook.cpp` | Install core, `mid_at`, `install_all`, ledger, publication |
 | `test_hook_backend.cpp` | Backend transactions, exception containment |
 | `test_hook_counted.cpp` | Counted `inline_at<Detour>`, `CallerFrame`, the counted drain proof |
+| `test_hook_counted_hardened.cpp` | The counted thunk under `-fstack-protector-all` |
 | `test_hook_fault_proof.cpp` | Every hook `*FaultProof` suite |
 | `test_hook_inline.cpp` | `inline_at`, prologue policy, duplicates, `Hook::call` |
 | `test_hook_integration.cpp` | Hooks on `hook_target_lib.dll` |

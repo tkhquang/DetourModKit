@@ -142,6 +142,13 @@ if(DMK_BUILD_TESTS)
   )
   list(SORT TEST_SOURCES)
 
+  # test_hook_counted_hardened.cpp proves that the counted thunk opts out of the stack protector. GCC and Clang
+  # protect every function of that file. MSVC keeps its default /GS, which the thunk already declines.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/test_hook_counted_hardened.cpp"
+      PROPERTIES COMPILE_OPTIONS "-fstack-protector-all")
+  endif()
+
   # psapi serves the cross-module hook tests; other Win32 dependencies propagate from DetourModKit.
   # hook_fixture.cpp defines the hook targets that several hook suites share, once for the whole binary.
   dmk_add_gtest_proof(

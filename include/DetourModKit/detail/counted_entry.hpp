@@ -78,11 +78,12 @@ namespace DetourModKit::hook::detail
 #define DMK_DETAIL_COUNTED_THREAD_ID(name) const std::uint64_t name = __readgsqword(0x48)
 #define DMK_DETAIL_COUNTED_RETURN_SLOT() static_cast<void **>(_AddressOfReturnAddress())
 #else
-// Clang has no noipa, and it changes no signature of a function whose address escapes.
+// Clang has no noipa, and it changes no signature of a function whose address escapes. A stack protector check is a
+// conditional branch, which the install decode refuses, so the thunk opts out as safebuffers does under MSVC.
 #if defined(__clang__)
-#define DMK_DETAIL_COUNTED_THUNK [[gnu::noinline, gnu::no_sanitize_address]]
+#define DMK_DETAIL_COUNTED_THUNK [[gnu::noinline, gnu::no_sanitize_address, gnu::no_stack_protector]]
 #else
-#define DMK_DETAIL_COUNTED_THUNK [[gnu::noipa, gnu::no_sanitize_address]]
+#define DMK_DETAIL_COUNTED_THUNK [[gnu::noipa, gnu::no_sanitize_address, gnu::no_stack_protector]]
 #endif
 #define DMK_DETAIL_COUNTED_INCREMENT(counter) __atomic_add_fetch(&(counter), 1, __ATOMIC_SEQ_CST)
 #define DMK_DETAIL_COUNTED_THREAD_ID(name)                                                                             \
