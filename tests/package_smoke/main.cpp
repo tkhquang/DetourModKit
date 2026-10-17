@@ -142,5 +142,15 @@ int main()
             return 8;
         }
     }
+
+    // Link the staged-reload verdict from the installed archive. A Busy retirement maps to BUSY for an ABI 3 loader.
+    {
+        namespace staged = DetourModKit::staged_reload;
+        const DetourModKit::hook::HookRetirement busy{.outcome = DetourModKit::hook::RetirementOutcome::Busy};
+        if (staged::verdict(busy, staged::capture(), DMK_STAGED_RELOAD_ABI_VERSION) != DMK_STAGED_RELOAD_BUSY)
+        {
+            return 10;
+        }
+    }
     return 0;
 }

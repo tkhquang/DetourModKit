@@ -40,6 +40,9 @@ namespace
     constexpr DWORD CONTROL_POLL_MS = 50;
     constexpr DWORD UNMAP_POLL_MS = 10;
     constexpr DWORD UNMAP_TIMEOUT_MS = 2000;
+    /// Bounds the Shutdown calls of one retirement while each returns BUSY, which changes nothing.
+    constexpr int SHUTDOWN_BUSY_ATTEMPTS = 20;
+    constexpr DWORD SHUTDOWN_BUSY_RETRY_MS = 50;
     constexpr SHORT KEY_DOWN_MASK = static_cast<SHORT>(0x8000);
     constexpr std::uint64_t LEASE_PROBE_OWNER = UINT64_C(0x444d4b50524f4245);
     constexpr std::uint32_t INIT_REQUEST_SIZE = static_cast<std::uint32_t>(sizeof(StagedReloadInitRequest));
@@ -298,16 +301,43 @@ namespace
         return true;
     }
 
+    /**
+     * @brief Calls Shutdown and retries a BUSY result within the bound.
+     * @return The last result. RESTART_REQUIRED also latches the restart request.
+     */
+    [[nodiscard]] std::uint32_t shut_down(const Generation &generation) noexcept
+    {
+        std::uint32_t verdict = generation.shutdown();
+        for (int attempt = 1; verdict == DMK_STAGED_RELOAD_BUSY && attempt < SHUTDOWN_BUSY_ATTEMPTS; ++attempt)
+        {
+            ::Sleep(SHUTDOWN_BUSY_RETRY_MS);
+            verdict = generation.shutdown();
+        }
+        if (verdict == DMK_STAGED_RELOAD_BUSY)
+        {
+            append_log("Shutdown stayed busy. The generation stays live.");
+        }
+        else if (verdict == DMK_STAGED_RELOAD_RESTART_REQUIRED)
+        {
+            s_restart_required = true;
+            append_log("A detour of the generation stays reachable. Restart the game before another reload.");
+        }
+        else if (verdict != DMK_STAGED_RELOAD_OK && verdict != DMK_STAGED_RELOAD_RETAINED)
+        {
+            append_log("Shutdown refused retirement. The generation stays mapped.");
+        }
+        return verdict;
+    }
+
     [[nodiscard]] bool retire_generation(Generation &generation) noexcept
     {
         if (generation.shutdown == nullptr)
         {
             return false;
         }
-        const std::uint32_t verdict = generation.shutdown();
+        const std::uint32_t verdict = shut_down(generation);
         if (verdict != DMK_STAGED_RELOAD_OK && verdict != DMK_STAGED_RELOAD_RETAINED)
         {
-            append_log("Shutdown refused retirement. The generation stays mapped.");
             return false;
         }
         return release_generation(generation, verdict);
@@ -423,7 +453,8 @@ namespace
 
     /**
      * @brief Retires the current generation before a fresh load.
-     * @return false after a teardown refusal or release failure. A release failure requests a restart.
+     * @return false after a teardown refusal or release failure. RESTART_REQUIRED and a release failure request a
+     *         restart.
      */
     [[nodiscard]] bool unload_current() noexcept
     {
@@ -431,10 +462,9 @@ namespace
         {
             return true;
         }
-        const std::uint32_t verdict = s_current->shutdown();
+        const std::uint32_t verdict = shut_down(*s_current);
         if (verdict != DMK_STAGED_RELOAD_OK && verdict != DMK_STAGED_RELOAD_RETAINED)
         {
-            append_log("Shutdown refused retirement. The generation stays mapped. Retry after quiescence.");
             return false;
         }
         if (!release_generation(*s_current, verdict))
