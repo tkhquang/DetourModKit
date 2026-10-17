@@ -155,7 +155,7 @@ flowchart TD
     Budget ==>|Yes| Shutdown{"Shutdown verdict?"}
     Shutdown ==>|BUSY| Bound{"Retry bound left?"}
     Bound ==>|Yes| Shutdown
-    Bound ==>|No| Live["Keep the generation live<br/>Retry on a later request"]
+    Bound ==>|No| BusyLive["Keep the generation live<br/>Retry on a later request"]
     Shutdown ==>|REFUSED| Mapped["Keep the image mapped<br/>Retry on a later request"]
     Shutdown ==>|RESTART_REQUIRED| Restart
     Shutdown ==>|OK or RETAINED| Lease{"ExternalHost probe succeeds?"}

@@ -81,9 +81,9 @@ namespace
         RETAINS,  // MemoryCache
         RETAINS,  // InputPoller
         RETAINS,  // LifecycleReaper
-        RETAINS,  // WndprocKeepalive
+        RETAINS,  // WndprocKeepalive: reserved, and a self-module pin retains if any code ever books it
         RETAINS,  // XInputKeepalive
-        UNMAPS,   // XInputTarget
+        UNMAPS,   // XInputTarget: references the provider module, not this image
         RETAINS,  // MessageHookKeepalive
     };
 
