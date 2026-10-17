@@ -227,6 +227,21 @@ namespace DetourModKit::detail
         return backend_value_or(backend, false, [on](auto &one) noexcept { return on ? one.resume() : one.bypass(); });
     }
 
+    /**
+     * @brief Runs the backend teardown. With @p defer, a restored inline trampoline can wait for
+     *        safetyhook::InlineHook::reclaim_deferred.
+     * @return True when the trampoline waits. False when the teardown completed, so route_retained() names its verdict.
+     */
+    template <class BackendVariant> [[nodiscard]] bool release_backend(BackendVariant &backend, bool defer) noexcept
+    {
+        if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend); defer && inline_backend != nullptr)
+        {
+            return inline_backend->reset_deferred();
+        }
+        (void)apply_backend(backend, [](auto &one) noexcept { one.reset(); });
+        return false;
+    }
+
     /// Hands a bypassed and drained backend's position to a later generation. See safetyhook::InlineHook::vacate.
     template <class BackendVariant> [[nodiscard]] bool vacate_backend(BackendVariant &backend) noexcept
     {

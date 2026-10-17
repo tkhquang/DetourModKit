@@ -130,14 +130,14 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_gate_race_probe.cpp` | Hook ledger and input gates under contention |
 | `test_heal_scheduler.cpp` | `HealScheduler`, healed slots |
 | `test_hook.cpp` | Install core, `mid_at`, `install_all`, ledger, publication |
-| `test_hook_backend.cpp` | Backend transactions, exception containment |
+| `test_hook_backend.cpp` | Backend transactions, exception containment, the idle-pass thread walk and suspension cost |
 | `test_hook_counted.cpp` | Counted `inline_at<Detour>`, `CallerFrame`, the counted drain proof |
 | `test_hook_counted_hardened.cpp` | The counted thunk under `-fstack-protector-all` |
 | `test_hook_fault_proof.cpp` | Every hook `*FaultProof` suite |
 | `test_hook_inline.cpp` | `inline_at`, prologue policy, duplicates, `Hook::call` |
 | `test_hook_integration.cpp` | Hooks on `hook_target_lib.dll` |
 | `test_hook_loader.cpp` | Hook loader-lock boundary |
-| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, `HookStack::retire`, in-flight drain |
+| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, `HookStack::retire` and its idle-pass count, in-flight drain |
 | `test_hook_vmt.cpp` | `vmt_for`, `apply_to`, `remove_from`, method hooks |
 | `test_input.cpp` | Binding registration and query core, `KeyStateCache` |
 | `test_input_codes.cpp` | `InputCode` and `Trigger` names, `InputCodeHash` |
@@ -195,6 +195,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 - `proof_section.hpp`: `DMK_PROOF_TARGET`, `DMK_TEST_NOINLINE`, `dmk_test::call_unfolded`.
 - `fault_injection.hpp`: no-access, protected, and executable pages for fault proofs.
 - `loader_lock_scope.hpp`, `log_capture.hpp`, `intercept_lease.hpp`, `scratch_page.hpp`, `throwing_copy.hpp`: the forced loader-lock probe, logger capture, an interception-layer lease, an executable scratch page, and a callable whose copy throws.
+- `thread_load.hpp`: the waiting and spinning threads that the idle-pass cases and `bench_hook.cpp` share.
 - `hook_target_lib.cpp` and `.def`: the `hook_target_lib.dll` export fixture.
 - `rtti_generation_fixture.cpp` and `.hpp`: the fixed-base RTTI DLL and its two same-base variants.
 
@@ -243,7 +244,7 @@ After you delete or rename a source file, configure a fresh build tree before a 
 
 TLS refusal proofs override only the executable import cell. Windows DLLs retain their native allocator. Each failure window verifies late CoreMessaging initialization and native TLS use on a new host thread. Delivery refusal, consume disarm, hook error, and recovery assertions remain mandatory.
 
-`Lifecycle.RoutedBypassDrainsBeforeReclaim` keeps both workers alive and waits for the caller's full return before native suspension. The caller returns to a separate driver fiber stack before its native event wait. The provider resumes after a drain pause, without a fixed time delay. `Lifecycle.RoutedBypassWaitsForCompleteCallerReturn` delays the return notice until the first scan requests it. `Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan` verifies native suspension refusal and charged retention after a snapshotted caller exits. Each route uses a 30-second timeout.
+`Lifecycle.RoutedBypassDrainsBeforeReclaim` keeps both workers alive and waits for the caller's full return before native suspension. The caller returns to a separate driver fiber stack before its native event wait. The provider resumes after a drain pause, without a fixed time delay. `Lifecycle.RoutedBypassWaitsForCompleteCallerReturn` delays the return notice until the first scan requests it. `Lifecycle.RoutedBypassReclaimsAfterThreadExitDuringScan` verifies that the pass skips the refused suspension of a caller that exited after the walk opened its handle, so the route reclaims (`[B-107]`). Each route uses a 30-second timeout.
 
 The foreign XInput proof counts explicit host probes by native thread identity. `Lifecycle.StagedGenerationForeignXInputSeparatesBackgroundProbes` verifies a concurrent caller without a change to the exact host count or route-bypass assertions. Both foreign XInput scenarios then reload 20 successors under the same newer layer and require constant live and Vacant record counts. Each successor connects the proxy controller only through `Init()`, because a claimed pair under that layer publishes observed coverage.
 

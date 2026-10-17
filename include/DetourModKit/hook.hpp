@@ -660,7 +660,12 @@ namespace DetourModKit
              *
              *          Callers of a closed mid route wait at its gateway, so each route drains for at most the closing
              *          budget of ~Hook. That budget is 4e9 time-stamp counter ticks, about one to four seconds.
-             * @note Setup/control-plane only: the drain suspends threads in turn and can wait up to @p deadline.
+             *
+             *          Each idle pass stops every other thread of the process once, for the length of the pass. One
+             *          counted drain and one trampoline proof cover all inline hooks, so their pass count does not grow
+             *          with the hook count. A restored hook that shares its patch window with another layer adds one
+             *          pass, and each mid hook adds two.
+             * @note Setup/control-plane only: the drain can wait up to @p deadline.
              */
             [[nodiscard]] HookRetirement retire(std::chrono::milliseconds deadline) noexcept;
 

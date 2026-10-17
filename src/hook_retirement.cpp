@@ -555,9 +555,13 @@ namespace DetourModKit
             std::vector<safetyhook::AddressRange> ranges;
             std::vector<const safetyhook::ReturnSites *> sites;
             std::vector<detail::CountedBlock *> blocks;
+            std::vector<detail::HookAccess::DeferredRestore> deferred;
+            std::vector<safetyhook::InlineHook *> deferred_backends;
             try
             {
                 hooks.reserve(m_hooks.size());
+                deferred.reserve(m_hooks.size());
+                deferred_backends.reserve(m_hooks.size());
                 for (auto it = m_hooks.rbegin(); it != m_hooks.rend(); ++it)
                 {
                     HookImpl *const impl = *it ? detail::HookAccess::impl(**it) : nullptr;
@@ -720,15 +724,9 @@ namespace DetourModKit
             }
 
             HookRetirement result{};
-            while (!m_hooks.empty())
+            const auto count = [&result](TeardownOutcome outcome) noexcept
             {
-                const std::unique_ptr<Hook> hook = std::move(m_hooks.back());
-                m_hooks.pop_back();
-                if (!hook)
-                {
-                    continue;
-                }
-                switch (detail::HookAccess::teardown(*hook))
+                switch (outcome)
                 {
                 case TeardownOutcome::Restored:
                     ++result.restored;
@@ -740,8 +738,29 @@ namespace DetourModKit
                     ++result.pinned;
                     break;
                 case TeardownOutcome::Empty:
+                case TeardownOutcome::Deferred:
                     break;
                 }
+            };
+            // The drain above covered every counted detour, and every relay stays off until the commit.
+            while (!m_hooks.empty())
+            {
+                const std::unique_ptr<Hook> hook = std::move(m_hooks.back());
+                m_hooks.pop_back();
+                if (hook)
+                {
+                    count(detail::HookAccess::teardown(*hook, detail::CountedDrainProof::ProvenByRetire, &deferred));
+                }
+            }
+            // One idle pass after the last restore proves every deferred trampoline.
+            for (detail::HookAccess::DeferredRestore &restore : deferred)
+            {
+                deferred_backends.push_back(std::get_if<safetyhook::InlineHook>(&restore.impl->backend));
+            }
+            safetyhook::InlineHook::reclaim_deferred(deferred_backends);
+            for (detail::HookAccess::DeferredRestore &restore : deferred)
+            {
+                count(detail::HookAccess::finish_deferred_restore(restore));
             }
             (void)log().try_log(
                 LogLevel::Info,

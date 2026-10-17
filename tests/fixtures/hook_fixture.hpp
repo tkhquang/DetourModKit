@@ -245,6 +245,16 @@ namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern void (*g_hook_publish_probe)(HookPublishStep);
+
+    // Mirrors src/internal/hook_backend.hpp, which this binary cannot include because it names the backend headers.
+    enum class CountedDrainStage : std::uint8_t
+    {
+        AfterFirstPass,
+        BetweenCounterReads,
+        AfterCounterReads,
+    };
+
+    extern void (*g_counted_drain_probe)(CountedDrainStage) noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -265,6 +275,27 @@ namespace dmk_test::hook_fixture
     private:
         void (*m_previous_probe)(DetourModKit::detail::HookPublishStep){nullptr};
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Installs @p probe as the counted drain probe for the scope and restores the prior probe.
+    class CountedDrainProbeScope
+    {
+    public:
+        explicit CountedDrainProbeScope(void (*probe)(DetourModKit::detail::CountedDrainStage) noexcept) noexcept
+            : m_previous(DetourModKit::detail::g_counted_drain_probe)
+        {
+            DetourModKit::detail::g_counted_drain_probe = probe;
+        }
+        ~CountedDrainProbeScope() noexcept { DetourModKit::detail::g_counted_drain_probe = m_previous; }
+        CountedDrainProbeScope(const CountedDrainProbeScope &) = delete;
+        CountedDrainProbeScope &operator=(const CountedDrainProbeScope &) = delete;
+        CountedDrainProbeScope(CountedDrainProbeScope &&) = delete;
+        CountedDrainProbeScope &operator=(CountedDrainProbeScope &&) = delete;
+
+    private:
+        void (*m_previous)(DetourModKit::detail::CountedDrainStage) noexcept;
+    };
+#endif
 
     // Offsets are spaced well past the longest body so no case can decode into its neighbour. The page is prefilled
     // 0xCC, which also terminates the slot walk at the first unwritten offset.
@@ -392,6 +423,67 @@ namespace dmk_test::hook_fixture
         std::atomic<int> m_result{0};
         // Declared last, so the member teardown joins the thread before the result goes away.
         std::jthread m_thread;
+    };
+
+    /**
+     * @brief A thread that never runs. It starts suspended with its instruction pointer at one address.
+     * @details An idle pass reads the context of each thread, so the thread stands for a call stopped at that address.
+     *          The destructor terminates it.
+     */
+    class SuspendedThreadAt
+    {
+    public:
+        explicit SuspendedThreadAt(void *address) noexcept
+        {
+            m_thread = CreateThread(nullptr, 0, &never_runs, nullptr, CREATE_SUSPENDED, nullptr);
+            if (m_thread == nullptr)
+            {
+                return;
+            }
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(m_thread, &context) == FALSE)
+            {
+                return;
+            }
+            context.Rip = reinterpret_cast<DWORD64>(address);
+            if (SetThreadContext(m_thread, &context) == FALSE)
+            {
+                return;
+            }
+            CONTEXT check{};
+            check.ContextFlags = CONTEXT_CONTROL;
+            m_ready = GetThreadContext(m_thread, &check) != FALSE && check.Rip == context.Rip;
+        }
+
+        ~SuspendedThreadAt() noexcept { terminate(); }
+
+        SuspendedThreadAt(const SuspendedThreadAt &) = delete;
+        SuspendedThreadAt &operator=(const SuspendedThreadAt &) = delete;
+        SuspendedThreadAt(SuspendedThreadAt &&) = delete;
+        SuspendedThreadAt &operator=(SuspendedThreadAt &&) = delete;
+
+        /// Reports whether the thread exists with the requested instruction pointer.
+        [[nodiscard]] bool ready() const noexcept { return m_ready; }
+
+        /// Ends the thread before it runs.
+        void terminate() noexcept
+        {
+            if (m_thread == nullptr)
+            {
+                return;
+            }
+            (void)TerminateThread(m_thread, 0);
+            (void)WaitForSingleObject(m_thread, static_cast<DWORD>(PARK_BOUND.count() * 1000));
+            (void)CloseHandle(m_thread);
+            m_thread = nullptr;
+        }
+
+    private:
+        static DWORD WINAPI never_runs(void *) noexcept { return 0; }
+
+        HANDLE m_thread{nullptr};
+        bool m_ready{false};
     };
 } // namespace dmk_test::hook_fixture
 

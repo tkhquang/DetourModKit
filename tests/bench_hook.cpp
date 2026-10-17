@@ -16,12 +16,17 @@
 // A guarded workload runs one round. The entry workloads run ENTRY_ROUNDS interleaved rounds, and each round installs
 // and removes its own hooks. An entry row reports the median batch mean and pools the samples of every round. Each
 // derived cost subtracts two medians, so one preempted batch does not flip its sign.
+//
+// The retire workloads time one HookStack::retire of 29 counted hooks, as many as the field retirement held. The idle
+// workload adds no thread. The parked workload adds 150 waiting threads, and the saturated workload also spins 8 more
+// threads than the logical processors. Each workload runs RETIRE_ROUNDS rounds and reports the median.
 
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/hook.hpp"
 
 #include "bench_gate.hpp"
 #include "fixtures/proof_section.hpp"
+#include "fixtures/thread_load.hpp"
 
 #include <windows.h>
 
@@ -529,6 +534,91 @@ namespace
         workload.held = workload.held && s_mid_callbacks.load(std::memory_order_relaxed) == 0 &&
                         entry_bytes(&residue_target) != pristine_entry;
     }
+
+    /// The counted hooks of each retire workload, as many as the field retirement held.
+    constexpr std::size_t RETIRE_HOOKS = 29;
+    /// The rounds of each retire workload. An odd count makes the median one measured retirement.
+    constexpr int RETIRE_ROUNDS = 5;
+    /// The waiting threads of the parked and saturated retire workloads.
+    constexpr std::size_t RETIRE_PARKED_THREADS = 150;
+    /// The spinning threads beyond the logical processors in the saturated retire workload.
+    constexpr std::size_t RETIRE_EXTRA_SPINNERS = 8;
+    /// The drain deadline of one retirement. A slow pass then shows as time, not as Busy.
+    constexpr milliseconds RETIRE_DEADLINE{60000};
+    /// The gate that every retire round holds.
+    constexpr const char *RETIRE_FACT = "hook.retire_counted_restored_every_hook";
+
+    // One target per index. The constant differs for each index, so no toolchain folds two targets.
+    template <std::size_t Index> DMK_PROOF_TARGET int retire_target(int x)
+    {
+        volatile std::int64_t r = static_cast<std::int64_t>(x) * static_cast<std::int64_t>(2 * Index + 3);
+        return static_cast<int>(r);
+    }
+
+    // The retire workloads never call the hooked targets, so the detour only needs the counted signature.
+    template <std::size_t Index> int retire_detour(int x) noexcept
+    {
+        return x + DETOUR_BONUS;
+    }
+
+    /// Arms a counted hook on retire_target<Index>. A failed setup records RETIRE_FACT as failed and exits.
+    template <std::size_t Index> void push_retire_hook(dmk_bench::GateLedger &gates, HookStack &stack)
+    {
+        Hook &hook = push_hook(
+            gates,
+            RETIRE_FACT,
+            stack,
+            inline_at<&retire_detour<Index>>(InlineRequest{
+                .name = "BenchRetire" + std::to_string(Index),
+                .target = address_of(&retire_target<Index>),
+            })
+        );
+        require_toggled(gates, RETIRE_FACT, hook.enable());
+    }
+
+    template <std::size_t... Index>
+    void push_retire_hooks(dmk_bench::GateLedger &gates, HookStack &stack, std::index_sequence<Index...>)
+    {
+        (push_retire_hook<Index>(gates, stack), ...);
+    }
+
+    struct RetireWorkload
+    {
+        const char *name = nullptr;
+        const char *metric = nullptr;
+        std::size_t threads = 0;
+        std::vector<double> ms;
+        /// False after a round that did not retire every hook by restore.
+        bool restored_every_hook = true;
+    };
+
+    /// Installs RETIRE_HOOKS counted hooks and times one HookStack::retire over them.
+    void run_retire_round(dmk_bench::GateLedger &gates, RetireWorkload &workload)
+    {
+        HookStack stack;
+        stack.reserve(RETIRE_HOOKS);
+        push_retire_hooks(gates, stack, std::make_index_sequence<RETIRE_HOOKS>{});
+        const auto start = steady_clock::now();
+        const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+        workload.ms.push_back(duration<double, std::milli>(steady_clock::now() - start).count());
+        workload.restored_every_hook = workload.restored_every_hook && retired.outcome == RetirementOutcome::Retired &&
+                                       retired.restored == RETIRE_HOOKS;
+    }
+
+    /// Runs RETIRE_ROUNDS retire rounds of @p workload.
+    void run_retire_workload(dmk_bench::GateLedger &gates, RetireWorkload &workload)
+    {
+        for (int round = 0; round < RETIRE_ROUNDS; ++round)
+        {
+            run_retire_round(gates, workload);
+        }
+    }
+
+    [[nodiscard]] double median_of(std::vector<double> values)
+    {
+        std::sort(values.begin(), values.end());
+        return values.empty() ? 0.0 : values[values.size() / 2];
+    }
 } // namespace
 
 int main()
@@ -614,6 +704,37 @@ int main()
     const EntryRun long_chain = merge_entry(std::move(long_rounds));
     const EntryRun mid_closed = merge_entry(std::move(mid_rounds));
 
+    const std::size_t spinners = std::max<std::size_t>(std::thread::hardware_concurrency(), 1) + RETIRE_EXTRA_SPINNERS;
+    RetireWorkload retire_idle{
+        .name = "retire_counted_29_idle",
+        .metric = "hook.retire_counted_29_idle_ms",
+    };
+    RetireWorkload retire_parked{
+        .name = "retire_counted_29_parked_150",
+        .metric = "hook.retire_counted_29_parked_150_ms",
+        .threads = RETIRE_PARKED_THREADS,
+    };
+    RetireWorkload retire_saturated{
+        .name = "retire_counted_29_saturated",
+        .metric = "hook.retire_counted_29_saturated_ms",
+        .threads = RETIRE_PARKED_THREADS + spinners,
+    };
+    run_retire_workload(gates, retire_idle);
+    {
+        const dmk_test::ParkedThreads parked{RETIRE_PARKED_THREADS};
+        if (!parked.wait_until_started(RETIRE_PARKED_THREADS))
+        {
+            gates.abort_setup(RETIRE_FACT);
+        }
+        run_retire_workload(gates, retire_parked);
+        const dmk_test::SpinningThreads spinning{spinners};
+        if (!spinning.wait_until_started(spinners))
+        {
+            gates.abort_setup(RETIRE_FACT);
+        }
+        run_retire_workload(gates, retire_saturated);
+    }
+
     std::printf("workload\tthreads\tcalls\tmean_ns\tp50_ns\tp99_ns\tp999_ns\tmax_ns\tcalls_per_s\tclock_tick_ns\n");
     print_row("hook_call_guarded", 1, guarded_single, tick_ns);
     print_row("hook_call_guarded", 2, guarded_two, tick_ns);
@@ -623,6 +744,20 @@ int main()
     print_row("residue_hops_1", 1, short_chain.measurement, tick_ns);
     print_row("residue_hops_16", 1, long_chain.measurement, tick_ns);
     print_row("mid_closed_entry", 1, mid_closed.measurement, tick_ns);
+
+    std::printf("\nretire_workload\thooks\textra_threads\trounds\tmedian_ms\tmax_ms\n");
+    for (const RetireWorkload *workload : {&retire_idle, &retire_parked, &retire_saturated})
+    {
+        std::printf(
+            "%s\t%zu\t%zu\t%d\t%.2f\t%.2f\n",
+            workload->name,
+            RETIRE_HOOKS,
+            workload->threads,
+            RETIRE_ROUNDS,
+            median_of(workload->ms),
+            *std::max_element(workload->ms.begin(), workload->ms.end())
+        );
+    }
 
     // A guarded or unguarded call must reach the original body through the trampoline. A refused guarded dispatch
     // returns a value-initialized int, and a call that reached the detour returns i + DETOUR_BONUS. Either one leaves
@@ -636,6 +771,10 @@ int main()
     gates.fact(short_chain.fact, short_chain.passed);
     gates.fact(long_chain.fact, long_chain.passed);
     gates.fact(mid_closed.fact, mid_closed.passed);
+    gates.fact(
+        RETIRE_FACT,
+        retire_idle.restored_every_hook && retire_parked.restored_every_hook && retire_saturated.restored_every_hook
+    );
 
     gates.metric("hook.call_guarded_1t_mean_ns", guarded_single.mean_ns);
     gates.metric("hook.call_guarded_2t_mean_ns", guarded_two.mean_ns);
@@ -654,5 +793,9 @@ int main()
         (long_chain.measurement.mean_ns - short_chain.measurement.mean_ns) /
             static_cast<double>(LONG_CHAIN_HOPS - SHORT_CHAIN_HOPS)
     );
+    for (const RetireWorkload *workload : {&retire_idle, &retire_parked, &retire_saturated})
+    {
+        gates.metric(workload->metric, median_of(workload->ms));
+    }
     return gates.close();
 }

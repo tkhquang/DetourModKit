@@ -477,7 +477,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RoutedBypassSurvivesDormantFiber
     Lifecycle.RoutedBypassCleanRoutesReclaim
     Lifecycle.RoutedBypassDrainsBeforeReclaim
-    Lifecycle.RoutedBypassRetainsAfterThreadExitDuringScan
+    Lifecycle.RoutedBypassReclaimsAfterThreadExitDuringScan
     Lifecycle.RoutedBypassWaitsForCompleteCallerReturn
     Lifecycle.RoutedBypassProofRejectsUnknownScenario
     Lifecycle.MidRouteStaleSlotRefusesCreation
