@@ -20,11 +20,13 @@
  */
 
 #include "DetourModKit/address.hpp"
+#include "DetourModKit/detail/counted_entry.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/scan.hpp"
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -212,12 +214,32 @@ namespace DetourModKit
             Options options{};
         };
 
+        /**
+         * @brief The return of the game call into a counted hook. A counted detour receives it as its first parameter.
+         * @details The relay jumps into the counted thunk, so the slot is the stack word of the game caller's return
+         *          address. A write to the slot changes where the hooked function returns.
+         */
+        struct CallerFrame
+        {
+            /// The stack slot that holds the return address of the call into the hooked function.
+            void **return_address_slot;
+
+            /// Returns the return address of the call into the hooked function.
+            [[nodiscard]] void *return_address() const noexcept { return *return_address_slot; }
+        };
+
         class Hook;
 
         namespace detail
         {
-            /// The non-template inline-install primitive behind @ref inline_at.
+            /// The internal access path to a Hook's private state, defined in src/internal/hook_backend.hpp.
+            struct HookAccess;
+
+            /// The non-template inline-install primitive behind the raw @ref inline_at.
             [[nodiscard]] Result<Hook> inline_at_raw(InlineRequest request, void *detour);
+
+            /// The non-template inline-install primitive behind the counted @ref inline_at.
+            [[nodiscard]] Result<Hook> inline_at_counted(InlineRequest request, CountedInstall install);
         } // namespace detail
 
 #ifdef _MSC_VER
@@ -275,7 +297,12 @@ namespace DetourModKit
              *          bodies. The loader lock, a published unload phase, self-destruction, or an unrecorded entrant
              *          prevents that wait. An expired or prevented wait retains the backend, and an admitted callback
              *          can still run after destruction returns.
-             * @warning Inline hook quiescence is caller-owned for a restore and for a residue. See @ref inline_at.
+             *
+             *          A counted inline hook switches its relay off first and waits up to one second for every call
+             *          inside its detour to leave (`[B-106]`). A call that stays, or a teardown from inside the
+             *          detour, retains the backend.
+             * @warning Quiescence of a raw inline detour is caller-owned for a restore and for a residue. See the raw
+             *          @ref inline_at.
              * @note Setup/control-plane only: teardown mutates the target and can wait for callbacks and continuations.
              */
             ~Hook() noexcept;
@@ -488,17 +515,51 @@ namespace DetourModKit
 
             friend Result<Hook> mid_at(MidRequest request, MidHookFn detour);
             friend Result<Hook> detail::inline_at_raw(InlineRequest request, void *detour);
+            friend struct detail::HookAccess;
         };
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
 
+        /// How @ref HookStack::retire ended.
+        enum class RetirementOutcome : std::uint8_t
+        {
+            /// The commit ran. The stack is empty, and the counts tell how each hook retired.
+            Retired,
+            /// The call changed nothing, so a retry can succeed later.
+            Busy,
+            /// The call changed nothing, and a retry under the same conditions fails again.
+            Refused
+        };
+
+        /// The result of @ref HookStack::retire.
+        struct HookRetirement
+        {
+            RetirementOutcome outcome = RetirementOutcome::Retired;
+            /// Top layers that restored their target.
+            std::uint32_t restored = 0;
+            /**
+             * @brief Layers that retired by bypass and reach no image code.
+             * @details Each one vacates its position (`[B-105]`). A vacate that the coordinator refuses keeps the
+             *          position Owned.
+             */
+            std::uint32_t vacated = 0;
+            /// Hooks whose detour can stay reachable. Each one books diagnostics::LeakSubsystem::HookManager.
+            std::uint32_t pinned = 0;
+            /// Counted calls inside a detour at the last read of a Busy drain.
+            std::uint32_t in_flight = 0;
+            /// The reason for Busy or Refused, as the @ref HookStack::retire contract lists. Otherwise ErrorCode::Ok.
+            ErrorCode refusal = ErrorCode::Ok;
+        };
+
         /**
          * @brief Move-only owner of Hook handles that tears them down newest-first, so each layer restores (`[B-16]`).
          * @details A `std::vector<Hook>` does not guarantee that order, and a lower layer then retires as residue. Use
-         *          HookStack for hooks layered on one target.
-         * @note HookStack has no internal synchronization. Build it and tear it down on the setup thread.
+         *          HookStack for hooks layered on one target. Use @ref retire for a teardown that must not wait in a
+         *          destructor.
+         * @note HookStack has no internal synchronization. Build it and tear it down on the setup thread. During
+         *       @ref retire, toggle no hook of the stack on another thread.
          */
         class HookStack
         {
@@ -542,19 +603,20 @@ namespace DetourModKit
 
             /**
              * @brief Moves @p hook onto the top of the stack. Push order is layer order, so push the base hook first.
-             * @return The stored @ref Hook, valid until the next @ref push, @ref reserve, @ref clear, or move.
+             * @return The stored @ref Hook. The reference stays valid until the stack destroys that hook.
              * @throws std::bad_alloc If storage growth fails. The stack then destroys @p hook, which restores its
              *         prologue, and keeps the stored hooks.
              * @note Setup/control-plane only: the push can allocate.
              */
             Hook &push(Hook hook)
             {
-                m_hooks.push_back(std::move(hook));
-                return m_hooks.back();
+                std::unique_ptr<Hook> stored = std::make_unique<Hook>(std::move(hook));
+                m_hooks.push_back(std::move(stored));
+                return *m_hooks.back();
             }
 
             /**
-             * @brief Reserves storage for @p capacity hooks, so a batch of @ref push calls does not reallocate.
+             * @brief Reserves slots for @p capacity hooks, so a batch of @ref push calls does not grow the slot list.
              * @note Setup/control-plane only: the reserve can allocate.
              */
             void reserve(std::size_t capacity) { m_hooks.reserve(capacity); }
@@ -577,6 +639,31 @@ namespace DetourModKit
              */
             void clear() noexcept { teardown_newest_first(); }
 
+            /**
+             * @brief Retires every owned hook newest-first, or changes nothing (`[B-106]`).
+             * @param deadline How long the drain can wait for calls inside the detours to leave.
+             * @return The outcome. Busy and Refused leave every hook, relay, route, and position as it was.
+             *         - Busy with LoaderLockActive: the caller holds the loader lock or runs in a loader phase.
+             *         - Busy with ErrorCode::Ok: a counted call stayed past @p deadline, a mid callback stayed past the
+             *           closing budget, or the process coordinator was unavailable. @ref HookRetirement::in_flight
+             *           counts the counted calls.
+             *         - Refused with ReentrantCallRejected: the call runs inside a counted detour or a mid callback of
+             *           this stack.
+             *         - Refused with LayerResidueLimitReached: a fresh layer that the commit cannot restore exceeds the
+             *           residue budget of the ~Hook contract.
+             *         - Refused with BackendFailed: a relay cannot switch off. OutOfMemory: the proof storage failed.
+             *         - Retired: the stack is empty. Each hook restored, vacated its position, or stayed pinned.
+             * @details The call switches off every inline relay, top layers included, and proves each counted detour
+             *          idle. It then closes and drains each mid route. Only then does it tear the hooks down
+             *          newest-first through the ~Hook contract. A raw inline detour keeps caller-owned quiescence, so a
+             *          raw detour must not call this function on its own stack.
+             *
+             *          Callers of a closed mid route wait at its gateway, so each route drains for at most the closing
+             *          budget of ~Hook. That budget is 4e9 time-stamp counter ticks, about one to four seconds.
+             * @note Setup/control-plane only: the drain suspends threads in turn and can wait up to @p deadline.
+             */
+            [[nodiscard]] HookRetirement retire(std::chrono::milliseconds deadline) noexcept;
+
         private:
             /// Destroys the owned hooks back to front, newest layer first.
             void teardown_newest_first() noexcept
@@ -587,17 +674,19 @@ namespace DetourModKit
                 }
             }
 
-            std::vector<Hook> m_hooks;
+            std::vector<std::unique_ptr<Hook>> m_hooks;
         };
 
         /**
-         * @brief Installs a disabled inline hook at the request's target. Call @ref Hook::enable to arm it.
+         * @brief Installs a disabled raw inline hook at the request's target. Call @ref Hook::enable to arm it.
          * @return The @ref Hook with the target unpatched, or an Error. This call reports every install failure,
          *         including a scan miss for a deferred target.
+         * @details Prefer the counted form, which owns quiescence. Use this form for a variadic, `__vectorcall`, or
+         *          other signature that the counted thunk does not forward.
          * @warning The detour must not throw. The patched target calls it directly, so an exception that escapes
          *          terminates the host.
-         * @warning Unlike @ref mid_at, quiescence before teardown is caller-owned: DMK cannot wait for a thread inside
-         *          the detour. Prove that no thread can execute the detour before the handle dies.
+         * @warning Unlike @ref mid_at and the counted form, quiescence before teardown is caller-owned: DMK cannot wait
+         *          for a thread inside the detour. Prove that no thread can execute the detour before the handle dies.
          * @warning For a Logic DLL detour, stop and join every thread that can reach the target. Then destroy the
          *          handle. Then unmap the provider. DMK cannot detect another order.
          * @note Setup/control-plane only: the install allocates the trampoline and validates the target.
@@ -606,6 +695,40 @@ namespace DetourModKit
         {
             static_assert(sizeof(Fn *) == sizeof(void *), "function pointer must be word-sized");
             return detail::inline_at_raw(std::move(request), reinterpret_cast<void *>(detour));
+        }
+
+        /**
+         * @brief Installs a disabled counted inline hook. DMK counts each call into @p Detour and drains them at
+         *        teardown (`[B-106]`). Call @ref Hook::enable to arm it.
+         * @tparam Detour A noexcept, non-variadic function whose parameters and result are references or trivially
+         *         copyable. An optional first @ref CallerFrame parameter, by value, receives the game caller's return.
+         *         The other parameters match the hooked function.
+         * @return The @ref Hook with the target unpatched, or an Error. InvalidDetourFunction means that the compiled
+         *         thunk has a shape that the drain proof cannot cover, and the log names the cause.
+         * @details A DMK thunk in the consumer image sits in the relay slot and calls @p Detour. @ref HookStack::retire
+         *          and ~Hook switch the relay off and wait until no thread runs the thunk or the detour. A Retired
+         *          outcome with no pinned hook therefore leaves no counted call in the image. An unwind or nonlocal exit
+         *          out of the detour leaves its call counted, so every later retirement of that detour stays Busy.
+         * @note Hooks that share one detour share its counters, so each drain also waits for the calls of the others.
+         * @note Setup/control-plane only: the install allocates the trampoline and decodes the thunk.
+         */
+        template <auto Detour> [[nodiscard]] Result<Hook> inline_at(InlineRequest request)
+        {
+            using Signature = detail::CountedSignature<decltype(Detour), CallerFrame>;
+            static_assert(
+                Signature::valid,
+                "inline_at<Detour> needs a noexcept, non-variadic detour whose parameters and result are references or "
+                "trivially copyable. Use inline_at(request, detour) for another signature."
+            );
+            static_assert(Detour != nullptr, "inline_at<Detour> needs a detour");
+            using Entry = typename Signature::template entry<Detour>;
+            return detail::inline_at_counted(
+                std::move(request),
+                detail::CountedInstall{
+                    .entry = reinterpret_cast<void *>(&Entry::entry),
+                    .block = &Entry::block,
+                }
+            );
         }
 
         /**

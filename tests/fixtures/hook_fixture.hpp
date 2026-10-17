@@ -9,6 +9,7 @@
  */
 
 #include "DetourModKit/address.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/hook.hpp"
 #include "internal/hook_publication.hpp"
@@ -17,10 +18,14 @@
 
 #include <windows.h>
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -70,6 +75,26 @@ namespace dmk_test::hook_fixture
     template <class Fn> [[nodiscard]] Address addr_of(Fn *fn) noexcept
     {
         return Address{reinterpret_cast<std::uintptr_t>(fn)};
+    }
+
+    /// Copies the first bytes of a function's entry, the span an inline patch overwrites.
+    template <class Fn> [[nodiscard]] std::array<std::uint8_t, 16> entry_bytes(Fn *fn) noexcept
+    {
+        std::array<std::uint8_t, 16> bytes{};
+        std::memcpy(bytes.data(), reinterpret_cast<const void *>(fn), bytes.size());
+        return bytes;
+    }
+
+    /// A pin whose detour stays reachable books here.
+    [[nodiscard]] inline std::size_t hook_manager_leaks() noexcept
+    {
+        return DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+    }
+
+    /// A retired layer that keeps backend storage while no path reaches its detour books here.
+    [[nodiscard]] inline std::size_t hook_residue_leaks() noexcept
+    {
+        return DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
     }
 
     // Synthetic prologue targets live on a dmk_test::ScratchPage, not in a static array. scratch_page.hpp owns the
@@ -277,6 +302,97 @@ namespace dmk_test::hook_fixture
         return bodies;
     }
 
+} // namespace dmk_test::hook_fixture
+
+namespace dmk_test::hook_fixture
+{
+    /// The bound of every wait on a parked call, so a failed premise cannot wedge the shared unit binary.
+    inline constexpr std::chrono::seconds PARK_BOUND{10};
+    /// The delta that @ref parked_detour adds to the result of its trampoline.
+    inline constexpr int PARKED_DELTA = 0x40000;
+
+    /// The state of one parked detour. Each Case value of @ref park_signals belongs to one test case of the binary.
+    struct ParkSignals
+    {
+        std::atomic<bool> armed{false};
+        std::atomic<bool> reached{false};
+        std::atomic<bool> released{false};
+        /// The function that the detour forwards to, usually its trampoline.
+        std::atomic<EchoFn> next{nullptr};
+    };
+
+    template <int Case> inline ParkSignals park_signals{};
+
+    /**
+     * @brief A counted detour whose next armed call waits inside the detour until its release or @ref PARK_BOUND.
+     * @details Every other call forwards at once. The result adds @ref PARKED_DELTA to the result of the trampoline.
+     */
+    template <int Case> int parked_detour(int value) noexcept
+    {
+        ParkSignals &signals = park_signals<Case>;
+        if (signals.armed.exchange(false, std::memory_order_acq_rel))
+        {
+            signals.reached.store(true, std::memory_order_release);
+            const auto deadline = std::chrono::steady_clock::now() + PARK_BOUND;
+            while (!signals.released.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::yield();
+            }
+        }
+        return call_unfolded(signals.next.load(std::memory_order_acquire), value) + PARKED_DELTA;
+    }
+
+    /**
+     * @brief Runs one call of a hooked target on its own thread, and the armed @ref parked_detour parks the call.
+     * @details The destructor releases the call and joins the thread on every exit path.
+     */
+    class ParkedCall
+    {
+    public:
+        ParkedCall(ParkSignals &signals, EchoFn target, int value) : m_signals(signals)
+        {
+            m_signals.reached.store(false, std::memory_order_release);
+            m_signals.released.store(false, std::memory_order_release);
+            m_signals.armed.store(true, std::memory_order_release);
+            m_thread = std::jthread([this, target, value]
+                                    { m_result.store(call_unfolded(target, value), std::memory_order_release); });
+        }
+
+        ~ParkedCall() noexcept { m_signals.released.store(true, std::memory_order_release); }
+
+        ParkedCall(const ParkedCall &) = delete;
+        ParkedCall &operator=(const ParkedCall &) = delete;
+        ParkedCall(ParkedCall &&) = delete;
+        ParkedCall &operator=(ParkedCall &&) = delete;
+
+        /// Waits up to @ref PARK_BOUND for the call to reach the detour and reports whether it did.
+        [[nodiscard]] bool wait_until_parked() const noexcept
+        {
+            const auto deadline = std::chrono::steady_clock::now() + PARK_BOUND;
+            while (!m_signals.reached.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            return m_signals.reached.load(std::memory_order_acquire);
+        }
+
+        /// Releases the call, joins its thread, and returns the result of the call.
+        int release_and_join()
+        {
+            m_signals.released.store(true, std::memory_order_release);
+            if (m_thread.joinable())
+            {
+                m_thread.join();
+            }
+            return m_result.load(std::memory_order_acquire);
+        }
+
+    private:
+        ParkSignals &m_signals;
+        std::atomic<int> m_result{0};
+        // Declared last, so the member teardown joins the thread before the result goes away.
+        std::jthread m_thread;
+    };
 } // namespace dmk_test::hook_fixture
 
 #endif // DETOURMODKIT_TESTS_FIXTURES_HOOK_FIXTURE_HPP

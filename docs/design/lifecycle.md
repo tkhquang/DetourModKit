@@ -140,7 +140,7 @@ A close is legal only once no live thread can still be inside the use. That is e
 
 ### [B-74]
 
-DMK's worker module references pin DMK, not consumer callbacks. Before the drain, the caller stops and joins its workers and drops every dispatcher subscription and hook handle. Input guards are not part of that ordering. Retirement reaches the callback through the binding's delivery gate, so a retained `BindingGuard` cannot keep one alive. The drain itself balances a binding still held while the provider is mapped.
+DMK's worker module references pin DMK, not consumer callbacks. Before the drain, the caller stops and joins its workers, retires each `HookStack` through `HookStack::retire`, and drops every dispatcher subscription and remaining hook handle. Input guards are not part of that ordering. Retirement reaches the callback through the binding's delivery gate, so a retained `BindingGuard` cannot keep one alive. The drain itself balances a binding still held while the provider is mapped.
 
 `prepare_logic_dll_unload*` owns one end-to-end deadline. It performs these steps in order:
 

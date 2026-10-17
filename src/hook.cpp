@@ -1268,16 +1268,49 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Switches the relay of a counted hook off and proves its detour idle within the route bound
+         *        (`[B-106]`).
+         * @return Null when the detour drained, or a phrase that completes the pin warning.
+         */
+        template <class BackendVariant>
+        [[nodiscard]] const char *drain_counted_hook(BackendVariant &backend, const hook::CountedThunk &thunk) noexcept
+        {
+            const std::array<safetyhook::AddressRange, 1> ranges{thunk.range};
+            if (hook::detail::current_thread_returns_into(ranges))
+            {
+                return "the teardown runs inside its own counted detour";
+            }
+            if (!DetourModKit::detail::switch_backend(backend, false))
+            {
+                return "the backend cannot switch its relay off";
+            }
+            std::array<const safetyhook::ReturnSites *, hook::COUNTED_HELPER_SITE_LISTS> sites{};
+            for (std::size_t i = 0; i < thunk.helper_site_lists; ++i)
+            {
+                sites[i] = &thunk.helper_sites[i];
+            }
+            const std::array<hook::detail::CountedBlock *, 1> blocks{thunk.block};
+            const hook::detail::CountedDrain drained = hook::detail::drain_counted(
+                ranges,
+                std::span<const safetyhook::ReturnSites *const>{sites.data(), thunk.helper_site_lists},
+                blocks,
+                std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT
+            );
+            return drained.idle ? nullptr : "a counted call stayed inside its detour past the drain bound";
+        }
+
+        /**
          * @brief Pins a backend whose detour can stay reachable: it leaks the Impl and keeps its module reference.
-         * @details The caller holds the target install-serialization slot. The helper releases it and keeps the
-         *          creation-order entry, so is_target_hooked still reports the hooked target. Hook::Impl is private to
-         *          Hook, so each ~Hook phase helper deduces the Impl type as a template parameter.
+         * @details A caller that holds the target install-serialization slot passes @p ledger, and the helper
+         *          releases the slot. The creation-order entry stays, so is_target_hooked still reports the hooked
+         *          target. Hook::Impl is private to Hook, so each ~Hook phase helper deduces the Impl type as a
+         *          template parameter.
          * @param reason A string literal that completes the warning sentence.
          */
         template <class HookImpl>
-        void pin_backend_with_live_detour(
+        hook::TeardownOutcome pin_backend_with_live_detour(
             std::unique_ptr<HookImpl> &impl,
-            detail::HookLedger &ledger,
+            detail::HookLedger *ledger,
             const std::string &name,
             std::uintptr_t target,
             std::uint64_t ledger_id,
@@ -1287,7 +1320,10 @@ namespace DetourModKit
         {
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)impl.release();
-            ledger.release_target_slot(target, ledger_id);
+            if (ledger != nullptr)
+            {
+                ledger->release_target_slot(target, ledger_id);
+            }
             (void)log().try_log(
                 LogLevel::Warning,
                 "hook: '{}' at 0x{:0{}X} leaked its backend during teardown, so its detour stays reachable: {}.",
@@ -1305,6 +1341,7 @@ namespace DetourModKit
                     .remains_live = true,
                 }
             );
+            return hook::TeardownOutcome::Pinned;
         }
 
         /// Names why a layer retires by bypass in place of a restore.
@@ -1421,61 +1458,6 @@ namespace DetourModKit
             return TeardownRestore::Restored;
         }
 
-        /// A time-stamp counter budget of about one to four seconds on a 1 GHz to 4 GHz counter.
-        constexpr std::uint64_t CLOSING_DRAIN_TICK_BUDGET = 4'000'000'000ULL;
-
-        /**
-         * @brief Waits for a CLOSING mid route to empty, with no call into any export.
-         * @details A call that reaches the hooked export spins in the gateway while the route is CLOSING. A clock read,
-         *          a yield, or a sleep can be that export, so the wait reads only the entry count and the time-stamp
-         *          counter. New entrants wait outside the count, so the count can only fall.
-         * @return False when the budget expired first. A false return never licenses a vacate.
-         */
-        template <class BackendVariant> [[nodiscard]] bool drain_closing_route(BackendVariant &backend) noexcept
-        {
-            const std::uint64_t start = __rdtsc();
-            while (backend_value_or(
-                       backend,
-                       std::size_t{1},
-                       [](const auto &one) noexcept { return one.route_entries(); }
-                   ) != 0)
-            {
-                if (__rdtsc() - start > CLOSING_DRAIN_TICK_BUDGET)
-                {
-                    return false;
-                }
-                _mm_pause();
-            }
-            return true;
-        }
-
-        /// The deepest target chain at which a fresh layer still leaves a residue position.
-        constexpr std::size_t RESIDUE_LAYER_LIMIT = 16;
-        /// The fewest free process records at which a fresh layer still leaves a residue position.
-        constexpr std::size_t RESIDUE_FREE_RECORD_FLOOR = 64;
-
-        /**
-         * @brief Reports whether one more residue position fits: at most @ref RESIDUE_LAYER_LIMIT layers on the target
-         *        and at least @ref RESIDUE_FREE_RECORD_FLOOR free process records.
-         * @details A full registry fails every inline and mid create that claims no Vacant position, so the guard
-         *          stops the growth first. An unusable coordinator fails the check.
-         */
-        template <class BackendVariant> [[nodiscard]] bool residue_fits_budget(BackendVariant &backend) noexcept
-        {
-            const safetyhook::ProcessCoordinator coordinator;
-            if (!coordinator)
-            {
-                return false;
-            }
-            std::uint8_t *const key = backend_value_or(
-                backend,
-                static_cast<std::uint8_t *>(nullptr),
-                [](const auto &one) noexcept { return one.trampoline().data(); }
-            );
-            return coordinator.layer_count(key) <= RESIDUE_LAYER_LIMIT &&
-                   coordinator.free_record_count() >= RESIDUE_FREE_RECORD_FLOOR;
-        }
-
         /**
          * @brief Retires a hook that cannot restore. It switches the hook off, drains a mid route, and vacates the
          *        position for a later generation of the same hook name.
@@ -1485,7 +1467,7 @@ namespace DetourModKit
          *          diagnostics::LeakSubsystem contract. Over the residue budget, a fresh layer keeps the pin.
          */
         template <class HookImpl>
-        void retire_by_vacate(
+        hook::TeardownOutcome retire_by_vacate(
             std::unique_ptr<HookImpl> &impl,
             detail::HookLedger &ledger,
             const std::string &name,
@@ -1500,7 +1482,7 @@ namespace DetourModKit
         ) noexcept
         {
             const bool claimed = DetourModKit::detail::backend_claimed(impl->backend);
-            if (!claimed && !residue_fits_budget(impl->backend))
+            if (!claimed && !DetourModKit::detail::residue_fits_budget(impl->backend))
             {
                 // Same route-state rule as the pin in restore_target_or_pin_backend.
                 (void)apply_backend(
@@ -1508,16 +1490,15 @@ namespace DetourModKit
                     [was_active](auto &backend) noexcept
                     { was_active ? backend.cancel_route_rundown() : backend.finish_route_rundown(); }
                 );
-                pin_backend_with_live_detour(
+                return pin_backend_with_live_detour(
                     impl,
-                    ledger,
+                    &ledger,
                     name,
                     target,
                     ledger_id,
                     kind,
                     "the target or the process route registry reached the residue budget"
                 );
-                return;
             }
 
             // A mid route drains while CLOSING, because a CLOSED route admits bypass traffic that holds entries. The
@@ -1533,7 +1514,10 @@ namespace DetourModKit
                 const safetyhook::ProcessCoordinator coordinator;
                 (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.begin_route_rundown(); });
                 drained = mid_rundown == DetourModKit::detail::MidRundown::Drained && !caller_owns_route &&
-                          drain_closing_route(impl->backend);
+                          DetourModKit::detail::drain_closing_route(
+                              impl->backend,
+                              DetourModKit::detail::CLOSING_DRAIN_TICK_BUDGET
+                          );
                 (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
             }
             drained =
@@ -1543,29 +1527,27 @@ namespace DetourModKit
             if (!drained)
             {
                 // A thread can still be inside the detour. The closed route stays closed.
-                pin_backend_with_live_detour(
+                return pin_backend_with_live_detour(
                     impl,
-                    ledger,
+                    &ledger,
                     name,
                     target,
                     ledger_id,
                     kind,
                     "a callback or route entrant did not drain before the bypass"
                 );
-                return;
             }
             if (!DetourModKit::detail::switch_backend(impl->backend, false))
             {
-                pin_backend_with_live_detour(
+                return pin_backend_with_live_detour(
                     impl,
-                    ledger,
+                    &ledger,
                     name,
                     target,
                     ledger_id,
                     kind,
                     "the backend cannot switch its relay off"
                 );
-                return;
             }
 
             const HMODULE self_ref = static_cast<HMODULE>(impl->self_ref);
@@ -1634,6 +1616,7 @@ namespace DetourModKit
                     .was_active = was_active,
                 }
             );
+            return hook::TeardownOutcome::Vacated;
         }
 
         /**
@@ -1751,7 +1734,7 @@ namespace DetourModKit
          *          keeps the Impl, the adapter slot, and the module reference pinned.
          */
         template <class HookImpl>
-        void reclaim_restored_backend(
+        hook::TeardownOutcome reclaim_restored_backend(
             std::unique_ptr<HookImpl> &impl,
             detail::HookLedger &ledger,
             const std::string &name,
@@ -1827,10 +1810,12 @@ namespace DetourModKit
                     retention_reason
                 );
             }
-            if (!pin_references)
+            if (pin_references)
             {
-                DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
+                return hook::TeardownOutcome::Pinned;
             }
+            DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
+            return hook::TeardownOutcome::Restored;
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -2201,19 +2186,25 @@ namespace DetourModKit
 
         Hook::~Hook() noexcept
         {
+            (void)detail::HookAccess::teardown(*this);
+        }
+
+        TeardownOutcome detail::HookAccess::teardown(Hook &hook) noexcept
+        {
+            std::unique_ptr<Hook::Impl> &impl = hook.m_impl;
             // Take the gate reference out for the complete teardown. A pinned caller keeps the gate alive through its
             // own reference. A null callable below makes a late caller fail closed. The slot itself is never
-            // destroyed, so a call() that races this destructor reads a valid null word.
-            std::shared_ptr<CallGate> gate = gate_slot().exchange(nullptr, std::memory_order_acq_rel);
-            if (!m_impl)
+            // destroyed, so a call() that races this teardown reads a valid null word.
+            std::shared_ptr<Hook::CallGate> gate = hook.gate_slot().exchange(nullptr, std::memory_order_acq_rel);
+            if (!impl)
             {
-                return;
+                return TeardownOutcome::Empty;
             }
 
             // Tombstone the mid-hook adapter before any teardown decision below. A late entrant exits at the adapter's
             // second live check. A pinned stub then becomes inert instead of a call to a destroyed owner. Inline hooks
             // have no slot. Their detour is the user function.
-            const std::size_t mid_slot = m_impl->mid_slot;
+            const std::size_t mid_slot = impl->mid_slot;
             const bool has_mid_slot = mid_slot < DetourModKit::detail::MID_ADAPTER_CAPACITY;
             if (has_mid_slot)
             {
@@ -2226,8 +2217,8 @@ namespace DetourModKit
             if (!DetourModKit::detail::blocking_teardown_permitted())
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
-                (void)m_impl.release();
-                return;
+                (void)impl.release();
+                return TeardownOutcome::Pinned;
             }
 
             const DetourModKit::detail::MidRundown mid_rundown =
@@ -2235,19 +2226,19 @@ namespace DetourModKit
                     ? DetourModKit::detail::run_down_mid_slot(DetourModKit::detail::mid_adapter_slots()[mid_slot])
                     : DetourModKit::detail::MidRundown::Drained;
 
-            const std::uintptr_t target = m_impl->target;
-            const std::uint64_t ledger_id = m_impl->ledger_id;
+            const std::uintptr_t target = impl->target;
+            const std::uint64_t ledger_id = impl->ledger_id;
             const diagnostics::HookKind kind =
-                m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
+                impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
             // Capture the armed state before the gate block below forces status to Disabled. Otherwise, the Removed
             // emission leaves the enable armed unit on the tally forever.
-            const bool was_active = m_impl->status.load(std::memory_order_acquire) == HookState::Active;
+            const bool was_active = impl->status.load(std::memory_order_acquire) == HookState::Active;
             // Copy the name out before reset() destroys its storage. The copy can throw under OOM inside a noexcept
             // destructor, so contain it and degrade to an empty name.
             std::string name;
             try
             {
-                name = m_impl->name;
+                name = impl->name;
             }
             catch (...)
             {
@@ -2258,17 +2249,26 @@ namespace DetourModKit
             // inactive default.
             if (gate)
             {
-                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
+                std::unique_lock<std::recursive_mutex> guard = hook.acquire_call_lock(gate.get());
                 if (!guard.owns_lock())
                 {
                     // An unowned guard makes restore safety unprovable. Leak the backend instead of a free of a
                     // trampoline that a guarded caller can still use.
                     diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
-                    (void)m_impl.release();
-                    return;
+                    (void)impl.release();
+                    return TeardownOutcome::Pinned;
                 }
                 gate->callable = nullptr;
-                m_impl->status.store(HookState::Disabled, std::memory_order_release);
+                impl->status.store(HookState::Disabled, std::memory_order_release);
+            }
+
+            // A counted detour drains before the layer decision, so the wait holds no ledger slot (`[B-106]`).
+            if (impl->counted)
+            {
+                if (const char *const blocked = drain_counted_hook(impl->backend, *impl->counted))
+                {
+                    return pin_backend_with_live_detour(impl, nullptr, name, target, ledger_id, kind, blocked);
+                }
             }
 
             // Decide restore or retirement under this target's install-serialization slot. The slot makes the
@@ -2278,21 +2278,20 @@ namespace DetourModKit
             const std::size_t newer = ledger.acquire_target_slot(target, ledger_id);
             if (newer == DetourModKit::detail::HookLedger::SLOT_UNAVAILABLE)
             {
-                pin_backend_with_live_detour(
-                    m_impl,
-                    ledger,
+                return pin_backend_with_live_detour(
+                    impl,
+                    &ledger,
                     name,
                     target,
                     ledger_id,
                     kind,
                     "the hook ledger cannot decide the layer order"
                 );
-                return;
             }
-            if (newer > 0 || DetourModKit::detail::backend_claimed(m_impl->backend))
+            if (newer > 0 || DetourModKit::detail::backend_claimed(impl->backend))
             {
-                retire_by_vacate(
-                    m_impl,
+                return retire_by_vacate(
+                    impl,
                     ledger,
                     name,
                     target,
@@ -2304,20 +2303,19 @@ namespace DetourModKit
                     mid_slot,
                     RetirementCause{.newer_layers = newer}
                 );
-                return;
             }
 
             RetirementCause cause{};
             const TeardownRestore restore =
-                restore_target_or_pin_backend(m_impl, ledger, name, target, ledger_id, kind, cause);
+                restore_target_or_pin_backend(impl, ledger, name, target, ledger_id, kind, cause);
             if (restore == TeardownRestore::Pinned)
             {
-                return;
+                return TeardownOutcome::Pinned;
             }
             if (restore == TeardownRestore::Retire)
             {
-                retire_by_vacate(
-                    m_impl,
+                return retire_by_vacate(
+                    impl,
                     ledger,
                     name,
                     target,
@@ -2329,22 +2327,22 @@ namespace DetourModKit
                     mid_slot,
                     cause
                 );
-                return;
             }
 
-            if (!drain_route_or_retain_backend(m_impl, ledger, name, target, ledger_id, kind, was_active, mid_rundown))
+            if (!drain_route_or_retain_backend(impl, ledger, name, target, ledger_id, kind, was_active, mid_rundown))
             {
-                return;
+                return TeardownOutcome::Pinned;
             }
 
             if (has_mid_slot &&
                 !DetourModKit::detail::drain_mid_adapter_entries(DetourModKit::detail::mid_adapter_slots()[mid_slot]))
             {
-                retain_backend_for_busy_adapter(m_impl, ledger, name, target, ledger_id, kind, was_active);
-                return;
+                retain_backend_for_busy_adapter(impl, ledger, name, target, ledger_id, kind, was_active);
+                return TeardownOutcome::Pinned;
             }
 
-            reclaim_restored_backend(m_impl, ledger, name, target, ledger_id, has_mid_slot, mid_slot);
+            const TeardownOutcome reclaimed =
+                reclaim_restored_backend(impl, ledger, name, target, ledger_id, has_mid_slot, mid_slot);
             emit_lifecycle(
                 name,
                 ledger_id,
@@ -2354,6 +2352,7 @@ namespace DetourModKit
                     .was_active = was_active,
                 }
             );
+            return reclaimed;
         }
 
         Hook::operator bool() const noexcept
@@ -2437,6 +2436,119 @@ namespace DetourModKit
             gate_slot().store(nullptr, std::memory_order_release);
         }
 
+        Result<Hook> detail::HookAccess::install_inline(
+            InlineRequest request,
+            std::uintptr_t target,
+            std::uint64_t ledger_id,
+            void *destination,
+            std::optional<CountedThunk> counted
+        )
+        {
+            const std::shared_ptr<safetyhook::Allocator> &allocator = backend_allocator();
+            if (!allocator)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::inline_at"});
+            }
+            ModuleRefGuard self_ref(acquire_hook_self_ref());
+            if (self_ref.get() == nullptr)
+            {
+                // Capture the acquire's last-error before release_hook can clobber it (error.hpp documents
+                // SystemCallFailed's detail = GetLastError()).
+                const DWORD acquire_error = ::GetLastError();
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
+            }
+            if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::inline_at"))
+            {
+                return std::unexpected(*stale);
+            }
+            try
+            {
+                // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
+                // steps below publish the caller state. No fault boundary wraps this code. See
+                // hook_fault_boundary.hpp.
+                auto created = safetyhook::InlineHook::create(
+                    allocator,
+                    reinterpret_cast<void *>(target),
+                    destination,
+                    safetyhook::InlineHook::StartDisabled,
+                    position_claim_for(request.name)
+                );
+                if (!created)
+                {
+                    log().error(
+                        "hook::inline_at: backend create failed for '{}' at {}: {}",
+                        request.name,
+                        format::format_address(target),
+                        backend_error_string(created.error())
+                    );
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
+                }
+                auto backend_hook = std::move(created.value());
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
+#endif
+                const bool claimed = backend_hook.claimed();
+                auto impl = std::make_unique<Hook::Impl>(
+                    std::move(backend_hook),
+                    std::move(request.name),
+                    target,
+                    ledger_id,
+                    HookState::Disabled
+                );
+                impl->bypassed = claimed;
+                impl->counted = counted;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
+#endif
+                // The gate starts null-callable, exactly as disable() leaves it. enable() publishes the
+                // trampoline once the target is armed.
+                auto gate = std::make_shared<Hook::CallGate>();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
+#endif
+                const std::string_view created_name = impl->name;
+                if (!DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id))
+                {
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                    return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
+                }
+                log().info(
+                    "hook::inline_at: created inline hook '{}' at {} (disabled).",
+                    created_name,
+                    format::format_address(target)
+                );
+                if (claimed)
+                {
+                    note_position_claim(created_name, target);
+                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
+#endif
+                emit_lifecycle(
+                    created_name,
+                    ledger_id,
+                    diagnostics::HookKind::Inline,
+                    diagnostics::HookTransition::Created
+                );
+                // Hand the module reference to the Impl only after completion of every fallible setup step.
+                impl->self_ref = self_ref.release();
+                return make(std::move(impl), std::move(gate));
+            }
+            catch (const std::bad_alloc &)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
+            }
+            catch (...)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::UnknownError, "hook::inline_at", target});
+            }
+        }
+
         namespace detail
         {
             Result<Hook> inline_at_raw(InlineRequest request, void *detour)
@@ -2446,112 +2558,55 @@ namespace DetourModKit
                 {
                     return std::unexpected(preflight.error());
                 }
-                const std::uintptr_t target = preflight->address;
-                // Every failure path below rolls back this reservation. Success commits it after all fallible setup.
-                const std::uint64_t ledger_id = preflight->ledger_id;
+                return HookAccess::install_inline(
+                    std::move(request),
+                    preflight->address,
+                    preflight->ledger_id,
+                    detour,
+                    std::nullopt
+                );
+            }
 
-                const std::shared_ptr<safetyhook::Allocator> &allocator = backend_allocator();
-                if (!allocator)
+            Result<Hook> inline_at_counted(InlineRequest request, CountedInstall install)
+            {
+                Result<PreflightResult> preflight = preflight_inline_request(request, install.entry);
+                if (!preflight)
                 {
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::inline_at"});
+                    return std::unexpected(preflight.error());
                 }
-                ModuleRefGuard self_ref(acquire_hook_self_ref());
-                if (self_ref.get() == nullptr)
+                const std::expected<CountedThunkShape, const char *> shape = inspect_counted_thunk(install.entry);
+                if (!shape || install.block == nullptr)
                 {
-                    // Capture the acquire's last-error before release_hook can clobber it (error.hpp documents
-                    // SystemCallFailed's detail = GetLastError()).
-                    const DWORD acquire_error = ::GetLastError();
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
-                }
-                if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::inline_at"))
-                {
-                    return std::unexpected(*stale);
-                }
-                try
-                {
-                    // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
-                    // steps below publish the caller state. No fault boundary wraps this code. See
-                    // hook_fault_boundary.hpp.
-                    auto created = safetyhook::InlineHook::create(
-                        allocator,
-                        reinterpret_cast<void *>(target),
-                        detour,
-                        safetyhook::InlineHook::StartDisabled,
-                        position_claim_for(request.name)
+                    log().error(
+                        "hook::inline_at: the counted thunk of '{}' has a shape that the drain proof cannot cover: {}.",
+                        request.name,
+                        shape ? "it has no counters" : shape.error()
                     );
-                    if (!created)
-                    {
-                        log().error(
-                            "hook::inline_at: backend create failed for '{}' at {}: {}",
-                            request.name,
-                            format::format_address(target),
-                            backend_error_string(created.error())
-                        );
-                        (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                        return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
-                    }
-                    auto backend_hook = std::move(created.value());
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
-#endif
-                    const bool claimed = backend_hook.claimed();
-                    auto impl = std::make_unique<Hook::Impl>(
-                        std::move(backend_hook),
-                        std::move(request.name),
-                        target,
-                        ledger_id,
-                        HookState::Disabled
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(
+                        preflight->address,
+                        preflight->ledger_id
                     );
-                    impl->bypassed = claimed;
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
-#endif
-                    // The gate starts null-callable, exactly as disable() leaves it. enable() publishes the
-                    // trampoline once the target is armed.
-                    auto gate = std::make_shared<Hook::CallGate>();
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
-#endif
-                    const std::string_view created_name = impl->name;
-                    if (!DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id))
-                    {
-                        (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                        return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
-                    }
-                    log().info(
-                        "hook::inline_at: created inline hook '{}' at {} (disabled).",
-                        created_name,
-                        format::format_address(target)
-                    );
-                    if (claimed)
-                    {
-                        note_position_claim(created_name, target);
-                    }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                    note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
-#endif
-                    emit_lifecycle(
-                        created_name,
-                        ledger_id,
-                        diagnostics::HookKind::Inline,
-                        diagnostics::HookTransition::Created
-                    );
-                    // Hand the module reference to the Impl only after completion of every fallible setup step.
-                    impl->self_ref = self_ref.release();
-                    return Hook(std::move(impl), std::move(gate));
+                    return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::inline_at"});
                 }
-                catch (const std::bad_alloc &)
+                if (shape->helper_calls != 0)
                 {
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
+                    log().warning(
+                        "hook::inline_at: the counted thunk of '{}' calls {} helper(s) outside its counted window, so "
+                        "its drain also reads thread stacks. A stale stack copy of a helper return can keep a "
+                        "retirement Busy.",
+                        request.name,
+                        shape->helper_calls
+                    );
                 }
-                catch (...)
-                {
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::UnknownError, "hook::inline_at", target});
-                }
+                CountedThunk thunk = shape->thunk;
+                thunk.block = install.block;
+                return HookAccess::install_inline(
+                    std::move(request),
+                    preflight->address,
+                    preflight->ledger_id,
+                    thunk.range.begin,
+                    thunk
+                );
             }
         } // namespace detail
 

@@ -4,10 +4,18 @@
 // Hook::call on one thread, Hook::call on two contending threads, and Hook::original on two threads as the unguarded
 // reference. Prints one TSV row per workload plus the gate records described in bench_gate.hpp to stdout.
 //
-// Each workload runs twice. The untimed batch carries the reported throughput and mean, because steady_clock's tick
-// on this platform is coarser than one dispatch and a per-call timer pair costs more than the call it wraps.
-// The sampled pass carries the percentiles, which show the tail that contention produces and the mean hides. The
-// tick column states the granularity the percentiles round to.
+// The entry workloads time a call at the patched entry itself. A raw and a counted inline hook run one detour on one
+// target, so their difference is the cost of the counted thunk. Calls across 1 and 16 bypassed layers give the cost
+// of one residue hop. A closed mid route under a restored inline layer gives the entry cost of a retired mid hook.
+//
+// Each round of a workload runs two passes. The untimed batch carries the reported throughput and mean. The tick of
+// steady_clock on this platform is coarser than one dispatch, and a per-call timer pair costs more than the call it
+// wraps. The sampled pass carries the percentiles, which show the tail that contention produces and the mean hides.
+// The tick column states the granularity the percentiles round to.
+//
+// A guarded workload runs one round. The entry workloads run ENTRY_ROUNDS interleaved rounds, and each round installs
+// and removes its own hooks. An entry row reports the median batch mean and pools the samples of every round. Each
+// derived cost subtracts two medians, so one preempted batch does not flip its sign.
 
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/hook.hpp"
@@ -18,11 +26,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -37,6 +48,16 @@ namespace
 
     constexpr int WARMUP = 20000;
     constexpr int ITERATIONS = 200000;
+    /// The rounds of each entry workload. An odd count makes the median one measured batch mean.
+    constexpr int ENTRY_ROUNDS = 9;
+    /// The value that every detour adds, so a result shows whether the call reached a detour.
+    constexpr int DETOUR_BONUS = 100000;
+    /// The bypassed layers that a call of the short residue workload crosses. Each chain holds one more layer.
+    constexpr int SHORT_CHAIN_HOPS = 1;
+    /// The bypassed layers that a call of the long residue workload crosses.
+    constexpr int LONG_CHAIN_HOPS = 16;
+    /// The size of the jump that a patch writes at a target entry.
+    constexpr std::size_t ENTRY_JUMP_SIZE = 5;
 
     // A real, hookable body. The volatile result keeps the call at the patched entry, so the measurement times the
     // dispatch rather than a constant the optimizer folded at the call site.
@@ -50,7 +71,36 @@ namespace
     // visible in the gate records rather than hidden in the percentiles.
     int bench_hook_detour(int x)
     {
-        return x + 100000;
+        return x + DETOUR_BONUS;
+    }
+
+    // The body differs from bench_hook_target, so no toolchain folds the two targets into one address. The raw and the
+    // counted entry workloads hook it in turn.
+    DMK_PROOF_TARGET int entry_target(int x)
+    {
+        volatile std::int64_t r = x;
+        return static_cast<int>(r);
+    }
+
+    // The residue and mid workloads hook this target in turn. Its result stays below DETOUR_BONUS, so a call that
+    // reached a detour never returns an original result.
+    DMK_PROOF_SEEDED_TARGET(residue_target, 211)
+
+    /// The trampoline of the entry hook under measurement. Each entry workload sets it before its enable.
+    TargetFn s_entry_original = nullptr;
+
+    // The raw and the counted entry hook both install this detour, so their rows differ only by the counted thunk.
+    int entry_detour(int x) noexcept
+    {
+        return s_entry_original(x) + DETOUR_BONUS;
+    }
+
+    /// The calls that reached the mid callback. A closed route leaves it at zero.
+    std::atomic<int> s_mid_callbacks{0};
+
+    void count_mid_callback(MidContext &) noexcept
+    {
+        s_mid_callbacks.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Releases every participating thread at the same instant, so a contended run overlaps instead of queueing
@@ -119,7 +169,16 @@ namespace
         out.correct = batch_correct + sampled_correct;
     }
 
-    /// One workload's merged figures across its threads.
+    /// The figures of every round of one workload.
+    struct Rounds
+    {
+        std::vector<double> batch_means;
+        std::vector<long long> samples;
+        std::size_t calls = 0;
+        std::size_t correct = 0;
+    };
+
+    /// One workload's merged figures across its threads and rounds.
     struct Measurement
     {
         double mean_ns = 0.0;
@@ -132,9 +191,9 @@ namespace
         std::size_t correct = 0;
     };
 
-    // Runs @p dispatch on @p threads threads and merges them. Throughput uses the slowest thread's batch wall clock,
-    // because that is when the whole workload finished.
-    [[nodiscard]] Measurement measure(int threads, auto &&dispatch)
+    // Runs one round of @p dispatch on @p threads threads and adds its figures to @p rounds. The batch mean uses the
+    // slowest thread's batch wall clock, because that is when the whole round finished.
+    void run_round(Rounds &rounds, int threads, auto &&dispatch)
     {
         std::vector<ThreadResult> results(static_cast<std::size_t>(threads));
         StartLine batch_line(threads);
@@ -160,24 +219,34 @@ namespace
             }
         }
 
-        Measurement out;
-        std::vector<long long> merged;
         long long slowest_batch_ns = 0;
         for (const ThreadResult &result : results)
         {
-            merged.insert(merged.end(), result.samples.begin(), result.samples.end());
-            out.correct += result.correct;
+            rounds.samples.insert(rounds.samples.end(), result.samples.begin(), result.samples.end());
+            rounds.correct += result.correct;
             slowest_batch_ns = std::max(slowest_batch_ns, result.batch_ns);
         }
+        rounds.calls += static_cast<std::size_t>(threads) * static_cast<std::size_t>(ITERATIONS) * 2u;
+        rounds.batch_means.push_back(static_cast<double>(slowest_batch_ns) / static_cast<double>(ITERATIONS));
+    }
 
-        const auto batch_calls = static_cast<double>(threads) * static_cast<double>(ITERATIONS);
-        out.calls = static_cast<std::size_t>(batch_calls) * 2u;
-        if (slowest_batch_ns > 0)
+    // Merges @p rounds into one row. The mean is the median batch mean, and the percentiles pool the samples of every
+    // round.
+    [[nodiscard]] Measurement summarize(Rounds rounds, int threads)
+    {
+        Measurement out;
+        out.calls = rounds.calls;
+        out.correct = rounds.correct;
+
+        const auto median = rounds.batch_means.begin() + static_cast<std::ptrdiff_t>(rounds.batch_means.size() / 2);
+        std::nth_element(rounds.batch_means.begin(), median, rounds.batch_means.end());
+        out.mean_ns = *median;
+        if (out.mean_ns > 0.0)
         {
-            out.mean_ns = static_cast<double>(slowest_batch_ns) * static_cast<double>(threads) / batch_calls;
-            out.calls_per_second = batch_calls * 1e9 / static_cast<double>(slowest_batch_ns);
+            out.calls_per_second = static_cast<double>(threads) * 1e9 / out.mean_ns;
         }
 
+        std::vector<long long> &merged = rounds.samples;
         std::sort(merged.begin(), merged.end());
         const auto at = [&](double fraction) -> long long
         { return merged[static_cast<std::size_t>(fraction * static_cast<double>(merged.size() - 1))]; };
@@ -186,6 +255,13 @@ namespace
         out.p999 = at(0.999);
         out.max = merged.back();
         return out;
+    }
+
+    [[nodiscard]] Measurement measure(int threads, auto &&dispatch)
+    {
+        Rounds rounds;
+        run_round(rounds, threads, dispatch);
+        return summarize(std::move(rounds), threads);
     }
 
     // The smallest nonzero gap between two consecutive clock reads, which is the granularity every percentile column
@@ -221,6 +297,237 @@ namespace
             m.calls_per_second,
             tick_ns
         );
+    }
+
+    using EntryBytes = std::array<std::uint8_t, ENTRY_JUMP_SIZE>;
+
+    [[nodiscard]] EntryBytes entry_bytes(TargetFn target) noexcept
+    {
+        EntryBytes bytes{};
+        std::memcpy(bytes.data(), reinterpret_cast<const void *>(target), bytes.size());
+        return bytes;
+    }
+
+    [[nodiscard]] Address address_of(TargetFn target) noexcept
+    {
+        return Address{reinterpret_cast<std::uintptr_t>(target)};
+    }
+
+    struct EntryWorkload
+    {
+        const char *fact = nullptr;
+        Rounds rounds{};
+        /// False after a round in which a condition other than the call results failed.
+        bool held = true;
+    };
+
+    struct EntryRun
+    {
+        const char *fact = nullptr;
+        Measurement measurement;
+        bool passed = false;
+    };
+
+    /// Merges @p workload. Its fact holds when every call returned its expected value and every round held.
+    [[nodiscard]] EntryRun merge_entry(EntryWorkload workload)
+    {
+        const Measurement measurement = summarize(std::move(workload.rounds), 1);
+        return EntryRun{
+            .fact = workload.fact,
+            .measurement = measurement,
+            .passed = workload.held && measurement.correct == measurement.calls,
+        };
+    }
+
+    /**
+     * @brief Records @p fact as failed and exits when @p target already holds a hook.
+     * @details The workloads of one target run in turn. A hook that an earlier workload left behind adds layers that
+     *          the row does not name.
+     */
+    void require_unhooked(dmk_bench::GateLedger &gates, const char *fact, TargetFn target) noexcept
+    {
+        if (is_target_hooked(address_of(target)))
+        {
+            std::fprintf(stderr, "bench_hook: %s: the target still holds a hook of an earlier workload\n", fact);
+            gates.abort_setup(fact);
+        }
+    }
+
+    /// Pushes @p hook onto @p stack. A failed install records @p fact as failed and exits.
+    [[nodiscard]] Hook &push_hook(dmk_bench::GateLedger &gates, const char *fact, HookStack &stack, Result<Hook> hook)
+    {
+        if (!hook.has_value())
+        {
+            std::fprintf(stderr, "bench_hook: %s: install failed: %s\n", fact, hook.error().message().c_str());
+            gates.abort_setup(fact);
+        }
+        return stack.push(std::move(*hook));
+    }
+
+    /// Records @p fact as failed and exits when the enable or disable that returned @p toggled failed.
+    void require_toggled(dmk_bench::GateLedger &gates, const char *fact, const Result<void> &toggled)
+    {
+        if (!toggled.has_value())
+        {
+            std::fprintf(stderr, "bench_hook: %s: toggle failed: %s\n", fact, toggled.error().message().c_str());
+            gates.abort_setup(fact);
+        }
+    }
+
+    /**
+     * @brief Installs a hook on entry_target through @p install, arms it, and times one round at the patched entry.
+     * @details A setup failure records the workload fact as failed and exits. A call is correct when it returned its
+     *          argument plus DETOUR_BONUS, which only entry_detour adds to the original result.
+     */
+    template <class Install>
+    void run_entry_round(dmk_bench::GateLedger &gates, EntryWorkload &workload, const char *name, Install install)
+    {
+        const char *const fact = workload.fact;
+        require_unhooked(gates, fact, &entry_target);
+        HookStack stack;
+        Hook &hook = push_hook(
+            gates,
+            fact,
+            stack,
+            install(
+                InlineRequest{
+                    .name = name,
+                    .target = address_of(&entry_target),
+                }
+            )
+        );
+        s_entry_original = hook.original<TargetFn>();
+        if (s_entry_original == nullptr)
+        {
+            gates.abort_setup(fact);
+        }
+        require_toggled(gates, fact, hook.enable());
+
+        run_round(workload.rounds, 1, [](int i) { return dmk_test::call_unfolded(&entry_target, i) - DETOUR_BONUS; });
+    }
+
+    /// Returns the result of the unhooked residue_target for every argument that measure() passes.
+    [[nodiscard]] std::vector<int> residue_results()
+    {
+        std::vector<int> results(static_cast<std::size_t>(ITERATIONS));
+        for (int i = 0; i < ITERATIONS; ++i)
+        {
+            results[static_cast<std::size_t>(i)] = dmk_test::call_unfolded(&residue_target, i);
+        }
+        return results;
+    }
+
+    /**
+     * @brief Times one round at the entry of residue_target.
+     * @details run_thread() counts a call as correct only when it returns its argument. A call that returned the
+     *          original result in @p pristine therefore maps to its argument.
+     */
+    void run_residue_entry_round(Rounds &rounds, const std::vector<int> &pristine)
+    {
+        run_round(
+            rounds,
+            1,
+            [&pristine](int i)
+            { return dmk_test::call_unfolded(&residue_target, i) == pristine[static_cast<std::size_t>(i)] ? i : -1; }
+        );
+    }
+
+    /**
+     * @brief Builds a chain whose calls cross @p hops bypassed layers on residue_target and times one round.
+     * @details The chain arms hops + 1 layers. Each lower layer then bypasses under the top layer, and the top layer
+     *          restores its saved prologue, which is the jump into the bypassed chain. A bypassed layer runs the same
+     *          relay and trampoline jumps as a residue position. A setup failure records the workload fact as failed
+     *          and exits. The round holds when the entry still held a patch after the calls.
+     */
+    void run_residue_round(
+        dmk_bench::GateLedger &gates,
+        EntryWorkload &workload,
+        int hops,
+        const std::vector<int> &pristine,
+        const EntryBytes &pristine_entry
+    )
+    {
+        const char *const fact = workload.fact;
+        require_unhooked(gates, fact, &residue_target);
+        HookStack stack;
+        std::vector<Hook *> layers;
+        stack.reserve(static_cast<std::size_t>(hops) + 1u);
+        layers.reserve(static_cast<std::size_t>(hops) + 1u);
+        for (int layer = 0; layer <= hops; ++layer)
+        {
+            Hook &hook = push_hook(
+                gates,
+                fact,
+                stack,
+                inline_at(
+                    InlineRequest{
+                        .name = "BenchResidueHops" + std::to_string(hops) + "Layer" + std::to_string(layer),
+                        .target = address_of(&residue_target),
+                    },
+                    &bench_hook_detour
+                )
+            );
+            require_toggled(gates, fact, hook.enable());
+            layers.push_back(&hook);
+        }
+        // A newer layer sits above each lower layer, so each lower disable bypasses. The top disable restores.
+        for (Hook *layer : layers)
+        {
+            require_toggled(gates, fact, layer->disable());
+        }
+
+        run_residue_entry_round(workload.rounds, pristine);
+        workload.held = workload.held && entry_bytes(&residue_target) != pristine_entry;
+    }
+
+    /**
+     * @brief Closes a mid route under a restored inline layer on residue_target and times one round at its entry.
+     * @details The mid hook bypasses under the armed inline layer, so its route closes. The inline layer then restores
+     *          the mid patch. A setup failure records the workload fact as failed and exits. The round holds when no
+     *          callback ran and the entry still held a patch.
+     */
+    void run_mid_closed_round(
+        dmk_bench::GateLedger &gates,
+        EntryWorkload &workload,
+        const std::vector<int> &pristine,
+        const EntryBytes &pristine_entry
+    )
+    {
+        const char *const fact = workload.fact;
+        require_unhooked(gates, fact, &residue_target);
+        HookStack stack;
+        Hook &mid = push_hook(
+            gates,
+            fact,
+            stack,
+            mid_at(
+                MidRequest{
+                    .name = "BenchMidClosedEntry",
+                    .target = address_of(&residue_target),
+                },
+                &count_mid_callback
+            )
+        );
+        require_toggled(gates, fact, mid.enable());
+        Hook &top = push_hook(
+            gates,
+            fact,
+            stack,
+            inline_at(
+                InlineRequest{
+                    .name = "BenchMidClosedEntryTop",
+                    .target = address_of(&residue_target),
+                },
+                &bench_hook_detour
+            )
+        );
+        require_toggled(gates, fact, top.enable());
+        require_toggled(gates, fact, mid.disable());
+        require_toggled(gates, fact, top.disable());
+
+        run_residue_entry_round(workload.rounds, pristine);
+        workload.held = workload.held && s_mid_callbacks.load(std::memory_order_relaxed) == 0 &&
+                        entry_bytes(&residue_target) != pristine_entry;
     }
 } // namespace
 
@@ -266,22 +573,86 @@ int main()
     const Measurement guarded_two = measure(2, guarded);
     const Measurement unguarded_two = measure(2, unguarded);
 
+    EntryWorkload raw_rounds{
+        .fact = "hook.raw_inline_entry_reached_the_detour",
+    };
+    EntryWorkload counted_rounds{
+        .fact = "hook.counted_inline_entry_reached_the_detour",
+    };
+    EntryWorkload short_rounds{
+        .fact = "hook.residue_hops_1_skipped_every_detour",
+    };
+    EntryWorkload long_rounds{
+        .fact = "hook.residue_hops_16_skipped_every_detour",
+    };
+    EntryWorkload mid_rounds{
+        .fact = "hook.mid_closed_entry_skipped_the_callback",
+    };
+    const std::vector<int> pristine = residue_results();
+    const EntryBytes pristine_entry = entry_bytes(&residue_target);
+    for (int i = 0; i < ENTRY_ROUNDS; ++i)
+    {
+        run_entry_round(
+            gates,
+            raw_rounds,
+            "BenchRawInlineEntry",
+            [](InlineRequest request) { return inline_at(std::move(request), &entry_detour); }
+        );
+        run_entry_round(
+            gates,
+            counted_rounds,
+            "BenchCountedInlineEntry",
+            [](InlineRequest request) { return inline_at<&entry_detour>(std::move(request)); }
+        );
+        run_residue_round(gates, short_rounds, SHORT_CHAIN_HOPS, pristine, pristine_entry);
+        run_residue_round(gates, long_rounds, LONG_CHAIN_HOPS, pristine, pristine_entry);
+        run_mid_closed_round(gates, mid_rounds, pristine, pristine_entry);
+    }
+    const EntryRun raw_entry = merge_entry(std::move(raw_rounds));
+    const EntryRun counted_entry = merge_entry(std::move(counted_rounds));
+    const EntryRun short_chain = merge_entry(std::move(short_rounds));
+    const EntryRun long_chain = merge_entry(std::move(long_rounds));
+    const EntryRun mid_closed = merge_entry(std::move(mid_rounds));
+
     std::printf("workload\tthreads\tcalls\tmean_ns\tp50_ns\tp99_ns\tp999_ns\tmax_ns\tcalls_per_s\tclock_tick_ns\n");
     print_row("hook_call_guarded", 1, guarded_single, tick_ns);
     print_row("hook_call_guarded", 2, guarded_two, tick_ns);
     print_row("hook_original_unguarded", 2, unguarded_two, tick_ns);
+    print_row("raw_inline_entry", 1, raw_entry.measurement, tick_ns);
+    print_row("counted_inline_entry", 1, counted_entry.measurement, tick_ns);
+    print_row("residue_hops_1", 1, short_chain.measurement, tick_ns);
+    print_row("residue_hops_16", 1, long_chain.measurement, tick_ns);
+    print_row("mid_closed_entry", 1, mid_closed.measurement, tick_ns);
 
-    // Every measured call must have reached the original body through the trampoline. A refused guarded dispatch
-    // returns a value-initialized int and a call that reached the detour returns i + 100000. Either one leaves the
-    // table measuring something other than the dispatch path.
+    // A guarded or unguarded call must reach the original body through the trampoline. A refused guarded dispatch
+    // returns a value-initialized int, and a call that reached the detour returns i + DETOUR_BONUS. Either one leaves
+    // a row that times something other than the dispatch path.
     gates.fact("hook.guarded_single_reached_the_original", guarded_single.correct == guarded_single.calls);
     gates.fact("hook.guarded_two_thread_reached_the_original", guarded_two.correct == guarded_two.calls);
     gates.fact("hook.unguarded_two_thread_reached_the_original", unguarded_two.correct == unguarded_two.calls);
+
+    gates.fact(raw_entry.fact, raw_entry.passed);
+    gates.fact(counted_entry.fact, counted_entry.passed);
+    gates.fact(short_chain.fact, short_chain.passed);
+    gates.fact(long_chain.fact, long_chain.passed);
+    gates.fact(mid_closed.fact, mid_closed.passed);
+
     gates.metric("hook.call_guarded_1t_mean_ns", guarded_single.mean_ns);
     gates.metric("hook.call_guarded_2t_mean_ns", guarded_two.mean_ns);
     gates.metric("hook.original_unguarded_2t_mean_ns", unguarded_two.mean_ns);
     gates.metric("hook.call_guarded_1t_calls_per_s", guarded_single.calls_per_second);
     gates.metric("hook.call_guarded_2t_calls_per_s", guarded_two.calls_per_second);
     gates.metric("hook.original_unguarded_2t_calls_per_s", unguarded_two.calls_per_second);
+    gates.metric("hook.raw_inline_entry_mean_ns", raw_entry.measurement.mean_ns);
+    gates.metric("hook.counted_inline_entry_mean_ns", counted_entry.measurement.mean_ns);
+    gates.metric("hook.residue_hops_1_mean_ns", short_chain.measurement.mean_ns);
+    gates.metric("hook.residue_hops_16_mean_ns", long_chain.measurement.mean_ns);
+    gates.metric("hook.mid_closed_entry_mean_ns", mid_closed.measurement.mean_ns);
+    gates.metric("hook.counted_thunk_ns", counted_entry.measurement.mean_ns - raw_entry.measurement.mean_ns);
+    gates.metric(
+        "hook.residue_hop_ns",
+        (long_chain.measurement.mean_ns - short_chain.measurement.mean_ns) /
+            static_cast<double>(LONG_CHAIN_HOPS - SHORT_CHAIN_HOPS)
+    );
     return gates.close();
 }

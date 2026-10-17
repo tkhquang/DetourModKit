@@ -245,8 +245,9 @@ namespace DetourModKit
      *         still mapped. The drain includes a balancing edge that a concurrent guard release already started.
      * @note A guard retained across a successful drain stays valid and still lifts its binding's passthrough
      *       suppression when released.
-     * @note Setup/control-plane only. Before you call it, stop consumer-owned workers and drop dispatcher subscriptions
-     *       and hook handles. Call it from an off-loader-lock shutdown thread.
+     * @note Setup/control-plane only. Before you call it, stop consumer-owned workers. Retire each hook::HookStack
+     *       through hook::HookStack::retire. Drop dispatcher subscriptions and the remaining hook handles. Call it from
+     *       an off-loader-lock shutdown thread.
      * @warning The drain runs your balancing callbacks and capture destructors on this thread, after the deadline is
      *          spent. A BindingGuard release that races the drain blocks until they finish. Neither wait is bounded, so
      *          hold no lock and own no join that any of that code can wait on.

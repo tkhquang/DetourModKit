@@ -30,6 +30,22 @@ extern "C"
         return result;
     }
 
+    // Each argument carries its own weight, so a swapped or dropped argument changes the result.
+    __declspec(dllexport) __declspec(noinline) long long compute_mixed_eight(
+        long long a,
+        long long b,
+        long long c,
+        long long d,
+        long long e,
+        long long f,
+        long long g,
+        long long h
+    )
+    {
+        volatile long long mixed = ((((((a * 31 + b) * 31 + c) * 31 + d) * 31 + e) * 31 + f) * 31 + g) * 31 + h;
+        return mixed;
+    }
+
     // A fixed, unique byte signature that lands in the DLL's read-only data section. Module-scoped scanner tests
     // resolve it to verify that a single module-range scan reaches .rdata (no separate Readable kind needed) and that
     // the resolved address falls inside the DLL image. The bytes are arbitrary and chosen not to collide with real code

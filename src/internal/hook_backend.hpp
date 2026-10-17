@@ -18,11 +18,15 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -62,6 +66,23 @@ namespace DetourModKit
             void *callable{nullptr};
         };
 
+        /// The return-site lists that the calls of a counted thunk outside its counted window can fill.
+        inline constexpr std::size_t COUNTED_HELPER_SITE_LISTS = 4;
+
+        /**
+         * @brief The thunk of a counted hook: its counters and the code that its drain proof scans (`[B-106]`).
+         * @details The range is the thunk's unchained RUNTIME_FUNCTION. A helper site is the return into the thunk
+         *          of a call that runs before the enter count or after the exit count. An unoptimized consumer build
+         *          can emit such a call, and only a stack read finds a thread inside it.
+         */
+        struct CountedThunk
+        {
+            detail::CountedBlock *block{nullptr};
+            safetyhook::AddressRange range{};
+            std::array<safetyhook::ReturnSites, COUNTED_HELPER_SITE_LISTS> helper_sites{};
+            std::size_t helper_site_lists{0};
+        };
+
         /**
          * @brief The complete backend state behind a @ref Hook handle.
          * @details Holds one backend hook, its state, identity, target, and ledger token. The call mutex lives in the
@@ -89,6 +110,8 @@ namespace DetourModKit
             // True while the switch word sends every caller past the detour and the target patch stays in the chain.
             // Written under the call gate mutex. A claimed backend starts bypassed.
             bool bypassed{false};
+            // The thunk of a counted inline hook, or empty for a raw inline or a mid hook.
+            std::optional<CountedThunk> counted;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
             ~Impl() noexcept;
@@ -186,6 +209,109 @@ namespace DetourModKit
             {
             }
         };
+
+        /// How the teardown of one Hook ended. @ref HookRetirement counts each value.
+        enum class TeardownOutcome : std::uint8_t
+        {
+            /// The handle owned no hook.
+            Empty,
+            /// The hook restored its target.
+            Restored,
+            /// The hook retired by bypass as residue and reaches no image code.
+            Vacated,
+            /// The backend leaked with its detour possibly reachable. HookManager counts it.
+            Pinned,
+        };
+
+        namespace detail
+        {
+            /// The access path of hook.cpp and hook_retirement.cpp to the private state of a Hook.
+            struct HookAccess
+            {
+                /// Returns the backend state of @p hook, or nullptr for a disengaged handle.
+                [[nodiscard]] static Hook::Impl *impl(const Hook &hook) noexcept { return hook.m_impl.get(); }
+
+                /// Builds the handle that an install verb returns.
+                [[nodiscard]] static Hook
+                make(std::unique_ptr<Hook::Impl> impl, std::shared_ptr<Hook::CallGate> gate) noexcept
+                {
+                    return Hook(std::move(impl), std::move(gate));
+                }
+
+                /// Runs the ~Hook contract on @p hook and reports how it ended. The handle ends disengaged.
+                [[nodiscard]] static TeardownOutcome teardown(Hook &hook) noexcept;
+
+                /**
+                 * @brief Installs a disabled inline hook whose relay jumps to @p destination, after the preflight
+                 *        reserved @p ledger_id on @p target.
+                 * @details @p counted carries the thunk of a counted hook. Every failure releases the reservation.
+                 */
+                [[nodiscard]] static Result<Hook> install_inline(
+                    InlineRequest request,
+                    std::uintptr_t target,
+                    std::uint64_t ledger_id,
+                    void *destination,
+                    std::optional<CountedThunk> counted
+                );
+            };
+
+            /// The thunk geometry that the install decodes. The positions serve the region-boundary proofs.
+            struct CountedThunkShape
+            {
+                CountedThunk thunk;
+                /**
+                 * @brief The offset of the locked increment that counts an entry.
+                 * @details A stack word equal to a helper site keeps the drain Busy, so the shape holds offsets.
+                 */
+                std::size_t enter_count_offset{0};
+                /// The offset of the first instruction after the locked increment that counts an exit.
+                std::size_t after_exit_count_offset{0};
+                /// The calls outside the counted window. Each one adds a helper site.
+                std::size_t helper_calls{0};
+                /// The calls inside the counted window: the detour call, plus any argument copy helper.
+                std::size_t counted_calls{0};
+                /// The push and pop instructions before the return, so a proof can check a balanced frame.
+                std::size_t pushes{0};
+                std::size_t pops{0};
+            };
+
+            /**
+             * @brief Decodes the counted thunk at @p entry, through any incremental-link jump, for the drain proof.
+             * @return The shape, or a sentence that names why the proof cannot cover the thunk. The proof needs one
+             *         unchained RUNTIME_FUNCTION of straight-line code with exactly two locked increments and at
+             *         least one call between them.
+             */
+            [[nodiscard]] std::expected<CountedThunkShape, const char *> inspect_counted_thunk(void *entry) noexcept;
+
+            /// The verdict of @ref drain_counted.
+            struct CountedDrain
+            {
+                bool idle{false};
+                /// The calls between enter and exit at the last counter read.
+                std::uint64_t in_flight{0};
+            };
+
+            /**
+             * @brief Proves that no thread runs the thunks behind @p blocks or their detours (`[B-106]`).
+             * @details The relays must already send every caller past the thunks. The proof runs pass 1 over
+             *          @p ranges and @p sites, reads every exit count and then every enter count, and runs pass 2. It
+             *          accepts only a clean pass 1, equal sums, and a clean pass 2. Otherwise it retries until
+             *          @p deadline and holds no coordinator or ledger slot between passes.
+             */
+            [[nodiscard]] CountedDrain drain_counted(
+                std::span<const safetyhook::AddressRange> ranges,
+                std::span<const safetyhook::ReturnSites *const> sites,
+                std::span<CountedBlock *const> blocks,
+                std::chrono::steady_clock::time_point deadline
+            ) noexcept;
+
+            /**
+             * @brief Reports whether a return address on the current thread's stack lies inside one of @p ranges.
+             * @details An unwind of the current thread through its function tables finds the frames, so a stale stack
+             *          word never matches. A walk deeper than its frame bound misses the frames beyond it.
+             */
+            [[nodiscard]] bool current_thread_returns_into(std::span<const safetyhook::AddressRange> ranges) noexcept;
+        } // namespace detail
 
         /**
          * @brief Returns the SafetyHook allocator shared by every hook this linked instance installs.
@@ -368,6 +494,33 @@ namespace DetourModKit
 
         /// Removes every filler record that fill_backend_coordinator_for_test added.
         void clear_backend_coordinator_fill_for_test() noexcept;
+
+        /// Names the point of a counted drain proof at which @ref g_counted_drain_probe runs.
+        enum class CountedDrainStage : std::uint8_t
+        {
+            AfterFirstPass,
+            BetweenCounterReads,
+            AfterCounterReads,
+        };
+
+        /// Runs at each stage of every counted drain proof while it is not null.
+        extern void (*g_counted_drain_probe)(CountedDrainStage) noexcept;
+
+        /// The decoded thunk of a counted hook. Every address is null for a raw or disengaged hook.
+        struct CountedThunkProbe
+        {
+            void *entry{nullptr};
+            void *range_end{nullptr};
+            void *enter_count{nullptr};
+            void *after_exit_count{nullptr};
+            std::size_t helper_calls{0};
+            std::size_t counted_calls{0};
+            std::size_t pushes{0};
+            std::size_t pops{0};
+        };
+
+        /// Decodes the thunk of the counted hook behind @p hook.
+        [[nodiscard]] CountedThunkProbe counted_thunk_for_test(const hook::Hook &hook) noexcept;
     } // namespace detail
 #endif
 } // namespace DetourModKit

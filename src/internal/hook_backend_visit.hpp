@@ -3,15 +3,17 @@
 
 /**
  * @file internal/hook_backend_visit.hpp
- * @brief Nothrow visitation and toggle primitives over the inline/mid backend variant.
- * @details The hook sibling TUs (src/hook.cpp and src/hook_toggle.cpp) share these helpers, so each visitation and
- *          exception-containment contract is stated exactly once. Every helper is noexcept and contains backend
- *          synchronization or allocation exceptions at this boundary.
+ * @brief Nothrow visitation, toggle, and drain primitives over the inline/mid backend variant.
+ * @details The hook sibling TUs (src/hook.cpp, src/hook_toggle.cpp, and src/hook_retirement.cpp) share these
+ *          helpers, so each visitation and exception-containment contract is stated exactly once. Every helper is
+ *          noexcept and contains backend synchronization or allocation exceptions at this boundary.
  */
 
 #include "internal/hook_patch_witness.hpp"
 
 #include <safetyhook.hpp>
+
+#include <intrin.h>
 
 #include <atomic>
 #include <cstddef>
@@ -230,6 +232,12 @@ namespace DetourModKit::detail
         return backend_value_or(backend, false, [](auto &one) noexcept { return one.vacate(); });
     }
 
+    /// Reports whether the backend's switch word sends every caller past its detour. An empty variant reports false.
+    template <class BackendVariant> [[nodiscard]] bool backend_bypassed(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(backend, false, [](const auto &one) noexcept { return one.bypassed(); });
+    }
+
     /// Returns the current target-byte witness, or Indeterminate when no backend is reachable.
     template <class BackendVariant> [[nodiscard]] detail::PatchWitness witness_of(BackendVariant &backend) noexcept
     {
@@ -238,6 +246,60 @@ namespace DetourModKit::detail
             detail::PatchWitness::Indeterminate,
             [](auto &one) noexcept { return detail::witness_patch(one); }
         );
+    }
+
+    /// The deepest target chain at which a fresh layer still leaves a residue position.
+    inline constexpr std::size_t RESIDUE_LAYER_LIMIT = 16;
+    /// The fewest free process records at which a fresh layer still leaves a residue position.
+    inline constexpr std::size_t RESIDUE_FREE_RECORD_FLOOR = 64;
+
+    /**
+     * @brief Reports whether one more residue position fits: at most @ref RESIDUE_LAYER_LIMIT layers on the target
+     *        and at least @ref RESIDUE_FREE_RECORD_FLOOR free process records.
+     * @details A full registry fails every inline and mid create that claims no Vacant position, so the guard
+     *          stops the growth first. An unusable coordinator fails the check.
+     */
+    template <class BackendVariant> [[nodiscard]] bool residue_fits_budget(BackendVariant &backend) noexcept
+    {
+        const safetyhook::ProcessCoordinator coordinator;
+        if (!coordinator)
+        {
+            return false;
+        }
+        std::uint8_t *const key = backend_value_or(
+            backend,
+            static_cast<std::uint8_t *>(nullptr),
+            [](const auto &one) noexcept { return one.trampoline().data(); }
+        );
+        return coordinator.layer_count(key) <= RESIDUE_LAYER_LIMIT &&
+               coordinator.free_record_count() >= RESIDUE_FREE_RECORD_FLOOR;
+    }
+
+    /// A time-stamp counter budget of about one to four seconds on a 1 GHz to 4 GHz counter.
+    inline constexpr std::uint64_t CLOSING_DRAIN_TICK_BUDGET = 4'000'000'000ULL;
+
+    /**
+     * @brief Waits for a CLOSING mid route to empty, with no call into any export.
+     * @details A call that reaches the hooked export spins in the gateway while the route is CLOSING. A clock read,
+     *          a yield, or a sleep can be that export, so the wait reads only the entry count and the time-stamp
+     *          counter. New entrants wait outside the count, so the count can only fall.
+     * @return False when @p tick_budget expired first. A false return never licenses a vacate.
+     */
+    template <class BackendVariant>
+    [[nodiscard]] bool drain_closing_route(BackendVariant &backend, std::uint64_t tick_budget) noexcept
+    {
+        const std::uint64_t start = __rdtsc();
+        while (
+            backend_value_or(backend, std::size_t{1}, [](const auto &one) noexcept { return one.route_entries(); }) != 0
+        )
+        {
+            if (__rdtsc() - start > tick_budget)
+            {
+                return false;
+            }
+            _mm_pause();
+        }
+        return true;
     }
 } // namespace DetourModKit::detail
 
