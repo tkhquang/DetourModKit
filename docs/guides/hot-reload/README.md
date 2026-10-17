@@ -16,7 +16,7 @@ Split the mod into a resident loader and a replaceable logic DLL.
 
 This guide defines DetourModKit unload guarantees, module pin sources, and the staged-generation pattern for repeatable reloads.
 
-Use unique staged names and bounded retained generations for mods that consume gamepad input or layer XInput hooks.
+Use unique staged names for every generation. Keep a bounded retained-generation budget for mods that consume gamepad input. An XInput drain timeout or the residue budget can still retain an image.
 
 Debug presets compile the [reference pair](../../../examples/staged_reload/) to check current API use. The [permanent proofs](#proof-pointers) exercise its sources. [The examples contract](../../../examples/README.md) defines ownership and compatibility.
 
@@ -114,12 +114,12 @@ Some subsystems take counted module references on the module that links the arch
 | The input poll thread | `InputPoller` | Before thread start | After join. A detach or failed join retains the reference. |
 | The lifecycle reaper | `LifecycleReaper` | Before thread start | Never. The process-lifetime thread owns this permanent reference. |
 | A wheel binding (local `MessageHook`) | `MessageHookKeepalive` | Before the first hook publication | On publication failure only. Success makes it permanent because a selected callback can run after `UnhookWindowsHookEx`. |
-| XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
-| XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
+| XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback, proved clean uninstall, or route-bypass retirement. Retention keeps it permanently. |
+| XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. A route bypass of a fresh position keeps it permanently. It pins the provider module, not the DMK host module. |
 
 The permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A teardown delta therefore reads zero for a current wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. These counters describe one linked DMK instance, not every Windows reference to its image.
 
-A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. The [retention policy](#define-a-retained-generation-policy) also covers teardown leaks without module pins.
+A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. A pair that retires by route bypass keeps only the `XInputTarget` references of its fresh positions. The [retention policy](#define-a-retained-generation-policy) also covers teardown leaks without module pins.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
@@ -183,7 +183,7 @@ Never load two generations by the same file name. If the loader maps the build o
 
 Retirement ends the generation's feature behavior. Unmap releases its image. A retained XInput chain can still forward calls after retirement.
 
-Use bounded retained generations with either wheel backend. `ExternalHost` removes the wheel pin from the logic image, but XInput retention remains possible.
+Use bounded retained generations with either wheel backend. `ExternalHost` removes the wheel pin from the logic image, but an XInput drain timeout or the residue budget can still retain it.
 
 `Shutdown()` returns a value of [`abi/staged_reload.h`](../../../include/DetourModKit/abi/staged_reload.h). The example computes it with [`staged_reload::verdict`](../../../include/DetourModKit/staged_reload.hpp) from the `HookStack::retire` result and the baseline that `Init()` captured. That header lists each rule. The example returns `DMK_STAGED_RELOAD_REFUSED` itself after a failed worker join or callback drain.
 
@@ -194,6 +194,8 @@ The development policy accepts leak counts after the [Shutdown sequence](#topolo
 `LeakSubsystem::Input` combines several causes. An XInput pin does not attribute every Input leak to XInput. The example needs no such attribution because it retains its own reference.
 
 An inline or mid hook that cannot restore its target retires by bypass. Causes include a newer layer in any participant, foreign or unreadable target bytes, and a claimed position. The hook switches its detour off without a target write and leaves its position for the next generation with the same hook name. It releases its module reference, so the image can unmap. Each position records one `LeakSubsystem::HookResidue` leak at its first retirement. A restored inline trampoline that fails its idle proof also stays as `HookResidue`.
+
+The XInput pair of DMK follows the same rule under a newer layer, such as the Steam overlay. Its closed routes forward to the provider, so the image can unmap. The next generation claims both positions. Under that layer, a claimed pair publishes coverage only while a controller answers.
 
 A hook keeps its executable route, with its detour reachable, when teardown cannot prove that no new call enters it. The `~Hook` contract in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) lists every cause. The retained route keeps its module reference, so the image stays mapped. DMK records a `LeakSubsystem::HookManager` leak and logs the cause. Retained routes preserve their dependencies under the [process coordinator contract](../../design/hooking.md#process-route-coordinator). A `HookManager` leak above the baseline makes the verdict `DMK_STAGED_RELOAD_RESTART_REQUIRED`, even when target restoration succeeds.
 
@@ -395,7 +397,7 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 | --- | --- |
 | `StagedGenerationSoakReloadsWithFreshBytes` | Clean `ExternalHost` generations load fresh bytes and unmap. |
 | `StagedGenerationLocalWheelRetentionStaysMapped` | Fresh local-wheel generations coexist with retained predecessors. CTest skips this case without a window station. |
-| `StagedGenerationForeignXInputRetainsThePair` | One local generation retains XInput, forwards calls, and survives foreign hand-back. |
+| `StagedGenerationForeignXInputRetiresThePair` | A generation under a newer host XInput layer retires the pair by route bypass and unmaps. 20 successors claim the pair with no new record, residue, or pin, and each unmaps. Calls forward through every stage and after hand-back. |
 | `StagedGenerationLowerLayerRetiresUnderNewerHost` | A generation under a newer host hook retires by bypass with one `HookResidue` leak and no `HookManager` leak, and it unmaps. The host chain skips the retired detour. A successor claims the position with no new record, and its detour reaches the call result. |
 
 [`layered_generation_reload.cpp`](../../../tests/lifecycle/layered_generation_reload.cpp) loads two separately linked families of the staged-generation DLL, which hook one export of `hook_target_lib.dll`. It contains these layered-reload proofs:
@@ -424,7 +426,7 @@ An active or pending callback drain makes `Input::start()` return `ShutdownInPro
 
 | `Lifecycle` test | Verified scope |
 | --- | --- |
-| `StagedExampleConsumeLoadsFreshRetainedSuccessor` | INI gamepad Consume, an active wheel-host lease, retained XInput, distinct successor bytes, retired callbacks, and Consume on/off/on transitions. |
+| `StagedExampleConsumeUnmapsUnderNewerXInputLayer` | INI gamepad Consume, an active wheel-host lease, and a newer XInput layer. Each retired image unmaps with no `XInputKeepalive`, and each successor consumes through the claimed pair across Consume on/off/on transitions. |
 | `StagedExampleUnpinnedLeakKeepsLoaderReference` | A leak without a pin retains the loader reference and permits fresh bytes. |
 | `StagedExampleUnsafeTeardownRefusesSuccessor` | A `HookManager` leak makes `Shutdown()` return `DMK_STAGED_RELOAD_RESTART_REQUIRED`. The loader keeps the image, latches a restart, and calls neither `Shutdown()` nor `Init()` again. |
 | `StagedExampleBusyRetirementRetries` | A call parked inside the counted detour makes `Shutdown()` return `DMK_STAGED_RELOAD_BUSY` with every hook armed, the worker live, and the `Session` live. The loader retries within its bound, and the image unmaps. |

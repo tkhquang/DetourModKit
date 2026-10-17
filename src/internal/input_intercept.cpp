@@ -5,6 +5,7 @@
 
 #include "input_intercept.hpp"
 #include "internal/drain_backoff.hpp"
+#include "internal/hook_backend_visit.hpp"
 #include "internal/hook_patch_witness.hpp"
 #include "internal/xinput_raw_scope.hpp"
 #include "internal/xinput_route_probe.hpp"
@@ -15,6 +16,7 @@
 #include <safetyhook.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <charconv>
@@ -45,6 +47,16 @@ namespace DetourModKit::detail
 
         /// Identifies the undocumented ordinal that exports XInputGetStateEx and reports the Guide button.
         constexpr WORD XINPUT_GET_STATE_EX_ORDINAL = 100;
+
+        /**
+         * @brief Names the position of each pair member across generations and DMK copies.
+         * @details A create claims a Vacant position with this identity. The names are part of the cross-copy
+         *          protocol and must not change.
+         */
+        constexpr safetyhook::PositionClaim XINPUT_GET_STATE_POSITION =
+            safetyhook::PositionClaim::from_name("DetourModKit.XInputGetState");
+        constexpr safetyhook::PositionClaim XINPUT_GET_STATE_EX_POSITION =
+            safetyhook::PositionClaim::from_name("DetourModKit.XInputGetStateEx");
 
         /**
          * @brief Defines how long a published suppression mask stays valid without a refresh.
@@ -339,6 +351,9 @@ namespace DetourModKit::detail
         {
             safetyhook::InlineHook primary;
             safetyhook::InlineHook ex;
+            /// The gateway entry of each claimed member. The claimed witness compares the target with a jump to it.
+            const std::uint8_t *primary_gateway{nullptr};
+            const std::uint8_t *ex_gateway{nullptr};
             HMODULE self_ref{nullptr};
             HMODULE target_ref{nullptr};
             HMODULE ex_target_ref{nullptr};
@@ -498,17 +513,31 @@ namespace DetourModKit::detail
 #endif
         }
 
-        /**
-         * @brief Releases the install keepalives or retains them with an executable chain.
-         * @param retain True if a reset retains a route that can reach either code provider.
-         */
-        void retire_xinput_module_refs(bool retain = false) noexcept
+        /// Names the code that a retired XInput chain can still execute. Each reachable provider keeps its reference.
+        enum class XInputChainReach : std::uint8_t
+        {
+            /// No chain stays, so every install reference goes.
+            Nothing,
+            /// A bypassed chain forwards to the XInput provider and reaches no code of this image.
+            Provider,
+            /// A retained chain can reach the provider and the detours of this image.
+            ProviderAndImage,
+        };
+
+        /// Maps a reset that retained its chain to the reach of that chain.
+        [[nodiscard]] constexpr XInputChainReach reset_chain_reach(bool retained) noexcept
+        {
+            return retained ? XInputChainReach::ProviderAndImage : XInputChainReach::Nothing;
+        }
+
+        /// Releases the install references that @p reach does not need. A kept reference is never released.
+        void retire_xinput_module_refs(XInputChainReach reach = XInputChainReach::Nothing) noexcept
         {
             if (s_xinput_permanent_hooks == nullptr)
             {
                 return;
             }
-            if (!retain)
+            if (reach != XInputChainReach::ProviderAndImage)
             {
                 if (s_xinput_raw_owner)
                 {
@@ -517,6 +546,9 @@ namespace DetourModKit::detail
                 }
                 close_xinput_route_probes();
                 (void)release_xinput_route_probe_if_idle();
+            }
+            if (reach == XInputChainReach::Nothing)
+            {
                 DetourModKit::detail::release_module_ref(
                     s_xinput_permanent_hooks->ex_target_ref,
                     diagnostics::ModulePinReason::XInputTarget
@@ -525,6 +557,9 @@ namespace DetourModKit::detail
                     s_xinput_permanent_hooks->target_ref,
                     diagnostics::ModulePinReason::XInputTarget
                 );
+            }
+            if (reach != XInputChainReach::ProviderAndImage)
+            {
                 DetourModKit::detail::release_module_ref(
                     s_xinput_permanent_hooks->self_ref,
                     diagnostics::ModulePinReason::XInputKeepalive
@@ -535,16 +570,65 @@ namespace DetourModKit::detail
             s_xinput_permanent_hooks->self_ref = nullptr;
         }
 
+        /// Returns the cached gateway entry of the cell member @p hook.
+        [[nodiscard]] const std::uint8_t *claimed_gateway(const safetyhook::InlineHook &hook) noexcept
+        {
+            return &hook == &s_xinput_permanent_hooks->ex ? s_xinput_permanent_hooks->ex_gateway
+                                                          : s_xinput_permanent_hooks->primary_gateway;
+        }
+
+        /**
+         * @brief Classifies the target window of a claimed member.
+         * @details A routed position patches a `jmp rel32` to its gateway and fills the rest of the window with
+         *          `nop`. Only the owner of the gateway jumps to it, so that exact encoding is the patch of this member.
+         */
+        [[nodiscard]] PatchWitness claimed_xinput_witness(const safetyhook::InlineHook &hook) noexcept
+        {
+            constexpr std::size_t JUMP_SIZE = 5;
+            const auto &original = hook.original_bytes();
+            const std::size_t count = original.size();
+            std::array<std::uint8_t, BACKEND_MAX_STEAL_WINDOW> current{};
+            if (count < JUMP_SIZE || count > current.size() ||
+                !guarded_read_bytes(hook.target_address(), current.data(), count))
+            {
+                return PatchWitness::Indeterminate;
+            }
+            if (std::equal(original.begin(), original.end(), current.begin()))
+            {
+                return PatchWitness::Original;
+            }
+            const std::uint8_t *const gateway = claimed_gateway(hook);
+            const std::intptr_t displacement = reinterpret_cast<std::intptr_t>(gateway) -
+                                               static_cast<std::intptr_t>(hook.target_address() + JUMP_SIZE);
+            if (gateway == nullptr || displacement < std::numeric_limits<std::int32_t>::min() ||
+                displacement > std::numeric_limits<std::int32_t>::max())
+            {
+                return PatchWitness::Foreign;
+            }
+            std::array<std::uint8_t, BACKEND_MAX_STEAL_WINDOW> jump{};
+            jump.fill(0x90);
+            jump[0] = 0xE9;
+            const auto relative = static_cast<std::int32_t>(displacement);
+            std::memcpy(jump.data() + 1, &relative, sizeof(relative));
+            return std::equal(jump.begin(), jump.begin() + static_cast<std::ptrdiff_t>(count), current.begin())
+                       ? PatchWitness::OwnedPatch
+                       : PatchWitness::Foreign;
+        }
+
         [[nodiscard]] PatchWitness xinput_patch_witness(const safetyhook::InlineHook &hook) noexcept
         {
-            return hook ? witness_patch(hook) : PatchWitness::Original;
+            if (!hook)
+            {
+                return PatchWitness::Original;
+            }
+            return hook.claimed() ? claimed_xinput_witness(hook) : witness_patch(hook);
         }
 
         [[nodiscard]] PatchWitness xinput_teardown_witness(const safetyhook::InlineHook &hook) noexcept
         {
             // A reconciled disabled backend has no target entry into its trampoline. Treat retained inactive storage
             // as Original even if its old target was later repatched or unmapped.
-            return hook && hook.enabled() ? witness_patch(hook) : PatchWitness::Original;
+            return hook && hook.enabled() ? xinput_patch_witness(hook) : PatchWitness::Original;
         }
 
         [[nodiscard]] bool try_xinput_backend_enable(safetyhook::InlineHook &hook) noexcept
@@ -599,6 +683,20 @@ namespace DetourModKit::detail
         ) noexcept
         {
             const PatchWitness before = xinput_patch_witness(hook);
+            if (hook.claimed())
+            {
+                // A claimed member writes no target byte, so its switch store is the whole arm. Original bytes no
+                // longer reach the claimed position.
+                if (before != PatchWitness::Original && try_xinput_backend_enable(hook))
+                {
+                    return XInputArmOutcome::Armed;
+                }
+                if (!original_was_published)
+                {
+                    original.store(nullptr, std::memory_order_release);
+                }
+                return XInputArmOutcome::Uncommitted;
+            }
             if (!witness_permits_write(before))
             {
                 hook.reconcile_enabled(false);
@@ -641,16 +739,35 @@ namespace DetourModKit::detail
             return XInputArmOutcome::Armed;
         }
 
+        /// Returns the gateway entry of the process record that a claimed @p hook adopted, or nullptr.
+        [[nodiscard]] const std::uint8_t *claimed_gateway_entry(const safetyhook::InlineHook &hook) noexcept
+        {
+            const safetyhook::ProcessCoordinator coordinator;
+            std::array<safetyhook::ProcessRouteRecord, 32> records{};
+            const std::size_t count = coordinator ? coordinator.records_at(hook.target(), records) : 0;
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                if (records[index].trampoline.begin == hook.trampoline().data())
+                {
+                    return records[index].gateway.begin;
+                }
+            }
+            return nullptr;
+        }
+
         /**
          * @brief Creates one disabled raw hook and contains allocation exceptions from creation.
          * @details Creation remains separate from the arm, so the whole pair exists before any prologue patch. A
-         *          creation failure rolls back completely and publishes nothing.
+         *          creation failure rolls back completely and publishes nothing. The create claims a Vacant
+         *          @p position first and then stores the claimed gateway in @p gateway.
          */
         [[nodiscard]] bool create_disabled_xinput_hook(
             safetyhook::RouteRetentionCredit &credit,
             void *target,
             void *detour,
-            safetyhook::InlineHook &destination
+            safetyhook::PositionClaim position,
+            safetyhook::InlineHook &destination,
+            const std::uint8_t *&gateway
         ) noexcept
         {
             try
@@ -670,7 +787,8 @@ namespace DetourModKit::detail
                     static_cast<safetyhook::InlineHook::Flags>(
                         safetyhook::InlineHook::StartDisabled | safetyhook::InlineHook::RoutedExternal
                     ),
-                    credit
+                    credit,
+                    position
                 );
                 if (!created)
                 {
@@ -678,6 +796,7 @@ namespace DetourModKit::detail
                 }
                 // The move assigns onto an empty destination, so it frees nothing and takes no allocation.
                 destination = std::move(created.value());
+                gateway = destination.claimed() ? claimed_gateway_entry(destination) : nullptr;
                 return true;
             }
             catch (...)
@@ -2653,7 +2772,9 @@ namespace DetourModKit::detail
                 pair_credit,
                 get_state,
                 reinterpret_cast<void *>(&xinput_get_state_detour),
-                s_xinput_permanent_hooks->primary
+                XINPUT_GET_STATE_POSITION,
+                s_xinput_permanent_hooks->primary,
+                s_xinput_permanent_hooks->primary_gateway
             ))
         {
             retire_xinput_module_refs();
@@ -2663,12 +2784,14 @@ namespace DetourModKit::detail
                                          pair_credit,
                                          get_state_ex,
                                          reinterpret_cast<void *>(&xinput_get_state_ex_detour),
-                                         s_xinput_permanent_hooks->ex
+                                         XINPUT_GET_STATE_EX_POSITION,
+                                         s_xinput_permanent_hooks->ex,
+                                         s_xinput_permanent_hooks->ex_gateway
                                      ))
         {
             const char *const primary_retained =
                 reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
-            retire_xinput_module_refs(primary_retained);
+            retire_xinput_module_refs(reset_chain_reach(primary_retained != nullptr));
             lock.unlock();
             emit_xinput_route_retention_logs(primary_retained, nullptr);
             return false;
@@ -2694,7 +2817,7 @@ namespace DetourModKit::detail
                 reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
             const char *const primary_retained =
                 reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
-            retire_xinput_module_refs(primary_retained || ex_retained);
+            retire_xinput_module_refs(reset_chain_reach(primary_retained || ex_retained));
             lock.unlock();
             emit_xinput_route_retention_logs(primary_retained, ex_retained);
             return false;
@@ -3257,6 +3380,131 @@ namespace DetourModKit::detail
                        ? xinput_teardown_witness(s_xinput_permanent_hooks->ex)
                        : PatchWitness::Original;
         }
+
+        /// Returns the first pair witness that refuses a restore, or PatchWitness::Original when both permit one.
+        [[nodiscard]] constexpr PatchWitness restore_refusal(PatchWitness primary, PatchWitness ex) noexcept
+        {
+            if (!witness_permits_write(primary))
+            {
+                return primary;
+            }
+            return witness_permits_write(ex) ? PatchWitness::Original : ex;
+        }
+
+        /// Records a route-bypass retirement for the report after s_intercept_mutex releases.
+        struct XInputBypassLog
+        {
+            /// The witness that refused the restore, or PatchWitness::Original when only claimed positions retired.
+            PatchWitness refusal{PatchWitness::Original};
+            const char *primary_retained{nullptr};
+            const char *ex_retained{nullptr};
+            bool pending{false};
+        };
+
+        /**
+         * @brief Retires the drained pair by route bypass and gives each position to a later generation.
+         * @details No step writes a target byte. Each closed route forwards to its trampoline and reaches no code of
+         *          this image, so the self-reference goes. A fresh position books HookResidue and keeps the target
+         *          references for good. A claimed position relies on the references of the generation that first
+         *          vacated it. The primary vacates first, so after a refused Ex vacate no primary hook remains that a
+         *          later maintenance can publish without its partner.
+         * @return False when the coordinator is unavailable, a fresh position exceeds the residue budget, or a vacate
+         *         refused. A member that did not vacate keeps its state, and the caller retains it.
+         * @note Requires s_intercept_mutex, a constructed process-lifetime cell, and routes that drained while CLOSING.
+         */
+        [[nodiscard]] bool retire_xinput_pair_by_bypass(PatchWitness refusal, XInputBypassLog &deferred_log) noexcept
+        {
+            PermanentXInputHooks *const permanent = permanent_cell();
+            const std::array<safetyhook::InlineHook *, 2> members{
+                &permanent->primary,
+                &permanent->ex,
+            };
+            // A fresh member without a committed patch has no target entry, so it resets as on the clean path.
+            const auto vacates = [](const safetyhook::InlineHook &member) noexcept -> bool
+            { return member && (member.claimed() || member.enabled()); };
+            bool fresh_vacated = false;
+            {
+                // Each vacate acquires the held coordinator again without a wait.
+                const safetyhook::ProcessCoordinator coordinator;
+                if (!coordinator)
+                {
+                    return false;
+                }
+                for (const safetyhook::InlineHook *const member : members)
+                {
+                    if (vacates(*member) && !member->claimed() &&
+                        !residue_fits_budget(coordinator, member->trampoline().data()))
+                    {
+                        return false;
+                    }
+                }
+                for (safetyhook::InlineHook *const member : members)
+                {
+                    if (!vacates(*member))
+                    {
+                        continue;
+                    }
+                    const bool fresh = !member->claimed();
+                    // A claimed member reports bypassed only after bypass() clears its enabled state.
+                    if (fresh || !member->bypass())
+                    {
+                        member->finish_route_rundown();
+                    }
+                    if (!member->vacate())
+                    {
+                        return false;
+                    }
+                    if (fresh)
+                    {
+                        diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookResidue);
+                        fresh_vacated = true;
+                    }
+                }
+            }
+
+            deferred_log.ex_retained =
+                permanent->ex ? reset_inactive_xinput_hook(permanent->ex, s_xinput_ex_original) : nullptr;
+            deferred_log.primary_retained =
+                permanent->primary ? reset_inactive_xinput_hook(permanent->primary, s_xinput_original) : nullptr;
+            if (deferred_log.primary_retained != nullptr || deferred_log.ex_retained != nullptr)
+            {
+                retire_xinput_module_refs(XInputChainReach::ProviderAndImage);
+            }
+            else
+            {
+                retire_xinput_module_refs(fresh_vacated ? XInputChainReach::Provider : XInputChainReach::Nothing);
+            }
+            clear_xinput_install_state();
+            deferred_log.refusal = refusal;
+            deferred_log.pending = true;
+            return true;
+        }
+
+        /** @brief Reports a route-bypass retirement after its caller releases s_intercept_mutex. */
+        void emit_xinput_bypass_log(const XInputBypassLog &deferred_log) noexcept
+        {
+            if (!deferred_log.pending)
+            {
+                return;
+            }
+            if (deferred_log.refusal == PatchWitness::Original)
+            {
+                (void)log().log_noexcept(
+                    LogLevel::Info,
+                    "InputIntercept: the XInput pair retired its claimed positions."
+                );
+            }
+            else
+            {
+                (void)log().try_log(
+                    LogLevel::Info,
+                    "InputIntercept: the XInput pair retired by route bypass under a newer layer: {}. Its positions "
+                    "stay for a later generation.",
+                    witness_description(deferred_log.refusal)
+                );
+            }
+            emit_xinput_route_retention_logs(deferred_log.primary_retained, deferred_log.ex_retained);
+        }
     } // anonymous namespace
 
     void uninstall(std::uint64_t owner) noexcept
@@ -3292,7 +3540,7 @@ namespace DetourModKit::detail
         }
 
         // The exit structure resolves both routes from their byte witnesses. Retention exits use retain_xinput_hooks.
-        // The clean exit uses reset_inactive_xinput_hook.
+        // The bypass exit uses retire_xinput_pair_by_bypass. The clean exit uses reset_inactive_xinput_hook.
         const XInputPublishedChains published_chains = retire_published_xinput_chains();
         const bool route_still_inflight = quiesce_xinput_routes_until_deadline();
         if (route_still_inflight)
@@ -3309,14 +3557,27 @@ namespace DetourModKit::detail
             return;
         }
 
-        // Classify both targets before either backend restore. If a newer layer owns either prologue, refuse the whole
-        // pair rather than overwrite that layer with a partial teardown.
+        // Classify both targets before either backend restore. A newer layer on either prologue or a claimed position
+        // retires the whole pair by route bypass, so no partial teardown overwrites that layer. Retention remains
+        // only for the refusals that retire_xinput_pair_by_bypass names.
         const PatchWitness primary_before = xinput_teardown_witness(s_xinput_permanent_hooks->primary);
         const PatchWitness ex_before = xinput_teardown_witness(s_xinput_permanent_hooks->ex);
-        if (!witness_permits_write(primary_before) || !witness_permits_write(ex_before))
+        const PatchWitness refusal = restore_refusal(primary_before, ex_before);
+        if (refusal != PatchWitness::Original || s_xinput_permanent_hooks->primary.claimed() ||
+            s_xinput_permanent_hooks->ex.claimed())
         {
-            retain_xinput_hooks(primary_before, ex_before, XInputRetentionReason::UnrestoredPatch, deferred_log);
+            XInputBypassLog bypass_log;
+            if (!retire_xinput_pair_by_bypass(refusal, bypass_log))
+            {
+                retain_xinput_hooks(
+                    xinput_teardown_witness(s_xinput_permanent_hooks->primary),
+                    xinput_teardown_witness(s_xinput_permanent_hooks->ex),
+                    XInputRetentionReason::UnrestoredPatch,
+                    deferred_log
+                );
+            }
             lock.unlock();
+            emit_xinput_bypass_log(bypass_log);
             emit_xinput_retention_log(deferred_log);
             return;
         }
@@ -3358,7 +3619,7 @@ namespace DetourModKit::detail
             reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
 
         // A retained chain can still reach a code provider after its detour body drains.
-        retire_xinput_module_refs(primary_retained || ex_retained);
+        retire_xinput_module_refs(reset_chain_reach(primary_retained || ex_retained));
 
         clear_xinput_install_state();
         lock.unlock();

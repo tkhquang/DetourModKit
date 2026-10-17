@@ -5,8 +5,9 @@
  * @file internal/hook_backend_visit.hpp
  * @brief Nothrow visitation, toggle, and drain primitives over the inline/mid backend variant.
  * @details The hook sibling TUs (src/hook.cpp, src/hook_toggle.cpp, and src/hook_retirement.cpp) share these
- *          helpers, so each visitation and exception-containment contract is stated exactly once. Every helper is
- *          noexcept and contains backend synchronization or allocation exceptions at this boundary.
+ *          helpers, so each visitation and exception-containment contract is stated exactly once. The XInput route
+ *          retirement in src/internal/input_intercept.cpp shares the residue budget. Every helper is noexcept and
+ *          contains backend synchronization or allocation exceptions at this boundary.
  */
 
 #include "internal/hook_patch_witness.hpp"
@@ -254,25 +255,30 @@ namespace DetourModKit::detail
     inline constexpr std::size_t RESIDUE_FREE_RECORD_FLOOR = 64;
 
     /**
-     * @brief Reports whether one more residue position fits: at most @ref RESIDUE_LAYER_LIMIT layers on the target
-     *        and at least @ref RESIDUE_FREE_RECORD_FLOOR free process records.
+     * @brief Reports whether one more residue position fits beside the record keyed by @p trampoline: at most
+     *        @ref RESIDUE_LAYER_LIMIT layers on its target and at least @ref RESIDUE_FREE_RECORD_FLOOR free records.
      * @details A full registry fails every inline and mid create that claims no Vacant position, so the guard
      *          stops the growth first. An unusable coordinator fails the check.
      */
+    [[nodiscard]] inline bool
+    residue_fits_budget(const safetyhook::ProcessCoordinator &coordinator, std::uint8_t *trampoline) noexcept
+    {
+        return coordinator && coordinator.layer_count(trampoline) <= RESIDUE_LAYER_LIMIT &&
+               coordinator.free_record_count() >= RESIDUE_FREE_RECORD_FLOOR;
+    }
+
+    /// Applies the residue budget to the record of @p backend under its own coordinator acquisition.
     template <class BackendVariant> [[nodiscard]] bool residue_fits_budget(BackendVariant &backend) noexcept
     {
         const safetyhook::ProcessCoordinator coordinator;
-        if (!coordinator)
-        {
-            return false;
-        }
-        std::uint8_t *const key = backend_value_or(
-            backend,
-            static_cast<std::uint8_t *>(nullptr),
-            [](const auto &one) noexcept { return one.trampoline().data(); }
+        return residue_fits_budget(
+            coordinator,
+            backend_value_or(
+                backend,
+                static_cast<std::uint8_t *>(nullptr),
+                [](const auto &one) noexcept { return one.trampoline().data(); }
+            )
         );
-        return coordinator.layer_count(key) <= RESIDUE_LAYER_LIMIT &&
-               coordinator.free_record_count() >= RESIDUE_FREE_RECORD_FLOOR;
     }
 
     /// A time-stamp counter budget of about one to four seconds on a 1 GHz to 4 GHz counter.

@@ -466,6 +466,8 @@ EXPECTED_REQUIRED_SOAK_PROOFS = (
     "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
     "Lifecycle.XInputRetainedPairRecoversALostPrimary",
     "Lifecycle.XInputPollLoopMaintainsAPublishedPair",
+    "Lifecycle.XInputNewerLayerSurvivesRawTeardown",
+    "Lifecycle.XInputNewerLayerRetiresExPair",
 )
 
 

@@ -1,3 +1,4 @@
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
@@ -600,19 +601,25 @@ namespace
         }
         const XInputGetStateFn saved_primary = xinput_trampoline();
         const XInputGetStateFn saved_ex = xinput_ex_trampoline();
+        namespace diag = DetourModKit::diagnostics;
+        const std::size_t keepalive_pins = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
+        const std::size_t target_pins = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
         input.shutdown();
         guard->release();
         XINPUT_STATE saved_primary_state{};
         XINPUT_STATE saved_ex_state{};
         if (!require(
-                !xinput_installed() && xinput_module_refs_held() == 2 && xinput_trampoline() == nullptr &&
-                    xinput_ex_trampoline() == saved_ex && saved_primary(0, &saved_primary_state) == ERROR_SUCCESS &&
+                !xinput_installed() && xinput_module_refs_held() == 0 && xinput_trampoline() == nullptr &&
+                    xinput_ex_trampoline() == nullptr &&
+                    diag::module_pin_count(diag::ModulePinReason::XInputKeepalive) + 1 == keepalive_pins &&
+                    diag::module_pin_count(diag::ModulePinReason::XInputTarget) == target_pins &&
+                    saved_primary(0, &saved_primary_state) == ERROR_SUCCESS &&
                     fields_match(saved_primary_state, provider.raw[0][0], 0) &&
                     saved_ex(0, &saved_ex_state) == ERROR_SUCCESS &&
                     fields_match(saved_ex_state, provider.raw[1][0], 0) && check_provider(provider, 0, bypass) &&
                     layered_bytes[0] == snapshot(provider.targets[0]) &&
                     layered_bytes[1] == snapshot(provider.targets[1]),
-                "teardown under a newer handler must retain both raw chains after the poller joins"
+                "teardown under a newer handler must close both routes and keep only the provider references"
             ))
             return 27;
         for (std::size_t route = layers.size(); route-- > 0;)
@@ -626,13 +633,15 @@ namespace
                 install_xinput(0) && xinput_trampoline() == saved_primary && xinput_ex_trampoline() == saved_ex &&
                     publish_gamepad_suppress(XINPUT_GAMEPAD_DPAD_UP, STANDALONE_INTERCEPT_OWNER) &&
                     check_provider(provider, XINPUT_GAMEPAD_DPAD_UP),
-                "hand-back must restore both consumed routes"
+                "hand-back must restore both consumed routes through the claimed positions"
             ))
             return 28;
         uninstall();
         if (!require(
-                !xinput_installed() && xinput_module_refs_held() == 2 && check_provider(provider, 0),
-                "retained route storage must keep both providers raw after the final disarm"
+                !xinput_installed() && xinput_module_refs_held() == 0 &&
+                    diag::module_pin_count(diag::ModulePinReason::XInputTarget) == target_pins &&
+                    check_provider(provider, 0),
+                "the claimed positions must vacate again and keep both providers raw after the final disarm"
             ))
             return 29;
         set_xinput_module_override_for_test(nullptr);
@@ -660,6 +669,29 @@ namespace
     template <class Fn> [[nodiscard]] Fn resolve(HMODULE module, const char *name) noexcept
     {
         return reinterpret_cast<Fn>(reinterpret_cast<void *>(GetProcAddress(module, name)));
+    }
+
+    /// Names how one stopped copy left the pair. See dmk_xinput_copy_module_refs for the packed fields.
+    enum class CopyTeardown
+    {
+        /// The top copy restored both prologues and released every reference.
+        Restored,
+        /// A lower copy retired by route bypass and kept only its provider reference.
+        Vacated,
+        /// A drain timeout kept the pair, the self keepalive, and the provider reference.
+        Retained,
+        Unexpected,
+    };
+
+    [[nodiscard]] CopyTeardown classify_teardown(DWORD packed) noexcept
+    {
+        const DWORD install = packed & 0xFFu;
+        const DWORD keepalive = (packed >> 8) & 0xFFu;
+        const DWORD target = (packed >> 16) & 0xFFu;
+        if (install == 0 && keepalive == 0)
+            return target == 0 ? CopyTeardown::Restored
+                               : (target == 1 ? CopyTeardown::Vacated : CopyTeardown::Unexpected);
+        return install == 2 && keepalive == 1 && target == 1 ? CopyTeardown::Retained : CopyTeardown::Unexpected;
     }
 
     [[nodiscard]] bool load_copy(Copy &copy, std::size_t index) noexcept
@@ -787,32 +819,37 @@ namespace
                 "every inner copy must observe a fresh raw chord despite all outer consume masks"
             ))
             return 35;
-        DWORD retained_references{0};
+        // A drain timeout under load keeps a pair retained, so either side tolerates Retained. Below the relay at
+        // least one copy has to vacate, or the proof shows nothing about the route bypass.
+        unsigned int vacated_copies{0};
         for (std::size_t order = copies.size(); order-- > 0;)
         {
             copies[order].stop();
-            const DWORD references = copies[order].references();
-            retained_references += references;
+            const CopyTeardown teardown = classify_teardown(copies[order].references());
+            vacated_copies += teardown == CopyTeardown::Vacated ? 1u : 0u;
             if (!require(
                     !copies[order].active() && !copies[order].installed() &&
-                        (order < 5 ? references == 2 : (references == 0 || references == 2)),
-                    "joined copies must retain only the chains beneath the newer overlay relay"
+                        (teardown == CopyTeardown::Retained ||
+                         teardown == (order < 5 ? CopyTeardown::Vacated : CopyTeardown::Restored)),
+                    "joined copies beneath the newer overlay relay must vacate, and copies above it must restore"
                 ))
                 return 36;
         }
+        if (!require(vacated_copies != 0, "no copy beneath the newer overlay relay retired by route bypass"))
+            return 36;
         if (!require(relay->disable().has_value(), "the overlay relay must hand back after every poller joins"))
             return 36;
         relay.reset();
         s_layer_original[0].store(nullptr, std::memory_order_release);
         if (!require(
                 check_provider(provider, 0),
-                "ten shutdowns must leave both successful providers raw through the retained inner chains"
+                "ten shutdowns must leave both successful providers raw through the bypassed inner chains"
             ))
             return 37;
         std::printf(
-            "PASS: ten copies %s report %lu retained provider references after joined shutdown\n",
+            "PASS: ten copies %s vacated %u positions beneath the relay after joined shutdown\n",
             reverse ? "reverse" : "forward",
-            retained_references
+            vacated_copies
         );
         return 0;
     }
@@ -857,8 +894,9 @@ namespace
         for (std::size_t order = copies.size(); order-- > 0;)
             copies[order].stop();
         if (!require(
-                copies[0].references() == 2 && copies[1].references() == 0 && relay->disable().has_value(),
-                "quiescent teardown must preserve only the lower foreign chain"
+                classify_teardown(copies[0].references()) == CopyTeardown::Vacated &&
+                    classify_teardown(copies[1].references()) == CopyTeardown::Restored && relay->disable().has_value(),
+                "quiescent teardown must vacate only the lower position beneath the foreign handler"
             ))
             return 65;
         relay.reset();
@@ -910,11 +948,12 @@ namespace
         for (std::size_t order = copies.size(); order-- > 0;)
             copies[order].stop();
         if (!require(
-                copies[0].references() == 2 && copies[1].references() == 0 &&
+                classify_teardown(copies[0].references()) == CopyTeardown::Vacated &&
+                    classify_teardown(copies[1].references()) == CopyTeardown::Restored &&
                     check_provider(provider, XINPUT_GAMEPAD_LEFT_SHOULDER) &&
                     foreign_bytes[0] == snapshot(provider.targets[0]) &&
                     foreign_bytes[1] == snapshot(provider.targets[1]),
-                "quiescent shutdown must retain the lower chains and preserve only the foreign LB removal"
+                "quiescent shutdown must vacate the lower positions and preserve only the foreign LB removal"
             ))
             return 76;
         for (std::size_t route = layers.size(); route-- > 0;)
@@ -924,7 +963,7 @@ namespace
             layers[route].reset();
             s_layer_original[route].store(nullptr, std::memory_order_release);
         }
-        if (!require(check_provider(provider, 0), "the retained providers must return every raw bit after hand-back"))
+        if (!require(check_provider(provider, 0), "the bypassed providers must return every raw bit after hand-back"))
             return 78;
         return 0;
     }
