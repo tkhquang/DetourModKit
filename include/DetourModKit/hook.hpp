@@ -217,7 +217,8 @@ namespace DetourModKit
         /**
          * @brief The return of the game call into a counted hook. A counted detour receives it as its first parameter.
          * @details The relay jumps into the counted thunk, so the slot is the stack word of the game caller's return
-         *          address. A write to the slot changes where the hooked function returns.
+         *          address. A write to the slot changes where the hooked function returns. The counted @ref inline_at
+         *          states what the return-address intrinsics name inside the detour.
          */
         struct CallerFrame
         {
@@ -283,14 +284,17 @@ namespace DetourModKit
              *          - a ledger that cannot decide the layer order,
              *          - a process coordinator that refuses or times out,
              *          - a backend that cannot switch its relay off,
-             *          - an unproved drain or route idle proof, an unresolved continuation, or a nonlocal exit,
+             *          - an unproved drain, an unresolved continuation, or a nonlocal exit,
+             *          - a route idle proof that fails while a thread can still reach the mid stub,
+             *          - a newer retained route that depends on this one, or unwind records that stay registered,
              *          - a full residue budget: more than 16 layers on the target, or fewer than 64 free process
              *            records.
              *
              *          Such a backend keeps its module reference for the process lifetime, and a mid backend also
              *          keeps its adapter and capacity charge. `[B-73]` attributes each such retention to
              *          @ref diagnostics::LeakSubsystem::HookManager. A restored trampoline that fails its idle proof
-             *          stays mapped as HookResidue.
+             *          stays mapped as HookResidue. So does a restored mid route whose stub no thread can reach
+             *          (`[B-108]`).
              *
              *          A mid hook tombstones its callback before `[B-85]` rundown, so no new callback begins after
              *          destruction returns. Mid teardown waits a bounded time for admitted callbacks and adapter
@@ -641,7 +645,8 @@ namespace DetourModKit
 
             /**
              * @brief Retires every owned hook newest-first, or changes nothing (`[B-106]`).
-             * @param deadline How long the drain can wait for calls inside the detours to leave.
+             * @param deadline How long the drain can wait for calls inside the detours to leave, and how long the
+             *        commit repeats a refused mid route proof.
              * @return The outcome. Busy and Refused leave every hook, relay, route, and position as it was.
              *         - Busy with LoaderLockActive: the caller holds the loader lock or runs in a loader phase.
              *         - Busy with ErrorCode::Ok: a counted call stayed past @p deadline, a mid callback stayed past the
@@ -714,6 +719,10 @@ namespace DetourModKit
          *          and ~Hook switch the relay off and wait until no thread runs the thunk or the detour. A Retired
          *          outcome with no pinned hook therefore leaves no counted call in the image. An unwind or nonlocal exit
          *          out of the detour leaves its call counted, so every later retirement of that detour stays Busy.
+         *
+         *          Inside @p Detour, `_ReturnAddress()` and `__builtin_return_address(0)` name the thunk, and
+         *          `_AddressOfReturnAddress()` names the return slot of the thunk. A detour that identifies its caller
+         *          takes @ref CallerFrame first.
          * @note Hooks that share one detour share its counters, so each drain also waits for the calls of the others.
          * @note Setup/control-plane only: the install allocates the trampoline and decodes the thunk.
          */
@@ -848,8 +857,7 @@ namespace DetourModKit
 
         /**
          * @brief Per-row result of @ref install_all, in table order.
-         * @warning Move the successful hooks into a @ref HookStack in table order. A `std::vector<InstallOutcome>`
-         *          does not guarantee newest-first destruction, and a lower layer then retires as residue (`[B-16]`).
+         * @warning Move the successful hooks into a @ref HookStack in table order. @ref HookStack states why.
          */
         struct InstallOutcome
         {

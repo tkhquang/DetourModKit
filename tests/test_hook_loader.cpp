@@ -229,10 +229,11 @@ TEST(HookLoaderLock, EnableAndDisableRejectAtEntry)
         EXPECT_EQ(allocations_after, allocations_before);
     }
     EXPECT_FALSE(hook.is_enabled()) << "a refused enable must leave the hook disabled";
-    EXPECT_EQ(loader_reject_target_b(1), 8) << "a refused enable must leave the target's bytes unpatched";
+    EXPECT_EQ(dmk_test::call_unfolded(&loader_reject_target_b, 1), 8)
+        << "a refused enable must leave the target's bytes unpatched";
 
     ASSERT_TRUE(hook.enable().has_value());
-    ASSERT_EQ(loader_reject_target_b(1), 101);
+    ASSERT_EQ(dmk_test::call_unfolded(&loader_reject_target_b, 1), 101);
 
     {
         Result<void> disabled;
@@ -251,10 +252,11 @@ TEST(HookLoaderLock, EnableAndDisableRejectAtEntry)
         EXPECT_EQ(allocations_after, allocations_before);
     }
     EXPECT_TRUE(hook.is_enabled()) << "a refused disable must leave the hook armed";
-    EXPECT_EQ(loader_reject_target_b(1), 101) << "a refused disable must leave the detour dispatching";
+    EXPECT_EQ(dmk_test::call_unfolded(&loader_reject_target_b, 1), 101)
+        << "a refused disable must leave the detour dispatching";
 
     ASSERT_TRUE(hook.disable().has_value());
-    EXPECT_EQ(loader_reject_target_b(1), 8);
+    EXPECT_EQ(dmk_test::call_unfolded(&loader_reject_target_b, 1), 8);
 }
 
 TEST(HookLoaderLock, VmtOperationsRejectAtEntry)

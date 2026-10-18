@@ -171,7 +171,7 @@ TEST_F(MidHookContextTest, DetourReadsLiveArgumentRegisters)
     Hook hook = std::move(*result);
     EXPECT_TRUE(hook.is_enabled());
 
-    volatile int observed = read_probe(0x11, 0x22, 0x33);
+    volatile int observed = call_unfolded(&read_probe, 0x11, 0x22, 0x33);
     EXPECT_EQ(observed, 0x11 + 0x22 + 0x33); // unmodified path still computes correctly
     EXPECT_GE(s_calls.load(), 1);
     EXPECT_EQ(static_cast<int>(s_rcx.load() & 0xFFFFFFFFu), 0x11);
@@ -192,7 +192,7 @@ TEST_F(MidHookContextTest, RspIsRealStackPointer)
     Hook hook = std::move(*result);
 
     int local = 0;
-    volatile int observed = read_probe(1, 2, 3);
+    volatile int observed = call_unfolded(&read_probe, 1, 2, 3);
     (void)observed;
 
     std::uint64_t rsp = s_rsp.load();
@@ -218,7 +218,7 @@ TEST_F(MidHookContextTest, GprWriteRcxSurvivesResume)
     Hook hook = std::move(*result);
 
     // unhooked: 1+2=3 ; with ctx.rcx:=1000 the resumed body computes 1000+2.
-    volatile int observed = sum_first_second(1, 2);
+    volatile int observed = call_unfolded(&sum_first_second, 1, 2);
     EXPECT_EQ(observed, 1000 + 2);
 }
 
@@ -237,7 +237,7 @@ TEST_F(MidHookContextTest, GprWriteR8SurvivesResume)
     Hook hook = std::move(*result);
 
     // unhooked: returns c=3 ; with ctx.r8:=777 the resumed body returns 777.
-    volatile int observed = return_third(1, 2, 3);
+    volatile int observed = call_unfolded(&return_third, 1, 2, 3);
     EXPECT_EQ(observed, 777) << "ctx.r8 write did not survive mid-hook resume";
 }
 
@@ -328,7 +328,7 @@ TEST_F(MidHookContextTest, ResumeStackPointerAndFlagsAreReadable)
     ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
     Hook hook = std::move(*result);
 
-    volatile int observed = read_probe(1, 2, 3);
+    volatile int observed = call_unfolded(&read_probe, 1, 2, 3);
     (void)observed;
 
     std::uint64_t resume_rsp = s_resume_rsp.load();

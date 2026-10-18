@@ -513,6 +513,43 @@ namespace DetourModKit
                                        : static_cast<std::uint64_t>(ticks);
             }
 
+            /**
+             * @brief Proves each deferred mid route idle, with retries until @p deadline, and retains every route that
+             *        stays refused. An expired deadline still leaves one attempt.
+             * @details No thread enters a restored route, and the threads inside it only move forward. A later attempt
+             *          can therefore hold where an earlier one refused (`[B-108]`).
+             */
+            void reclaim_deferred_routes(
+                std::span<detail::HookAccess::DeferredRestore> deferred,
+                std::chrono::steady_clock::time_point deadline
+            ) noexcept
+            {
+                DetourModKit::detail::DrainBackoff backoff;
+                for (;;)
+                {
+                    bool waiting = false;
+                    for (detail::HookAccess::DeferredRestore &restore : deferred)
+                    {
+                        if (auto *const mid_backend = std::get_if<safetyhook::MidHook>(&restore.impl->backend))
+                        {
+                            waiting = !mid_backend->reclaim_deferred_route() || waiting;
+                        }
+                    }
+                    if (!waiting || std::chrono::steady_clock::now() >= deadline)
+                    {
+                        break;
+                    }
+                    backoff.pause();
+                }
+                for (detail::HookAccess::DeferredRestore &restore : deferred)
+                {
+                    if (auto *const mid_backend = std::get_if<safetyhook::MidHook>(&restore.impl->backend))
+                    {
+                        mid_backend->retain_deferred_route();
+                    }
+                }
+            }
+
             /// Builds the result of a retirement that changed nothing and logs why.
             [[nodiscard]] HookRetirement
             unchanged(RetirementOutcome outcome, ErrorCode refusal, std::uint64_t in_flight, const char *why) noexcept
@@ -755,9 +792,13 @@ namespace DetourModKit
             // One idle pass after the last restore proves every deferred trampoline.
             for (detail::HookAccess::DeferredRestore &restore : deferred)
             {
-                deferred_backends.push_back(std::get_if<safetyhook::InlineHook>(&restore.impl->backend));
+                if (auto *const inline_backend = std::get_if<safetyhook::InlineHook>(&restore.impl->backend))
+                {
+                    deferred_backends.push_back(inline_backend);
+                }
             }
             safetyhook::InlineHook::reclaim_deferred(deferred_backends);
+            reclaim_deferred_routes(std::span<detail::HookAccess::DeferredRestore>{deferred}, stop);
             for (detail::HookAccess::DeferredRestore &restore : deferred)
             {
                 count(detail::HookAccess::finish_deferred_restore(restore));

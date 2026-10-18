@@ -134,7 +134,7 @@ namespace staged_gen
         int enable_mid = 0;
         /**
          * @brief Parks one caller at the first mid route entry through StagedShutdown when nonzero.
-         * @details Teardown then retains that route. Requires enable_mid.
+         * @details Teardown then keeps that route as residue. Requires enable_mid.
          */
         int retain_mid = 0;
         /**

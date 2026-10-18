@@ -130,14 +130,14 @@ After you delete or rename a source file, configure a fresh build tree before a 
 | `test_gate_race_probe.cpp` | Hook ledger and input gates under contention |
 | `test_heal_scheduler.cpp` | `HealScheduler`, healed slots |
 | `test_hook.cpp` | Install core, `mid_at`, `install_all`, ledger, publication |
-| `test_hook_backend.cpp` | Backend transactions, exception containment, the idle-pass thread walk and suspension cost |
+| `test_hook_backend.cpp` | Backend transactions, exception containment, mid stub release, and the idle-pass thread walk, suspension cost, and refusal record |
 | `test_hook_counted.cpp` | Counted `inline_at<Detour>`, `CallerFrame`, the counted drain proof |
 | `test_hook_counted_hardened.cpp` | The counted thunk under `-fstack-protector-all` |
 | `test_hook_fault_proof.cpp` | Every hook `*FaultProof` suite |
 | `test_hook_inline.cpp` | `inline_at`, prologue policy, duplicates, `Hook::call` |
 | `test_hook_integration.cpp` | Hooks on `hook_target_lib.dll` |
 | `test_hook_loader.cpp` | Hook loader-lock boundary |
-| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, `HookStack::retire` and its idle-pass count, in-flight drain |
+| `test_hook_teardown.cpp` | Toggle and teardown, `HookStack`, `HookStack::retire` with its idle-pass count and mid route retry, in-flight drain |
 | `test_hook_vmt.cpp` | `vmt_for`, `apply_to`, `remove_from`, method hooks |
 | `test_input.cpp` | Binding registration and query core, `KeyStateCache` |
 | `test_input_codes.cpp` | `InputCode` and `Trigger` names, `InputCodeHash` |

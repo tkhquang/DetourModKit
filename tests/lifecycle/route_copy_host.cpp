@@ -993,13 +993,18 @@ int main(int argc, char **argv)
         caller.join();
         return fail("the newer gateway did not park");
     }
+    // The newer route frees its stub and keeps its chain as residue, because the parked caller fails its idle proof.
     const auto newer_retention = second.run(Command::Reset);
+    const auto newer_residue = second.run(Command::Residue);
     const auto older_retention = first.run(Command::Reset);
     const bool retained = executable(older);
     // The parked caller also fails the idle scan, so only the reason proves the newer-record refusal.
     const bool dependent = first.run(Command::DependentRetentions) == 1;
     // Only a retained mark on the newer record lets the older layer restore its target.
     const bool restored = std::memcmp(page, code.data(), code.size()) == 0;
+    // The parked caller spins on the park word in the image of the newer copy, so it leaves before that image unmaps.
+    second.run(Command::ReleaseEntry);
+    caller.join();
     const auto first_address = reinterpret_cast<const wchar_t *>(first.command);
     const auto second_address = reinterpret_cast<const wchar_t *>(second.command);
     FreeLibrary(first.module);
@@ -1009,15 +1014,16 @@ int main(int argc, char **argv)
     HMODULE owner{};
     constexpr DWORD lookup_flags =
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-    if (!GetModuleHandleExW(lookup_flags, first_address, &owner) ||
-        !GetModuleHandleExW(lookup_flags, second_address, &owner))
+    // The older route stays reachable from the retained newer chain, so it pins its provider. The newer residue reaches
+    // no image code, so its provider unmaps (`[B-108]`).
+    if (!GetModuleHandleExW(lookup_flags, first_address, &owner))
     {
         (void)fail("a retained route lost its code provider");
         ExitProcess(1);
     }
-    second.run(Command::ReleaseEntry);
-    caller.join();
-    if (newer_retention != 1 || older_retention != 1 || !retained || !dependent || !restored || observed != 37)
-        return fail("the newer route lost its older dependency");
+    const bool newer_unmapped = !GetModuleHandleExW(lookup_flags, second_address, &owner);
+    if (newer_retention != 0 || newer_residue != 1 || !newer_unmapped || older_retention != 1 || !retained ||
+        !dependent || !restored || observed != 37)
+        return fail("the newer residue kept its provider or the older route lost its dependency");
     return 0;
 }

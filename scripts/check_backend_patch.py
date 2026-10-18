@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "6091eff2c5f74004e19ed9f9b4d0b0574cec9f60c3d68cc6025f93db7cdb0621"
+EXPECTED_PATCH_SHA256 = "3791d71b91e612122551c5a27f256a3c4d1fbb0a48cad5c4caeeccafef326d5a"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -240,7 +240,7 @@ RELAY_RETIREMENT_SENTINELS = [
     "align_up(src + sizeof(JmpFF), alignof(uint64_t))",  # the relay slot is 8-aligned ...
     "std::atomic_ref<uint64_t>{*reinterpret_cast<uint64_t*>(address)}.store(value, std::memory_order_seq_cst);",
     "m_relay_offset != 0 ? m_trampoline.data() + m_relay_offset : m_destination",  # ... far hooks route through it
-    "if (!trampoline_idle()) {",  # a restored trampoline frees only after an idle proof
+    "if (!trampoline_idle(&m_idle_refusal)) {",  # a restored trampoline frees only after an idle proof
     "m_route_control->test_control.store(&m_route_control->local_test_control",  # retention leaves image data
     "footer.seal != (RELAY_CELL_SEAL ^ seal_address) || footer.layout != RELAY_CELL_LAYOUT",  # a cell is sealed
     "exchange_cell_state(cell, RELAY_CELL_OWNED, RELAY_CELL_VACANT)",  # vacate hands the cell on ...
@@ -260,7 +260,7 @@ RETIREMENT_COST_SENTINELS = [
     'GetProcAddress(ntdll, "NtGetNextThread")',  # the pass walks only this process's threads ...
     "THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE",  # ... skips the current thread by its id ...
     "WaitForSingleObject(m_handles[i], 0) != WAIT_OBJECT_0",  # ... skips only a thread that exited ...
-    "bool inside = !handles.suspend_all();",  # ... stops every other thread before the first read ...
+    "const size_t unsuspended = handles.suspend_all();",  # ... stops every other thread before the first read ...
     "handles.resume_all();",  # ... and resumes every stopped thread
     "defer_release && coordinator.layer_count(m_trampoline.data()) == 1",  # a hook alone on its window waits ...
     "void InlineHook::reclaim_deferred(",  # ... for one pass over every waiting trampoline ...
@@ -268,6 +268,20 @@ RETIREMENT_COST_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += RETIREMENT_COST_SENTINELS
+
+# A mid stub frees only when no thread can reach it, a restored route retries its proof, and a refusal names its thread.
+MID_ROUTE_RESIDUE_SENTINELS = [
+    "m_route_control->live_stores.fetch_add(1, std::memory_order_seq_cst);",  # a LIVE store ends a recorded read ...
+    "control.unreachable_mark.store(before + 1, std::memory_order_seq_cst);",  # ... that a zero entry read records ...
+    "m_hook.route_destination_unreachable()",  # ... and that lets the mid stub free under a held entry
+    "m_retention_reason = RouteRetentionReason::EntryHeld;",  # each refusal names its own cause ...
+    "m_retention_reason = RouteRetentionReason::TargetNotRestored;",  # ... apart from a refused thread scan
+    "defer_release && !m_enabled && coordinator.layer_count(m_trampoline.data()) == 1",  # a restored route waits ...
+    "bool InlineHook::reclaim_deferred_route(",  # ... for repeated proof attempts
+    "*refusal = IdleRefusal{thread_id, check};",  # a refused pass records its thread and its check
+]
+
+REQUIRED_SENTINELS += MID_ROUTE_RESIDUE_SENTINELS
 
 
 def patch_files(patch_dir: Path):

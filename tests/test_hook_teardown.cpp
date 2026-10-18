@@ -22,6 +22,7 @@
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/staged_reload.hpp"
 
 #include "internal/hook_ledger.hpp"
 
@@ -3252,5 +3253,190 @@ TEST(HookStackTest, RetireBatchProofFallsBackPerHook)
     EXPECT_EQ(call_unfolded(&fallback_free_target, 5), free_pristine);
     EXPECT_EQ(call_unfolded(&fallback_busy_target, 5), busy_pristine_result);
     EXPECT_EQ(call_unfolded(&fallback_last_target, 5), last_pristine);
+}
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(parked_route_target, 443)
+    DMK_PROOF_SEEDED_TARGET(released_route_target, 449)
+    DMK_PROOF_SEEDED_TARGET(residue_route_target, 457)
+
+    /// The bound of a retirement that a parked route outlasts.
+    constexpr std::chrono::milliseconds PARKED_ROUTE_DEADLINE{100};
+    /// How long the released park holds its call inside a retirement.
+    constexpr std::chrono::milliseconds PARK_RELEASE_DELAY{50};
+
+    std::atomic<int> s_parked_route_callbacks{0};
+    std::atomic<int> s_successor_route_callbacks{0};
+
+    void count_parked_route_callback(MidContext &) noexcept
+    {
+        s_parked_route_callbacks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void count_successor_route_callback(MidContext &) noexcept
+    {
+        s_successor_route_callbacks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    using MidCallback = void (*)(MidContext &) noexcept;
+
+    /// Installs a mid hook of @p callback on @p target, pushes it onto @p stack, and arms it.
+    void push_armed_mid_hook(HookStack &stack, const char *name, Address target, MidCallback callback)
+    {
+        Result<Hook> created = mid_at(
+            MidRequest{
+                .name = name,
+                .target = target,
+            },
+            callback
+        );
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        ASSERT_TRUE(stack.push(std::move(*created)).enable().has_value());
+    }
+
+    /// Retires @p stack while a call stays parked at the gateway of its route past the deadline.
+    [[nodiscard]] HookRetirement retire_past_a_parked_call(HookStack &stack, EchoFn target, int pristine)
+    {
+        GatewayParkedCall call{target, 5};
+        if (!call.wait_until_parked())
+        {
+            ADD_FAILURE() << "the call never reached the gateway";
+            return HookRetirement{};
+        }
+        const HookRetirement retired = stack.retire(PARKED_ROUTE_DEADLINE);
+        // The parked call completes through the kept route with the unhooked result.
+        EXPECT_EQ(call.release_and_join(), pristine);
+        return retired;
+    }
+} // namespace
+
+// A call parked at the gateway entry holds no route entry, so the route drains, but every idle pass of the commit sees
+// it. The proof stays refused past the deadline, so the route retires as HookResidue: the target restores, the module
+// reference releases, and the verdict stays OK (`[B-108]`).
+TEST(HookStackTest, RetireMidRouteParkedPastTheDeadlineLeavesResidue)
+{
+    const Address target = addr_of(&parked_route_target);
+    const int pristine = call_unfolded(&parked_route_target, 5);
+    const std::array<std::uint8_t, 16> pristine_bytes = entry_bytes(&parked_route_target);
+    const staged_reload::Baseline baseline = staged_reload::capture();
+    const std::size_t pins_before = diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+
+    HookStack stack;
+    ASSERT_NO_FATAL_FAILURE(push_armed_mid_hook(stack, "ParkedRoute", target, &count_parked_route_callback));
+    s_parked_route_callbacks.store(0, std::memory_order_relaxed);
+    HookRetirement retired{};
+    std::string text;
+    DWORD parked_thread = 0;
+    {
+        GatewayParkedCall call{&parked_route_target, 5};
+        ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the gateway";
+        parked_thread = call.thread_id();
+        {
+            dmk_test::LoggerFileCapture capture{LogLevel::Info};
+            retired = stack.retire(PARKED_ROUTE_DEADLINE);
+            text = capture.read_all();
+        }
+        // The parked call completes through the kept route with the unhooked result.
+        EXPECT_EQ(call.release_and_join(), pristine);
+    }
+
+    // The residue line names the parked thread and the check that refused the last proof.
+    const std::string residue_line =
+        std::format("kept its route: route idle proof refused. Thread {} runs inside the retired code.", parked_thread);
+    EXPECT_NE(text.find(residue_line), std::string::npos) << text;
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(retired.vacated, 0u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(hook_residue_leaks(), residue_before + 1) << "the refused route did not retire as residue";
+    EXPECT_EQ(hook_manager_leaks(), manager_before) << "the refused route pinned its backend";
+    EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook), pins_before);
+    EXPECT_EQ(entry_bytes(&parked_route_target), pristine_bytes);
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(staged_reload::verdict(retired, baseline, DMK_STAGED_RELOAD_ABI_VERSION), DMK_STAGED_RELOAD_OK);
+    EXPECT_EQ(s_parked_route_callbacks.load(std::memory_order_relaxed), 0) << "a callback ran after the route closed";
+}
+
+// The parked call leaves 50 ms into a 2 s retirement. The commit repeats the refused proof, so the route frees with no
+// residue and no retained record.
+TEST(HookStackTest, RetireMidRouteParkReleasedBeforeTheDeadlineReclaims)
+{
+    const Address target = addr_of(&released_route_target);
+    const int pristine = call_unfolded(&released_route_target, 5);
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+    const BackendCoordinatorCounts before = backend_coordinator_counts_for_test();
+
+    HookStack stack;
+    ASSERT_NO_FATAL_FAILURE(push_armed_mid_hook(stack, "ReleasedRoute", target, &count_parked_route_callback));
+    s_parked_route_callbacks.store(0, std::memory_order_relaxed);
+    HookRetirement retired{};
+    {
+        GatewayParkedCall call{&released_route_target, 5};
+        ASSERT_TRUE(call.wait_until_parked()) << "the call never reached the gateway";
+        std::jthread releaser{[&call]
+                              {
+                                  std::this_thread::sleep_for(PARK_RELEASE_DELAY);
+                                  call.release();
+                              }};
+        retired = stack.retire(RETIRE_DEADLINE);
+        releaser.join();
+        EXPECT_EQ(call.release_and_join(), pristine);
+    }
+
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(hook_residue_leaks(), residue_before) << "the released route stayed as residue";
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    const BackendCoordinatorCounts after = backend_coordinator_counts_for_test();
+    EXPECT_EQ(after.retained, before.retained) << "the released route kept its record";
+    EXPECT_EQ(after.live, before.live);
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(s_parked_route_callbacks.load(std::memory_order_relaxed), 0);
+}
+
+// A residue keeps a retained record on its target. The same name and a new name then install fresh layers there,
+// because a claim skips a retained record. Each runs its callback, and both retire with no residue.
+TEST(HookStackTest, RetireMidResidueTargetAcceptsTheNextGeneration)
+{
+    const Address target = addr_of(&residue_route_target);
+    const int pristine = call_unfolded(&residue_route_target, 5);
+    {
+        HookStack stack;
+        ASSERT_NO_FATAL_FAILURE(push_armed_mid_hook(stack, "ResidueRoute", target, &count_parked_route_callback));
+        const std::size_t residue_before = hook_residue_leaks();
+        const HookRetirement retired = retire_past_a_parked_call(stack, &residue_route_target, pristine);
+        ASSERT_EQ(retired.outcome, RetirementOutcome::Retired);
+        ASSERT_EQ(hook_residue_leaks(), residue_before + 1) << "the premise needs a residue on the target";
+    }
+
+    const std::size_t manager_before = hook_manager_leaks();
+    const std::size_t residue_before = hook_residue_leaks();
+    HookStack next;
+    ASSERT_NO_FATAL_FAILURE(push_armed_mid_hook(next, "ResidueRoute", target, &count_parked_route_callback));
+    ASSERT_NO_FATAL_FAILURE(
+        push_armed_mid_hook(next, "ResidueRouteSuccessor", target, &count_successor_route_callback)
+    );
+    s_parked_route_callbacks.store(0, std::memory_order_relaxed);
+    s_successor_route_callbacks.store(0, std::memory_order_relaxed);
+    EXPECT_EQ(call_unfolded(&residue_route_target, 5), pristine);
+    EXPECT_EQ(s_parked_route_callbacks.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(s_successor_route_callbacks.load(std::memory_order_relaxed), 1);
+
+    const HookRetirement retired = next.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 2u);
+    EXPECT_EQ(retired.vacated, 0u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(hook_residue_leaks(), residue_before);
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&residue_route_target, 5), pristine);
+    EXPECT_EQ(s_parked_route_callbacks.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(s_successor_route_callbacks.load(std::memory_order_relaxed), 1);
 }
 #endif

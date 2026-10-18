@@ -53,8 +53,12 @@ namespace
 
     /**
      * @brief Stands in for a game function that a real mod resolves with a scan ladder.
-     * @details Volatile operands preserve a hookable body under optimization. A real mod resolves a game target.
+     * @details Volatile operands preserve a hookable body under optimization. GCC `noipa` keeps a direct call on the
+     *          hooked entry, not on a specialized copy. A real mod resolves a game target.
      */
+#if defined(__GNUC__) && !defined(__clang__)
+    __attribute__((noipa)) int demo_apply_damage(int amount, int resist) noexcept;
+#endif
     __declspec(noinline) int demo_apply_damage(int amount, int resist) noexcept
     {
         volatile int observed_amount = amount;
