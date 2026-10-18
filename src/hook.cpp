@@ -38,6 +38,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -47,12 +48,75 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace DetourModKit::detail
 {
+    namespace
+    {
+        /// The sentence that names the first refusal of an idle proof, or an empty sentence for a clean proof.
+        struct IdleRefusalSentence
+        {
+            std::array<char, 96> text{};
+            std::size_t size{0};
+
+            [[nodiscard]] std::string_view view() const noexcept { return {text.data(), size}; }
+        };
+
+        /// Names the thread and the check of @p refusal. A teardown warning appends the sentence after its reason.
+        [[nodiscard]] IdleRefusalSentence describe_idle_refusal(const safetyhook::IdleRefusal &refusal) noexcept
+        {
+            IdleRefusalSentence sentence{};
+            const auto write = [&sentence, &refusal](std::format_string<std::uint32_t> format) noexcept
+            {
+                try
+                {
+                    const auto written = std::format_to_n(
+                        sentence.text.data(),
+                        static_cast<std::ptrdiff_t>(sentence.text.size()),
+                        format,
+                        std::uint32_t{refusal.thread_id}
+                    );
+                    sentence.size = std::min(static_cast<std::size_t>(written.size), sentence.text.size());
+                }
+                catch (...)
+                {
+                    sentence.size = 0;
+                }
+            };
+            switch (refusal.check)
+            {
+            case safetyhook::IdleRefusalCheck::None:
+                break;
+            case safetyhook::IdleRefusalCheck::InstructionPointerInRange:
+                write(" Thread {} runs inside the retired code.");
+                break;
+            case safetyhook::IdleRefusalCheck::ReturnSiteOnStack:
+                write(" Thread {} can still return into the retired code.");
+                break;
+            case safetyhook::IdleRefusalCheck::SuspensionFailed:
+                write(" Thread {} did not suspend.");
+                break;
+            case safetyhook::IdleRefusalCheck::ContextFailed:
+                write(" The context of thread {} is not readable.");
+                break;
+            case safetyhook::IdleRefusalCheck::ThreadWalkFailed:
+                write(" The thread walk failed.");
+                break;
+            case safetyhook::IdleRefusalCheck::ThreadLimit:
+                write(" The process has more threads than one idle pass holds.");
+                break;
+            case safetyhook::IdleRefusalCheck::CoordinatorUnavailable:
+                write(" The process coordinator was unavailable.");
+                break;
+            }
+            return sentence;
+        }
+    } // namespace
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
     namespace
     {
@@ -195,6 +259,49 @@ namespace DetourModKit::detail
         {
             return false;
         }
+    }
+
+    void set_backend_gateway_park_for_test(bool park) noexcept
+    {
+        safetyhook::set_route_park_for_test(
+            park ? safetyhook::RouteParkStage::AT_ENTRY : safetyhook::RouteParkStage::NONE
+        );
+    }
+
+    bool backend_gateway_park_reached_for_test() noexcept
+    {
+        return safetyhook::route_park_reached_for_test();
+    }
+
+    BackendIdleRefusal
+    backend_idle_refusal_for_test(void *begin, void *end, const void *site_base, std::uint8_t site_offset) noexcept
+    {
+        const std::array<safetyhook::AddressRange, 1> ranges{{{
+            static_cast<std::uint8_t *>(begin),
+            static_cast<std::uint8_t *>(end),
+        }}};
+        safetyhook::ReturnSites sites{};
+        sites.code = static_cast<const std::uint8_t *>(site_base);
+        sites.offsets[0] = site_offset;
+        sites.count = site_base != nullptr ? 1 : 0;
+        const std::array<const safetyhook::ReturnSites *, 1> lists{&sites};
+        BackendIdleRefusal result{};
+        safetyhook::IdleRefusal refusal{};
+        try
+        {
+            const std::expected<bool, safetyhook::OsError> idle =
+                safetyhook::threads_idle_outside(ranges, lists, &refusal);
+            result.idle = idle.has_value() && *idle;
+        }
+        catch (...)
+        {
+            return result;
+        }
+        result.thread_id = refusal.thread_id;
+        const IdleRefusalSentence sentence = describe_idle_refusal(refusal);
+        std::ranges::copy(sentence.view(), result.sentence.begin());
+        result.sentence_size = sentence.size;
+        return result;
     }
 
     void retire_backend_trap_runtime_for_test() noexcept
@@ -398,6 +505,8 @@ namespace DetourModKit::detail
                 case BackendProbeOperation::RetainRoute:
                     backend.retain_route();
                     return true;
+                case BackendProbeOperation::ObserveRouteEntries:
+                    return backend.observe_route_entries() == 0;
                 }
                 return false;
             }
@@ -411,6 +520,11 @@ namespace DetourModKit::detail
             BackendProbeState{},
             [](const auto &backend) noexcept
             {
+                bool stub_freed = false;
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(backend)>, safetyhook::MidHook>)
+                {
+                    stub_freed = backend.stub_freed();
+                }
                 return BackendProbeState{
                     .valid = static_cast<bool>(backend),
                     .enabled = backend.enabled(),
@@ -419,6 +533,9 @@ namespace DetourModKit::detail
                     .trampoline = backend.trampoline().data(),
                     .relay_slot = backend.relay_slot_for_test(),
                     .relay_cell = backend.relay_cell_for_test(),
+                    .route_retained = backend.route_retained(),
+                    .stub_freed = stub_freed,
+                    .retention_reason = backend.route_retention_reason(),
                 };
             }
         );
@@ -1282,6 +1399,7 @@ namespace DetourModKit
 
         /**
          * @brief Waits for the backend route to empty, or reports that proof of an empty route timed out.
+         * @details The zero read that ends the wait proves the mid stub unreachable (`[B-108]`).
          * @note A false return never licenses reclamation. The caller must retain the backend.
          */
         template <class BackendVariant> [[nodiscard]] bool drain_backend_route(BackendVariant &backend) noexcept
@@ -1292,7 +1410,7 @@ namespace DetourModKit
                     return backend_value_or(
                         backend,
                         std::size_t{1},
-                        [](const auto &one) noexcept { return one.route_entries(); }
+                        [](auto &one) noexcept { return one.observe_route_entries(); }
                     );
                 },
                 std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT
@@ -1764,7 +1882,8 @@ namespace DetourModKit
          * @brief Finishes a restored backend that release_backend tore down, then releases its adapter slot, ledger
          *        entry, and module reference.
          * @details A caller that holds the target install-serialization slot passes @p ledger, and the helper releases
-         *          it. A retained route keeps the Impl, the adapter slot, and the module reference pinned.
+         *          it. A retained route keeps the Impl, the adapter slot, and the module reference pinned, except a
+         *          residue that reaches no image code (`[B-108]`).
          */
         template <class HookImpl>
         hook::TeardownOutcome reclaim_restored_backend(
@@ -1793,13 +1912,26 @@ namespace DetourModKit
                 "route idle proof refused",
                 [](const auto &backend) noexcept { return backend.route_retention_reason(); }
             );
-            // A raw hook that failed the idle proof keeps only its trampoline in allocator memory. The restored target
-            // and the bypassed relay reach no image code, so the residue releases every reference.
+            const DetourModKit::detail::IdleRefusalSentence refusal =
+                DetourModKit::detail::describe_idle_refusal(backend_value_or(
+                    impl->backend,
+                    safetyhook::IdleRefusal{},
+                    [](const auto &backend) noexcept { return backend.idle_refusal(); }
+                ));
+            // A raw hook that failed the idle proof keeps only its trampoline in allocator memory. A mid hook with a
+            // freed stub keeps only its gateway and trampoline (`[B-108]`). The restored target and the switched-off
+            // relay or route reach no image code, so the residue releases every reference.
             const auto *const inline_backend = std::get_if<safetyhook::InlineHook>(&impl->backend);
+            const auto *const mid_backend = std::get_if<safetyhook::MidHook>(&impl->backend);
             const bool trampoline_residue =
                 route_retained && inline_backend != nullptr &&
                 inline_backend->route_retention_cause() == safetyhook::RouteRetentionReason::IdleProofFailed;
-            const bool pin_references = route_retained && !trampoline_residue;
+            const bool route_residue =
+                route_retained && mid_backend != nullptr && mid_backend->stub_freed() &&
+                (mid_backend->route_retention_cause() == safetyhook::RouteRetentionReason::IdleProofFailed ||
+                 mid_backend->route_retention_cause() == safetyhook::RouteRetentionReason::EntryHeld);
+            const bool residue = trampoline_residue || route_residue;
+            const bool pin_references = route_retained && !residue;
             if (pin_references)
             {
                 // A retained route preserves every provider reference.
@@ -1810,7 +1942,7 @@ namespace DetourModKit
             {
                 impl.reset();
             }
-            if (trampoline_residue)
+            if (residue)
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookResidue);
             }
@@ -1827,22 +1959,25 @@ namespace DetourModKit
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' at 0x{:0{}X} retained its executable route at teardown. "
-                    "The module reference remains held. Reason: {}.",
+                    "The module reference remains held. Reason: {}.{}",
                     name,
                     target,
                     sizeof(std::uintptr_t) * 2,
-                    retention_reason
+                    retention_reason,
+                    refusal.view()
                 );
             }
-            if (trampoline_residue)
+            if (residue)
             {
                 (void)log().try_log(
                     LogLevel::Info,
-                    "hook: '{}' at 0x{:0{}X} restored its target and kept its trampoline: {}.",
+                    "hook: '{}' at 0x{:0{}X} restored its target and kept its {}: {}.{}",
                     name,
                     target,
                     sizeof(std::uintptr_t) * 2,
-                    retention_reason
+                    route_residue ? "route" : "trampoline",
+                    retention_reason,
+                    refusal.view()
                 );
             }
             if (pin_references)
@@ -2412,19 +2547,22 @@ namespace DetourModKit
         {
             const std::uintptr_t target = restore.impl->target;
             const std::uint64_t ledger_id = restore.impl->ledger_id;
+            const std::size_t mid_slot = restore.impl->mid_slot;
+            const diagnostics::HookKind kind =
+                restore.impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
             const TeardownOutcome reclaimed = reclaim_restored_backend(
                 restore.impl,
                 nullptr,
                 restore.name,
                 target,
                 ledger_id,
-                false,
-                DetourModKit::detail::MID_ADAPTER_CAPACITY
+                mid_slot < DetourModKit::detail::MID_ADAPTER_CAPACITY,
+                mid_slot
             );
             emit_lifecycle(
                 restore.name,
                 ledger_id,
-                diagnostics::HookKind::Inline,
+                kind,
                 diagnostics::HookTransition::Removed,
                 RemovalPopulationState{
                     .was_active = restore.was_active,

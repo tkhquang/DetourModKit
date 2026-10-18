@@ -112,6 +112,7 @@ namespace DetourModKit::detail
         Reset,
         MoveAssign,
         RetainRoute,
+        ObserveRouteEntries,
     };
     struct BackendProbeState
     {
@@ -122,6 +123,9 @@ namespace DetourModKit::detail
         void *trampoline{nullptr};
         void *relay_slot{nullptr};
         void *relay_cell{nullptr};
+        bool route_retained{false};
+        bool stub_freed{false};
+        const char *retention_reason{nullptr};
     };
     struct BackendProbe;
     [[nodiscard]] BackendProbe *create_backend_probe_for_test(
@@ -141,6 +145,15 @@ namespace DetourModKit::detail
     [[nodiscard]] std::size_t backend_idle_snapshot_walks_for_test() noexcept;
     void fail_backend_next_thread_lookup_for_test(bool fail) noexcept;
     [[nodiscard]] bool backend_idle_pass_for_test(void *begin, void *end) noexcept;
+    struct BackendIdleRefusal
+    {
+        bool idle{false};
+        std::uint32_t thread_id{0};
+        std::array<char, 96> sentence{};
+        std::size_t sentence_size{0};
+    };
+    [[nodiscard]] BackendIdleRefusal
+    backend_idle_refusal_for_test(void *begin, void *end, const void *site_base, std::uint8_t site_offset) noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -4639,6 +4652,131 @@ TEST(HookBackendRelay, FailedRestoreKeepsABypassedRouteClosed)
     }
 }
 
+// A closed mid route records a zero entry read. A caller then takes a closed entry and parks in the relocated callee,
+// so the route holds an entry at teardown. That caller runs the trampoline and cannot reach the stub, so the teardown
+// frees the stub and retains the chain with the held entry as its cause (`[B-108]`).
+TEST(HookBackendRelay, MidRouteEntryAfterTheIdleReadFreesTheStub)
+{
+    using namespace std::chrono_literals;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_relocated_call(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    s_parked_callee_reached.store(false, std::memory_order_release);
+    s_parked_callee_release.store(false, std::memory_order_release);
+    s_parked_result.store(0, std::memory_order_release);
+    const std::size_t first_calls = s_first_mid_calls.load(std::memory_order_relaxed);
+
+    void *const callback = first_destination(BackendProbeKind::Mid);
+    ProbeHandle probe = create_probe(BackendProbeKind::Mid, page.addr(0), callback, "ClosedEntrantStub");
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Enable));
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Bypass));
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::ObserveRouteEntries)) << "the closed route held an entry";
+
+    ParkedCaller caller{page.addr(0)};
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!s_parked_callee_reached.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(s_parked_callee_reached.load(std::memory_order_acquire)) << "the caller never reached the callee";
+
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Reset));
+    const BackendProbeState state = probe.state();
+    EXPECT_TRUE(state.stub_freed) << "the teardown kept a stub that no thread can reach";
+    EXPECT_TRUE(state.route_retained) << "the teardown freed a chain that a caller still runs";
+    EXPECT_STREQ(state.retention_reason, "a caller still holds a route entry");
+    EXPECT_EQ(read_prologue_span(page), pristine);
+
+    if (state.route_retained)
+    {
+        // The parked caller returns through the kept trampoline, and no callback runs.
+        EXPECT_EQ(caller.release_and_join(), LEAF_RESULT);
+        EXPECT_EQ(s_first_mid_calls.load(std::memory_order_relaxed), first_calls);
+    }
+    else
+    {
+        // A freed chain must never run, so a regressed teardown leaves the caller parked.
+        caller.abandon();
+    }
+    // The retained record names this target for process life, so the fixture must not hand the page back.
+    page.abandon();
+}
+
+namespace
+{
+    std::atomic<bool> s_callback_parked{false};
+    std::atomic<bool> s_callback_release{false};
+    std::atomic<int> s_callback_result{0};
+
+    /// Parks inside the mid callback, which the stub calls, until the test releases it.
+    DMK_TEST_NOINLINE void parking_mid_callback(void *) noexcept
+    {
+        s_callback_parked.store(true, std::memory_order_release);
+        while (!s_callback_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+} // namespace
+
+// A recorded zero read ends at the next LIVE store. A caller that enters the reopened route parks inside the callback,
+// which the stub calls, so the teardown keeps the stub and retains the chain (`[B-108]`).
+TEST(HookBackendRelay, LiveStoreAfterTheIdleReadKeepsTheStub)
+{
+    using namespace std::chrono_literals;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    s_callback_parked.store(false, std::memory_order_release);
+    s_callback_release.store(false, std::memory_order_release);
+
+    ProbeHandle probe =
+        create_probe(BackendProbeKind::Mid, page.addr(0), code_address(&parking_mid_callback), "ReopenedRouteStub");
+    ASSERT_TRUE(probe);
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Enable));
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Bypass));
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::ObserveRouteEntries)) << "the closed route held an entry";
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Resume));
+
+    std::thread caller{[&page] { s_callback_result.store(call_target(page), std::memory_order_release); }};
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!s_callback_parked.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    if (!s_callback_parked.load(std::memory_order_acquire))
+    {
+        s_callback_release.store(true, std::memory_order_release);
+        caller.join();
+        FAIL() << "the caller never reached the callback";
+    }
+
+    ASSERT_TRUE(probe.drive(BackendProbeOperation::Reset));
+    const BackendProbeState state = probe.state();
+    EXPECT_FALSE(state.stub_freed) << "the teardown freed a stub that a parked caller returns into";
+    EXPECT_TRUE(state.route_retained);
+    EXPECT_STREQ(state.retention_reason, "a caller still holds a route entry");
+    EXPECT_EQ(read_prologue_span(page), pristine);
+
+    if (!state.stub_freed)
+    {
+        // The parked caller leaves the kept stub through the retained chain.
+        s_callback_release.store(true, std::memory_order_release);
+        caller.join();
+        EXPECT_EQ(s_callback_result.load(std::memory_order_acquire), LEAF_RESULT);
+    }
+    else
+    {
+        // A freed stub must never run, so a regressed teardown leaves the caller parked.
+        caller.detach();
+    }
+    // The retained record names this target for process life, so the fixture must not hand the page back.
+    page.abandon();
+}
+
 // A participant outside this kit's ledger owns a newer record on the target. The disable of the armed hook reaches the
 // backend restore, the coordinator refuses it before any write, and the hook bypasses. Its Info line names the newer
 // participant.
@@ -4738,6 +4876,36 @@ namespace
     {
         return 0;
     }
+
+    using DetourModKit::detail::backend_idle_refusal_for_test;
+    using DetourModKit::detail::BackendIdleRefusal;
+
+    /**
+     * @brief The base of the return site of the stack-check case, which adds @ref FAKE_RETURN_SITE_OFFSET.
+     * @details Only the holder thread forms the sum, so no other stack holds it.
+     */
+    alignas(16) std::array<std::uint8_t, 64> s_fake_return_site_base{};
+    constexpr std::uint8_t FAKE_RETURN_SITE_OFFSET = 24;
+    std::atomic<bool> s_fake_return_site_held{false};
+    std::atomic<bool> s_fake_return_site_release{false};
+
+    /// Keeps the fake return site in a stack word until the release.
+    DWORD WINAPI hold_fake_return_site(void *) noexcept
+    {
+        const volatile std::uintptr_t site =
+            reinterpret_cast<std::uintptr_t>(s_fake_return_site_base.data()) + FAKE_RETURN_SITE_OFFSET;
+        s_fake_return_site_held.store(true, std::memory_order_release);
+        while (!s_fake_return_site_release.load(std::memory_order_acquire))
+        {
+            Sleep(1);
+        }
+        return site != 0 ? 0 : 1;
+    }
+
+    [[nodiscard]] std::string refusal_sentence(const BackendIdleRefusal &refusal)
+    {
+        return std::string{refusal.sentence.data(), refusal.sentence_size};
+    }
 } // namespace
 
 // The walk opens the threads of this process only, so a thread that starts after 200 others still reads busy inside the
@@ -4820,5 +4988,57 @@ TEST(HookBackendIdleProof, SaturatedCoresFinishWithinTheBound)
     EXPECT_LT(elapsed, SATURATED_PASS_BOUND)
         << "one pass took " << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms with "
         << spinners << " spinning threads";
+}
+
+// A refused pass names its first refusal for the teardown warning: a thread stopped inside the range by its id and the
+// range check, and a thread that holds a return site by its id and the stack check. A clean pass names nothing.
+TEST(HookBackendIdleProof, RefusalNamesTheThreadAndTheCheck)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    auto *const begin = static_cast<std::uint8_t *>(page.base());
+    auto *const end = begin + dmk_test::ScratchPage::PAGE_SIZE;
+
+    BackendIdleRefusal clean{};
+    for (int attempt = 0; attempt < 3 && !clean.idle; ++attempt)
+    {
+        clean = backend_idle_refusal_for_test(begin, end, s_fake_return_site_base.data(), FAKE_RETURN_SITE_OFFSET);
+    }
+    EXPECT_TRUE(clean.idle) << refusal_sentence(clean);
+    EXPECT_EQ(clean.thread_id, 0u);
+    EXPECT_EQ(refusal_sentence(clean), "");
+
+    {
+        const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
+        ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
+        const BackendIdleRefusal refusal = backend_idle_refusal_for_test(begin, end, nullptr, 0);
+        EXPECT_FALSE(refusal.idle);
+        EXPECT_EQ(refusal.thread_id, inside.thread_id());
+        EXPECT_EQ(
+            refusal_sentence(refusal),
+            std::format(" Thread {} runs inside the retired code.", inside.thread_id())
+        );
+    }
+
+    s_fake_return_site_held.store(false, std::memory_order_release);
+    s_fake_return_site_release.store(false, std::memory_order_release);
+    const HANDLE holder = CreateThread(nullptr, 0, &hold_fake_return_site, nullptr, 0, nullptr);
+    ASSERT_NE(holder, nullptr);
+    const DWORD holder_id = GetThreadId(holder);
+    const auto deadline = std::chrono::steady_clock::now() + THREAD_LOAD_BOUND;
+    while (!s_fake_return_site_held.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        Sleep(1);
+    }
+    const bool held = s_fake_return_site_held.load(std::memory_order_acquire);
+    const BackendIdleRefusal refusal =
+        backend_idle_refusal_for_test(end, end, s_fake_return_site_base.data(), FAKE_RETURN_SITE_OFFSET);
+    s_fake_return_site_release.store(true, std::memory_order_release);
+    (void)WaitForSingleObject(holder, static_cast<DWORD>(THREAD_LOAD_BOUND.count() * 1000));
+    (void)CloseHandle(holder);
+    ASSERT_TRUE(held) << "the holder thread never started";
+    EXPECT_FALSE(refusal.idle);
+    EXPECT_EQ(refusal.thread_id, holder_id);
+    EXPECT_EQ(refusal_sentence(refusal), std::format(" Thread {} can still return into the retired code.", holder_id));
 }
 #endif // DMK_ENABLE_TEST_SEAMS

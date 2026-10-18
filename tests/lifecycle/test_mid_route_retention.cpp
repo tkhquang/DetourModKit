@@ -405,29 +405,31 @@ namespace
     }
 
     std::uintptr_t s_warning_target{0};
-    int s_retention_warnings{0};
-    bool s_warning_after_release{true};
+    int s_residue_lines{0};
+    bool s_residue_line_after_release{true};
 
     /**
-     * @brief Observes the ledger state when the retained-route warning reaches the logger.
+     * @brief Observes the ledger state when the route residue line reaches the logger.
      */
-    void observe_retention_warning(DetourModKit::LogLevel level, std::string_view message) noexcept
+    void observe_residue_line(DetourModKit::LogLevel level, std::string_view message) noexcept
     {
-        if (level == DetourModKit::LogLevel::Warning &&
-            message.find("retained its executable route") != std::string_view::npos)
+        if (level == DetourModKit::LogLevel::Info &&
+            message.find("kept its route: route idle proof refused.") != std::string_view::npos)
         {
-            ++s_retention_warnings;
-            s_warning_after_release = !DetourModKit::hook::is_target_hooked(DetourModKit::Address{s_warning_target}) &&
-                                      s_warning_after_release;
+            ++s_residue_lines;
+            s_residue_line_after_release =
+                !DetourModKit::hook::is_target_hooked(DetourModKit::Address{s_warning_target}) &&
+                s_residue_line_after_release;
         }
     }
 
     /**
      * @brief Installs @p layers published mid hooks on one target, parks a helper at the newest gateway entry, tears
      *        every layer down, and asserts that each layer retained exactly one block.
-     * @details The helper sits before the entry increment, where only the instruction-pointer scan can see it. After
-     *          the park releases it must complete through every bypass with the unhooked result, and no callback
-     *          runs.
+     * @details The helper sits before the entry increment, where only the instruction-pointer scan can see it. The
+     *          newest layer frees its stub and retires as residue (`[B-108]`). Each older layer stays reachable from
+     *          the retained newer chain, so it keeps the dependent-route pin. After the park releases, the helper must
+     *          complete through every bypass with the unhooked result, and no callback runs.
      */
     int run_parked_scenario(int layers, int target_index, int base_code)
     {
@@ -436,6 +438,7 @@ namespace
         const ExecutableWalk before = walk_private_executable();
         const safetyhook::RouteRetentionStats charged_before = safetyhook::route_retention_stats();
         const std::size_t leaks_before = leak_count();
+        const std::size_t residue_before = residue_count();
 
         DetourModKit::hook::HookStack stack;
         for (int layer = 0; layer < layers; ++layer)
@@ -486,10 +489,10 @@ namespace
         if (layers == 1)
         {
             s_warning_target = reinterpret_cast<std::uintptr_t>(TARGETS[target_index]);
-            s_retention_warnings = 0;
-            s_warning_after_release = true;
-            DetourModKit::log().set_log_level(DetourModKit::LogLevel::Warning);
-            DetourModKit::detail::g_logger_record_probe = &observe_retention_warning;
+            s_residue_lines = 0;
+            s_residue_line_after_release = true;
+            DetourModKit::log().set_log_level(DetourModKit::LogLevel::Info);
+            DetourModKit::detail::g_logger_record_probe = &observe_residue_line;
         }
         stack.clear();
         DetourModKit::detail::g_logger_record_probe = previous_probe;
@@ -498,9 +501,9 @@ namespace
         safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::NONE);
         helper.join();
 
-        if (layers == 1 && (s_retention_warnings != 1 || !s_warning_after_release))
+        if (layers == 1 && (s_residue_lines != 1 || !s_residue_line_after_release))
         {
-            std::fputs("FAIL: retained-route warning precedes ledger release or is missing\n", stderr);
+            std::fputs("FAIL: the route residue line precedes ledger release or is missing\n", stderr);
             return base_code + 8;
         }
         const ExecutableWalk after = walk_private_executable();
@@ -534,13 +537,17 @@ namespace
         }
         // The retained newer layer leaves the ledger, and its disabled record does not block a restore. Each older
         // layer then restores as the top layer and retains as a dependent route, never as a residue.
-        if (leak_count() - leaks_before != static_cast<std::size_t>(layers))
+        const std::size_t pins_booked = leak_count() - leaks_before;
+        const std::size_t residue_booked = residue_count() - residue_before;
+        if (pins_booked != static_cast<std::size_t>(layers - 1) || residue_booked != 1)
         {
             std::fprintf(
                 stderr,
-                "FAIL: the parked teardown booked %zu HookManager leaks, expected %d\n",
-                leak_count() - leaks_before,
-                layers
+                "FAIL: the parked teardown booked %zu HookManager leaks and %zu HookResidue events, "
+                "expected %d and 1\n",
+                pins_booked,
+                residue_booked,
+                layers - 1
             );
             return base_code + 6;
         }
@@ -1306,16 +1313,17 @@ int main(int argc, char **argv)
     }
 
     // One block per parked layer, two for the call-site teardowns with a thread still returning, and nothing else.
-    // Each retention keeps its route and its module reference, so it books HookManager and never HookResidue.
+    // The newest parked layer of each scenario retires as residue. The older parked layer and the call-site retentions
+    // keep their routes and their module references, so they book HookManager.
     const std::size_t leaks = leak_count();
-    if (leaks != 5)
+    if (leaks != 3)
     {
-        std::fprintf(stderr, "FAIL: the run booked %zu HookManager leaks, expected exactly 5\n", leaks);
+        std::fprintf(stderr, "FAIL: the run booked %zu HookManager leaks, expected exactly 3\n", leaks);
         return 70;
     }
-    if (const std::size_t residue = residue_count(); residue != 0)
+    if (const std::size_t residue = residue_count(); residue != 2)
     {
-        std::fprintf(stderr, "FAIL: the run booked %zu HookResidue events, expected none\n", residue);
+        std::fprintf(stderr, "FAIL: the run booked %zu HookResidue events, expected exactly 2\n", residue);
         return 71;
     }
     std::puts("PASS: a published mid hook reclaims its route chain unless a thread is parked inside it");

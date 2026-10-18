@@ -193,7 +193,7 @@ The development policy accepts leak counts after the [Shutdown sequence](#topolo
 
 `LeakSubsystem::Input` combines several causes. An XInput pin does not attribute every Input leak to XInput. The example needs no such attribution because it retains its own reference.
 
-An inline or mid hook that cannot restore its target retires by bypass. Causes include a newer layer in any participant, foreign or unreadable target bytes, and a claimed position. The hook switches its detour off without a target write and leaves its position for the next generation with the same hook name. It releases its module reference, so the image can unmap. Each position records one `LeakSubsystem::HookResidue` leak at its first retirement. A restored inline trampoline that fails its idle proof also stays as `HookResidue`.
+An inline or mid hook that cannot restore its target retires by bypass. Causes include a newer layer in any participant, foreign or unreadable target bytes, and a claimed position. The hook switches its detour off without a target write and leaves its position for the next generation with the same hook name. It releases its module reference, so the image can unmap. Each position records one `LeakSubsystem::HookResidue` leak at its first retirement. A restored inline trampoline that fails its idle proof also stays as `HookResidue`. So does a restored mid route whose stub no thread can reach (`[B-108]`).
 
 The XInput pair of DMK follows the same rule under a newer layer, such as the Steam overlay. Its closed routes forward to the provider, so the image can unmap. The next generation claims both positions. Under that layer, a claimed pair publishes coverage only while a controller answers.
 
@@ -236,6 +236,8 @@ Keep debugger symbols from the same build as each staged DLL. A debugger can cac
 A prologue rewrite uses execute traps instead of a process-wide thread freeze. The backend removes execute permission and tracks patch windows during the rewrite. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. That handler does not drain detour bodies or code outside those windows. Route reclamation separately suspends every other thread once per pass for its idle proof. The [hook note](../../design/hooking.md#concurrency-model) defines that proof.
 
 A fixed sleep cannot prove quiescence. A counter inside the detour also misses a caller that selected the detour before its counter entry. The counted `inline_at<&Detour>` form owns that proof (`[B-106]`). `HookStack::retire` drains its calls and returns Busy while one stays. The raw `inline_at(request, detour)` form requires caller quiescence before teardown, as the [`inline_at` contract](../../../include/DetourModKit/hook.hpp) states. The reference sample uses the counted form, so it retires its hook before it joins its heartbeat worker.
+
+The [`inline_at<&Detour>` contract](../../../include/DetourModKit/hook.hpp) states what `_ReturnAddress()` names inside a counted detour.
 
 DMK owns rundown for mid callbacks and counted displaced execution. The [`mid_at` contract](../../../include/DetourModKit/hook.hpp) requires callers to quiesce saved contexts outside that execution.
 

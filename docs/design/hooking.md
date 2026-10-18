@@ -2,7 +2,7 @@
 
 This note explains the hook subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`.
+Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`, `[B-107]`, `[B-108]`.
 
 ## Concurrency model
 
@@ -32,7 +32,7 @@ VmtHook and teardown:
 - `VmtHook` serializes object-vptr create/apply/remove/teardown transitions through a setup-time object gate, with per-method state still protected by its SRWLOCK.
 - The destructor applies the loader-lock leaf discipline. Under the loader lock it leaks the backend and `record_intentional_leak`s instead of a restore. It keeps the counted module reference it took at install, which maps the trampoline/detour code.
 - Inline and mid `Hook` teardown restores only on an `OwnedPatch` witness. A `Foreign` or `Indeterminate` witness retires the hook as residue (`[B-104]`), and a failed restore over its own patch pins the whole backend. Both keep the ledger entry. `VmtHook` teardown restores an object word only through the compare-exchange in `[B-66]`, and a rejected exchange pins the clone.
-- Clean x64 mid teardown reclaims the published route after the backend proves that it is idle. Public `mid_at` reserves route capacity before publication. An idle chain returns its gateway, trampoline, allocator block, and unwind records, and refunds its charge. A failed proof retains the chain and its charge. `Hook::~Hook` records that retention as a `LeakSubsystem::HookManager` leak with a warning.
+- Clean x64 mid teardown reclaims the published route after the backend proves that it is idle. Public `mid_at` reserves route capacity before publication. An idle chain returns its gateway, trampoline, allocator block, and unwind records, and refunds its charge. A failed proof retains the chain and its charge. `Hook::~Hook` records that retention as a `LeakSubsystem::HookManager` leak with a warning, or as `HookResidue` when no thread can reach the stub (`[B-108]`).
 
   The proof requires a restored target, zero route entries, and a closed route. Each pass suspends every other thread once (`[B-107]`), and each instruction pointer must be outside the gateway and trampoline. Each suspended thread's committed stack is checked for relocated-call return addresses. The current thread's stack receives the same check. The scan excludes dormant fiber stacks. Counted displaced execution covers their route lifetime.
 
@@ -149,7 +149,10 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - a sealed relay cell at the end of every x64 trampoline,
 - `vacate()` on inline and mid hooks, which marks a bypassed position Vacant and leaves the object inert,
 - a `PositionClaim` create argument that claims a Vacant position of the same hook name,
-- a claimed mode that writes no target byte and no record field and frees nothing.
+- a claimed mode that writes no target byte and no record field and frees nothing,
+- an idle pass that walks only this process's threads and suspends them together, and one deferred proof for every restored trampoline,
+- a mid stub that frees only when no thread can reach it, and a restored route proof that a retirement can defer and repeat,
+- an idle-pass refusal record that names the refused thread and check.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 
@@ -161,7 +164,7 @@ The configure-time verdict is byte equality, not a path set. `dmk_reconstruct_ba
 
 Python and CMake spell one normalization two ways, `lf()` and `git diff --ignore-cr-at-eol`. `scripts/test_check_backend_patch.py` asserts that they accept and refuse the same states. A fixture for that defect must put the smuggled bytes outside every hunk, or the reverse-apply catches them first and the test proves nothing.
 
-A configured build tree leaves the submodule working tree dirty, because the patch is applied in place. It can also leave ignored generated build output under its reviewed roots. That is expected.
+A configured build tree leaves the submodule working tree dirty, because the patch is applied in place. It can also leave ignored generated build output under its reviewed roots. That is expected. `.gitmodules` sets `ignore = dirty`, so the parent's `git status` and `git diff` do not report it.
 
 `EXPECTED_PATCH_SHA256` is a computed value. Never substitute a literal for it without the recompute command in the comment above it and the checker's own verdict. Any change to the patch content, a new backend test scenario included, requires a regenerated patch and a re-pinned hash. It also requires a re-run of forward apply, reverse apply, and configured-tree equality. Such a change belongs in a backend batch.
 
@@ -309,4 +312,14 @@ A thread that waits for a core runs its suspension and context requests only whe
 
 `HookStack::retire` runs two passes for its counted drain and one for its restored trampolines, so the count does not grow with its inline hooks. The commit tears each counted hook down with no drain of its own, because the retire drain covered it and its relay stayed off. Each restored trampoline then waits for one pass over all of them. No thread can enter a restored trampoline, and a layer installed after the restore relocates the restored bytes, so it never reaches one.
 
-A restored hook that shares its patch window with another record frees its trampoline at once. A live record of a restored layer refuses the restore of every older layer on the window. Each mid hook keeps the two passes of its published route. A refused pass falls back to the proof of each hook, so every outcome, leak bucket, and module reference matches the proof of one hook. `HookBackendIdleProof.*`, `HookStackTest.RetireRunsNoRepeatedCountedDrain`, `HookStackTest.RetireRunsAConstantNumberOfIdlePasses`, and `HookStackTest.RetireBatchProofFallsBackPerHook` prove the rule.
+A restored hook that shares its patch window with another record frees its trampoline at once. A live record of a restored layer refuses the restore of every older layer on the window. Each mid hook keeps the two passes of its published route, and a refused route proof repeats (`[B-108]`). A refused pass falls back to the proof of each hook, so every outcome, leak bucket, and module reference matches the proof of one hook. `HookBackendIdleProof.*`, `HookStackTest.RetireRunsNoRepeatedCountedDrain`, `HookStackTest.RetireRunsAConstantNumberOfIdlePasses`, and `HookStackTest.RetireBatchProofFallsBackPerHook` prove the rule.
+
+### [B-108]
+
+A mid hook reaches image code only through its stub, which calls the DMK adapter and the callback. Only the LIVE gateway path jumps to the stub. A closed route sends each entrant to the trampoline, which runs relocated target code and continuation exits back to the target. A retained chain with an unreachable stub therefore reaches no image code, as a raw residue does (`[B-44]`).
+
+A caller holds a route entry from its gateway increment until it leaves the stub. An entrant increments before it reads the state. A zero entry read while the route is not LIVE therefore proves that no thread is in the stub. No thread can enter the stub until the next LIVE store. `observe_route_entries()` records such a read with the count of LIVE stores, so a later LIVE store ends the proof. Both DMK route drains read through it.
+
+`MidHook` frees its stub when the hook is disabled and either no caller holds an entry or the recorded read still holds. A thread that leaves an uncounted window after the drain takes a closed entry and runs the trampoline, so it never reaches the freed stub. `Hook` teardown retires a restored mid hook with a freed stub as `HookResidue`, when a thread scan or a held entry refused its proof. A failed restore, an unavailable coordinator, a dependent route, unwind records, and the owner lock keep the pin.
+
+`HookStack::retire` defers a restored route that is alone on its patch window, as it defers a trampoline (`[B-107]`). No thread enters a restored route, and the threads inside it only move forward. The commit therefore repeats a refused route proof until the retire deadline, and an expired deadline leaves one attempt. Each refused pass records its first thread and check, and the pin or residue line names them after the threads resume. `HookBackendRelay.MidRouteEntryAfterTheIdleReadFreesTheStub`, `HookBackendIdleProof.RefusalNamesTheThreadAndTheCheck`, and `HookStackTest.RetireMid*` prove the rule.

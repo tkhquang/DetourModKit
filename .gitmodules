@@ -1,9 +1,12 @@
 [submodule "external/safetyhook"]
 	path = external/safetyhook
 	url = https://github.com/cursey/safetyhook.git
+	ignore = dirty
 [submodule "external/simpleini"]
 	path = external/simpleini
 	url = https://github.com/brofield/simpleini.git
+	ignore = dirty
 [submodule "external/DirectXMath"]
 	path = external/DirectXMath
 	url = https://github.com/microsoft/DirectXMath.git
+	ignore = dirty

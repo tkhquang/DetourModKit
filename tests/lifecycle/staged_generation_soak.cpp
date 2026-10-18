@@ -422,8 +422,8 @@ namespace
         if (previous_tls == 0)
             return fail("resources", "the host TLS census is unavailable");
         std::uintptr_t coordinator_identity = 0;
-        // After the clean series, one generation retains a route and another keeps a diagnostics subscription across
-        // ~Session. Two clean generations follow.
+        // After the clean series, one generation keeps a parked route as residue and another keeps a diagnostics
+        // subscription across ~Session. Two clean generations follow.
         const int retained_cycle = clean_cycles + 1;
         const int diagnostics_retained_cycle = retained_cycle + 1;
         const int last_cycle = diagnostics_retained_cycle + 2;
@@ -471,17 +471,17 @@ namespace
                 generation.read_status().lifecycle_events != INIT_LIFECYCLE_EVENTS)
                 return fail("resources", "six mid callbacks, one dispatched event, and 14 hook events did not execute");
             const std::size_t initialized_tls = dmk_lifecycle::free_tls_indices();
-            // A retained route books one HookManager leak and requires a restart. A diagnostics subscription that
-            // outlives ~Session books one Diagnostics leak and retains the image.
+            // A parked route keeps its chain as one HookResidue leak, and the image unmaps (`[B-108]`). A diagnostics
+            // subscription that outlives ~Session books one Diagnostics leak and retains the image.
             const int verdict = generation.shutdown();
             const std::size_t shutdown_tls = dmk_lifecycle::free_tls_indices();
             const auto status = generation.read_status();
             if (status.lifecycle_events != SHUTDOWN_LIFECYCLE_EVENTS)
                 return fail("resources", "the diagnostics subscription did not observe every hook removal");
             if (retain &&
-                (verdict != static_cast<int>(DMK_STAGED_RELOAD_RESTART_REQUIRED) || status.hook_manager_leaks != 1 ||
-                 status.total_intentional_leaks != 1 || status.parked_result != 3))
-                return fail("resources", "the parked route was not retained, reported, and bypassed");
+                (verdict != static_cast<int>(DMK_STAGED_RELOAD_OK) || status.hook_manager_leaks != 0 ||
+                 status.hook_residue_leaks != 1 || status.total_intentional_leaks != 1 || status.parked_result != 3))
+                return fail("resources", "the parked route was not kept as residue and bypassed");
             if (retain_diagnostics && (verdict != static_cast<int>(DMK_STAGED_RELOAD_RETAINED) ||
                                        status.diagnostics_leaks != 1 || status.total_intentional_leaks != 1))
                 return fail("resources", "the live diagnostics subscription did not retain the image with one leak");
@@ -503,15 +503,14 @@ namespace
                 coordinator_region.RegionSize != 12 * system.dwPageSize)
                 return fail("resources", "the fixed process owner changed or holds an unexplained route record");
             const void *const marker = generation.marker;
-            // The loader keeps a refused generation mapped. The retained route also holds its module reference, so
-            // only a clean generation unmaps.
+            // The loader keeps a refused generation mapped. A residue reaches no image code, so its generation unmaps.
             if (!retain_diagnostics && !unload_generation(generation))
                 return fail("resources", "the generation did not unload");
-            if ((retain || retain_diagnostics) && !module_owns(marker))
+            if (retain_diagnostics && !module_owns(marker))
                 return fail("resources", "the retained generation lost its image");
-            if (!retain && !retain_diagnostics && !wait_for_unmap(marker))
+            if (!retain_diagnostics && !wait_for_unmap(marker))
                 return fail("resources", "the generation did not unmap");
-            if (!retain && !retain_diagnostics)
+            if (!retain_diagnostics)
                 remove_unmapped_staged_file_best_effort(generation);
             if (generation_tls_leak && cycle == 0)
             {
@@ -544,14 +543,13 @@ namespace
                 static_cast<long long>(previous_tls) - static_cast<long long>(tls),
                 s_tls_ledger.live.load(std::memory_order_relaxed)
             );
-            // A retained route keeps the one near block that holds its generated ranges.
+            // A residue route keeps the one near block that holds its generated ranges.
             const std::uint64_t retained_bytes = retain ? system.dwAllocationGranularity : 0;
             if (bytes != previous_bytes + system.dwPageSize + retained_bytes)
                 return fail("resources", "executable growth differs from one trap page per copy and retained blocks");
-            // Every clean generation returns each TLS index it reserved. The retained generation stays mapped, so its
-            // claimed mid slot and its namespace-scope dispatcher each keep one index. The refused diagnostics
-            // generation keeps the one emit index that its live subscription and that dispatcher share.
-            const std::size_t retained_tls = retain ? 2 : (retain_diagnostics ? 1 : 0);
+            // Every unmapped generation returns each TLS index it reserved. The refused diagnostics generation keeps
+            // the one emit index that its live subscription and its namespace-scope dispatcher share.
+            const std::size_t retained_tls = retain_diagnostics ? 1 : 0;
             const std::size_t owned_tls = s_tls_ledger.live.load(std::memory_order_relaxed);
             bool owned_indices_allocated = true;
             std::size_t recorded_indices = 0;

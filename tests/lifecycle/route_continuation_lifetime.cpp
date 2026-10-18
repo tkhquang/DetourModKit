@@ -420,6 +420,8 @@ namespace
         }
         const auto before =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+        const auto residue_before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
         DetourModKit::detail::g_logger_record_probe = &observe_warning;
         safetyhook::set_route_park_for_test(safetyhook::RouteParkStage::AT_ENTRY);
         std::thread caller{
@@ -487,11 +489,15 @@ namespace
         s_fiber_resume.store(true);
         caller.join();
         DetourModKit::detail::g_logger_record_probe = nullptr;
-        if (s_observed != EXPECTED_VALUE || s_callbacks.load() != 1 || s_retention_warnings != 1 ||
+        // The caller took a closed entry after the stub was freed, so it never reaches image code. The chain stays as
+        // residue and releases the module reference (`[B-108]`).
+        if (s_observed != EXPECTED_VALUE || s_callbacks.load() != 1 || s_retention_warnings != 0 ||
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager) !=
-                before + 1)
+                before ||
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue) !=
+                residue_before + 1)
         {
-            return fail("scan race lost its bypass result or retention attribution");
+            return fail("scan race lost its bypass result or residue attribution");
         }
         return 0;
     }
@@ -656,6 +662,8 @@ namespace
         }
         const auto before =
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+        const auto residue_before =
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue);
         DetourModKit::hook::HookStack stack;
         if (!install(page.get(), stack))
         {
@@ -731,11 +739,15 @@ namespace
         }
         stack.clear();
         const int expected = scenario == "state" ? EXPECTED_VALUE + 2 : EXPECTED_VALUE;
+        // The parked bypass caller refuses the idle proof after the stub was freed, so its chain stays as residue
+        // (`[B-108]`).
         const bool retained = scenario == "bypass";
         if (observed != expected || s_callbacks.load() != 1 || route_is_mapped() != retained ||
             (retained && bypass_observed != EXPECTED_VALUE) ||
             DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager) !=
-                before + (retained ? 1u : 0u))
+                before ||
+            DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookResidue) !=
+                residue_before + (retained ? 1u : 0u))
         {
             return fail("ordinary exit did not balance ownership and reclaim its route");
         }

@@ -96,16 +96,12 @@ namespace DetourModKit
             std::uintptr_t target{0};
             std::uint64_t ledger_id{0};
             bool is_inline{false};
-            // Index into the mid-hook adapter pool, or SIZE_MAX for an inline hook. Kept as a bare index (rather than a
-            // slot pointer) so this header does not have to name the adapter pool. Teardown runs the slot down through
-            // it; a pinned Impl carries it away and the slot is never reclaimed, which is what keeps a still-reachable
-            // stub's adapter pointing at storage that outlives it.
+            // Index into the mid-hook adapter pool, or SIZE_MAX for an inline hook. A bare index keeps the pool out of
+            // this header. A pinned Impl keeps its slot claimed, so a reachable stub never reaches reused storage.
             std::size_t mid_slot{static_cast<std::size_t>(-1)};
-            // Counted reference on the module that holds the detour and adapter code, taken before the backend is
-            // published while the module is mapped. Trampolines live in allocator memory, so the reference protects
-            // only image code that a retained chain can still reach. ~Hook releases it when no path reaches that code:
-            // after a restore, or after a bypass and drain. A leak branch keeps it with the leaked Impl. Holds an
-            // HMODULE (kept as void* so the acquire/release stay in hook.cpp). See detail::acquire_module_ref.
+            // Counted reference on the module that holds the detour and adapter code, taken while the module is mapped
+            // and before publication. It protects only image code that a retained chain can reach, so ~Hook releases
+            // it once no path reaches that code (`[B-44]`). A void* keeps HMODULE out of this header.
             void *self_ref{nullptr};
             // True while the switch word sends every caller past the detour and the target patch stays in the chain.
             // Written under the call gate mutex. A claimed backend starts bypassed.
@@ -144,24 +140,17 @@ namespace DetourModKit
 
         /**
          * @brief The complete backend state behind a @ref VmtHook handle.
-         * @details Owns the detached backend clone, its identity, bindings, and per-index method hooks. SafetyHook is
-         *          created on a private snapshot surrogate whose counted run is normalized to a stable executable
-         *          marker, then populated with the captured targets. It retains no host object pointer; DMK publishes
-         *          and restores every binding through guarded stores. method_count exactly matches the backend-owned
+         * @details SafetyHook clones a private snapshot surrogate, so the backend holds no host object pointer. DMK
+         *          publishes and restores every binding through guarded stores. method_count equals the backend-owned
          *          allocation and bounds every unchecked VmHook slot access.
          *
-         *          Per-method hooks are backend VmHooks keyed by vtable index. Each VmHook, on destruction, rewrites
-         *          its cloned-vtable slot back to the original function pointer, so erasing an entry (@ref
-         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map dies
-         *          before `backend`, keeping the clone allocation alive until every VmHook has released it.
+         *          Each VmHook restores its clone slot on destruction, so an erase or the map teardown restores the
+         *          method. The map dies before `backend`, which keeps the clone allocation alive for every VmHook.
          *
-         *          method_mutex is the reader/writer guard for per-method state: @ref VmtHook::original snapshots a
-         *          slot's original pointer under a shared read, while @ref VmtHook::hook_method,
-         *          @ref VmtHook::remove_method, @ref VmtHook::apply_to, and @ref VmtHook::remove_from mutate under the
-         *          exclusive write, so a snapshot reader never traverses the map (or observes an apply)
-         *          mid-mutation. It is an SRWLOCK wrapper rather than std::shared_mutex because winpthreads' rwlock
-         *          corrupts under reader contention; all of its operations are noexcept, which is what lets
-         *          @ref VmtHook::original stay noexcept.
+         *          method_mutex gives @ref VmtHook::original a shared read and every mutation an exclusive write, so
+         *          a reader never sees a map or an apply in mid-mutation. It wraps SRWLOCK, because the winpthreads
+         *          rwlock corrupts under reader contention. Its noexcept operations keep @ref VmtHook::original
+         *          noexcept.
          */
         struct VmtHook::Impl
         {
@@ -240,9 +229,11 @@ namespace DetourModKit
             struct HookAccess
             {
                 /**
-                 * @brief A restored inline hook whose trampoline waits for the one idle pass of HookStack::retire.
-                 * @details The teardown released the ledger entry. The Impl keeps the trampoline, its process record,
-                 *          and the module reference until @ref finish_deferred_restore.
+                 * @brief A restored hook whose trampoline or mid route waits for the idle proof that HookStack::retire
+                 *        runs after its last restore.
+                 * @details The teardown released the ledger entry. The Impl keeps the trampoline or the route, its
+                 *          process record, the adapter slot, and the module reference until @ref
+                 *          finish_deferred_restore.
                  */
                 struct DeferredRestore
                 {
@@ -263,9 +254,8 @@ namespace DetourModKit
 
                 /**
                  * @brief Runs the ~Hook contract on @p hook and reports how it ended. The handle ends disengaged.
-                 * @param deferred Receives a restored inline hook whose trampoline waits for
-                 *        safetyhook::InlineHook::reclaim_deferred, while its reserved capacity lasts. Null releases
-                 *        every trampoline at once.
+                 * @param deferred Receives a restored hook whose trampoline or mid route waits for the proof of
+                 *        HookStack::retire, while its reserved capacity lasts. Null proves every hook at once.
                  */
                 [[nodiscard]] static TeardownOutcome teardown(
                     Hook &hook,
@@ -381,6 +371,29 @@ namespace DetourModKit
 
         /// Runs one backend idle pass over [@p begin, @p end) with no return site and reports whether it was clean.
         [[nodiscard]] bool backend_idle_pass_for_test(void *begin, void *end) noexcept;
+
+        /// Parks every thread that enters a backend route gateway, before the gateway counts its entry, until false.
+        void set_backend_gateway_park_for_test(bool park) noexcept;
+
+        /// Reports whether a thread reached the armed gateway park.
+        [[nodiscard]] bool backend_gateway_park_reached_for_test() noexcept;
+
+        /// One backend idle pass and the sentence that a teardown warning appends for its refusal.
+        struct BackendIdleRefusal
+        {
+            bool idle{false};
+            std::uint32_t thread_id{0};
+            std::array<char, 96> sentence{};
+            std::size_t sentence_size{0};
+        };
+
+        /**
+         * @brief Runs one backend idle pass over [@p begin, @p end) and reports its refusal record.
+         * @details A non-null @p site_base adds the return site at @p site_base plus @p site_offset. The two stay
+         *          apart, so no frame of the caller holds the site.
+         */
+        [[nodiscard]] BackendIdleRefusal
+        backend_idle_refusal_for_test(void *begin, void *end, const void *site_base, std::uint8_t site_offset) noexcept;
 
         /// Closes backend trap-transaction admission and retires its vectored handler.
         void retire_backend_trap_runtime_for_test() noexcept;
@@ -498,6 +511,8 @@ namespace DetourModKit
             Reset,
             MoveAssign,
             RetainRoute,
+            /// Reads the route entries through observe_route_entries(), and reports a zero count.
+            ObserveRouteEntries,
         };
 
         /// Reads one raw backend probe. A null address means absent.
@@ -510,6 +525,10 @@ namespace DetourModKit
             void *trampoline{nullptr};
             void *relay_slot{nullptr};
             void *relay_cell{nullptr};
+            /// The verdict of the latest reset: the retention, its reason, and, for a mid probe, the stub release.
+            bool route_retained{false};
+            bool stub_freed{false};
+            const char *retention_reason{nullptr};
         };
 
         /// One raw backend hook that a proof drives without a Hook handle.

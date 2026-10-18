@@ -49,7 +49,11 @@ This method suits active development. Your own toolchain compiles the library, s
     ```bash
     git submodule add https://github.com/tkhquang/DetourModKit.git external/DetourModKit
     git submodule update --init --recursive
+    git config -f .gitmodules submodule.external/DetourModKit.ignore dirty
+    git add .gitmodules
     ```
+
+    The CMake configure step patches the SafetyHook submodule of DetourModKit in place, so the submodule always has local changes. `ignore = dirty` keeps them out of `git status` and `git diff`, and those commands skip the work tree of the submodule. A moved submodule commit still shows. An existing consumer runs the last two lines and commits.
 
 2. **Pin a release tag, or move to a newer one later:**
 

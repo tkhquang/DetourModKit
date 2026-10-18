@@ -255,6 +255,9 @@ namespace DetourModKit::detail
     };
 
     extern void (*g_counted_drain_probe)(CountedDrainStage) noexcept;
+
+    void set_backend_gateway_park_for_test(bool park) noexcept;
+    [[nodiscard]] bool backend_gateway_park_reached_for_test() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -466,6 +469,9 @@ namespace dmk_test::hook_fixture
         /// Reports whether the thread exists with the requested instruction pointer.
         [[nodiscard]] bool ready() const noexcept { return m_ready; }
 
+        /// Returns the id of the thread, or zero when it does not exist.
+        [[nodiscard]] DWORD thread_id() const noexcept { return m_thread != nullptr ? GetThreadId(m_thread) : 0; }
+
         /// Ends the thread before it runs.
         void terminate() noexcept
         {
@@ -485,6 +491,80 @@ namespace dmk_test::hook_fixture
         HANDLE m_thread{nullptr};
         bool m_ready{false};
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /**
+     * @brief Runs one call of a mid-hooked target on its own thread, parked at the gateway before its entry count.
+     * @details The route holds no entry for the parked call, so only an idle pass sees it. The park holds every thread
+     *          that enters any gateway. Do not call a mid-hooked target from another thread while it is armed. The
+     *          destructor releases the park and joins the thread on every exit path.
+     */
+    class GatewayParkedCall
+    {
+    public:
+        GatewayParkedCall(EchoFn target, int value)
+        {
+            DetourModKit::detail::set_backend_gateway_park_for_test(true);
+            try
+            {
+                m_thread = std::jthread(
+                    [this, target, value]
+                    {
+                        m_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+                        m_result.store(call_unfolded(target, value), std::memory_order_release);
+                    }
+                );
+            }
+            catch (...)
+            {
+                release();
+                throw;
+            }
+        }
+
+        ~GatewayParkedCall() noexcept { release(); }
+
+        GatewayParkedCall(const GatewayParkedCall &) = delete;
+        GatewayParkedCall &operator=(const GatewayParkedCall &) = delete;
+        GatewayParkedCall(GatewayParkedCall &&) = delete;
+        GatewayParkedCall &operator=(GatewayParkedCall &&) = delete;
+
+        /// Waits up to @ref PARK_BOUND for the call to reach the park and reports whether it did.
+        [[nodiscard]] bool wait_until_parked() const noexcept
+        {
+            const auto deadline = std::chrono::steady_clock::now() + PARK_BOUND;
+            while (!DetourModKit::detail::backend_gateway_park_reached_for_test() &&
+                   std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            return DetourModKit::detail::backend_gateway_park_reached_for_test();
+        }
+
+        /// Releases the park. Any thread can call it.
+        void release() noexcept { DetourModKit::detail::set_backend_gateway_park_for_test(false); }
+
+        /// Returns the Win32 id of the thread that makes the call once it started, or zero before.
+        [[nodiscard]] DWORD thread_id() const noexcept { return m_thread_id.load(std::memory_order_acquire); }
+
+        /// Releases the park, joins the thread, and returns the result of the call.
+        int release_and_join()
+        {
+            release();
+            if (m_thread.joinable())
+            {
+                m_thread.join();
+            }
+            return m_result.load(std::memory_order_acquire);
+        }
+
+    private:
+        std::atomic<int> m_result{0};
+        std::atomic<DWORD> m_thread_id{0};
+        // Declared last, so the member teardown joins the thread before the result goes away.
+        std::jthread m_thread;
+    };
+#endif
 } // namespace dmk_test::hook_fixture
 
 #endif // DETOURMODKIT_TESTS_FIXTURES_HOOK_FIXTURE_HPP

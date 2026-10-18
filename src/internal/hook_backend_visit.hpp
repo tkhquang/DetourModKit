@@ -229,14 +229,14 @@ namespace DetourModKit::detail
 
     /**
      * @brief Runs the backend teardown. With @p defer, a restored inline trampoline can wait for
-     *        safetyhook::InlineHook::reclaim_deferred.
-     * @return True when the trampoline waits. False when the teardown completed, so route_retained() names its verdict.
+     *        safetyhook::InlineHook::reclaim_deferred, and a restored mid route for its reclaim_deferred_route.
+     * @return True when the backend waits. False when the teardown completed, so route_retained() names its verdict.
      */
     template <class BackendVariant> [[nodiscard]] bool release_backend(BackendVariant &backend, bool defer) noexcept
     {
-        if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend); defer && inline_backend != nullptr)
+        if (defer)
         {
-            return inline_backend->reset_deferred();
+            return backend_value_or(backend, false, [](auto &one) noexcept { return one.reset_deferred(); });
         }
         (void)apply_backend(backend, [](auto &one) noexcept { one.reset(); });
         return false;
@@ -303,7 +303,8 @@ namespace DetourModKit::detail
      * @brief Waits for a CLOSING mid route to empty, with no call into any export.
      * @details A call that reaches the hooked export spins in the gateway while the route is CLOSING. A clock read,
      *          a yield, or a sleep can be that export, so the wait reads only the entry count and the time-stamp
-     *          counter. New entrants wait outside the count, so the count can only fall.
+     *          counter. New entrants wait outside the count, so the count can only fall. The zero read that ends
+     *          the wait proves the mid stub unreachable (`[B-108]`).
      * @return False when @p tick_budget expired first. A false return never licenses a vacate.
      */
     template <class BackendVariant>
@@ -311,7 +312,8 @@ namespace DetourModKit::detail
     {
         const std::uint64_t start = __rdtsc();
         while (
-            backend_value_or(backend, std::size_t{1}, [](const auto &one) noexcept { return one.route_entries(); }) != 0
+            backend_value_or(backend, std::size_t{1}, [](auto &one) noexcept { return one.observe_route_entries(); }) !=
+            0
         )
         {
             if (__rdtsc() - start > tick_budget)
