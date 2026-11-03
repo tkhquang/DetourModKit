@@ -49,6 +49,42 @@ namespace DetourModKit
         /// The protection granularity of a mapped section on x86-64 Windows.
         constexpr std::uintptr_t SECTION_PAGE_BYTES = 0x1000;
 
+        /**
+         * @brief Reports whether every page of [address, address + size) is committed image memory that is readable
+         *        and either executable or writable.
+         * @details A patch window writes its page, so it leaves the page writable. A guard, no-access, read-only, or
+         *          execute-only page keeps that protection until its owner changes it, so it is never a patch window.
+         */
+        [[nodiscard]] bool image_pages_patchable(std::uintptr_t address, std::size_t size) noexcept
+        {
+            constexpr DWORD PATCHABLE_PAGE_FLAGS =
+                PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READWRITE | PAGE_WRITECOPY;
+            if (size > UINTPTR_MAX - address)
+            {
+                return false;
+            }
+            const std::uintptr_t end = address + size;
+            for (std::uintptr_t cursor = address; cursor < end;)
+            {
+                MEMORY_BASIC_INFORMATION region{};
+                if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &region, sizeof(region)) != sizeof(region) ||
+                    region.State != MEM_COMMIT || region.Type != MEM_IMAGE ||
+                    (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                    (region.Protect & PATCHABLE_PAGE_FLAGS) == 0)
+                {
+                    return false;
+                }
+                const std::uintptr_t region_end =
+                    reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+                if (region_end <= cursor)
+                {
+                    return false;
+                }
+                cursor = region_end;
+            }
+            return true;
+        }
+
         /// Reports whether every byte of [address, address + size) lies in an executable section of one mapped image.
         [[nodiscard]] bool image_sections_execute(std::uintptr_t address, std::size_t size) noexcept
         {
@@ -109,7 +145,8 @@ namespace DetourModKit
         {
             // Code runs only from executable pages, so a patcher restores execute access to an image section that
             // carries it before that code runs again.
-            const TargetWindowVerdict verdict = image_sections_execute(target, BACKEND_MAX_STEAL_WINDOW)
+            const TargetWindowVerdict verdict = image_pages_patchable(target, BACKEND_MAX_STEAL_WINDOW) &&
+                                                        image_sections_execute(target, BACKEND_MAX_STEAL_WINDOW)
                                                     ? TargetWindowVerdict::PatchInFlight
                                                     : TargetWindowVerdict::NotExecutable;
             return TargetWindowResult{verdict, target};

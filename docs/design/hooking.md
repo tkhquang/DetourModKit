@@ -338,7 +338,7 @@ An inline or mid install runs this sequence:
 6. Create the backend hook. The backend acquires again with no wait.
 7. Release the hold, emit the collected lines, and commit the reservation.
 
-A `PatchInFlight` window verdict in step 5 names a page that its image section marks executable. A patcher outside the coordinator holds that page, and the page turns executable again before its code runs. The install releases the hold, yields one scheduler tick, and returns to step 4. A target outside every image keeps `TargetPrologueUnsafe`, because DMK cannot tell it from a data page.
+A `PatchInFlight` window verdict in step 5 names a writable page that its image section marks executable. A patcher outside the coordinator holds that page, and the page turns executable again before its code runs. The install releases the hold, yields one scheduler tick, and returns to step 4. A target outside every image keeps `TargetPrologueUnsafe`, because DMK cannot tell it from a data page. A guard, no-access, read-only, or execute-only image page also keeps `TargetPrologueUnsafe`, because a patch window must leave its page writable.
 
 Every hook path takes its locks in this order:
 
@@ -352,4 +352,4 @@ No DMK path waits for a target slot, takes a counted module reference, or runs a
 
 Each wait for a held coordinator logs one line that names the holder thread. The line runs while the waiter holds no coordinator, so a wait that never ends stays visible.
 
-`HookBackendTrapWindow.*AtWaitsForTheBackendTrapWindow`, `HookBackendTrapWindow.PreflightReadsTheSettledPrologue`, `HookBackendTrapWindow.InstallWaitsForAPatchWindowOutsideTheCoordinator`, `HookBackendTrapWindow.NonImageTargetOutsideTheCoordinatorKeepsTheRefusal`, `HookInstallCoordinator.*`, `HookToggle.EnableAndDisableWaitForAHolderPastTheWaitSlice`, and `Lifecycle.ConcurrentCopiesCreateOnOneTarget` prove the rule.
+`HookBackendTrapWindow.*AtWaitsForTheBackendTrapWindow`, `HookBackendTrapWindow.PreflightReadsTheSettledPrologue`, `HookBackendTrapWindow.InstallWaitsForAPatchWindowOutsideTheCoordinator`, `HookBackendTrapWindow.NonImageTargetOutsideTheCoordinatorKeepsTheRefusal`, `HookBackendTrapWindow.ClosedImagePageKeepsTheRefusal`, `HookInstallCoordinator.*`, `HookToggle.EnableAndDisableWaitForAHolderPastTheWaitSlice`, and `Lifecycle.ConcurrentCopiesCreateOnOneTarget` prove the rule.

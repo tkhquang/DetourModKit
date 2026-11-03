@@ -76,8 +76,11 @@ namespace DetourModKit
             Unreadable,
             BoundOverrun,
             /**
-             * @brief The window lacks execute access, but each byte lies in an executable image section.
-             * @details A patcher holds the page in a patch window that closes before the code runs again.
+             * @brief The window lacks execute access, but each byte lies in an executable image section, and each
+             *        page that lacks execute access is readable and writable.
+             * @details A patcher holds the page in a patch window that closes before the code runs again. A guard,
+             *          no-access, read-only, or execute-only page reports @ref NotExecutable.
+             *          `HookBackendTrapWindow.ClosedImagePageKeepsTheRefusal` pins the split.
              */
             PatchInFlight
         };

@@ -2981,7 +2981,8 @@ namespace
      * @brief Opens a real backend trap window on the first bytes of @p page and runs @p install inside it.
      * @param inside Runs first inside the window, before the install starts.
      * @param restore Runs inside the window after the install had 100 ms to return.
-     * @return True when the window restored and @p install returned only after the window closed.
+     * @return True when the window restored and @p install returned only after the window closed. False without
+     *         @p install when the transaction returns before its window opens.
      */
     template <class Install>
     bool install_inside_trap_window(
@@ -2998,6 +2999,7 @@ namespace
             return false;
         }
         std::atomic<bool> window_open{false};
+        std::atomic<bool> transaction_returned{false};
         std::atomic<bool> install_attempted{false};
         std::atomic<bool> install_returned{false};
         std::atomic<bool> returned_inside_window{false};
@@ -3031,11 +3033,17 @@ namespace
                         }
                     }
                 );
+                transaction_returned.store(true, std::memory_order_release);
             }
         );
-        while (!window_open.load(std::memory_order_acquire))
+        while (!window_open.load(std::memory_order_acquire) && !transaction_returned.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
+        }
+        if (!window_open.load(std::memory_order_acquire))
+        {
+            transaction.join();
+            return false;
         }
         install_attempted.store(true, std::memory_order_release);
         install();
@@ -3213,6 +3221,51 @@ TEST(HookBackendTrapWindow, NonImageTargetOutsideTheCoordinatorKeepsTheRefusal)
     (void)VirtualProtect(page.base(), 4096, previous, &previous);
     ASSERT_FALSE(installed.has_value());
     EXPECT_EQ(installed.error().code, ErrorCode::TargetPrologueUnsafe);
+}
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(closed_window_target, 0x7A13)
+} // namespace
+
+// A patch window writes its page, so it leaves the page writable. A guard, no-access, read-only, or execute-only page
+// of an image function is no patch window, so the install refuses it at once and keeps no reservation.
+TEST(HookBackendTrapWindow, ClosedImagePageKeepsTheRefusal)
+{
+    const auto target = reinterpret_cast<std::uintptr_t>(&closed_window_target);
+    for (const DWORD protection :
+         {DWORD{PAGE_EXECUTE_READ | PAGE_GUARD}, DWORD{PAGE_NOACCESS}, DWORD{PAGE_READONLY}, DWORD{PAGE_EXECUTE}})
+    {
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(reinterpret_cast<void *>(target), 32, protection, &previous), 0) << protection;
+        const HANDLE returned = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        std::atomic<bool> restored{false};
+        // An install that waits for the page returns only after this restore, and fails the checks below.
+        std::thread restorer(
+            [&]() -> void
+            {
+                (void)WaitForSingleObject(returned, 2000);
+                restored.store(true, std::memory_order_release);
+                DWORD ignored = 0;
+                (void)VirtualProtect(reinterpret_cast<void *>(target), 32, previous, &ignored);
+            }
+        );
+        const Result<Hook> installed = inline_at(
+            InlineRequest{
+                .name = "ClosedImagePage",
+                .target = Address{target},
+            },
+            &patch_window_detour
+        );
+        const bool restored_before_return = restored.load(std::memory_order_acquire);
+        (void)SetEvent(returned);
+        restorer.join();
+        (void)CloseHandle(returned);
+        EXPECT_FALSE(restored_before_return) << protection;
+        ASSERT_FALSE(installed.has_value()) << protection;
+        EXPECT_EQ(installed.error().code, ErrorCode::TargetPrologueUnsafe) << protection;
+        EXPECT_FALSE(is_target_hooked(Address{target})) << protection;
+    }
 }
 #endif
 

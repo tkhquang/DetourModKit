@@ -3520,7 +3520,7 @@ TEST(HookInstallCoordinator, InstallToggleAndRetireKeepTheLockOrder)
                     toggles.time(
                         [&toggles, &base]() -> void
                         {
-                            for (const Result<void> toggled : {base->enable(), base->disable()})
+                            for (const Result<void> &toggled : {base->enable(), base->disable()})
                             {
                                 if (!toggled && toggled.error().code != ErrorCode::LayerConflict)
                                 {
