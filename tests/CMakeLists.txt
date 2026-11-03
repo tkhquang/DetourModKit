@@ -566,17 +566,19 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesShareRegistrationCapacity
     Lifecycle.RouteCopiesRetryRefusedConnection
     Lifecycle.RouteCopiesRejectForeignCoordinatorView
-    Lifecycle.RouteCopiesReportLayerConflict
-    Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict
+    Lifecycle.RouteCopiesReArmAboveANewerLayer
+    Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm
     Lifecycle.RouteCopiesReportCoordinatorRefusal
     Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline
     Lifecycle.RouteCopiesLegacyLowerStaysRefused
     Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper
     Lifecycle.RouteCopiesLegacyAroundClaimedPosition
+    Lifecycle.RouteCopiesArmOrderWithALegacyCopy
     Lifecycle.RouteCopiesResidueBudgetFloorPins
     Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed
     Lifecycle.ConcurrentCopiesCreateOnOneTarget
     Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget
+    Lifecycle.ConcurrentCopiesArmInEitherOrder
     Lifecycle.RouteCoordinatorSurvivesParticipantUnload
     Lifecycle.StagedGenerationResourcesStayWithinBudget
     Lifecycle.StagedGenerationResourcesExcludeHostExceptionTls
@@ -655,7 +657,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 320)
+    --minimum 322)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

@@ -2092,6 +2092,20 @@ namespace
         std::memcpy(bytes.data(), target, bytes.size());
         return bytes;
     }
+
+    /// Writes @p bytes over the entry of @p target, as another writer that restores an export does.
+    [[nodiscard]] bool write_entry_window(std::uint8_t *target, const std::array<std::uint8_t, 16> &bytes) noexcept
+    {
+        DWORD protection = 0;
+        if (VirtualProtect(target, bytes.size(), PAGE_EXECUTE_READWRITE, &protection) == FALSE)
+        {
+            return false;
+        }
+        std::memcpy(target, bytes.data(), bytes.size());
+        DWORD ignored = 0;
+        return VirtualProtect(target, bytes.size(), protection, &ignored) != FALSE &&
+               FlushInstructionCache(GetCurrentProcess(), target, bytes.size()) != FALSE;
+    }
 } // namespace
 
 // The pair installs on the private hook_target_lib exports, because each retired position stays in the process.
@@ -2194,6 +2208,90 @@ TEST(InterceptXInputTest, ForeignLayerTeardownRetiresByRouteBypassAndTheSuccesso
     s_newer_xinput_original.store(nullptr, std::memory_order_release);
     set_xinput_module_override_for_test(nullptr);
     FreeLibrary(fixture);
+}
+
+// Another writer restores the primary export, and a newer layer arms over it. The disarmed pair member re-arms over
+// that layer and becomes the newest layer (`[B-110]`), so one call runs the pair detour and the newer layer.
+TEST(InputIntercept, XInputPairArmsAboveANewerLayer)
+{
+    const HMODULE fixture = LoadLibraryW(L"hook_target_lib.dll");
+    ASSERT_NE(fixture, nullptr) << "hook_target_lib.dll did not load: " << GetLastError();
+    // Restores the shared XInput state on every exit, an early ASSERT_* return included. It runs after `newer`.
+    struct SharedStateCleanup
+    {
+        HMODULE fixture{nullptr};
+        std::uint64_t owner{0};
+        bool owner_installed{false};
+
+        ~SharedStateCleanup() noexcept
+        {
+            set_xinput_detour_body_seam(nullptr);
+            detail::set_xinput_backend_toggle_exception_for_test(nullptr, false);
+            if (owner_installed)
+            {
+                uninstall(owner);
+            }
+            s_newer_xinput_original.store(nullptr, std::memory_order_release);
+            set_xinput_module_override_for_test(nullptr);
+            FreeLibrary(fixture);
+        }
+    } cleanup{fixture};
+    auto *const primary = reinterpret_cast<std::uint8_t *>(GetProcAddress(fixture, "XInputGetState"));
+    ASSERT_NE(primary, nullptr);
+    const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary));
+    set_xinput_module_override_for_test(fixture);
+    const std::array<std::uint8_t, 16> pristine = entry_window(primary);
+
+    const std::uint64_t owner = next_intercept_owner();
+    cleanup.owner = owner;
+    cleanup.owner_installed = true;
+    ASSERT_TRUE(install_xinput(0, owner));
+    ASSERT_NE(entry_window(primary), pristine);
+
+    // The next maintenance pass reads Original and disarms the member. Its re-arm fails before the write, so the member
+    // stays disarmed until the newer layer arms.
+    ASSERT_TRUE(write_entry_window(primary, pristine));
+    detail::set_xinput_backend_toggle_exception_for_test(primary, false);
+    EXPECT_FALSE(install_xinput(0, owner));
+    detail::set_xinput_backend_toggle_exception_for_test(nullptr, false);
+    ASSERT_EQ(detail::xinput_backend_toggle_exception_catches_for_test(), 1u) << "the re-arm did not reach the backend";
+    ASSERT_EQ(entry_window(primary), pristine);
+
+    hook::InlineRequest request{
+        .name = "XInputPairNewerLayer",
+        .target = Address{reinterpret_cast<std::uintptr_t>(primary)},
+        .options = {.prologue = hook::Prologue::Relocate},
+    };
+    auto layered = hook::inline_at(std::move(request), &newer_xinput_layer);
+    ASSERT_TRUE(layered.has_value());
+    hook::Hook newer = std::move(*layered);
+    s_newer_xinput_original.store(newer.original<XInputGetStateFn>(), std::memory_order_release);
+    ASSERT_TRUE(newer.enable().has_value());
+    const std::array<std::uint8_t, 16> newer_patch = entry_window(primary);
+
+    (void)detail::expire_xinput_recovery_delay_for_test();
+    EXPECT_TRUE(install_xinput(0, owner)) << "the member did not re-arm above the newer layer";
+    const auto coverage = detail::xinput_pair_coverage_for_test();
+    EXPECT_TRUE(coverage.primary) << "the re-armed member does not own the primary entry";
+    EXPECT_TRUE(coverage.ex);
+
+    s_xinput_detour_bodies.store(0, std::memory_order_relaxed);
+    s_newer_xinput_calls.store(0, std::memory_order_relaxed);
+    set_xinput_detour_body_seam(&count_xinput_detour_body);
+    XINPUT_STATE state{};
+    EXPECT_EQ(get_state(0, &state), static_cast<DWORD>(ERROR_SUCCESS));
+    EXPECT_EQ(state.dwPacketNumber, 0x4000u);
+    EXPECT_EQ(s_xinput_detour_bodies.load(std::memory_order_relaxed), 1) << "the call skipped the pair detour";
+    EXPECT_EQ(s_newer_xinput_calls.load(std::memory_order_relaxed), 1) << "the call skipped the newer layer";
+    set_xinput_detour_body_seam(nullptr);
+
+    uninstall(owner);
+    cleanup.owner_installed = false;
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+    EXPECT_EQ(entry_window(primary), newer_patch)
+        << "the member teardown did not hand the entry back to the newer layer";
+    EXPECT_TRUE(newer.disable().has_value());
+    EXPECT_EQ(entry_window(primary), pristine);
 }
 
 TEST(InterceptXInputTest, NonOwnerPollerConstructionCannotReplaceActiveOwnersConsumeRules)

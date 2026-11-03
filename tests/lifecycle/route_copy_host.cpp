@@ -428,9 +428,19 @@ namespace
         return 0;
     }
 
-    // Under a live newer participant, an older arm over restored bytes writes nothing and reports LayerConflict. An
-    // older restore bypasses the older detour and writes nothing.
-    int report_layer_conflict(
+    using Window = std::array<unsigned char, 16>;
+
+    Window window_of(const unsigned char *page) noexcept
+    {
+        Window bytes{};
+        std::memcpy(bytes.data(), page, bytes.size());
+        return bytes;
+    }
+
+    // An arm makes its hook the newest layer (`[B-110]`). An older hook that restored its bytes arms above a disarmed
+    // newer participant, and the newer one then chains to it. The older hook re-arms above an armed newer participant
+    // too. Each teardown in arm order restores the patch below it.
+    int re_arm_above_newer_layer(
         Participant &first,
         Participant &second,
         unsigned char *page,
@@ -438,31 +448,43 @@ namespace
     )
     {
         TargetFn volatile target = reinterpret_cast<TargetFn>(page);
-        // Both layers are disarmed, so only the coordinator layer order refuses the older arm.
+        const auto pristine = [page, &code]() { return std::memcmp(page, code.data(), code.size()) == 0; };
         if (first.run(Command::Install, page) == 0 || first.run(Command::Disable) == 0 ||
-            second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 ||
-            first.run(Command::EnableLayerConflict) == 0 || std::memcmp(page, code.data(), code.size()) != 0 ||
-            target() != 37 || second.run(Command::Reset) != 0)
-            return fail("an older participant arm did not report LayerConflict");
-        if (first.run(Command::Enable) == 0)
-            return fail("the older participant did not arm after the newer layer retired");
-        std::array<unsigned char, 16> armed{};
-        std::memcpy(armed.data(), page, armed.size());
-        // The disarmed newer layer saved the older patch as its prologue, so an older restore erases that patch. The
-        // coordinator refuses that restore, and the older layer bypasses in its place. No caller reaches its detour.
-        if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 ||
-            std::memcmp(page, armed.data(), armed.size()) != 0 || first.run(Command::Disable) == 0 ||
-            first.run(Command::Enabled) != 0 || std::memcmp(page, armed.data(), armed.size()) != 0 || target() != 37 ||
-            first.run(Command::Hits) != 0)
-            return fail("an older participant restore under a newer participant did not bypass");
-        // After the newer layer retires, the bypassed older layer is the top layer over its own patch and restores.
-        if (second.run(Command::Reset) != 0 || first.run(Command::Disable) == 0 ||
-            std::memcmp(page, code.data(), code.size()) != 0 || first.run(Command::Reset) != 0)
-            return fail("the bypassed older participant did not restore after the newer layer retired");
+            second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 || !pristine())
+            return fail("the participants did not install and restore");
+        const auto first_hits = first.run(Command::Hits);
+        const auto second_hits = second.run(Command::Hits);
+        if (first.run(Command::Enable) == 0 || target() != 37 || first.run(Command::Hits) != first_hits + 1 ||
+            second.run(Command::Hits) != second_hits)
+            return fail("an older participant did not arm above a disarmed newer participant");
+        const Window older_patch = window_of(page);
+        if (second.run(Command::Enable) == 0 || target() != 37 || second.run(Command::Hits) != second_hits + 1 ||
+            first.run(Command::Hits) != first_hits + 2)
+            return fail("the newer participant did not chain to the re-armed older participant");
+        // The disarmed newer record holds the older patch as its prologue, so the older restore waits until it leaves
+        // (`[B-16]`). The newer participant then installs again over the restored target.
+        if (second.run(Command::Disable) == 0 || window_of(page) != older_patch || second.run(Command::Reset) != 0 ||
+            first.run(Command::Disable) == 0 || !pristine())
+            return fail("the layers did not restore in arm order");
+        if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 || !pristine())
+            return fail("the newer participant did not install over the restored target");
+        // The newer participant arms first. The older one re-arms above it and recaptures its patch.
+        if (second.run(Command::Enable) == 0 || target() != 37 || second.run(Command::Hits) != second_hits + 2)
+            return fail("the newer participant did not arm over the restored target");
+        const Window newer_patch = window_of(page);
+        if (first.run(Command::Enable) == 0 || window_of(page) == newer_patch || target() != 37 ||
+            first.run(Command::Hits) != first_hits + 3 || second.run(Command::Hits) != second_hits + 3)
+            return fail("an older participant did not re-arm above an armed newer participant");
+        if (first.run(Command::Reset) != 0 || window_of(page) != newer_patch || target() != 37 ||
+            second.run(Command::Hits) != second_hits + 4 || second.run(Command::Reset) != 0 || !pristine() ||
+            second.run(Command::Records) != 0)
+            return fail("the re-armed older participant did not restore the newer patch");
         return 0;
     }
 
-    int reconcile_stale_state_before_layer_conflict(
+    // A foreign restore leaves the older hook Active over Original bytes. Its arm reconciles that state to Disabled,
+    // then arms above the newer participant, which saved and restored the original prologue.
+    int reconcile_stale_state_before_the_arm(
         Participant &first,
         Participant &second,
         unsigned char *page,
@@ -470,22 +492,19 @@ namespace
     )
     {
         TargetFn volatile target = reinterpret_cast<TargetFn>(page);
-        // A foreign restore leaves the older hook Active over Original bytes. Its arm reconciles that state to
-        // Disabled before the coordinator refuses it under the newer layer.
+        const auto pristine = [page, &code]() { return std::memcmp(page, code.data(), code.size()) == 0; };
         if (first.run(Command::Install, page) == 0 || first.run(Command::Enabled) == 0)
             return fail("the older participant did not arm");
         std::memcpy(page, code.data(), code.size());
         FlushInstructionCache(GetCurrentProcess(), page, code.size());
-        if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 ||
-            std::memcmp(page, code.data(), code.size()) != 0)
+        if (second.run(Command::Install, page) == 0 || second.run(Command::Disable) == 0 || !pristine())
             return fail("the newer participant did not save and restore the original prologue");
-        if (first.run(Command::EnableLayerConflict) == 0 || first.run(Command::Enabled) != 0 ||
-            std::memcmp(page, code.data(), code.size()) != 0 || target() != 37 || first.run(Command::Hits) != 0)
-            return fail("the refused arm did not publish the reconciled Disabled state");
-        if (second.run(Command::Reset) != 0 || first.run(Command::Enable) == 0 || target() != 37 ||
-            first.run(Command::Hits) != 1 || first.run(Command::Reset) != 0 ||
-            std::memcmp(page, code.data(), code.size()) != 0)
-            return fail("the reconciled older hook did not arm after the newer layer retired");
+        if (first.run(Command::Enable) == 0 || first.run(Command::Enabled) == 0 || pristine() || target() != 37 ||
+            first.run(Command::Hits) != 1 || second.run(Command::Hits) != 0)
+            return fail("the reconciled older hook did not arm above the newer participant");
+        if (first.run(Command::Reset) != 0 || !pristine() || second.run(Command::Reset) != 0 ||
+            second.run(Command::Records) != 0)
+            return fail("the reconciled older hook did not restore as the newest layer");
         return 0;
     }
 
@@ -567,15 +586,6 @@ namespace
             !executable(reinterpret_cast<std::uintptr_t>(page)) || target() != 37)
             return fail("a create beside a peer trap window did not succeed");
         return 0;
-    }
-
-    using Window = std::array<unsigned char, 16>;
-
-    Window window_of(const unsigned char *page) noexcept
-    {
-        Window bytes{};
-        std::memcpy(bytes.data(), page, bytes.size());
-        return bytes;
     }
 
     bool mapped(const void *address) noexcept
@@ -865,9 +875,8 @@ namespace
      * @brief Runs @p command in both copies from one barrier for each round, then calls the target once and tears the
      *        copies down newest-first.
      * @return Null when every round held, or the failure that ended the race.
-     * @details The detour that a call reaches first belongs to the newest layer, so its copy tears down first and both
-     *          layers restore. @p require_both_armed also requires that every install arms and that the call runs both
-     *          detours.
+     * @details Every install must arm, and the call must run both detours. The detour that a call reaches first belongs
+     *          to the newest layer, so its copy tears down first and both layers restore.
      */
     const char *race_installs(
         Participant &first,
@@ -875,7 +884,6 @@ namespace
         unsigned char *page,
         Command command,
         route_copy::HookShape shape,
-        bool require_both_armed,
         std::array<OutcomeCounts, 2> &counts
     )
     {
@@ -914,14 +922,14 @@ namespace
                     ++counts[copy][result];
             }
             const auto armed = static_cast<std::uintptr_t>(route_copy::InstallOutcome::Armed);
-            if (require_both_armed && (results[0] != armed || results[1] != armed))
+            if (results[0] != armed || results[1] != armed)
                 failure = "an install did not arm on its first call";
             sequence = 0;
             if (target() != 37)
                 failure = "a call through the layered target returned the wrong value";
             const std::uintptr_t first_order = first.run(Command::EntryOrder);
             const std::uintptr_t second_order = second.run(Command::EntryOrder);
-            if (require_both_armed && first_order + second_order != 3)
+            if (first_order + second_order != 3)
                 failure = "one call through the target did not run both detours";
             Participant &newer = first_order == 1 ? first : second;
             Participant &older = first_order == 1 ? second : first;
@@ -948,7 +956,7 @@ namespace
         for (const auto shape : {route_copy::HookShape::CountedInline, route_copy::HookShape::Mid})
         {
             std::array<OutcomeCounts, 2> counts{};
-            const char *const failure = race_installs(first, second, page, Command::StackInstall, shape, true, counts);
+            const char *const failure = race_installs(first, second, page, Command::StackInstall, shape, counts);
             std::printf(
                 "concurrent install: shape=%s armed=%u/%u rounds=%u\n",
                 shape == route_copy::HookShape::Mid ? "mid" : "counted-inline",
@@ -962,34 +970,86 @@ namespace
         return 0;
     }
 
-    // Manual probe with no ctest registration: both copies run inline_at, the original store, HookStack::push, and
-    // enable from one barrier for 1000 rounds. A create of one copy between the create and the enable of the other
-    // fails that enable. The counts measure the race that HookStack::install closes.
-    int probe_two_step_arm_order(Participant &first, Participant &second, unsigned char *page)
+    // Both copies run inline_at or mid_at, the original store, HookStack::push, and enable from one barrier, for 1000
+    // rounds of the counted inline shape and then 1000 rounds of the mid shape. An arm makes its hook the newest layer,
+    // so each install arms on its first call in either arm order and one call runs both detours.
+    int arm_in_either_order(Participant &first, Participant &second, unsigned char *page)
     {
-        std::array<OutcomeCounts, 2> counts{};
-        const char *const failure = race_installs(
-            first,
-            second,
-            page,
-            Command::TwoStepInstall,
-            route_copy::HookShape::CountedInline,
-            false,
-            counts
-        );
-        for (std::size_t copy = 0; copy < counts.size(); ++copy)
+        for (const auto shape : {route_copy::HookShape::CountedInline, route_copy::HookShape::Mid})
         {
+            std::array<OutcomeCounts, 2> counts{};
+            const char *const failure = race_installs(first, second, page, Command::TwoStepInstall, shape, counts);
+            const auto count_of = [&counts](std::size_t copy, route_copy::InstallOutcome value)
+            { return counts[copy][static_cast<std::size_t>(value)]; };
             std::printf(
-                "arm order probe: copy=%zu armed=%u layer_conflict=%u enable_failed=%u other=%u rounds=%u\n",
-                copy,
-                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::Armed)],
-                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::LayerConflict)],
-                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::EnableFailed)],
-                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::OtherFailure)],
+                "arm in either order: shape=%s armed=%u/%u layer_conflict=%u/%u enable_failed=%u/%u rounds=%u\n",
+                shape == route_copy::HookShape::Mid ? "mid" : "counted-inline",
+                count_of(0, route_copy::InstallOutcome::Armed),
+                count_of(1, route_copy::InstallOutcome::Armed),
+                count_of(0, route_copy::InstallOutcome::LayerConflict),
+                count_of(1, route_copy::InstallOutcome::LayerConflict),
+                count_of(0, route_copy::InstallOutcome::EnableFailed),
+                count_of(1, route_copy::InstallOutcome::EnableFailed),
                 RACE_ROUNDS
             );
+            if (failure != nullptr)
+                return fail(failure);
         }
-        return failure == nullptr ? 0 : fail(failure);
+        return 0;
+    }
+
+    // The legacy copy keeps the 4.4.0 arm through a backend seam. In both create orders and both arm orders the new
+    // copy arms, and the legacy copy arms only while its record is the newest. A legacy hook created over the armed new
+    // hook arms as the upper layer. Every teardown leaves no record, no residue, and no pin.
+    int arm_order_with_legacy_copy(
+        Participant &current,
+        Participant &legacy,
+        unsigned char *page,
+        const std::array<unsigned char, 11> &code
+    )
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        const auto pristine = [page, &code]() { return std::memcmp(page, code.data(), code.size()) == 0; };
+        const auto create_disarmed = [page, &pristine](const Participant &copy)
+        { return copy.run(Command::InstallInline, page) != 0 && copy.run(Command::Disable) != 0 && pristine(); };
+        const auto torn_down = [&current, &legacy, &pristine]()
+        {
+            return current.run(Command::Reset) == 0 && legacy.run(Command::Reset) == 0 && pristine() &&
+                   current.run(Command::Records) == 0 && current.run(Command::Residue) == 0;
+        };
+        for (const bool legacy_created_first : {true, false})
+        {
+            for (const bool legacy_arms_first : {true, false})
+            {
+                if (!create_disarmed(legacy_created_first ? legacy : current) ||
+                    !create_disarmed(legacy_created_first ? current : legacy))
+                    return fail("a copy did not create a disarmed hook");
+                const auto current_hits = current.run(Command::Hits);
+                const auto legacy_hits = legacy.run(Command::Hits);
+                const bool legacy_newest = !legacy_created_first && legacy_arms_first;
+                if (legacy_arms_first &&
+                    legacy.run(legacy_newest ? Command::Enable : Command::EnableLayerConflict) == 0)
+                    return fail("the legacy copy did not keep its 4.4.0 arm before the new arm");
+                if (current.run(Command::Enable) == 0 || target() != 37 ||
+                    current.run(Command::Hits) != current_hits + 1 ||
+                    legacy.run(Command::Hits) != legacy_hits + (legacy_newest ? 1 : 0))
+                    return fail("the new copy did not arm as the newest layer");
+                if (!legacy_arms_first && legacy.run(Command::EnableLayerConflict) == 0)
+                    return fail("the legacy copy armed under a newer record");
+                if (!torn_down())
+                    return fail("a teardown left a record, a residue, a pin, or a changed target");
+            }
+        }
+        const auto current_hits = current.run(Command::Hits);
+        const auto legacy_hits = legacy.run(Command::Hits);
+        if (current.run(Command::InstallInline, page) == 0 || legacy.run(Command::InstallInline, page) == 0 ||
+            target() != 37 || legacy.run(Command::Hits) != legacy_hits + 1 ||
+            current.run(Command::Hits) != current_hits + 1)
+            return fail("the legacy upper hook did not chain to the new lower hook");
+        if (legacy.run(Command::Reset) != 0 || current.run(Command::Reset) != 0 || !pristine() ||
+            current.run(Command::Records) != 0 || current.run(Command::Residue) != 0)
+            return fail("the legacy upper hook and the new lower hook did not restore");
+        return 0;
     }
 } // namespace
 
@@ -1002,12 +1062,13 @@ int main(int argc, char **argv)
         scenario != "layers-inline" && scenario != "missing" && scenario != "incompatible" && scenario != "capacity" &&
         scenario != "timeout" && scenario != "stub-page" && scenario != "layers-overlap" && scenario != "drain-leak" &&
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
-        scenario != "connect-retry" && scenario != "layer-conflict" && scenario != "stale-layer-conflict" &&
+        scenario != "connect-retry" && scenario != "re-arm-above-newer" && scenario != "stale-re-arm" &&
         scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
         scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page" &&
         scenario != "retire-inline" && scenario != "legacy-lower" && scenario != "legacy-upper" &&
-        scenario != "legacy-around-claim" && scenario != "budget-floor" && scenario != "retire-closed-route" &&
-        scenario != "concurrent-create" && scenario != "concurrent-install" && scenario != "arm-order-probe")
+        scenario != "legacy-around-claim" && scenario != "legacy-arm-order" && scenario != "budget-floor" &&
+        scenario != "retire-closed-route" && scenario != "concurrent-create" && scenario != "concurrent-install" &&
+        scenario != "arm-either-order")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -1029,25 +1090,26 @@ int main(int argc, char **argv)
     const auto identity = first.run(Command::Identity);
     if (identity == 0 || identity != second.run(Command::Identity))
         return fail("participants did not share the same data owner");
-    if (scenario == "layer-conflict")
-        return report_layer_conflict(first, second, page, code);
-    if (scenario == "stale-layer-conflict")
-        return reconcile_stale_state_before_layer_conflict(first, second, page, code);
+    if (scenario == "re-arm-above-newer")
+        return re_arm_above_newer_layer(first, second, page, code);
+    if (scenario == "stale-re-arm")
+        return reconcile_stale_state_before_the_arm(first, second, page, code);
     if (scenario == "refusal-cause")
         return report_coordinator_refusal(first, second, page);
     if (scenario == "concurrent-create")
         return create_beside_trap_windows(first, second, page);
     if (scenario == "concurrent-install")
         return install_and_arm_on_one_target(first, second, page);
-    if (scenario == "arm-order-probe")
-        return probe_two_step_arm_order(first, second, page);
+    if (scenario == "arm-either-order")
+        return arm_in_either_order(first, second, page);
     if (scenario == "retire-inline")
         return retire_older_inline_under_newer_inline(first, second, page);
     if (scenario == "budget-floor")
         return residue_budget_floor_pins(first, second, page);
     if (scenario == "retire-closed-route")
         return retirement_keeps_bypassed_route_closed(first, second, page);
-    if (scenario == "legacy-lower" || scenario == "legacy-upper" || scenario == "legacy-around-claim")
+    if (scenario == "legacy-lower" || scenario == "legacy-upper" || scenario == "legacy-around-claim" ||
+        scenario == "legacy-arm-order")
     {
         Participant legacy{"route_copy_legacy.dll"};
         if (legacy.command == nullptr || legacy.command == first.command || legacy.command == second.command ||
@@ -1057,6 +1119,8 @@ int main(int argc, char **argv)
             return legacy_lower_stays_refused(legacy, first, page);
         if (scenario == "legacy-upper")
             return new_lower_retires_under_legacy_upper(first, legacy, page);
+        if (scenario == "legacy-arm-order")
+            return arm_order_with_legacy_copy(first, legacy, page, code);
         return legacy_around_claimed_position(first, second, legacy, page);
     }
     if (scenario == "scans")

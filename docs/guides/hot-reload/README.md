@@ -253,7 +253,7 @@ Hooks that share a target retire in any order, in one DMK copy or across copies 
 - A position that no generation claims stays for the process. It keeps one process record and adds two jumps to each call. `DetourModKit_bench_hook` measures those jumps as `hook.residue_hop_ns`: 0.7 ns per position on the development host under game load (MinGW release, nine-round medians, 2026-10-17). A chain of 16 positions costs about 10 ns more per call than a chain of one.
 - VMT hook stacks fall outside this rule. [Destroy stacked VMT hooks newest-first](../hooking/vmt-hook-config.md#destroy-stacked-vmt-hooks-newest-first).
 
-Install each hook through `HookStack::install`. It creates the hook, stores the original, and arms it under one process coordinator hold. DMK copies that hook one target then arm in any startup order. `inline_at` then `enable()` leaves a gap where another copy can create a hook, and the arm then fails with `LayerConflict`.
+Install each hook through `HookStack::install`. It creates the hook, stores the original, and arms it under one process coordinator hold. An arm makes its hook the newest layer of its target, so DMK copies that hook one target arm in any startup order, also through `inline_at` then `enable()`. `enable()` of a hook that restored its bytes arms again above a newer layer.
 
 ### Session teardown owns one instance's subsystems
 

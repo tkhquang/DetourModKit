@@ -115,6 +115,10 @@ namespace DetourModKit::detail
         None,
         LayerConflict,
         Unavailable,
+        /// A thread runs the trampoline that the arm recaptures. The caller releases its hold and arms again.
+        TrampolineBusy,
+        /// The calling thread returns into the trampoline that the arm recaptures. No retry changes it.
+        CallerInTrampoline,
     };
 
     [[nodiscard]] inline CoordinatorRefusal coordinator_refusal(const safetyhook::InlineHook::Error &error) noexcept
@@ -125,6 +129,10 @@ namespace DetourModKit::detail
             return CoordinatorRefusal::LayerConflict;
         case safetyhook::InlineHook::Error::COORDINATION_UNAVAILABLE:
             return CoordinatorRefusal::Unavailable;
+        case safetyhook::InlineHook::Error::TRAMPOLINE_BUSY:
+            return CoordinatorRefusal::TrampolineBusy;
+        case safetyhook::InlineHook::Error::CALLER_IN_TRAMPOLINE:
+            return CoordinatorRefusal::CallerInTrampoline;
         default:
             return CoordinatorRefusal::None;
         }
@@ -145,6 +153,10 @@ namespace DetourModKit::detail
             return "a newer participant owns the target";
         case CoordinatorRefusal::Unavailable:
             return "process coordinator unavailable or timed out";
+        case CoordinatorRefusal::TrampolineBusy:
+            return "a thread runs the trampoline";
+        case CoordinatorRefusal::CallerInTrampoline:
+            return "the calling thread returns into the trampoline";
         default:
             return {};
         }
@@ -218,6 +230,19 @@ namespace DetourModKit::detail
     }
 
     /**
+     * @brief Reports whether the backend ever committed its patch. No layer chains to a patch that never committed,
+     *        so such a hook releases at any layer (`[B-110]`). An empty variant reports true.
+     */
+    template <class BackendVariant> [[nodiscard]] bool backend_committed(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(
+            backend,
+            true,
+            [](const auto &one) noexcept { return one.enabled() || one.patch_bytes_valid(); }
+        );
+    }
+
+    /**
      * @brief Switches the backend off (@p on false) or back on without a target write.
      * @details An inline hook stores its relay slot, and a mid hook stores its route state. Neither waits.
      * @return False when the backend cannot switch, so the caller keeps its published state.
@@ -261,6 +286,16 @@ namespace DetourModKit::detail
             backend,
             detail::PatchWitness::Indeterminate,
             [](auto &one) noexcept { return detail::witness_patch(one); }
+        );
+    }
+
+    /// Returns the arm witness (@ref witness_arm), or Indeterminate when no backend is reachable.
+    template <class BackendVariant> [[nodiscard]] detail::PatchWitness arm_witness_of(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(
+            backend,
+            detail::PatchWitness::Indeterminate,
+            [](auto &one) noexcept { return detail::witness_arm(one); }
         );
     }
 

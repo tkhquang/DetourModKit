@@ -18,6 +18,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -35,6 +37,7 @@ namespace DetourModKit
         namespace
         {
             using DetourModKit::detail::apply_backend;
+            using DetourModKit::detail::arm_witness_of;
             using DetourModKit::detail::backend_claimed;
             using DetourModKit::detail::backend_value_or;
             using DetourModKit::detail::CoordinatorRefusal;
@@ -50,6 +53,7 @@ namespace DetourModKit
             using DetourModKit::detail::witness_description;
             using DetourModKit::detail::witness_of;
             using DetourModKit::detail::witness_permits_write;
+            using DetourModKit::detail::witness_promotes_arm;
 
             /**
              * @brief Defers one toggle log line until later-declared lock guards release.
@@ -243,6 +247,13 @@ namespace DetourModKit
                     return static_cast<bool>(*m_coordinator);
                 }
 
+                /// Releases the coordinator. Returns false for a kept slot, whose install owns the coordinator.
+                [[nodiscard]] bool release_coordinator() noexcept
+                {
+                    m_coordinator.reset();
+                    return !m_kept;
+                }
+
                 /// Records @p transition for the install of a kept slot. Returns false, and records nothing, otherwise.
                 [[nodiscard]] bool defer_emission(diagnostics::HookTransition transition) noexcept
                 {
@@ -416,6 +427,10 @@ namespace DetourModKit
                 {
                     return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
                 }
+                if (refusal == CoordinatorRefusal::CallerInTrampoline)
+                {
+                    return std::unexpected(Error{ErrorCode::ReentrantCallRejected, "hook::enable", impl.target});
+                }
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
             }
 
@@ -558,81 +573,144 @@ namespace DetourModKit
                     impl.bypassed = false;
                 }
 
-                // Only the newest live layer can write target bytes. The slot makes the {decide, patch} pair atomic
-                // against a concurrent same-target install. Claim it before the state CAS so a refusal changes nothing.
+                // The slot makes the {decide, patch} pair atomic against a concurrent same-target install. Claim it
+                // before the state CAS so a refusal changes nothing. A ledger that cannot decide the order refuses.
                 std::optional<TargetSlot> acquired_slot;
                 TargetSlot &slot =
                     kept_slot != nullptr ? *kept_slot : acquired_slot.emplace(impl.target, impl.ledger_id);
-                if (!slot.is_top_layer())
+                if (slot.unavailable())
                 {
                     return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
                 }
-                if (!slot.hold_coordinator("hook::enable", impl.name))
+                bool busy_logged = false;
+                for (;;)
                 {
-                    deferred_warning.arm(
-                        "refused enable",
-                        impl.name,
-                        impl.target,
-                        DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
-                    );
-                    return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
-                }
-
-                // Classify before the transition claim. The backend emits its jmp over the current bytes. Foreign or
-                // unreadable bytes must refuse here while the hook remains as the caller left it.
-                const PatchWitness before = witness_of(impl.backend);
-                if (!witness_permits_write(before))
-                {
-                    deferred_warning.arm("refused enable", impl.name, impl.target, witness_description(before));
-                    return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
-                }
-
-                HookState expected = HookState::Disabled;
-                if (!impl.status.compare_exchange_strong(expected, HookState::Enabling, std::memory_order_acq_rel))
-                {
-                    if (expected != HookState::Active)
+                    if (!slot.hold_coordinator("hook::enable", impl.name))
                     {
-                        return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
+                        deferred_warning.arm(
+                            "refused enable",
+                            impl.name,
+                            impl.target,
+                            DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
+                        );
+                        return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
                     }
-                    // Active answers the request only over this hook's own patch. Here `before` is Original or
-                    // OwnedPatch, because every other class refused above.
-                    if (before == PatchWitness::OwnedPatch)
+
+                    // Classify before the transition claim. The backend emits its jmp over the current bytes, or
+                    // recaptures the patch of another layer (`[B-110]`). Foreign or unreadable bytes must refuse here
+                    // while the hook remains as the caller left it.
+                    const PatchWitness before = arm_witness_of(impl.backend);
+                    const bool promotes = witness_promotes_arm(before);
+                    if (!promotes && !witness_permits_write(before))
                     {
+                        deferred_warning.arm("refused enable", impl.name, impl.target, witness_description(before));
+                        return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
+                    }
+                    // An arm over this hook's own patch keeps its layer, so only the newest layer writes it.
+                    if (!promotes && !slot.is_top_layer())
+                    {
+                        return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
+                    }
+
+                    HookState expected = HookState::Disabled;
+                    if (!impl.status.compare_exchange_strong(expected, HookState::Enabling, std::memory_order_acq_rel))
+                    {
+                        if (expected != HookState::Active)
+                        {
+                            return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
+                        }
+                        // Active answers the request only over this hook's own patch. The patch of another layer
+                        // cannot prove that its chain still reaches this hook.
+                        if (before == PatchWitness::OwnedPatch)
+                        {
+                            return {};
+                        }
+                        if (before == PatchWitness::LayeredOver)
+                        {
+                            deferred_warning.arm("refused enable", impl.name, impl.target, witness_description(before));
+                            return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
+                        }
+                        // The bytes prove the target is unpatched. Rewrite the stale claim, then arm through the
+                        // ordinary path so byte authority and the population tally both stay exact.
+                        deferred_warning.arm(
+                            "has original bytes under an active state. This enable retries the arm",
+                            impl.name,
+                            impl.target
+                        );
+                        reconcile_published_state(impl, gate, false);
+                        impl.status.store(HookState::Enabling, std::memory_order_release);
+                    }
+                    // Create leaves the target unpatched, so this is the first operation that can make the detour
+                    // reachable.
+                    CoordinatorRefusal refusal = CoordinatorRefusal::None;
+                    const bool backend_enabled = backend_value_or(
+                        impl.backend,
+                        false,
+                        [&refusal](auto &backend) noexcept { return try_backend_enable(backend, &refusal); }
+                    );
+                    // A thread runs the trampoline that the arm recaptures. It leaves by itself, so the arm lets the
+                    // coordinator go and tries again, with no count (`[B-110]`). Nothing changed yet.
+                    if (!backend_enabled && refusal == CoordinatorRefusal::TrampolineBusy && slot.release_coordinator())
+                    {
+                        impl.status.store(HookState::Disabled, std::memory_order_release);
+                        if (!std::exchange(busy_logged, true))
+                        {
+                            (void)log().try_log(
+                                LogLevel::Warning,
+                                "hook::enable: '{}' waits for a thread to leave its trampoline at 0x{:0{}X}.",
+                                impl.name,
+                                impl.target,
+                                sizeof(std::uintptr_t) * 2
+                            );
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        continue;
+                    }
+                    const bool patch_confirmed = backend_value_or(
+                        impl.backend,
+                        false,
+                        [](auto &backend) noexcept { return enable_patch_is_confirmed(backend); }
+                    );
+                    if (backend_enabled && patch_confirmed)
+                    {
+                        // The backend made the record the newest layer, so the local order follows it.
+                        if (promotes)
+                        {
+                            if (const std::uint64_t stamp = DetourModKit::detail::HookLedger::instance()
+                                                                .promote_to_newest(impl.target, impl.ledger_id);
+                                stamp != 0)
+                            {
+                                impl.layer_stamp = stamp;
+                            }
+                        }
+                        publish_toggle(impl, gate, &slot, guard, true);
                         return {};
                     }
-                    // The bytes prove the target is unpatched. Rewrite the stale claim, then arm through the ordinary
-                    // path so byte authority and the population tally both stay exact.
-                    deferred_warning.arm(
-                        "has original bytes under an active state. This enable retries the arm",
-                        impl.name,
-                        impl.target
-                    );
-                    reconcile_published_state(impl, gate, false);
-                    impl.status.store(HookState::Enabling, std::memory_order_release);
+                    if (!backend_enabled)
+                    {
+                        // A promoting arm meets LayerConflict only when it cannot chain to the layer on the target.
+                        if (promotes && refusal == CoordinatorRefusal::LayerConflict)
+                        {
+                            deferred_warning.arm(
+                                "refused enable",
+                                impl.name,
+                                impl.target,
+                                "the hook cannot chain to the layer on the target"
+                            );
+                        }
+                        else if (refusal == CoordinatorRefusal::CallerInTrampoline)
+                        {
+                            deferred_warning.arm(
+                                "refused enable",
+                                impl.name,
+                                impl.target,
+                                DetourModKit::detail::coordinator_refusal_description(refusal)
+                            );
+                        }
+                        return settle_backend_enable_failure(impl, gate, slot, guard, refusal);
+                    }
+                    return settle_unconfirmed_enable(impl, gate, slot, guard);
                 }
-                // Create leaves the target unpatched, so this is the first operation that can make the detour
-                // reachable.
-                CoordinatorRefusal refusal = CoordinatorRefusal::None;
-                const bool backend_enabled = backend_value_or(
-                    impl.backend,
-                    false,
-                    [&refusal](auto &backend) noexcept { return try_backend_enable(backend, &refusal); }
-                );
-                const bool patch_confirmed = backend_value_or(
-                    impl.backend,
-                    false,
-                    [](auto &backend) noexcept { return enable_patch_is_confirmed(backend); }
-                );
-                if (backend_enabled && patch_confirmed)
-                {
-                    publish_toggle(impl, gate, &slot, guard, true);
-                    return {};
-                }
-                if (!backend_enabled)
-                {
-                    return settle_backend_enable_failure(impl, gate, slot, guard, refusal);
-                }
-                return settle_unconfirmed_enable(impl, gate, slot, guard);
             }
         } // namespace
 

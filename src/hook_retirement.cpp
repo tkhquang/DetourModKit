@@ -433,6 +433,11 @@ namespace DetourModKit
                         {
                             continue;
                         }
+                        if (!DetourModKit::detail::backend_committed(hook.impl->backend))
+                        {
+                            hook.restores = changed = true;
+                            continue;
+                        }
                         std::uint8_t *const key = coordinator_key(*hook.impl);
                         const DetourModKit::detail::PatchWitness witness =
                             DetourModKit::detail::witness_of(hook.impl->backend);
@@ -565,6 +570,23 @@ namespace DetourModKit
             }
         } // namespace
 
+        void HookStack::order_by_layer() noexcept
+        {
+            const auto stamp = [](const std::unique_ptr<Hook> &hook) noexcept -> std::uint64_t
+            {
+                const auto *const impl = hook ? detail::HookAccess::impl(*hook) : nullptr;
+                return impl != nullptr ? impl->layer_stamp : 0;
+            };
+            // An insertion sort keeps equal stamps in push order and allocates nothing.
+            for (std::size_t index = 1; index < m_hooks.size(); ++index)
+            {
+                for (std::size_t slot = index; slot > 0 && stamp(m_hooks[slot - 1]) > stamp(m_hooks[slot]); --slot)
+                {
+                    std::swap(m_hooks[slot - 1], m_hooks[slot]);
+                }
+            }
+        }
+
         HookRetirement HookStack::retire(std::chrono::milliseconds deadline) noexcept
         {
             if (m_hooks.empty())
@@ -588,6 +610,7 @@ namespace DetourModKit
                                   : now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(deadline);
 
             using HookImpl = std::remove_pointer_t<decltype(detail::HookAccess::impl(std::declval<const Hook &>()))>;
+            order_by_layer();
             std::vector<RetiringHook<HookImpl>> hooks;
             std::vector<safetyhook::AddressRange> ranges;
             std::vector<const safetyhook::ReturnSites *> sites;

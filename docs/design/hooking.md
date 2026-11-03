@@ -2,7 +2,7 @@
 
 This note explains the hook subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`, `[B-107]`, `[B-108]`, `[B-109]`.
+Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`, `[B-107]`, `[B-108]`, `[B-109]`, `[B-110]`.
 
 ## Concurrency model
 
@@ -24,7 +24,7 @@ The ledger:
 - The ledger backs exact duplicate detection (`fail_if_already_hooked`) through an atomic check-and-reserve ( `try_reserve_hook`). The reservation commits only after backend create and fallible setup succeed, and it rolls back on any create failure.
 - The two refusal mechanisms carry two codes, because the caller's correct response differs. `ErrorCode::TargetAlreadyHookedByThisKit` comes from the ledger. `ErrorCode::TargetAlreadyHookedByAnotherModule` comes from the foreign-prologue decode that runs only when the ledger has no record.
 - The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants. `[B-109]` owns the order of the two and the install classification under the coordinator.
-- Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot. Under a newer local layer, an Active hook bypasses in place of a write, and a restored hook gets `ErrorCode::LayerConflict` (`[B-16]`).
+- An arm makes its hook the newest layer of its target (`[B-110]`). Only the newest live layer restores its bytes. `enable()` and `disable()` claim the target's ledger slot. Under a newer local layer, an Active hook bypasses in place of a write (`[B-16]`).
 - The ledger's state is never-destroyed storage, so a hook owned by a namespace-scope object can still tear down at static-destruction time.
 
 VmtHook and teardown:
@@ -55,7 +55,7 @@ VmtHook and teardown:
   `Lifecycle.MidRouteSurvivesDormantFiber` and `Lifecycle.MidRouteSurvivesExceptionContinuation` verify saved execution after teardown. `Lifecycle.MidRouteUnwindSettlesRouteOwnership` verifies permanent retention after unwind. The other `Lifecycle.MidRoute*` cases verify normal exits, selected resumes, bypass execution, register preservation, unwind records, and idle reclamation.
 
   The [process route coordinator](#process-route-coordinator) owns dependencies across participants. `Lifecycle.RouteCopiesRetainLayeredDependencies`, `Lifecycle.RouteCopiesRetainInlineDependencies`, and `Lifecycle.RouteCopiesRetainOverlappingDependencies` verify that contract after both loader references drop. The local idle proof remains under `Lifecycle.PublishedMidRouteReclaimsUnlessParked`.
-- A retained id still counts in newer-layer counting for the process lifetime, and so does a residue id. Both positions stay in the target chain, so a layer underneath either one never writes the target. An Active layer there bypasses, and teardown retires it as residue. Ids append newest-last, so a layer installed after a pin still tears down normally.
+- A retained id still counts in newer-layer counting for the process lifetime, and so does a residue id. Both positions stay in the target chain, so a layer underneath either one never writes the target. An Active layer there bypasses, and teardown retires it as residue. Ids append newest-last, and an arm moves its id to the back (`[B-110]`), so a layer installed after a pin still tears down normally.
 - `Hook::release()` and `VmtHook::release()` are the caller-requested form of the same pin and book their leak identically.
 
 Hot-path mechanism: None. Install and teardown are setup/control-plane. The per-hook gate mutex serializes `call()`, and the handle's own storage must outlive a concurrent call.
@@ -68,7 +68,7 @@ The process owns one 49,152-byte non-executable mapping and two handles. The pay
 
 `safetyhook::ProcessCoordinator` in `external/safetyhook/include/safetyhook/os.hpp` owns the lock order, the acquisition limit, owner reacquisition, and the shared layer order. Create holds the coordinator through the original-byte snapshot and record publication. Patch transactions and reclamation scans acquire it before any protection change or thread suspension. DMK teardown acquires it before a route closes, because the coordinator wait export can be that route.
 
-Each record identifies a target, its patched byte count, creation order, generated ranges, enable state, and continuation state. A live newer record blocks a target write by an older layer. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
+Each record identifies a target, its patched byte count, layer order, generated ranges, enable state, and continuation state. Create assigns the order, and each arm assigns a newer one (`[B-110]`). A live newer record blocks a restore by an older layer. A retained newer record permanently preserves older dependencies. Teardown records a reconciled enable state before the idle proof. Clean teardown removes its record before storage release. An exhausted registry refuses creation before publication.
 
 Every x64 trampoline that the patched backend emits ends with a relay cell, which other participants read under the coordinator. A 16-byte footer fills the last bytes of the trampoline allocation: the body offset, the layout `RELAY_CELL_LAYOUT` (1), the hook kind, and a seal. The seal is a fixed value XOR the address of the seal word. The 8-aligned body holds the state (Owned or Vacant), a 64-bit FNV-1a identity of the hook name, and the target. It also holds the switch word and route word addresses and up to 32 saved original bytes. The format is frozen, and a reader treats a footer that fails the seal or the layout as an opaque layer (`[B-105]`).
 
@@ -170,11 +170,11 @@ A configured build tree leaves the submodule working tree dirty, because the pat
 
 ### [B-16]
 
-A restore writes the saved prologue over the target. Below a newer layer that write clobbers the newer layer, and a layered prologue can reference an older route. Only the newest unclaimed layer over its own patch therefore restores. Every other Active layer bypasses (`[B-104]`), and teardown vacates its position (`[B-105]`). The local ledger finds a newer local layer, and a coordinator refusal of the restore finds a newer participant. `Hook::enable()` and `Hook::disable()` own the error codes, and `Lifecycle.RouteCopiesReportLayerConflict` verifies that an arm over restored bytes stays refused.
+A restore writes the saved prologue over the target. Below a newer layer that write clobbers the newer layer, and a layered prologue can reference an older route. Only the newest unclaimed layer over its own patch therefore restores. Every other Active layer bypasses (`[B-104]`), and teardown vacates its position (`[B-105]`). The local ledger finds a newer local layer, and a coordinator refusal of the restore finds a newer participant. `Hook::enable()` and `Hook::disable()` own the error codes, and `Lifecycle.RouteCopiesReArmAboveANewerLayer` verifies that each layer restores in arm order.
 
 Reverse-order destruction is automatic for stack locals and array or aggregate members. A `std::vector<Hook>` (or any container) gives no newest-first order, so a lower layer then retires as residue instead of a restore. The `install_all` rollback therefore tears its rows down back-to-front through its internal `InstallRollback` guard.
 
-For caller-held sets of hooks, prefer `hook::HookStack`. This move-only owner drains newest-first in its destructor, move-assignment, and `clear()`, so each of its layers can restore. `HookStack::retire` switches every relay off and drains every counted detour and mid route before its newest-first commit (`[B-106]`).
+For caller-held sets of hooks, prefer `hook::HookStack`. This move-only owner drains newest layer first, in arm order (`[B-110]`), in its destructor, move-assignment, and `clear()`, so each of its layers can restore. `HookStack::retire` switches every relay off and drains every counted detour and mid route before its newest-first commit (`[B-106]`).
 
 ### [B-41]
 
@@ -223,11 +223,9 @@ Query and protection failures must return a status, restore only the protections
 
 `inline_at`, `mid_at`, and `install_all` return disabled hooks. Publish the handle and callback context before the `Hook::enable()` call. A byte witness verifies the arm. A rejected witness publishes `Disabled` only when the compensating disable leaves the prologue witnessed original. If that rollback cannot prove it, the handle stays truthfully active and returns `DisableFailed`. This rule is specific to the inline/mid transaction: `hook::vmt_for` is intentionally live on creation and has no `enable()` step. It stays safe by construction because it publishes the real object's vptr last, after the private clone is fully built. No window exists where a caller can observe a half-published clone.
 
-`HookStack::install` keeps that order and closes the gap between the create and the arm. A coordinator record joins the process at create, and an arm refuses under any newer live record. A participant that creates between the create and the arm of another therefore fails that arm with `LayerConflict`.
+`HookStack::install` keeps that order. It creates the hook, stores the original into the caller atomic, stores the handle, and arms it under one process coordinator hold. The arm writes through the reservation that `HookLedger::commit_hook_keep_slot` keeps. A slot of its own counts a queued reservation of this kit as a newer layer. A failed arm leaves the hook stored, in the state that the arm error states.
 
-`HookStack::install` creates the hook, stores the original into the caller atomic, stores the handle, and arms it under one process coordinator hold. No participant can then create between the two. The arm writes through the reservation that `HookLedger::commit_hook_keep_slot` keeps. A slot of its own counts a queued reservation of this kit as a newer layer. A failed arm leaves the hook stored, in the state that the arm error states.
-
-`Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget`, `HookStackTest.Install*`, `HookLedgerSlot.CommitKeepsTheSlotForTheArm`, `HookCounted.InstallArmsTheCountedThunk`, and `MidHookContextTest.InstallArmsTheMidAdapter` prove the rule. `route_copy_host arm-order-probe` measures the gap of `inline_at` then `enable` and has no ctest registration.
+`Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget`, `HookStackTest.Install*`, `HookLedgerSlot.CommitKeepsTheSlotForTheArm`, `HookCounted.InstallArmsTheCountedThunk`, and `MidHookContextTest.InstallArmsTheMidAdapter` prove the rule.
 
 ### [B-84]
 
@@ -312,7 +310,7 @@ The proof holds only for straight-line thunk code inside one unchained `RUNTIME_
 
 ### [B-107]
 
-A thread snapshot lists every thread of the machine, so its cost follows the machine, not the game. The pass therefore opens only the threads of this process through `NtGetNextThread`. That export is undocumented, so the backend resolves it at run time and walks the snapshot when the export is absent. The walk opens each thread with `THREAD_QUERY_LIMITED_INFORMATION`, because `GetThreadId` needs it to skip the current thread. Without it the pass suspends its own thread. The walk also returns a thread that exited while a handle stays open, so a failed suspension on a signaled handle skips that thread.
+A thread snapshot lists every thread of the machine, so its cost follows the machine, not the game. The pass therefore opens only the threads of this process through `NtGetNextThread`. That export is undocumented, so the backend resolves it at run time and walks the snapshot when the export is absent. The walk opens each thread with `THREAD_QUERY_LIMITED_INFORMATION`, because `GetThreadId` needs it to skip the current thread. Without it the pass suspends its own thread. The walk also returns a thread that exited while a handle stays open, so a failed suspension on a signaled handle skips that thread. A thread that the kernel terminates refuses its suspension before its handle signals, and it never returns into its code. The pass reads `ThreadIsTerminated` through `NtQueryInformationThread`, resolved before the first suspension, and skips that thread too. Without it, an arm that waited for a thread to leave its trampoline failed as that thread exited.
 
 A thread that waits for a core runs its suspension and context requests only when it gets one. With every core busy, one suspension at a time therefore costs about one scheduler quantum per thread. The pass suspends every other thread before its first read instead, so each stopped thread gives up its core at once. Nothing allocates, takes a lock, or calls back until the resume, because a stopped thread can hold the heap lock. The process stops for the length of one pass, 8 to 25 ms with 166 threads on the measured host.
 
@@ -361,3 +359,25 @@ No DMK path waits for a target slot, takes a counted module reference, or runs a
 Each wait for a held coordinator logs one line that names the holder thread. The line runs while the waiter holds no coordinator, so a wait that never ends stays visible.
 
 `HookBackendTrapWindow.*AtWaitsForTheBackendTrapWindow`, `HookBackendTrapWindow.PreflightReadsTheSettledPrologue`, `HookBackendTrapWindow.InstallWaitsForAPatchWindowOutsideTheCoordinator`, `HookBackendTrapWindow.NonImageTargetOutsideTheCoordinatorKeepsTheRefusal`, `HookBackendTrapWindow.ClosedImagePageKeepsTheRefusal`, `HookInstallCoordinator.*`, `HookToggle.EnableAndDisableWaitForAHolderPastTheWaitSlice`, and `Lifecycle.ConcurrentCopiesCreateOnOneTarget` prove the rule.
+
+### [B-110]
+
+A coordinator record joins the process at create. Under a create-order rule, an older hook could not arm under a newer record. A peer that created between the create and the arm of another copy then cost that copy its hook for the session. The arm therefore decides the layer order.
+
+The backend arm runs under the coordinator:
+
+1. A claimed hook, or a resume over its own patch, switches only as the newest layer.
+2. Over the saved prologue, the record takes a fresh order and the hook arms.
+3. Over other bytes, the window must hold the patch of an enabled overlapping record: an `E9` jump into its trampoline or gateway, then `NOP` fill to the window end. Other bytes refuse.
+4. One idle pass proves that no thread runs or returns into the trampoline. With every other thread still suspended, the backend rewrites the relocated region with a jump to that layer, and a mid route leaves through a continuation exit.
+5. The record takes a fresh order, and the patch write runs through the trap transaction.
+
+The trampoline entry, the epilogue, the relay, and the relay cell keep their offsets, so the original that a consumer stored before the arm stays valid (`[B-83]`). The boundaries, the saved prologue, the three return-site copies, and the saved bytes of the cell follow the new window. The cell seal derives from its address, so the cell keeps its layout and seal.
+
+A busy trampoline releases the coordinator and retries with no attempt count. Under an outer hold the backend returns `TRAMPOLINE_BUSY`, and `Hook::enable()` releases its hold and retries. An arm whose own thread returns into the trampoline fails at once with `ReentrantCallRejected`. A far trampoline or a jump out of rel32 reach fails with `LayerConflict` and one log line.
+
+`Hook::enable()` reads `PatchWitness::LayeredOver` for a step 3 window and skips the same-kit ledger refusal for a promoting arm. After a confirmed promoting arm, `HookLedger::promote_to_newest` moves the id to the back of the layer order with no allocation and returns a layer stamp. `HookStack` and `HookStack::retire` tear down by descending stamp. A hook whose patch never committed releases at any layer, because no layer chains to it.
+
+`COORDINATOR_VERSION` stays 1 with the 88-byte record, because every reader compares orders relatively or tests them for zero. `RELAY_CELL_LAYOUT` stays 1. A 4.4.0 copy keeps its create-order arm.
+
+`Lifecycle.ConcurrentCopiesArmInEitherOrder`, `Lifecycle.RouteCopiesReArmAboveANewerLayer`, `Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm`, `Lifecycle.RouteCopiesArmOrderWithALegacyCopy`, `HookBackendArmOrder.*`, `HookLayeredDisabled.EveryLayerArmsInEitherEnableOrder`, `HookStackTest.TeardownFollowsArmOrder`, `HookLedgerSlot.PromoteMovesTheIdWithoutAllocation`, `MidHookContextTest.OlderMidHookArmsAboveANewerOne`, and `InputIntercept.XInputPairArmsAboveANewerLayer` prove the rule.
