@@ -288,8 +288,11 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.RouteCopiesLegacyAroundClaimedPosition` | `route_copy_host` |
 | `Lifecycle.RouteCopiesResidueBudgetFloorPins` | `route_copy_host` |
 | `Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed` | `route_copy_host` |
+| `Lifecycle.ConcurrentCopiesCreateOnOneTarget` | `route_copy_host` |
 
 `Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` is the constancy soak. It runs 1000 reload cycles under a 1200-second timeout and returns skip code 77 under ASan. `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` runs 128 mid reload cycles under a 600-second timeout. `Lifecycle.LayeredReloadCountedLowerCopyUnmaps` runs 51 generations under a 300-second timeout.
+
+In `Lifecycle.ConcurrentCopiesCreateOnOneTarget`, one copy opens trap windows on a target while the other copy creates and destroys a disabled hook there for 1000 rounds. Its output line records the window count and the install latency.
 
 ## Staged example proof
 

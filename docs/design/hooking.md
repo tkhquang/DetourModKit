@@ -2,7 +2,7 @@
 
 This note explains the hook subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`, `[B-107]`, `[B-108]`.
+Rules owned here: `[B-01]`, `[B-16]`, `[B-41]`, `[B-42]`, `[B-43]`, `[B-66]`, `[B-81]`, `[B-83]`, `[B-84]`, `[B-85]`, `[B-89]`, `[B-97]`, `[B-104]`, `[B-105]`, `[B-106]`, `[B-107]`, `[B-108]`, `[B-109]`.
 
 ## Concurrency model
 
@@ -23,7 +23,7 @@ The ledger:
 - The per-linked-instance `src/internal/hook_ledger.hpp` is a small mutex over target/vptr sets, not a public registry. DMK is a static archive, so two DLLs that each link it get two independent ledgers.
 - The ledger backs exact duplicate detection (`fail_if_already_hooked`) through an atomic check-and-reserve ( `try_reserve_hook`). The reservation commits only after backend create and fallible setup succeed, and it rolls back on any create failure.
 - The two refusal mechanisms carry two codes, because the caller's correct response differs. `ErrorCode::TargetAlreadyHookedByThisKit` comes from the ledger. `ErrorCode::TargetAlreadyHookedByAnotherModule` comes from the foreign-prologue decode that runs only when the ledger has no record.
-- The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants.
+- The local ledger serializes same-target reservations. The process coordinator serializes backend create, patch, and reclaim transactions across participants. `[B-109]` owns the order of the two and the install classification under the coordinator.
 - Only the newest live layer on a target writes its bytes. `enable()` and `disable()` claim the target's ledger slot. Under a newer local layer, an Active hook bypasses in place of a write, and a restored hook gets `ErrorCode::LayerConflict` (`[B-16]`).
 - The ledger's state is never-destroyed storage, so a hook owned by a namespace-scope object can still tear down at static-destruction time.
 
@@ -83,7 +83,7 @@ A layer that retires without a restore switches off, drains, and marks its cell 
 
 The claim changes the state from Vacant to Owned with one compare-exchange. It writes no target byte and adds no record. A mid or routed claim writes its destination into the route word while the route stays CLOSED. The claimed hook starts bypassed, never restores, and vacates at teardown. When no cell passes, the create installs fresh on top.
 
-Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses a target write by an older layer.
+Timeout, missing state, incompatible state, or abandoned ownership refuses unsafe work. Abandoned ownership permanently poisons the coordinator. `ProcessCoordinator::refusal()` names the cause, and `owner_thread()` names the holder at a timeout. An install and a public toggle wait out a timeout (`[B-109]`). A refused teardown retains storage and reports its cause after the local ledger releases. A later acquisition marks its record retained. A record that no acquisition marks stays live and refuses a target write by an older layer.
 
 When another thread holds the coordinator throughout teardown, DMK makes at most four acquisitions per disarmed mid hook and two per armed hook. The coordinator timeout budgets total eight and four seconds, respectively, apart from scheduler delay.
 
@@ -207,7 +207,7 @@ A guarded read followed by a guarded store is not equivalent: a foreign writer t
 
 A swap of foreign access for an owned snapshot moves the trap rather than removes it. Any fact derived BEFORE the capture (a slot count, a size, an offset) describes different memory than the backend acts on. Even a re-walk of captured pointer words is insufficient when the backend re-queries mutable metadata, such as the target pages' execute permission. `Impl::method_count` is the worked example. It is the only bound between a caller's index and `VmHook`'s unchecked slot write. A count larger than SafetyHook's allocation therefore corrupts an adjacent RWX allocation without a fault. Demote the pre-capture walk to a capture budget, and derive the published count from captured words. Normalize the backend surrogate's counted run to a DMK-owned executable marker, so its allocation has exactly that count. Then copy the captured targets into the detached clone before publication. More generally, validate the backend's complete footprint, or replace its foreign access with an owned snapshot or guarded transaction. C++ `try/catch` does not contain a foreign SEH fault.
 
-A page classification taken outside the process coordinator carries the same trap. A backend trap window holds a method page at `PAGE_READWRITE`, so a slot walk inside that window ends early and the clone is truncated. `vmt_for` therefore holds the coordinator across the walk and the clone, and refuses the create with `BackendFailed` when the coordinator is unavailable. `HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow` pins the exclusion. `detail::BackendCoordinatorHold` (`src/internal/hook_coordinator.hpp`) gives translation units outside the hook island the same hold, which `[B-18]` uses for protection transactions.
+A page classification taken outside the process coordinator carries the same trap (`[B-109]`). A slot walk inside a backend trap window ends early and truncates the clone. `vmt_for` therefore holds the coordinator across the walk and the clone. `HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow` pins the exclusion. `detail::BackendCoordinatorHold` (`src/internal/hook_coordinator.hpp`) gives translation units outside the hook island the same hold, which `[B-18]` uses for protection transactions.
 
 `hook_method` allocates its map node and records the original slot pointer before the backend stores the slot. No allocation failure then sits over a live detour, and `original()` resolves from the instant the slot changes. `VmtHookFaultProof.MethodMapNodeAllocatesBeforeSlotStore` pins the order.
 
@@ -323,3 +323,33 @@ A caller holds a route entry from its gateway increment until it leaves the stub
 `MidHook` frees its stub when the hook is disabled and either no caller holds an entry or the recorded read still holds. A thread that leaves an uncounted window after the drain takes a closed entry and runs the trampoline, so it never reaches the freed stub. `Hook` teardown retires a restored mid hook with a freed stub as `HookResidue`, when a thread scan or a held entry refused its proof. A failed restore, an unavailable coordinator, a dependent route, unwind records, and the owner lock keep the pin.
 
 `HookStack::retire` defers a restored route that is alone on its patch window, as it defers a trampoline (`[B-107]`). No thread enters a restored route, and the threads inside it only move forward. The commit therefore repeats a refused route proof until the retire deadline, and an expired deadline leaves one attempt. Each refused pass records its first thread and check, and the pin or residue line names them after the threads resume. `HookBackendRelay.MidRouteEntryAfterTheIdleReadFreesTheStub`, `HookBackendIdleProof.RefusalNamesTheThreadAndTheCheck`, and `HookStackTest.RetireMid*` prove the rule.
+
+### [B-109]
+
+A read of a hook target's protection or bytes outside the process coordinator can land inside the trap window of another participant. That window holds the target page at `PAGE_READWRITE`, so the read classifies a transient state, and the install refuses a hookable target. The backend create decodes again under its own hold, so an unheld read corrupts only the DMK verdict and its log lines.
+
+An inline or mid install runs this sequence:
+
+1. Run the loader-lock veto and the argument checks.
+2. Resolve the target and reserve it in the HookLedger. Read no target byte.
+3. Inspect the counted thunk, look up the allocator, acquire the counted self-reference, and claim the mid adapter slot.
+4. Hold the coordinator. A timeout waits again with no attempt count and no time cap. Any other refusal releases the reservation and returns `BackendFailed`.
+5. Run the steal-window, foreign-jump, and prologue checks. Collect each log line in a local record.
+6. Create the backend hook. The backend acquires again with no wait.
+7. Release the hold, emit the collected lines, and commit the reservation.
+
+A `PatchInFlight` window verdict in step 5 names a writable page that its image section marks executable. A patcher outside the coordinator holds that page, and the page turns executable again before its code runs. The install releases the hold, yields one scheduler tick, and returns to step 4. A target outside every image keeps `TargetPrologueUnsafe`, because DMK cannot tell it from a data page. A guard, no-access, read-only, or execute-only image page also keeps `TargetPrologueUnsafe`, because a patch window must leave its page writable.
+
+Every hook path takes its locks in this order:
+
+1. The per-hook call gate, for a toggle only.
+2. The HookLedger target slot: an install reservation or a toggle write slot.
+3. The loader lock, only inside the counted self-reference acquire of an install.
+4. The backend process coordinator.
+5. The memory protection ledger lock.
+
+No DMK path waits for a target slot, takes a counted module reference, or runs a consumer callable while it holds the coordinator. `vmt_for` takes the coordinator after its VMT object gate. Public `enable()` and `disable()` hold the coordinator from the witness read through the backend write, so the backend toggle acquires again with no wait. Teardown and `HookStack::retire` keep their single bounded wait (`[B-73]`, `[B-85]`).
+
+Each wait for a held coordinator logs one line that names the holder thread. The line runs while the waiter holds no coordinator, so a wait that never ends stays visible.
+
+`HookBackendTrapWindow.*AtWaitsForTheBackendTrapWindow`, `HookBackendTrapWindow.PreflightReadsTheSettledPrologue`, `HookBackendTrapWindow.InstallWaitsForAPatchWindowOutsideTheCoordinator`, `HookBackendTrapWindow.NonImageTargetOutsideTheCoordinatorKeepsTheRefusal`, `HookBackendTrapWindow.ClosedImagePageKeepsTheRefusal`, `HookInstallCoordinator.*`, `HookToggle.EnableAndDisableWaitForAHolderPastTheWaitSlice`, and `Lifecycle.ConcurrentCopiesCreateOnOneTarget` prove the rule.

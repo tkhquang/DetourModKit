@@ -147,7 +147,7 @@ namespace DetourModKit
          * @details @ref Fail refuses the create with @ref ErrorCode::TargetPrologueUnsafe. @ref Relocate logs and
          *          installs anyway. The backend decode decides relocation, so a relative call passes this check. A
          *          backend refusal returns @ref ErrorCode::BackendFailed and logs the reason. Both policies refuse a
-         *          target whose bytes are not readable, executable, committed memory.
+         *          target whose settled bytes are not readable, executable, committed memory (see @ref Hook).
          */
         enum class Prologue : std::uint8_t
         {
@@ -253,8 +253,15 @@ namespace DetourModKit
          * @brief Move-only RAII handle for one inline or mid hook. The destructor restores the prologue, or retires a
          *        layer that cannot restore by bypass.
          * @note Hooks that share one target, in this copy or in other copies, retire in any order (`[B-16]`).
-         * @note Lock order: a toggle takes the per-hook call gate before the HookLedger target slot and releases them
-         *       in reverse order. Logs and lifecycle events follow both releases.
+         * @note Lock order (`[B-109]`): a toggle takes the per-hook call gate, then the HookLedger target slot, and
+         *       then the backend process coordinator. It releases them in reverse order. An install takes its target
+         *       reservation and its module reference before the coordinator. Logs and lifecycle events follow every
+         *       release.
+         * @note An install and a public toggle wait while another thread or DMK copy holds the process coordinator. An
+         *       install also waits while a patcher outside the coordinator holds the page of an image target without
+         *       execute access. No attempt count or time cap applies, and each wait logs one line. Only a coordinator
+         *       cause that no retry changes fails at once: BackendFailed for an install, EnableFailed or DisableFailed
+         *       for a toggle.
          */
         class Hook
         {
@@ -412,7 +419,8 @@ namespace DetourModKit
              *       Under another participant's newer layer, the arm returns LayerConflict, or EnableFailed when that
              *       patch fails the byte witness first.
              * @note Idempotent and thread-safe. Publish everything the detour needs before this call (`[B-83]`).
-             * @note Setup/control-plane only: the arm patches the target and serializes on the per-hook call gate.
+             * @note Setup/control-plane only: the arm patches the target and serializes on the per-hook call gate. It
+             *       waits for a held process coordinator, as @ref Hook states.
              */
             [[nodiscard]] Result<void> enable() noexcept;
 
@@ -436,6 +444,7 @@ namespace DetourModKit
              *       bytes gets DisableFailed. A ledger that cannot decide the layer order returns LayerConflict and
              *       changes nothing.
              * @note Setup/control-plane only: the disarm restores the target and serializes on the per-hook call gate.
+             *       It waits for a held process coordinator, as @ref Hook states.
              */
             [[nodiscard]] Result<void> disable() noexcept;
 
@@ -690,7 +699,8 @@ namespace DetourModKit
         /**
          * @brief Installs a disabled raw inline hook at the request's target. Call @ref Hook::enable to arm it.
          * @return The @ref Hook with the target unpatched, or an Error. This call reports every install failure,
-         *         including a scan miss for a deferred target.
+         *         including a scan miss for a deferred target. It first waits out the transient causes that @ref Hook
+         *         lists.
          * @details Prefer the counted form, which owns quiescence. Use this form for a variadic, `__vectorcall`, or
          *          other signature that the counted thunk does not forward.
          * @warning The detour must not throw. The patched target calls it directly, so an exception that escapes
@@ -714,7 +724,8 @@ namespace DetourModKit
          *         copyable. An optional first @ref CallerFrame parameter, by value, receives the game caller's return.
          *         The other parameters match the hooked function.
          * @return The @ref Hook with the target unpatched, or an Error. InvalidDetourFunction means that the compiled
-         *         thunk has a shape that the drain proof cannot cover, and the log names the cause.
+         *         thunk has a shape that the drain proof cannot cover, and the log names the cause. The call first
+         *         waits out the transient causes that @ref Hook lists.
          * @details A DMK thunk in the consumer image sits in the relay slot and calls @p Detour. @ref HookStack::retire
          *          and ~Hook switch the relay off and wait until no thread runs the thunk or the detour. A Retired
          *          outcome with no pinned hook therefore leaves no counted call in the image. An unwind or nonlocal exit
@@ -757,7 +768,8 @@ namespace DetourModKit
         /**
          * @brief Installs a disabled mid-function hook at the request's target. Call @ref Hook::enable to arm it.
          * @return The @ref Hook with the target unpatched, or an Error. @ref ErrorCode::MidHookCapacityExhausted means
-         *         that every mid-hook adapter is in use and the call patched nothing.
+         *         that every mid-hook adapter is in use and the call patched nothing. The call first waits out the
+         *         transient causes that @ref Hook lists.
          * @details DMK owns callback exception containment and rundown. @ref Hook::~Hook owns the retention rules.
          * @note Each hook holds one adapter from a fixed pool until clean teardown. Displaced instructions and their
          *       callees own the route until an ordinary exit completes, so dormant fibers and unresolved exception

@@ -1,14 +1,19 @@
 #include <gtest/gtest.h>
 #include <windows.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 
+#include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "fixtures/hook_fixture.hpp"
@@ -747,4 +752,154 @@ TEST(HookCall, TryCallOnMovedFromHandleFailsClosed)
     const Result<int> got = h.try_call<int>(3);
     ASSERT_FALSE(got.has_value());
     EXPECT_EQ(got.error().code, ErrorCode::InvalidHookState);
+}
+
+// COORDINATOR WAITS
+
+namespace
+{
+    using namespace std::chrono_literals;
+
+    constexpr std::string_view WAIT_LINE = "waits for the process coordinator";
+
+    [[nodiscard]] std::size_t count_of(std::string_view text, std::string_view needle) noexcept
+    {
+        std::size_t count = 0;
+        for (std::size_t at = text.find(needle); at != std::string_view::npos; at = text.find(needle, at + 1))
+        {
+            ++count;
+        }
+        return count;
+    }
+
+    [[nodiscard]] Result<Hook> install_strict_at(std::uintptr_t target, const char *name)
+    {
+        return inline_at(
+            InlineRequest{
+                .name = name,
+                .target = Address{target},
+                .options = Options{.fail_if_already_hooked = true},
+            },
+            reinterpret_cast<void (*)()>(&noop_detour)
+        );
+    }
+} // namespace
+
+// A coordinator wait that times out once is transient. The install waits again, installs, and logs one wait line.
+TEST(HookInstallCoordinator, TimeoutRefusalWaitsAndInstalls)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    std::string text;
+    Result<Hook> installed = std::unexpected(Error{ErrorCode::UnknownError, "unset"});
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Warning};
+        const CoordinatorRefusalScope refusal{COORDINATOR_TIMEOUT_ONCE};
+        installed = try_install_at(page.addr(0), "TimeoutOnce");
+        text = capture.read_all();
+    }
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_EQ(count_of(text, WAIT_LINE), 1U) << text;
+}
+
+// An incompatible coordinator stays refused for the process. The install fails at once with BackendFailed and examines
+// no target byte, so a non-executable target does not turn the refusal into TargetPrologueUnsafe.
+TEST(HookInstallCoordinator, PermanentRefusalFailsAtOnce)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    DWORD previous = 0;
+    ASSERT_NE(VirtualProtect(page.base(), dmk_test::ScratchPage::PAGE_SIZE, PAGE_READWRITE, &previous), 0);
+    std::string text;
+    Result<Hook> installed = std::unexpected(Error{ErrorCode::UnknownError, "unset"});
+    std::chrono::steady_clock::duration elapsed{};
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Warning};
+        const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+        const auto start = std::chrono::steady_clock::now();
+        installed = try_install_at(page.addr(0), "IncompatibleCoordinator");
+        elapsed = std::chrono::steady_clock::now() - start;
+        text = capture.read_all();
+    }
+    (void)VirtualProtect(page.base(), dmk_test::ScratchPage::PAGE_SIZE, previous, &previous);
+    ASSERT_FALSE(installed.has_value());
+    EXPECT_EQ(installed.error().code, ErrorCode::BackendFailed);
+    EXPECT_LT(elapsed, 2s);
+    EXPECT_EQ(count_of(text, WAIT_LINE), 0U) << text;
+    EXPECT_NE(text.find("the process coordinator is incompatible"), std::string::npos) << text;
+}
+
+// A permanent refusal releases the target reservation. After the cause clears, a strict install on the same target
+// succeeds. A leaked reservation blocks or refuses that install.
+TEST(HookInstallCoordinator, PermanentRefusalLeavesNoReservation)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_UNAVAILABLE};
+        const Result<Hook> refused = try_install_at(page.addr(0), "UnavailableCoordinator");
+        ASSERT_FALSE(refused.has_value());
+        EXPECT_EQ(refused.error().code, ErrorCode::BackendFailed);
+    }
+    EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+    const Result<Hook> installed = install_strict_at(page.addr(0), "AfterUnavailableCoordinator");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+}
+
+// A holder keeps the coordinator past one backend wait slice. The install waits for the release, installs, and logs one
+// wait line that names the holder thread.
+TEST(HookInstallCoordinator, InstallWaitsForAHolderPastTheWaitSlice)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    std::string text;
+    Result<Hook> installed = std::unexpected(Error{ErrorCode::UnknownError, "unset"});
+    bool released_before_return = false;
+    DWORD holder_thread = 0;
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Warning};
+        {
+            const CoordinatorHolder holder{2500ms};
+            ASSERT_TRUE(holder.held());
+            holder_thread = holder.thread_id();
+            installed = try_install_at(page.addr(0), "WaitPastSlice");
+            released_before_return = holder.released();
+        }
+        text = capture.read_all();
+    }
+    EXPECT_TRUE(released_before_return);
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_EQ(count_of(text, WAIT_LINE), 1U) << text;
+    EXPECT_NE(text.find("held by thread " + std::to_string(holder_thread)), std::string::npos) << text;
+}
+
+// Public toggles wait for a holder past one wait slice, then write the target.
+TEST(HookToggle, EnableAndDisableWaitForAHolderPastTheWaitSlice)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    Result<Hook> installed = try_install_at(page.addr(0), "ToggleWaitPastSlice");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    {
+        const CoordinatorHolder holder{2500ms};
+        ASSERT_TRUE(holder.held());
+        const Result<void> enabled = hook.enable();
+        EXPECT_TRUE(holder.released());
+        ASSERT_TRUE(enabled.has_value()) << enabled.error().message();
+    }
+    EXPECT_TRUE(hook.is_enabled());
+    {
+        const CoordinatorHolder holder{2500ms};
+        ASSERT_TRUE(holder.held());
+        const Result<void> disabled = hook.disable();
+        EXPECT_TRUE(holder.released());
+        ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
+    }
+    EXPECT_FALSE(hook.is_enabled());
 }

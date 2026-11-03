@@ -84,17 +84,13 @@ namespace DetourModKit
              *        @ref hook::Options::fail_if_already_hooked exact same-kit gate.
              * @return A @ref Reservation. On @ref ReserveStatus::Reserved the id is appended newest-last and is next in
              *         the per-target queue.
-             * @details Folding the check and the record into one locked step closes the time-of-check/time-of-use gap a
-             *          separate is_target_hooked + record left open. Reservations also wait their turn in creation
-             *          order, so two permissive same-target installs cannot patch concurrently or invert the layering
-             *          order. Allocation or lock failure returns OutOfMemory so the caller fails the install closed
-             *          rather than installing a live-but-unledgered hook that duplicate detection and layer tracking
-             *          cannot see.
-             * @warning Setup/control-plane only, and NOT reentrant for a single target on one thread: a thread MUST
-             *          commit or roll back its reservation before reserving the SAME @p target again, or the second
-             *          call blocks forever waiting for the first (which the same thread still holds) to leave the
-             *          queue. DMK's install paths honor this and never install reentrantly from a detour, so the
-             *          deadlock is unreachable in supported use; it is a caller error, not a defect.
+             * @details One locked step checks and records, so no same-target install slips between them. Reservations
+             *          wait their turn in creation order, so two permissive same-target installs cannot patch
+             *          concurrently or invert the layer order. Allocation or lock failure returns OutOfMemory, so the
+             *          install fails closed instead of a live hook that the ledger cannot see.
+             * @warning Setup/control-plane only, with no wait cap. A thread must commit or roll back its reservation
+             *          before it reserves the same @p target again, or the second call blocks forever. A caller must
+             *          not reserve while it holds the backend process coordinator (`[B-109]`).
              */
             [[nodiscard]] Reservation try_reserve_hook(std::uintptr_t target, bool refuse_if_hooked) noexcept;
 

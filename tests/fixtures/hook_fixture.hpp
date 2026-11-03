@@ -12,6 +12,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/hook.hpp"
+#include "internal/hook_coordinator.hpp"
 #include "internal/hook_publication.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
@@ -258,6 +259,7 @@ namespace DetourModKit::detail
 
     void set_backend_gateway_park_for_test(bool park) noexcept;
     [[nodiscard]] bool backend_gateway_park_reached_for_test() noexcept;
+    void set_backend_coordinator_refusal_for_test(unsigned refusal) noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -563,6 +565,71 @@ namespace dmk_test::hook_fixture
         std::atomic<DWORD> m_thread_id{0};
         // Declared last, so the member teardown joins the thread before the result goes away.
         std::jthread m_thread;
+    };
+
+    /// The backend coordinator seam modes: 1 refuses as Unavailable, 2 as Incompatible, and 3 once as Timeout.
+    inline constexpr unsigned COORDINATOR_UNAVAILABLE = 1;
+    inline constexpr unsigned COORDINATOR_INCOMPATIBLE = 2;
+    inline constexpr unsigned COORDINATOR_TIMEOUT_ONCE = 3;
+
+    /// Arms one backend coordinator refusal mode for the scope.
+    class CoordinatorRefusalScope
+    {
+    public:
+        explicit CoordinatorRefusalScope(unsigned refusal) noexcept
+        {
+            DetourModKit::detail::set_backend_coordinator_refusal_for_test(refusal);
+        }
+        ~CoordinatorRefusalScope() noexcept { DetourModKit::detail::set_backend_coordinator_refusal_for_test(0); }
+        CoordinatorRefusalScope(const CoordinatorRefusalScope &) = delete;
+        CoordinatorRefusalScope &operator=(const CoordinatorRefusalScope &) = delete;
+        CoordinatorRefusalScope(CoordinatorRefusalScope &&) = delete;
+        CoordinatorRefusalScope &operator=(CoordinatorRefusalScope &&) = delete;
+    };
+
+    /// Holds the backend process coordinator on a helper thread for a duration longer than one backend wait slice.
+    class CoordinatorHolder
+    {
+    public:
+        explicit CoordinatorHolder(std::chrono::milliseconds duration)
+            : m_thread(
+                  [this, duration]() -> void
+                  {
+                      const DetourModKit::detail::BackendCoordinatorHold hold;
+                      m_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
+                      m_held.store(static_cast<bool>(hold), std::memory_order_relaxed);
+                      m_entered.store(true, std::memory_order_release);
+                      if (hold)
+                      {
+                          std::this_thread::sleep_for(duration);
+                      }
+                      // Set before the release, so a wait that ends observes it.
+                      m_released.store(true, std::memory_order_release);
+                  }
+              )
+        {
+            while (!m_entered.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+
+        ~CoordinatorHolder() { m_thread.join(); }
+        CoordinatorHolder(const CoordinatorHolder &) = delete;
+        CoordinatorHolder &operator=(const CoordinatorHolder &) = delete;
+        CoordinatorHolder(CoordinatorHolder &&) = delete;
+        CoordinatorHolder &operator=(CoordinatorHolder &&) = delete;
+
+        [[nodiscard]] bool held() const noexcept { return m_held.load(std::memory_order_relaxed); }
+        [[nodiscard]] bool released() const noexcept { return m_released.load(std::memory_order_acquire); }
+        [[nodiscard]] DWORD thread_id() const noexcept { return m_thread_id.load(std::memory_order_relaxed); }
+
+    private:
+        std::atomic<bool> m_entered{false};
+        std::atomic<bool> m_held{false};
+        std::atomic<bool> m_released{false};
+        std::atomic<DWORD> m_thread_id{0};
+        std::thread m_thread;
     };
 #endif
 } // namespace dmk_test::hook_fixture

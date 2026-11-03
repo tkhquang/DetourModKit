@@ -1330,7 +1330,9 @@ TEST(HookDiagnosticContainment, RiskyPrologueWarningContainsEveryAllocationFailu
 {
     DMK_REQUIRE_PROXY_FREE_STL();
     dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning, DetourModKit::DEFAULT_TIMESTAMP_FORMAT};
-    const HookModuleRefFailureScope fail_module_ref;
+    // The throw after the backend create fails each install after its classification logged the warning.
+    s_oom_throw_step = DetourModKit::detail::HookPublishStep::BackendCreated;
+    const HookPublishProbeScope stop_after_create(&oom_throwing_probe);
     sweep_allocation_failures(
         [](long long allow) -> long long
         {
@@ -1402,7 +1404,9 @@ TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailur
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     Hook base = std::move(*installed);
     dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning, DetourModKit::DEFAULT_TIMESTAMP_FORMAT};
-    const HookModuleRefFailureScope fail_module_ref;
+    // The throw after the backend create fails each install after its classification logged the warning.
+    s_oom_throw_step = DetourModKit::detail::HookPublishStep::BackendCreated;
+    const HookPublishProbeScope stop_after_create(&oom_throwing_probe);
     sweep_allocation_failures(
         [&page](long long allow) -> long long
         {
@@ -1439,7 +1443,9 @@ TEST(HookDiagnosticContainment, ForeignJumpWarningContainsEveryAllocationFailure
     std::memcpy(reinterpret_cast<void *>(page->addr(2)), &foreign_destination, sizeof(foreign_destination));
     page->put(10, {0xFF, 0xE0});
     dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning, DetourModKit::DEFAULT_TIMESTAMP_FORMAT};
-    const HookModuleRefFailureScope fail_module_ref;
+    // The throw after the backend create fails each install after its classification logged the warning.
+    s_oom_throw_step = DetourModKit::detail::HookPublishStep::BackendCreated;
+    const HookPublishProbeScope stop_after_create(&oom_throwing_probe);
     sweep_allocation_failures(
         [page](long long allow) -> long long
         {

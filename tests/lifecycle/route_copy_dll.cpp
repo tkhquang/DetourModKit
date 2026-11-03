@@ -12,10 +12,12 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -160,6 +162,8 @@ namespace
     std::atomic<std::uintptr_t> s_trampoline{0};
     std::atomic<unsigned> s_hits{0};
     std::atomic<unsigned> s_warnings{0};
+    std::atomic<unsigned> s_wait_warnings{0};
+    std::atomic<unsigned> s_incompatible_warnings{0};
     std::atomic<unsigned> s_dependent_retentions{0};
     std::atomic<bool> s_self_reset{false};
 
@@ -169,6 +173,10 @@ namespace
             return;
         if (message.find("process coordinator unavailable or timed out") != std::string_view::npos)
             s_warnings.fetch_add(1);
+        if (message.find("waits for the process coordinator held by thread") != std::string_view::npos)
+            s_wait_warnings.fetch_add(1);
+        if (message.find("refused enable: the process coordinator is incompatible") != std::string_view::npos)
+            s_incompatible_warnings.fetch_add(1);
         if (message.find("a dependent process route remains registered") != std::string_view::npos)
             s_dependent_retentions.fetch_add(1);
     }
@@ -255,6 +263,10 @@ namespace
             return s_hits.load();
         case Command::Warnings:
             return s_warnings.load();
+        case Command::WaitWarnings:
+            return s_wait_warnings.load();
+        case Command::IncompatibleWarnings:
+            return s_incompatible_warnings.load();
         case Command::DependentRetentions:
             return s_dependent_retentions.load();
         case Command::SelfReset:
@@ -271,6 +283,36 @@ namespace
             return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookResidue);
         case Command::ModulePins:
             return diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook);
+        case Command::CreateLoop:
+        {
+            auto &loop = *static_cast<route_copy::CreateLoop *>(argument);
+            LARGE_INTEGER frequency{};
+            QueryPerformanceFrequency(&frequency);
+            for (std::uint32_t round = 0; round < loop.rounds; ++round)
+            {
+                LARGE_INTEGER start{};
+                LARGE_INTEGER end{};
+                QueryPerformanceCounter(&start);
+                const auto created = hook::inline_at(
+                    {
+                        .name = "route_copy_create_loop",
+                        .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(loop.target)},
+                        .options = {.prologue = hook::Prologue::Relocate, .fail_if_already_hooked = false},
+                    },
+                    &inline_callback
+                );
+                QueryPerformanceCounter(&end);
+                const auto microseconds =
+                    static_cast<std::uint64_t>((end.QuadPart - start.QuadPart) * 1000000 / frequency.QuadPart);
+                loop.install_microseconds_total += microseconds;
+                loop.install_microseconds_max = std::max(loop.install_microseconds_max, microseconds);
+                if (created)
+                    ++loop.created;
+                else if (created.error().code == DetourModKit::ErrorCode::TargetPrologueUnsafe)
+                    ++loop.prologue_unsafe;
+            }
+            return loop.created;
+        }
         default:
             break;
         }
@@ -367,6 +409,35 @@ extern "C" __declspec(dllexport) std::uintptr_t route_copy_command(route_copy::C
                 return 0;
             SetEvent(events.entered);
             return WaitForSingleObject(events.release, 15000) == WAIT_OBJECT_0;
+        }
+        case Command::TrapLoop:
+        {
+            // Each window is the trap transaction that a toggle runs, held open for about 50 microseconds.
+            auto &loop = *static_cast<route_copy::TrapLoop *>(argument);
+            auto *const scratch =
+                static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+            if (scratch == nullptr)
+                return 0;
+            LARGE_INTEGER frequency{};
+            QueryPerformanceFrequency(&frequency);
+            const auto hold_window = [&frequency]() -> void
+            {
+                LARGE_INTEGER start{};
+                LARGE_INTEGER now{};
+                QueryPerformanceCounter(&start);
+                do
+                {
+                    QueryPerformanceCounter(&now);
+                } while ((now.QuadPart - start.QuadPart) * 20000 < frequency.QuadPart);
+            };
+            SetEvent(loop.started);
+            while (WaitForSingleObject(loop.stop, 0) == WAIT_TIMEOUT)
+            {
+                if (safetyhook::trap_threads(static_cast<std::uint8_t *>(loop.target), scratch, 6, hold_window))
+                    ++loop.windows;
+            }
+            VirtualFree(scratch, 0, MEM_RELEASE);
+            return 1;
         }
         default:
             break;
