@@ -1301,10 +1301,22 @@ TEST_F(MidHookContextTest, OlderMidHookArmsAboveANewerOne)
     const Address site{reinterpret_cast<std::uintptr_t>(&layered_mid_site)};
     s_older_mid_calls.store(0);
     s_newer_mid_calls.store(0);
-    Result<Hook> older_created = mid_at(MidRequest{.name = "MidLayerOlder", .target = site}, &record_older_mid);
+    Result<Hook> older_created = mid_at(
+        MidRequest{
+            .name = "MidLayerOlder",
+            .target = site,
+        },
+        &record_older_mid
+    );
     ASSERT_TRUE(older_created.has_value()) << older_created.error().message();
     std::optional<Hook> older{std::move(*older_created)};
-    Result<Hook> newer_created = mid_at(MidRequest{.name = "MidLayerNewer", .target = site}, &record_newer_mid);
+    Result<Hook> newer_created = mid_at(
+        MidRequest{
+            .name = "MidLayerNewer",
+            .target = site,
+        },
+        &record_newer_mid
+    );
     ASSERT_TRUE(newer_created.has_value()) << newer_created.error().message();
     std::optional<Hook> newer{std::move(*newer_created)};
 

@@ -2216,6 +2216,26 @@ TEST(InputIntercept, XInputPairArmsAboveANewerLayer)
 {
     const HMODULE fixture = LoadLibraryW(L"hook_target_lib.dll");
     ASSERT_NE(fixture, nullptr) << "hook_target_lib.dll did not load: " << GetLastError();
+    // Restores the shared XInput state on every exit, an early ASSERT_* return included. It runs after `newer`.
+    struct SharedStateCleanup
+    {
+        HMODULE fixture{nullptr};
+        std::uint64_t owner{0};
+        bool owner_installed{false};
+
+        ~SharedStateCleanup() noexcept
+        {
+            set_xinput_detour_body_seam(nullptr);
+            detail::set_xinput_backend_toggle_exception_for_test(nullptr, false);
+            if (owner_installed)
+            {
+                uninstall(owner);
+            }
+            s_newer_xinput_original.store(nullptr, std::memory_order_release);
+            set_xinput_module_override_for_test(nullptr);
+            FreeLibrary(fixture);
+        }
+    } cleanup{fixture};
     auto *const primary = reinterpret_cast<std::uint8_t *>(GetProcAddress(fixture, "XInputGetState"));
     ASSERT_NE(primary, nullptr);
     const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary));
@@ -2223,6 +2243,8 @@ TEST(InputIntercept, XInputPairArmsAboveANewerLayer)
     const std::array<std::uint8_t, 16> pristine = entry_window(primary);
 
     const std::uint64_t owner = next_intercept_owner();
+    cleanup.owner = owner;
+    cleanup.owner_installed = true;
     ASSERT_TRUE(install_xinput(0, owner));
     ASSERT_NE(entry_window(primary), pristine);
 
@@ -2264,14 +2286,12 @@ TEST(InputIntercept, XInputPairArmsAboveANewerLayer)
     set_xinput_detour_body_seam(nullptr);
 
     uninstall(owner);
+    cleanup.owner_installed = false;
     EXPECT_EQ(xinput_module_refs_held(), 0);
     EXPECT_EQ(entry_window(primary), newer_patch)
         << "the member teardown did not hand the entry back to the newer layer";
     EXPECT_TRUE(newer.disable().has_value());
     EXPECT_EQ(entry_window(primary), pristine);
-    s_newer_xinput_original.store(nullptr, std::memory_order_release);
-    set_xinput_module_override_for_test(nullptr);
-    FreeLibrary(fixture);
 }
 
 TEST(InterceptXInputTest, NonOwnerPollerConstructionCannotReplaceActiveOwnersConsumeRules)

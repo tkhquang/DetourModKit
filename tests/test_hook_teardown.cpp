@@ -1881,8 +1881,9 @@ namespace
     }
 
     /**
-     * @brief Retires a lower layer under an upper one and checks that the residue gives its module reference back.
-     * @param arm False keeps both layers unarmed, so the lower layer owns no position and its vacate is refused.
+     * @brief Retires a lower layer under an upper one and checks that it gives its module reference back.
+     * @param arm True arms both layers, so the lower layer retires as a residue. False keeps both unarmed, so no layer
+     *        chains to the lower one and it releases with no residue (`[B-110]`).
      */
     template <int Case> void expect_residue_releases_module_reference(ChainFn target_function, bool arm)
     {
@@ -1908,7 +1909,6 @@ namespace
         }
         ASSERT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook), pins_before + 2);
 
-        // A lower layer that never armed has no chain, so it releases with no residue (`[B-110]`).
         lower.reset();
         EXPECT_EQ(hook_residue_leaks(), residue_before + (arm ? 1 : 0));
         EXPECT_EQ(hook_manager_leaks(), manager_before);

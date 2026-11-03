@@ -251,12 +251,18 @@ namespace
         {
             const bool mid = round.shape == route_copy::HookShape::Mid;
             auto created = mid ? hook::mid_at(
-                                     {.name = "route_copy_two_step_mid", .target = target, .options = options},
+                                     {
+                                         .name = "route_copy_two_step_mid",
+                                         .target = target,
+                                         .options = options,
+                                     },
                                      &stack_callback
                                  )
-                               : hook::inline_at<&counted_callback>(
-                                     {.name = "route_copy_two_step", .target = target, .options = options}
-                                 );
+                               : hook::inline_at<&counted_callback>({
+                                     .name = "route_copy_two_step",
+                                     .target = target,
+                                     .options = options,
+                                 });
             if (!created)
                 return outcome(route_copy::InstallOutcome::OtherFailure);
             if (!mid)
