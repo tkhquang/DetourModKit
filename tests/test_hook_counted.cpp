@@ -21,11 +21,13 @@
 #include <xmmintrin.h>
 
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 
 #include "fixtures/hook_fixture.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -1532,6 +1534,64 @@ TEST(HookCounted, InstallRefusesAThunkWithOneCount)
     );
 }
 
+namespace
+{
+    /**
+     * @brief Repeats the install of the fake thunk @p entry on @p target with one allocation failed per pass, and
+     *        requires that no pass leaves the target reserved.
+     * @details The name is longer than the inline log buffer, so each thunk diagnostic line allocates.
+     */
+    void expect_thunk_install_contains_allocation_failures(
+        EchoFn target,
+        EchoFn entry,
+        DetourModKit::hook::detail::CountedBlock &block
+    )
+    {
+        const dmk_test::LoggerFileCapture capture{LogLevel::Warning};
+        const std::string name(LOG_INLINE_MESSAGE_SIZE, 'N');
+        const auto install = [&](long long allow) -> long long
+        {
+            InlineRequest request = request_for(name.c_str(), target);
+            std::optional<Result<Hook>> result;
+            const long long before = dmk_test::thread_new_calls();
+            {
+                std::optional<dmk_test::AllocFailScope> armed;
+                if (allow >= 0)
+                {
+                    armed.emplace(allow);
+                }
+                result.emplace(
+                    DetourModKit::hook::detail::inline_at_counted(
+                        std::move(request),
+                        DetourModKit::hook::detail::CountedInstall{
+                            .entry = reinterpret_cast<void *>(entry),
+                            .block = &block,
+                        }
+                    )
+                );
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            result.reset();
+            EXPECT_FALSE(is_target_hooked(addr_of(target))) << "allocation " << allow << " left the target reserved";
+            return measured;
+        };
+        const long long budget = install(-1);
+        ASSERT_GT(budget, 0) << "the install exposed no allocation index";
+        for (long long allow = 0; allow < budget; ++allow)
+        {
+            (void)install(allow);
+        }
+    }
+} // namespace
+
+// A thunk diagnostic that fails to allocate neither escapes the install nor keeps the target reserved.
+TEST(HookCounted, ThunkDiagnosticsContainEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    expect_thunk_install_contains_allocation_failures(&branching_thunk_target, &branching_thunk, s_refused_thunk_block);
+    expect_thunk_install_contains_allocation_failures(&helper_site_target, &helper_site_thunk, s_helper_thunk_block);
+}
+
 // The relay jumps into the thunk, so the frame names the return into the function that called the hooked target.
 TEST(HookCounted, CallerFrameCarriesTheGameReturnAddress)
 {
@@ -1923,3 +1983,44 @@ TEST(HookCounted, ThreadAtTheRelayRetires)
     EXPECT_EQ(dmk_test::call_unfolded(&relay_target, RELAY_ARGUMENT), pristine);
 }
 #endif
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(install_target, 353)
+
+    constexpr int INSTALL_DELTA = 0x600;
+    std::atomic<EchoFn> s_install_original{nullptr};
+    std::atomic<int> s_install_detour_calls{0};
+
+    DMK_TEST_NOINLINE int install_detour(int value) noexcept
+    {
+        s_install_detour_calls.fetch_add(1, std::memory_order_relaxed);
+        return s_install_original.load(std::memory_order_acquire)(value) + INSTALL_DELTA;
+    }
+} // namespace
+
+// HookStack::install arms the counted thunk in the hold of its create. The thunk counts the call, so the retirement
+// drains the detour and restores the target.
+TEST(HookCounted, InstallArmsTheCountedThunk)
+{
+    const int pristine = dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT);
+    const std::array<std::uint8_t, 16> pristine_bytes = entry_bytes(&install_target);
+    HookStack stack;
+    const auto installed = stack.install<&install_detour>(InlineInstallRequest{
+        .name = "CountedInstall",
+        .target = addr_of(&install_target),
+        .original = &s_install_original,
+    });
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_TRUE(installed->get().is_enabled());
+    EXPECT_EQ(installed->get().original<EchoFn>(), s_install_original.load(std::memory_order_acquire));
+    EXPECT_EQ(dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT), pristine + INSTALL_DELTA);
+    EXPECT_EQ(s_install_detour_calls.load(std::memory_order_relaxed), 1);
+
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(entry_bytes(&install_target), pristine_bytes);
+    EXPECT_EQ(dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT), pristine);
+}

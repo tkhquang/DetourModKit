@@ -10,6 +10,7 @@
  *          hook::MidContext stays incomplete, so no definition belongs here.
  */
 
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 
 #include "internal/srw_shared_mutex.hpp"
@@ -285,6 +286,56 @@ namespace DetourModKit
                     void *destination,
                     std::optional<CountedThunk> counted
                 );
+
+                /// The warning line and lifecycle event of an @ref arm_installed call, for the install to emit later.
+                struct DeferredArm
+                {
+                    /// The warning text, or null when the arm logs nothing.
+                    const char *warning{nullptr};
+                    std::string_view reason;
+                    std::optional<diagnostics::HookTransition> transition;
+                };
+
+                /**
+                 * @brief Runs the Hook::enable arm on a hook that HookStack::install created under its hold.
+                 * @details The arm writes through the kept target slot of the install and acquires the coordinator
+                 *          again with no wait. The call gate of @p hook is unpublished, so its lock cannot wait. The
+                 *          arm emits nothing: @p deferred receives its warning line and its lifecycle event.
+                 */
+                [[nodiscard]] static Result<void> arm_installed(Hook &hook, DeferredArm &deferred) noexcept;
+
+                /// Logs the warning line of @p deferred for the hook @p name at @p target.
+                static void
+                log_deferred_arm(const DeferredArm &deferred, const std::string &name, std::uintptr_t target) noexcept;
+
+                /// Stores @p original into @p slot with release order.
+                static void publish_original(const OriginalSlot &slot, void *original) noexcept
+                {
+                    slot.publish(original);
+                }
+
+                /**
+                 * @brief Runs the HookStack::install transaction on @p reserved (docs/design/hooking.md `[B-83]`).
+                 * @param create_backend Creates the disabled backend hook from the hook name, under the hold.
+                 * @param hand_off Moves the module reference and the state of the hook kind into the Impl. No step
+                 *        after it can fail.
+                 * @return The stored hook, or the Error of the create or of the arm. A create Error releases the
+                 *         reservation and leaves @p hooks unchanged.
+                 * @details The stack slot, the handle, and the Impl allocate before the hold. Under the hold, the
+                 *          create, the original store, the stack store, and the arm run in that order. The hold
+                 *          releases first, then the kept slot, and then the log lines and lifecycle events run.
+                 *          src/hook.cpp defines it.
+                 */
+                template <class Backend, class CreateBackend, class HandOff>
+                [[nodiscard]] static Result<std::reference_wrapper<Hook>> install_into_stack(
+                    std::vector<std::unique_ptr<Hook>> &hooks,
+                    std::string name,
+                    const ReservedTarget &reserved,
+                    const Options &options,
+                    const OriginalSlot &original,
+                    CreateBackend &&create_backend,
+                    HandOff &&hand_off
+                ) noexcept;
             };
 
             /// The thunk geometry that the install decodes. The positions serve the region-boundary proofs.

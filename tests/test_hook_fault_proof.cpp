@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include "internal/hook_publication.hpp"
 #include "internal/hook_ledger.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
 #include "test_alloc_probe.hpp"
@@ -1452,4 +1454,221 @@ TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
     // Drain the synthetic target so it cannot alias a later assertion.
     (void)ledger.release_hook(target, first.id);
     EXPECT_FALSE(ledger.is_target_hooked(target));
+}
+
+namespace DetourModKit::detail
+{
+    extern HMODULE (*g_hook_module_ref_override)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    DMK_PROOF_TARGET int kept_slot_target(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    using KeptSlotFn = int (*)(int, int);
+    std::atomic<KeptSlotFn> s_kept_slot_original{nullptr};
+    std::atomic<KeptSlotFn> s_kept_slot_peer_original{nullptr};
+    // The detour that a call reaches first belongs to the newest layer.
+    std::atomic<int> s_kept_slot_entries{0};
+    std::atomic<int> s_kept_slot_first_entry{0};
+
+    int kept_slot_detour(int a, int b) noexcept
+    {
+        s_kept_slot_first_entry.store(s_kept_slot_entries.fetch_add(1) + 1);
+        return s_kept_slot_original.load(std::memory_order_acquire)(a, b) + 1000;
+    }
+
+    int kept_slot_peer_detour(int a, int b) noexcept
+    {
+        s_kept_slot_entries.fetch_add(1);
+        return s_kept_slot_peer_original.load(std::memory_order_acquire)(a, b) + 20000;
+    }
+
+    /// Polls @p flag for up to @p milliseconds.
+    [[nodiscard]] bool wait_for_flag(const std::atomic<bool> &flag, int milliseconds) noexcept
+    {
+        for (int elapsed = 0; elapsed < milliseconds && !flag.load(std::memory_order_acquire); ++elapsed)
+        {
+            Sleep(1);
+        }
+        return flag.load(std::memory_order_acquire);
+    }
+
+    HMODULE refuse_module_ref() noexcept
+    {
+        ::SetLastError(ERROR_MOD_NOT_FOUND);
+        return nullptr;
+    }
+
+    class ModuleRefRefusalScope
+    {
+    public:
+        ModuleRefRefusalScope() noexcept { DetourModKit::detail::g_hook_module_ref_override = &refuse_module_ref; }
+        ~ModuleRefRefusalScope() noexcept { DetourModKit::detail::g_hook_module_ref_override = nullptr; }
+        ModuleRefRefusalScope(const ModuleRefRefusalScope &) = delete;
+        ModuleRefRefusalScope &operator=(const ModuleRefRefusalScope &) = delete;
+        ModuleRefRefusalScope(ModuleRefRefusalScope &&) = delete;
+        ModuleRefRefusalScope &operator=(ModuleRefRefusalScope &&) = delete;
+    };
+} // namespace
+
+// The kept slot blocks a later same-target reserver until its release, and the arm of HookStack::install writes
+// through it. A slot of its own for the arm counts a queued reservation of this kit as a newer layer.
+TEST(HookLedgerSlot, CommitKeepsTheSlotForTheArm)
+{
+    using DetourModKit::detail::HookLedger;
+    auto &ledger = HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BA9000;
+
+    const auto first = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
+    ASSERT_EQ(first.status, HookLedger::ReserveStatus::Reserved);
+    EXPECT_FALSE(ledger.commit_hook_keep_slot(target, first.id + 1));
+    EXPECT_FALSE(ledger.commit_hook_keep_slot(target + 0x1000, first.id));
+    ASSERT_TRUE(ledger.commit_hook_keep_slot(target, first.id));
+
+    const auto returned = std::make_shared<std::atomic<bool>>(false);
+    const auto later_id = std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::thread later(
+        [&ledger, returned, later_id]
+        {
+            const auto reserved = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
+            later_id->store(
+                reserved.status == HookLedger::ReserveStatus::Reserved ? reserved.id : 0,
+                std::memory_order_relaxed
+            );
+            returned->store(true, std::memory_order_release);
+        }
+    );
+    EXPECT_FALSE(wait_for_flag(*returned, 50)) << "a later reserver passed the kept slot";
+    ledger.release_target_slot(target, first.id);
+    const bool completed = wait_for_flag(*returned, 2000);
+    EXPECT_TRUE(completed) << "the slot release did not wake the later reserver";
+    if (!completed)
+    {
+        later.detach();
+        return;
+    }
+    later.join();
+    EXPECT_TRUE(ledger.is_target_hooked(target));
+    EXPECT_TRUE(ledger.commit_hook(target, later_id->load(std::memory_order_relaxed)));
+    (void)ledger.release_hook(target, later_id->load(std::memory_order_relaxed));
+    (void)ledger.release_hook(target, first.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+
+    // Two installs of this kit start on one target from one barrier. The first arms through its kept slot while the
+    // second waits in its reservation, so both arm in every round.
+    for (int round = 0; round < 100; ++round)
+    {
+        HookStack first_stack;
+        HookStack second_stack;
+        std::barrier start{2};
+        bool second_armed = false;
+        std::thread peer(
+            [&start, &second_stack, &second_armed]
+            {
+                start.arrive_and_wait();
+                second_armed = second_stack
+                                   .install<&kept_slot_peer_detour>(InlineInstallRequest{
+                                       .name = "KeptSlotPeer",
+                                       .target = addr_of(&kept_slot_target),
+                                       .original = &s_kept_slot_peer_original,
+                                   })
+                                   .has_value();
+            }
+        );
+        start.arrive_and_wait();
+        const bool first_armed = first_stack
+                                     .install<&kept_slot_detour>(InlineInstallRequest{
+                                         .name = "KeptSlotFirst",
+                                         .target = addr_of(&kept_slot_target),
+                                         .original = &s_kept_slot_original,
+                                     })
+                                     .has_value();
+        peer.join();
+        ASSERT_TRUE(first_armed && second_armed) << "round " << round << " lost an arm";
+        s_kept_slot_entries.store(0);
+        s_kept_slot_first_entry.store(0);
+        ASSERT_EQ(call_unfolded(&kept_slot_target, 1, 2), 21003) << "round " << round;
+        const bool first_is_newer = s_kept_slot_first_entry.load() == 1;
+        (first_is_newer ? first_stack : second_stack).clear();
+        (first_is_newer ? second_stack : first_stack).clear();
+        ASSERT_EQ(call_unfolded(&kept_slot_target, 1, 2), 3) << "round " << round;
+    }
+}
+
+// Each install step that fails before the arm leaves the stack, the original slot, the ledger, and the target as
+// they were. A later install of the same target then succeeds.
+TEST(HookStackTest, InstallRollsBackEveryStepOnFailure)
+{
+    HookStack stack;
+    s_kept_slot_original.store(nullptr, std::memory_order_relaxed);
+    const Address target = addr_of(&kept_slot_target);
+    const auto install = [&stack](Address address)
+    {
+        return stack.install<&kept_slot_detour>(InlineInstallRequest{
+            .name = "RollBack",
+            .target = address,
+            .original = &s_kept_slot_original,
+        });
+    };
+    const auto expect_unchanged =
+        [&stack](const Result<std::reference_wrapper<Hook>> &refused, ErrorCode code, Address address)
+    {
+        ASSERT_FALSE(refused.has_value());
+        EXPECT_EQ(refused.error().code, code);
+        EXPECT_TRUE(stack.empty());
+        EXPECT_EQ(s_kept_slot_original.load(std::memory_order_relaxed), nullptr);
+        EXPECT_FALSE(is_target_hooked(address));
+    };
+
+    const auto loader_refused = [&install, target]
+    {
+        const dmk_test::ForcedLoaderProbe loader;
+        return install(target);
+    }();
+    expect_unchanged(loader_refused, ErrorCode::LoaderLockActive, target);
+
+    const auto module_refused = [&install, target]
+    {
+        const ModuleRefRefusalScope refusal;
+        return install(target);
+    }();
+    expect_unchanged(module_refused, ErrorCode::SystemCallFailed, target);
+
+    const auto coordinator_refused = [&install, target]
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+        return install(target);
+    }();
+    expect_unchanged(coordinator_refused, ErrorCode::BackendFailed, target);
+
+    // The second ledger lock is the commit that keeps the slot. The third is its rollback.
+    std::size_t ledger_locks = 0;
+    const auto commit_refused = [&install, target, &ledger_locks]
+    {
+        const LedgerLockFailureScope failure{2};
+        auto refused = install(target);
+        ledger_locks = s_ledger_lock_probe_calls;
+        return refused;
+    }();
+    expect_unchanged(commit_refused, ErrorCode::OutOfMemory, target);
+    EXPECT_EQ(ledger_locks, 3u);
+
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    DWORD previous = 0;
+    ASSERT_NE(VirtualProtect(page.base(), dmk_test::ScratchPage::PAGE_SIZE, PAGE_READWRITE, &previous), 0);
+    const Address scratch{page.addr(0)};
+    expect_unchanged(install(scratch), ErrorCode::TargetPrologueUnsafe, scratch);
+
+    EXPECT_EQ(call_unfolded(&kept_slot_target, 1, 2), 3);
+    const auto installed = install(target);
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_EQ(call_unfolded(&kept_slot_target, 1, 2), 1003);
 }

@@ -196,6 +196,78 @@ namespace
             s_hook.reset();
     }
 
+    // The install rounds keep their hooks here. The host shares the entry counter, so the first detour that a call
+    // reaches belongs to the newest layer.
+    DetourModKit::hook::HookStack s_stack;
+    std::atomic<volatile long *> s_sequence{nullptr};
+    std::atomic<long> s_entry_order{0};
+
+    void note_entry() noexcept
+    {
+        s_hits.fetch_add(1);
+        if (volatile long *sequence = s_sequence.load(std::memory_order_acquire))
+            s_entry_order.store(InterlockedIncrement(sequence), std::memory_order_relaxed);
+    }
+
+    int counted_callback() noexcept
+    {
+        note_entry();
+        return s_original.load(std::memory_order_acquire)();
+    }
+
+    void stack_callback(DetourModKit::hook::MidContext &) noexcept
+    {
+        note_entry();
+    }
+
+    std::uintptr_t outcome(route_copy::InstallOutcome value) noexcept
+    {
+        return static_cast<std::uintptr_t>(value);
+    }
+
+    std::uintptr_t outcome_of(const DetourModKit::Error &error) noexcept
+    {
+        switch (error.code)
+        {
+        case DetourModKit::ErrorCode::LayerConflict:
+            return outcome(route_copy::InstallOutcome::LayerConflict);
+        case DetourModKit::ErrorCode::EnableFailed:
+            return outcome(route_copy::InstallOutcome::EnableFailed);
+        default:
+            return outcome(route_copy::InstallOutcome::OtherFailure);
+        }
+    }
+
+    std::uintptr_t install_round(Command command, const route_copy::InstallRound &round)
+    {
+        namespace hook = DetourModKit::hook;
+        s_sequence.store(round.sequence, std::memory_order_release);
+        s_entry_order.store(0, std::memory_order_relaxed);
+        const DetourModKit::Address target{reinterpret_cast<std::uintptr_t>(round.target)};
+        constexpr hook::Options options{.prologue = hook::Prologue::Relocate, .fail_if_already_hooked = false};
+        if (command == Command::TwoStepInstall)
+        {
+            auto created = hook::inline_at<&counted_callback>(
+                {.name = "route_copy_two_step", .target = target, .options = options}
+            );
+            if (!created)
+                return outcome(route_copy::InstallOutcome::OtherFailure);
+            s_original.store(created->original<TargetFn>(), std::memory_order_release);
+            const auto armed = s_stack.push(std::move(*created)).enable();
+            return armed ? outcome(route_copy::InstallOutcome::Armed) : outcome_of(armed.error());
+        }
+        const auto installed =
+            round.shape == route_copy::HookShape::Mid
+                ? s_stack.install(
+                      hook::MidRequest{.name = "route_copy_stack_mid", .target = target, .options = options},
+                      &stack_callback
+                  )
+                : s_stack.install<&counted_callback>(
+                      {.name = "route_copy_stack", .target = target, .options = options, .original = &s_original}
+                  );
+        return installed ? outcome(route_copy::InstallOutcome::Armed) : outcome_of(installed.error());
+    }
+
     std::uintptr_t policy_command(Command command, void *argument)
     {
         namespace hook = DetourModKit::hook;
@@ -241,8 +313,15 @@ namespace
         }
         case Command::Reset:
             s_hook.reset();
+            s_stack.clear();
+            s_sequence.store(nullptr, std::memory_order_release);
             DetourModKit::memory::shutdown_cache();
             return diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+        case Command::StackInstall:
+        case Command::TwoStepInstall:
+            return install_round(command, *static_cast<const route_copy::InstallRound *>(argument));
+        case Command::EntryOrder:
+            return static_cast<std::uintptr_t>(s_entry_order.load(std::memory_order_relaxed));
         case Command::Disable:
             return s_hook && s_hook->disable().has_value();
         case Command::Enable:

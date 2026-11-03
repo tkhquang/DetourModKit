@@ -11,13 +11,12 @@ The core is five headers. Everything else is optional and layers on top: config 
 | Process lifetime | [`DetourModKit/session.hpp`](../../include/DetourModKit/session.hpp) | `Session::start`, `bootstrap_attach`, `ModInfo` |
 | Pattern scanning | [`DetourModKit/scan.hpp`](../../include/DetourModKit/scan.hpp) | `scan::scan`, `scan::resolve` |
 | Guarded memory | [`DetourModKit/memory.hpp`](../../include/DetourModKit/memory.hpp) | `memory::read`, `memory::write`, `memory::walk` |
-| Function hooking | [`DetourModKit/hook.hpp`](../../include/DetourModKit/hook.hpp) | `hook::inline_at`, `hook::mid_at` |
+| Function hooking | [`DetourModKit/hook.hpp`](../../include/DetourModKit/hook.hpp) | `hook::HookStack::install`, `hook::inline_at`, `hook::mid_at` |
 | Logging | [`DetourModKit/logger.hpp`](../../include/DetourModKit/logger.hpp) | `log()`, `Logger` |
 
 ```cpp
+#include <atomic>
 #include <cstdint>
-#include <optional>
-#include <utility>
 
 #include <DetourModKit/session.hpp>   // Session / ModInfo / bootstrap_attach: the process-lifecycle surface
 #include <DetourModKit/scan.hpp>      // pattern scanning and candidate ladders
@@ -92,53 +91,53 @@ A bare `scan::scan` is fine for prototyping, but a signature that must survive g
 
 ## Install one hook
 
-`hook::inline_at` installs an inline detour and hands back a move-only RAII `Hook`, **disabled**. The target is not patched until you call `enable()`. Drop the handle and the original prologue is restored. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
+`HookStack::install` installs an inline detour and arms it. The stack owns the move-only RAII `Hook` and restores the original prologue at teardown. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
 
-The two steps are not interchangeable. The detour below reaches the original through `g_print_hook`, so the game must not be able to enter it until that global holds the handle. Install, publish, then arm.
+The detour reaches the original through `g_print_original`. The install stores the trampoline there before the arm, so no call enters the detour before the original exists. DMK mods that hook the same function arm in any order.
 
 ```cpp
-using PrintFn = void(__stdcall *)(const char *message, int type);
+using PrintFn = void (*)(const char *message, int type);
 
-// A global handle keeps the hook engaged. Reset it during orderly shutdown before the Session tears down the logger
-// and other process-wide services.
-std::optional<dmk::hook::Hook> g_print_hook;
+// The stack keeps the hook engaged. Clear it during orderly shutdown before the Session tears down the logger and
+// other process-wide services.
+dmk::hook::HookStack g_hooks;
+std::atomic<PrintFn> g_print_original{nullptr};
 
-void __stdcall print_detour(const char *message, int type)
+void print_detour(const char *, int type) noexcept
 {
-    // original<Fn>() is the typed trampoline to the un-hooked function. Nothing can reach this detour before
-    // g_print_hook is armed, and the arming happens after the emplace below, so the handle is always there.
-    if (const auto original = g_print_hook ? g_print_hook->original<PrintFn>() : nullptr)
-    {
-        original("Hooked!", type);
-    }
+    g_print_original.load(std::memory_order_acquire)("Hooked!", type);
 }
 
 // ... inside your init, after the Session exists:
-auto installed = dmk::hook::inline_at(
-    dmk::hook::InlineRequest{
-        .name = "print_hook",
-        .target = dmk::scan::OwnedScanRequest{
-            .ladder = {dmk::scan::Candidate::direct("print", dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
-            .label = "print",
-            .pages = dmk::scan::Pages::Executable,
-            .require_executable_result = true,
+const auto installed = g_hooks.install<&print_detour>(dmk::hook::InlineInstallRequest{
+    .name = "print_hook",
+    .target = dmk::scan::OwnedScanRequest{
+        .ladder = {
+            dmk::scan::Candidate::direct("print_prologue", dmk::scan::Pattern::literal("48 89 5C 24 08 57 48 83 EC 20")),
+            // An inline hook overwrites the prologue. This landmark sits past the longest stolen span, so the scan also
+            // resolves the function after another mod hooks it.
+            dmk::scan::Candidate::direct("print_body", dmk::scan::Pattern::literal("81 FF 00 01 00 00 77"), -15),
         },
+        .label = "print",
+        .pages = dmk::scan::Pages::Executable,
+        .require_executable_result = true,
     },
-    &print_detour);
-if (installed)
+    .original = &g_print_original,
+});
+if (!installed)
 {
-    g_print_hook.emplace(std::move(*installed)); // take ownership for the hook's lifetime
-    if (!g_print_hook->enable() && !g_print_hook->is_enabled())
-    {
-        // enable() reported failure AND the target is confirmed unpatched, so dropping the handle is safe. If the
-        // hook were still enabled here (enable() returned DisableFailed after a failed rollback), retain it and
-        // quiesce or retry teardown instead of resetting a live hook.
-        g_print_hook.reset();
-    }
+    // A failed create changes nothing. A failed arm keeps the hook in g_hooks, which still owns its teardown.
+    session.log().warning("print_hook: {}", installed.error().message());
 }
 ```
 
-`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. DMK classifies the target under the process coordinator, so an install waits out a patch that another mod has in flight on the same function. A target whose bytes stay outside readable executable committed memory is refused under both policies. The pre-flight does not reject a relative call prologue on sight. Whether the backend can relocate it is left to the backend, so the install can still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
+The counted form takes the detour as a template argument and counts its calls, so `HookStack::retire` can prove the detour idle. `hook::inline_at` returns a disabled hook for code that publishes more state before `enable()`. Another mod can create a hook between those two calls, and the arm then fails with `ErrorCode::LayerConflict`.
+
+By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. DMK classifies the target under the process coordinator, so an install waits out a patch that another mod has in flight on the same function.
+
+A target whose bytes stay outside readable executable committed memory is refused under both policies. The pre-flight does not reject a relative call prologue on sight. The backend decides whether it can relocate the prologue. The install can therefore still fail with `ErrorCode::BackendFailed`, and the log names the backend reason.
+
+The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
 
 ## Where to go next
 
