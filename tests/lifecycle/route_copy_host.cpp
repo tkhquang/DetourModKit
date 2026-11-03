@@ -336,6 +336,32 @@ namespace
                    : static_cast<CoordinatorHeader *>(MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0));
     }
 
+    // Runs the action while the holder participant owns the process coordinator, and releases the coordinator after
+    // hold_ms whether the action returned or not. Returns false without the action when the holder cannot acquire it.
+    template <class Action> bool while_held_for(Participant &holder, DWORD hold_ms, Action &&action)
+    {
+        route_copy::HoldEvents events{
+            .entered = CreateEventW(nullptr, TRUE, FALSE, nullptr),
+            .release = CreateEventW(nullptr, TRUE, FALSE, nullptr),
+        };
+        std::thread owner([&holder, &events]() -> void { holder.run(Command::HoldCoordinator, &events); });
+        const bool entered = WaitForSingleObject(events.entered, WAIT_MS) == WAIT_OBJECT_0;
+        std::thread timer(
+            [&events, hold_ms]() -> void
+            {
+                Sleep(hold_ms);
+                SetEvent(events.release);
+            }
+        );
+        if (entered)
+            action();
+        timer.join();
+        owner.join();
+        CloseHandle(events.entered);
+        CloseHandle(events.release);
+        return entered;
+    }
+
     // The host creates the coordinator mapping before any participant connects. A wrong magic, version, or size must
     // refuse the connection before the participant trusts its canonical address. A canonical address that is unmapped
     // or that names a view of another section must refuse coordination. A live view of the same section connects.
@@ -460,28 +486,83 @@ namespace
         return 0;
     }
 
-    // A held coordinator refuses an arm, a disarm, and the teardown restore of an armed hook. Each warning names the
-    // cause.
+    // A toggle waits for a peer that holds the coordinator past one wait slice and logs one wait line for each wait. An
+    // incompatible coordinator refuses a toggle at once and names its cause. A teardown restore keeps its bounded wait
+    // and reports the refusal.
     int report_coordinator_refusal(Participant &first, Participant &second, unsigned char *page)
     {
+        constexpr DWORD HOLD_PAST_SLICE_MS = 2500;
         TargetFn volatile target = reinterpret_cast<TargetFn>(page);
         if (first.run(Command::Install, page) == 0 || target() != 37 || first.run(Command::Disable) == 0)
             return fail("the first hook did not execute and disarm");
-        std::uintptr_t armed = 1;
-        std::uintptr_t disarmed = 1;
-        std::uintptr_t leaks = 0;
-        if (!while_held(second, [&first, &armed]() -> void { armed = first.run(Command::Enable); }) ||
-            first.run(Command::Enable) == 0 ||
-            !while_held(
+        std::uintptr_t armed = 0;
+        std::uintptr_t disarmed = 0;
+        std::uint64_t armed_ms = 0;
+        if (!while_held_for(
                 second,
-                [&first, &disarmed, &leaks]() -> void
+                HOLD_PAST_SLICE_MS,
+                [&first, &armed, &armed_ms]() -> void
                 {
-                    disarmed = first.run(Command::Disable);
-                    leaks = first.run(Command::Reset);
+                    const auto start = GetTickCount64();
+                    armed = first.run(Command::Enable);
+                    armed_ms = GetTickCount64() - start;
                 }
             ) ||
-            armed != 0 || disarmed != 0 || leaks != 1 || first.run(Command::Warnings) != 3 || target() != 37)
-            return fail("a coordinator refusal of a toggle or teardown restore was not reported");
+            !while_held_for(
+                second,
+                HOLD_PAST_SLICE_MS,
+                [&first, &disarmed]() -> void { disarmed = first.run(Command::Disable); }
+            ) ||
+            armed != 1 || disarmed != 1 || armed_ms < 2000 || first.run(Command::WaitWarnings) != 2)
+            return fail("a toggle did not wait for a coordinator holder past one wait slice");
+        first.run(Command::Incompatible);
+        const auto refused = first.run(Command::Enable);
+        first.run(Command::RestoreCoordination);
+        if (refused != 0 || first.run(Command::IncompatibleWarnings) != 1 || first.run(Command::Enable) == 0)
+            return fail("an incompatible coordinator did not refuse a toggle at once with its cause");
+        std::uintptr_t leaks = 0;
+        if (!while_held(second, [&first, &leaks]() -> void { leaks = first.run(Command::Reset); }) || leaks != 1 ||
+            first.run(Command::Warnings) != 1 || target() != 37)
+            return fail("a coordinator refusal of a teardown restore was not reported");
+        return 0;
+    }
+
+    // One copy opens trap windows on the target page under the shared coordinator. The other copy creates and destroys
+    // a disabled inline hook on the same target for 1000 rounds. Each create classifies the settled page, so it never
+    // reads the transient protection of a window and every create succeeds.
+    int create_beside_trap_windows(Participant &first, Participant &second, unsigned char *page)
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        route_copy::TrapLoop trap{
+            .target = page,
+            .started = CreateEventW(nullptr, TRUE, FALSE, nullptr),
+            .stop = CreateEventW(nullptr, TRUE, FALSE, nullptr),
+        };
+        std::uintptr_t trap_result = 0;
+        std::thread windows(
+            [&first, &trap, &trap_result]() -> void { trap_result = first.run(Command::TrapLoop, &trap); }
+        );
+        const bool started = WaitForSingleObject(trap.started, WAIT_MS) == WAIT_OBJECT_0;
+        route_copy::CreateLoop create{.target = page, .rounds = 1000};
+        if (started)
+            second.run(Command::CreateLoop, &create);
+        SetEvent(trap.stop);
+        windows.join();
+        CloseHandle(trap.started);
+        CloseHandle(trap.stop);
+        std::printf(
+            "concurrent create: windows=%u created=%u prologue_unsafe=%u install_us_avg=%llu install_us_max=%llu\n",
+            trap.windows,
+            create.created,
+            create.prologue_unsafe,
+            static_cast<unsigned long long>(create.install_microseconds_total / create.rounds),
+            static_cast<unsigned long long>(create.install_microseconds_max)
+        );
+        if (!started || trap_result != 1 || trap.windows < create.rounds)
+            return fail("the first copy did not open a trap window for each create round");
+        if (create.created != create.rounds || second.run(Command::Records) != 0 ||
+            !executable(reinterpret_cast<std::uintptr_t>(page)) || target() != 37)
+            return fail("a create beside a peer trap window did not succeed");
         return 0;
     }
 
@@ -786,7 +867,8 @@ int main(int argc, char **argv)
         scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
         scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page" &&
         scenario != "retire-inline" && scenario != "legacy-lower" && scenario != "legacy-upper" &&
-        scenario != "legacy-around-claim" && scenario != "budget-floor" && scenario != "retire-closed-route")
+        scenario != "legacy-around-claim" && scenario != "budget-floor" && scenario != "retire-closed-route" &&
+        scenario != "concurrent-create")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -814,6 +896,8 @@ int main(int argc, char **argv)
         return reconcile_stale_state_before_layer_conflict(first, second, page, code);
     if (scenario == "refusal-cause")
         return report_coordinator_refusal(first, second, page);
+    if (scenario == "concurrent-create")
+        return create_beside_trap_windows(first, second, page);
     if (scenario == "retire-inline")
         return retire_older_inline_under_newer_inline(first, second, page);
     if (scenario == "budget-floor")

@@ -138,7 +138,7 @@ if (installed)
 }
 ```
 
-`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. A target whose bytes are not readable executable committed memory is refused under both policies. A relative call prologue is no longer rejected by the pre-flight on sight. Whether the backend can relocate it is left to the backend, so the install can still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
+`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. DMK classifies the target under the process coordinator, so an install waits out a patch that another mod has in flight on the same function. A target whose bytes stay outside readable executable committed memory is refused under both policies. The pre-flight does not reject a relative call prologue on sight. Whether the backend can relocate it is left to the backend, so the install can still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
 
 ## Where to go next
 

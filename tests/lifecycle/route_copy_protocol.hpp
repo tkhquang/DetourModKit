@@ -54,6 +54,14 @@ namespace route_copy
         Top,
         /// Parks the next caller that the route of this copy's hook admits, before its destination.
         HoldDestination,
+        /// Opens backend trap windows on a target until the host stops the loop. The argument is a @ref TrapLoop.
+        TrapLoop,
+        /// Creates and destroys a disabled inline hook on a target for each round. The argument is a @ref CreateLoop.
+        CreateLoop,
+        /// Returns the coordinator wait lines that this copy logged.
+        WaitWarnings,
+        /// Returns the toggle refusals that this copy logged for an incompatible coordinator.
+        IncompatibleWarnings,
     };
 
     /** @brief Host events that delimit ownership of the process coordinator. */
@@ -61,6 +69,26 @@ namespace route_copy
     {
         void *entered{};
         void *release{};
+    };
+
+    /** @brief The target, the stop event, and the window count of a trap window loop. */
+    struct TrapLoop
+    {
+        void *target{};
+        void *started{};
+        void *stop{};
+        std::uint32_t windows{};
+    };
+
+    /** @brief The target, the round count, and the install results of a create loop. */
+    struct CreateLoop
+    {
+        void *target{};
+        std::uint32_t rounds{};
+        std::uint32_t created{};
+        std::uint32_t prologue_unsafe{};
+        std::uint64_t install_microseconds_total{};
+        std::uint64_t install_microseconds_max{};
     };
 
     /** @brief Executes a fixture command and returns its result or address. */

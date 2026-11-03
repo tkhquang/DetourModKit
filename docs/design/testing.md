@@ -34,7 +34,7 @@ Class headers own each multi-lock order. These headers state the current orders:
 
 - [`logger.hpp`](../../include/DetourModKit/logger.hpp) states the logger order.
 - [`input_intercept.hpp`](../../src/internal/input_intercept.hpp) states the intercept order.
-- [`hook.hpp`](../../include/DetourModKit/hook.hpp) states the hook toggle order.
+- [`hook.hpp`](../../include/DetourModKit/hook.hpp) states the hook order, which places the backend process coordinator after the target slot (`[B-109]`). `HookInstallCoordinator.InstallToggleAndRetireKeepTheLockOrder` proves it.
 
 The subsystem notes describe the related concurrency models.
 
@@ -187,7 +187,7 @@ White-box internal suites (`test_x86_decode` over `src/x86_decode.hpp`, `test_in
 - When code inserts a sticky manipulator such as `std::left` into a shared stream, assert a second record's format. `AsyncLoggerTest.MillisecondFieldIsZeroPaddedLeft` is the shape.
 - When a contract promises replacement in place, drive a second registration end to end. A return-value check does not prove the replacement. `ConfigTest.ReloadHotkeyReRegistrationFiresOnPress` is the shape.
 - When a setter is valid before `start()`, observe its effect on the engine that `start(Settings)` builds. `InputTest.SetRequireFocusBeforeStartIsHonored` is the shape.
-- When an operation reads the protection of an executable page, run it inside a backend trap window on that page. Assert that it waits for the window to close. `[B-18]` and `[B-66]` own the exclusion. `TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow` is the shape.
+- When an operation reads the protection of an executable page, run it inside a backend trap window on that page. Assert that it waits for the window to close. `[B-109]` owns the exclusion. `TrapProtect.ProtectGuardWaitsForTheBackendTrapWindow` is the shape, and `HookBackendTrapWindow.*AtWaitsForTheBackendTrapWindow` and `HookBackendTrapWindow.PreflightReadsTheSettledPrologue` cover the hook install.
 - When code converts a path to or from a narrow string, test a component outside CP-1252 and an ill-formed component. `DriftManifestTest.FileRoundTripOutsideAnsiCodePage` and `DriftManifestTest.IllFormedUtf8PathFailsClosed` are the shape.
 - Rebind, removal, clear, and a guard release can deliver an input callback on the caller's thread, as the `Input::shutdown` contract states. From such a callback, call each verb whose contract permits a call from an input callback, under a deadline. A poll-thread callback proof does not cover this path. `Lifecycle.ShutdownFromControlThreadReleaseDoesNotJoinAParkedPollThread` covers `shutdown`.
 

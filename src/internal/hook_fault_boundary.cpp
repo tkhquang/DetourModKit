@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -43,12 +44,112 @@ namespace DetourModKit
         return bound;
     }
 
+    namespace
+    {
+        /// The protection granularity of a mapped section on x86-64 Windows.
+        constexpr std::uintptr_t SECTION_PAGE_BYTES = 0x1000;
+
+        /**
+         * @brief Reports whether every page of [address, address + size) is committed image memory that is readable
+         *        and either executable or writable.
+         * @details A patch window writes its page, so it leaves the page writable. A guard, no-access, read-only, or
+         *          execute-only page keeps that protection until its owner changes it, so it is never a patch window.
+         */
+        [[nodiscard]] bool image_pages_patchable(std::uintptr_t address, std::size_t size) noexcept
+        {
+            constexpr DWORD PATCHABLE_PAGE_FLAGS =
+                PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READWRITE | PAGE_WRITECOPY;
+            if (size > UINTPTR_MAX - address)
+            {
+                return false;
+            }
+            const std::uintptr_t end = address + size;
+            for (std::uintptr_t cursor = address; cursor < end;)
+            {
+                MEMORY_BASIC_INFORMATION region{};
+                if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &region, sizeof(region)) != sizeof(region) ||
+                    region.State != MEM_COMMIT || region.Type != MEM_IMAGE ||
+                    (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                    (region.Protect & PATCHABLE_PAGE_FLAGS) == 0)
+                {
+                    return false;
+                }
+                const std::uintptr_t region_end =
+                    reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+                if (region_end <= cursor)
+                {
+                    return false;
+                }
+                cursor = region_end;
+            }
+            return true;
+        }
+
+        /// Reports whether every byte of [address, address + size) lies in an executable section of one mapped image.
+        [[nodiscard]] bool image_sections_execute(std::uintptr_t address, std::size_t size) noexcept
+        {
+            MEMORY_BASIC_INFORMATION region{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(address), &region, sizeof(region)) != sizeof(region) ||
+                region.State != MEM_COMMIT || region.Type != MEM_IMAGE)
+            {
+                return false;
+            }
+            const auto base = reinterpret_cast<std::uintptr_t>(region.AllocationBase);
+            IMAGE_DOS_HEADER dos{};
+            if (!detail::guarded_read_bytes(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+                dos.e_lfanew <= 0)
+            {
+                return false;
+            }
+            const std::uintptr_t nt = base + static_cast<std::uintptr_t>(dos.e_lfanew);
+            DWORD signature = 0;
+            IMAGE_FILE_HEADER file{};
+            if (!detail::guarded_read_bytes(nt, &signature, sizeof(signature)) || signature != IMAGE_NT_SIGNATURE ||
+                !detail::guarded_read_bytes(nt + sizeof(signature), &file, sizeof(file)))
+            {
+                return false;
+            }
+            const std::uintptr_t table = nt + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + file.SizeOfOptionalHeader;
+            // Section headers ascend by address, so one pass covers a window that spans two adjacent sections.
+            std::uintptr_t cursor = address - base;
+            const std::uintptr_t end = cursor + size;
+            for (WORD index = 0; index < file.NumberOfSections && cursor < end; ++index)
+            {
+                IMAGE_SECTION_HEADER section{};
+                if (!detail::guarded_read_bytes(table + index * sizeof(section), &section, sizeof(section)))
+                {
+                    return false;
+                }
+                const std::uintptr_t begin = section.VirtualAddress;
+                const std::uintptr_t extent =
+                    (static_cast<std::uintptr_t>(section.Misc.VirtualSize) + SECTION_PAGE_BYTES - 1) &
+                    ~(SECTION_PAGE_BYTES - 1);
+                if (cursor < begin || cursor - begin >= extent)
+                {
+                    continue;
+                }
+                if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
+                {
+                    return false;
+                }
+                cursor = begin + extent;
+            }
+            return cursor >= end;
+        }
+    } // namespace
+
     detail::TargetWindowResult detail::validate_backend_steal_window(std::uintptr_t target) noexcept
     {
         // The backend decodes forward with no region bound, so the whole window must be executable and committed.
         if (!is_executable_range(target, BACKEND_MAX_STEAL_WINDOW))
         {
-            return TargetWindowResult{TargetWindowVerdict::NotExecutable, target};
+            // Code runs only from executable pages, so a patcher restores execute access to an image section that
+            // carries it before that code runs again.
+            const TargetWindowVerdict verdict = image_pages_patchable(target, BACKEND_MAX_STEAL_WINDOW) &&
+                                                        image_sections_execute(target, BACKEND_MAX_STEAL_WINDOW)
+                                                    ? TargetWindowVerdict::PatchInFlight
+                                                    : TargetWindowVerdict::NotExecutable;
+            return TargetWindowResult{verdict, target};
         }
 
         // Only a guarded touch finds a guard page or a backing store that fails to fault in.
@@ -79,6 +180,8 @@ namespace DetourModKit
             return "the bytes the backend decodes are not all readable";
         case TargetWindowVerdict::BoundOverrun:
             return "the target function is shorter than the largest patch minimum the backend may select";
+        case TargetWindowVerdict::PatchInFlight:
+            return "a patch window outside the process coordinator holds the target page without execute access";
         case TargetWindowVerdict::Ok:
             return "the target is hookable";
         }

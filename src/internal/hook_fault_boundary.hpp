@@ -74,7 +74,15 @@ namespace DetourModKit
             Ok,
             NotExecutable,
             Unreadable,
-            BoundOverrun
+            BoundOverrun,
+            /**
+             * @brief The window lacks execute access, but each byte lies in an executable image section, and each
+             *        page that lacks execute access is readable and writable.
+             * @details A patcher holds the page in a patch window that closes before the code runs again. A guard,
+             *          no-access, read-only, or execute-only page reports @ref NotExecutable.
+             *          `HookBackendTrapWindow.ClosedImagePageKeepsTheRefusal` pins the split.
+             */
+            PatchInFlight
         };
 
         /**
@@ -93,7 +101,8 @@ namespace DetourModKit
          * @details Requires [target, target + @ref BACKEND_MAX_STEAL_WINDOW) to be executable, committed, and
          *          readable. Requires @ref BACKEND_FALLBACK_MIN_PATCH bytes inside the unwind bound of the target when
          *          one exists. Code with no unwind bound, such as a leaf function or JIT code, passes.
-         * @return @ref TargetWindowVerdict::Ok when the backend may proceed, else the refusal and its address.
+         * @return @ref TargetWindowVerdict::Ok when the backend may proceed, else the refusal and its address. A window
+         *         outside every image, such as JIT code, never reports @ref TargetWindowVerdict::PatchInFlight.
          * @note The window is a worst-case bound. An entry within @ref BACKEND_MAX_STEAL_WINDOW of the end of its
          *       executable region is refused, although the backend can need fewer bytes.
          * @warning A verdict describes the moment it was taken. A concurrent unmap can invalidate it before the caller

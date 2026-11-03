@@ -225,6 +225,15 @@ namespace DetourModKit
                 ProvenByRetire,
             };
 
+            /// An inline or mid hook target that the HookLedger reserved for one install.
+            struct ReservedTarget
+            {
+                std::uintptr_t address{0};
+                std::uint64_t ledger_id{0};
+                /// True when this kit already hooks the target, so the install layers on its own hook.
+                bool preexisting{false};
+            };
+
             /// The access path of hook.cpp and hook_retirement.cpp to the private state of a Hook.
             struct HookAccess
             {
@@ -267,14 +276,12 @@ namespace DetourModKit
                 [[nodiscard]] static TeardownOutcome finish_deferred_restore(DeferredRestore &restore) noexcept;
 
                 /**
-                 * @brief Installs a disabled inline hook whose relay jumps to @p destination, after the preflight
-                 *        reserved @p ledger_id on @p target.
+                 * @brief Installs a disabled inline hook on @p reserved whose relay jumps to @p destination.
                  * @details @p counted carries the thunk of a counted hook. Every failure releases the reservation.
                  */
                 [[nodiscard]] static Result<Hook> install_inline(
                     InlineRequest request,
-                    std::uintptr_t target,
-                    std::uint64_t ledger_id,
+                    const ReservedTarget &reserved,
                     void *destination,
                     std::optional<CountedThunk> counted
                 );
