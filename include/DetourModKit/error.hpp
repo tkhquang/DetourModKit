@@ -77,7 +77,7 @@ namespace DetourModKit
         HookNotFound,
         /// The manager is in teardown and rejects new operations.
         ShutdownInProgress,
-        /// The hook backend reported a failure.
+        /// The hook backend reported a failure, or the process coordinator refused for the process lifetime.
         BackendFailed,
         /// The hook failed to enable.
         EnableFailed,
@@ -114,7 +114,12 @@ namespace DetourModKit
         TargetAlreadyHookedByAnotherModule,
         /// A re-entrant call into the guarded path was rejected.
         ReentrantCallRejected,
-        /// The target prologue is not safe to relocate.
+        /**
+         * @brief The target prologue is not safe to relocate.
+         * @details A hook install returns this code, @ref ReadFaulted, and both `TargetAlreadyHooked` codes only for
+         *          the settled target. It waits out a held coordinator and a patch window first, so a repeat call on
+         *          the same target returns the same code.
+         */
         TargetPrologueUnsafe,
         /// An unclassified hook error: an unmapped backend failure, or a failed hook gate acquisition.
         UnknownError,

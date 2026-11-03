@@ -857,7 +857,7 @@ index 68e44fd..7415d1d 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..c011e3e 100644
+index 8cb1fbe..6868d9f 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -2,9 +2,12 @@
@@ -889,7 +889,7 @@ index 8cb1fbe..c011e3e 100644
  
  struct SystemInfo {
      uint32_t page_size;
-@@ -65,9 +70,274 @@ struct SystemInfo {
+@@ -65,9 +70,289 @@ struct SystemInfo {
  
  SystemInfo SAFETYHOOK_API system_info();
  
@@ -944,6 +944,15 @@ index 8cb1fbe..c011e3e 100644
 +///          and release exports. Records that patch overlapping target bytes share one layer order.
 +class SAFETYHOOK_API ProcessCoordinator final {
 +public:
++    /// @brief Why construction did not acquire the coordinator.
++    enum class Refusal : uint8_t {
++        None,         ///< This object holds the coordinator.
++        Timeout,      ///< Another thread held the coordinator for the whole wait.
++        Poisoned,     ///< A holder ended without a release, so the coordinator refuses for the process.
++        Incompatible, ///< The shared coordinator has another protocol version or layout, or no canonical view.
++        Unavailable,  ///< The system refused to create or query the coordinator objects.
++    };
++
 +    /// @brief Acquires the coordinator. A missing, incompatible, poisoned, or timed-out coordinator, or a mapping with
 +    ///        no canonical view in this process, leaves this object unusable. A later object retries a process
 +    ///        connection that did not complete.
@@ -954,6 +963,10 @@ index 8cb1fbe..c011e3e 100644
 +    ProcessCoordinator& operator=(const ProcessCoordinator&) = delete;
 +    /// @brief Reports whether this object holds the coordinator.
 +    [[nodiscard]] explicit operator bool() const noexcept { return m_state != nullptr; }
++    /// @brief Reports why construction did not acquire the coordinator. Only Timeout can clear on a later attempt.
++    [[nodiscard]] Refusal refusal() const noexcept { return m_refusal; }
++    /// @brief Reports the thread that held the coordinator when the wait timed out, or zero when it is unknown.
++    [[nodiscard]] uint32_t owner_thread() const noexcept { return m_owner_thread; }
 +    /// @brief Registers a route keyed by its trampoline address.
 +    /// @return False for a zero or oversized patch, a full registry, or exhausted creation order.
 +    [[nodiscard]] bool add(uint8_t* target, size_t patch_size, AddressRange trampoline, AddressRange gateway,
@@ -984,6 +997,8 @@ index 8cb1fbe..c011e3e 100644
 +private:
 +    void* m_state{};
 +    bool m_nested{};
++    Refusal m_refusal{};
++    uint32_t m_owner_thread{};
 +};
 +#endif
 +
@@ -1104,7 +1119,7 @@ index 8cb1fbe..c011e3e 100644
 +/// @brief Test-only switch that makes the NtGetNextThread lookup fail, so every pass walks a thread snapshot.
 +extern std::atomic<bool> SAFETYHOOK_API g_next_thread_lookup_failure;
 +/// @brief Selects 0 for no refusal, 1 for unavailable coordination, 2 for an incompatible protocol, or 3 for one
-+///        unavailable acquisition.
++///        acquisition that times out.
 +/// @details The value applies to this participant only.
 +extern std::atomic<unsigned> SAFETYHOOK_API g_coordinator_refusal_for_test;
 +/// @brief Reports the fixed process owner and its bounded route population.
@@ -4355,7 +4370,7 @@ index d3f37f0..d58283b 100644
  
  #endif
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..71839cd 100644
+index 64eb0bb..bd20f2f 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,13 @@
@@ -4380,7 +4395,7 @@ index 64eb0bb..71839cd 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -18,10 +24,355 @@
+@@ -18,10 +24,378 @@
  #else
  #error "Windows.h not found"
  #endif
@@ -4461,7 +4476,8 @@ index 64eb0bb..71839cd 100644
 +    return same;
 +}
 +
-+[[nodiscard]] CoordinatorState* connect_coordinator() noexcept {
++[[nodiscard]] CoordinatorState* connect_coordinator(ProcessCoordinator::Refusal& refusal) noexcept {
++    refusal = ProcessCoordinator::Refusal::Unavailable;
 +    FILETIME created{}, exited{}, kernel{}, user{};
 +    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
 +        return nullptr;
@@ -4477,6 +4493,8 @@ index 64eb0bb..71839cd 100644
 +        return nullptr;
 +    const DWORD acquired = WaitForSingleObject(mutex, COORDINATOR_WAIT_MS);
 +    if (acquired != WAIT_OBJECT_0 && acquired != WAIT_ABANDONED) {
++        if (acquired == WAIT_TIMEOUT)
++            refusal = ProcessCoordinator::Refusal::Timeout;
 +        CloseHandle(mutex);
 +        return nullptr;
 +    }
@@ -4503,6 +4521,9 @@ index 64eb0bb..71839cd 100644
 +            result = view->canonical;
 +            if (acquired == WAIT_ABANDONED)
 +                result->poisoned = true;
++        } else {
++            refusal = acquired == WAIT_ABANDONED ? ProcessCoordinator::Refusal::Poisoned
++                                                 : ProcessCoordinator::Refusal::Incompatible;
 +        }
 +        if (!owner)
 +            UnmapViewOfFile(view);
@@ -4518,12 +4539,15 @@ index 64eb0bb..71839cd 100644
 +
 +std::atomic<CoordinatorState*> g_coordinator_state{nullptr};
 +
-+[[nodiscard]] CoordinatorState* coordinator_state() noexcept {
++[[nodiscard]] CoordinatorState* coordinator_state(ProcessCoordinator::Refusal* refusal = nullptr) noexcept {
 +    if (auto* const state = g_coordinator_state.load(std::memory_order_acquire))
 +        return state;
-+    auto* const state = connect_coordinator();
++    ProcessCoordinator::Refusal connect_refusal{};
++    auto* const state = connect_coordinator(connect_refusal);
 +    if (state != nullptr)
 +        g_coordinator_state.store(state, std::memory_order_release);
++    else if (refusal != nullptr)
++        *refusal = connect_refusal;
 +    return state;
 +}
 +
@@ -4550,10 +4574,16 @@ index 64eb0bb..71839cd 100644
 +ProcessCoordinator::ProcessCoordinator() noexcept {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    unsigned refusal = g_coordinator_refusal_for_test.load();
-+    if (refusal == 1 || (refusal == 3 && g_coordinator_refusal_for_test.compare_exchange_strong(refusal, 0)))
++    if (refusal == 1) {
++        m_refusal = Refusal::Unavailable;
 +        return;
++    }
++    if (refusal == 3 && g_coordinator_refusal_for_test.compare_exchange_strong(refusal, 0)) {
++        m_refusal = Refusal::Timeout;
++        return;
++    }
 +#endif
-+    auto* const state = coordinator_state();
++    auto* const state = coordinator_state(&m_refusal);
 +    if (state == nullptr)
 +        return;
 +    const uint32_t thread_id = current_thread_id();
@@ -4567,10 +4597,17 @@ index 64eb0bb..71839cd 100644
 +        state->owner.store(0, std::memory_order_relaxed);
 +        state->poisoned = true;
 +        ReleaseMutex(state->mutex);
++        m_refusal = Refusal::Poisoned;
 +        return;
 +    }
-+    if (acquired != WAIT_OBJECT_0)
++    if (acquired != WAIT_OBJECT_0) {
++        m_refusal = Refusal::Unavailable;
++        if (acquired == WAIT_TIMEOUT) {
++            m_refusal = Refusal::Timeout;
++            m_owner_thread = state->owner.load(std::memory_order_relaxed);
++        }
 +        return;
++    }
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    const uint32_t expected_version = COORDINATOR_VERSION + (g_coordinator_refusal_for_test.load() == 2 ? 1 : 0);
 +#else
@@ -4578,6 +4615,7 @@ index 64eb0bb..71839cd 100644
 +#endif
 +    if (state->poisoned || state->magic != COORDINATOR_MAGIC || state->version != expected_version ||
 +        state->bytes != sizeof(CoordinatorState)) {
++        m_refusal = state->poisoned ? Refusal::Poisoned : Refusal::Incompatible;
 +        ReleaseMutex(state->mutex);
 +        return;
 +    }
@@ -4736,7 +4774,7 @@ index 64eb0bb..71839cd 100644
  std::expected<uint8_t*, OsError> vm_allocate(uint8_t* address, size_t size, VmAccess access) {
      DWORD protect = 0;
  
-@@ -157,33 +508,215 @@ SystemInfo system_info() {
+@@ -157,33 +531,215 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -4868,7 +4906,11 @@ index 64eb0bb..71839cd 100644
 +
 +// The fixed budget avoids allocation. Enumeration fails if a transaction exceeds it.
 +constexpr size_t MAX_PROTECT_SEGMENTS = 8;
-+
+ 
+-    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
+-    ~TrapManager() {
+-        if (m_trap_veh != nullptr) {
+-            RemoveVectoredExceptionHandler(m_trap_veh);
 +// Enumeration records exact VirtualQuery segments before any protection change.
 +[[nodiscard]] static bool enumerate_protect_segments(
 +    uint8_t* begin, uint8_t* end, std::array<ProtectSegment, MAX_PROTECT_SEGMENTS>& segments, size_t& count) {
@@ -4876,22 +4918,18 @@ index 64eb0bb..71839cd 100644
 +
 +    while (cursor < end) {
 +        MEMORY_BASIC_INFORMATION mbi{};
- 
--    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
--    ~TrapManager() {
--        if (m_trap_veh != nullptr) {
--            RemoveVectoredExceptionHandler(m_trap_veh);
++
 +        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT) {
 +            return false;
-         }
--        is_destructed = true;
++        }
 +
 +        auto* const region_end = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
 +        auto* const segment_end = region_end < end ? region_end : end;
 +
 +        if (segment_end <= cursor || count >= segments.size()) {
 +            return false;
-+        }
+         }
+-        is_destructed = true;
 +
 +        segments[count++] = ProtectSegment{cursor, static_cast<size_t>(segment_end - cursor), 0};
 +        cursor = segment_end;
@@ -4966,7 +5004,7 @@ index 64eb0bb..71839cd 100644
          });
  
          if (search == m_traps.end()) {
-@@ -213,115 +746,1024 @@ public:
+@@ -213,115 +769,1024 @@ public:
          return nullptr;
      }
  
@@ -5309,11 +5347,8 @@ index 64eb0bb..71839cd 100644
 +
 +private:
 +    TrapRuntime* m_runtime;
- };
- 
--std::mutex TrapManager::mutex;
--std::unique_ptr<TrapManager> TrapManager::instance;
--bool TrapManager::is_destructed = false;
++};
++
 +[[nodiscard]] static TrapRuntime* trap_runtime() noexcept {
 +    static TrapRuntime* const runtime = new (std::nothrow) TrapRuntime{};
 +    static TrapShutdown shutdown{runtime};
@@ -5416,8 +5451,11 @@ index 64eb0bb..71839cd 100644
 +    std::array<DWORD, MAX_SCANNED_THREADS> m_ids{};
 +    std::array<bool, MAX_SCANNED_THREADS> m_suspended{};
 +    size_t m_count{0};
-+};
-+
+ };
+ 
+-std::mutex TrapManager::mutex;
+-std::unique_ptr<TrapManager> TrapManager::instance;
+-bool TrapManager::is_destructed = false;
 +using NtGetNextThreadFn = LONG(NTAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
 +
 +// Resolved once. ntdll stays mapped for the process lifetime, so the address never goes stale.
@@ -5706,7 +5744,8 @@ index 64eb0bb..71839cd 100644
 +size_t trap_restore_trace_size_for_test() noexcept {
 +    return g_trap_restore_trace_size.load(std::memory_order_acquire);
 +}
-+
+ 
+-void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +uint8_t* trap_restore_trace_address_for_test(size_t index) noexcept {
 +    if (index >= trap_restore_trace_size_for_test() || index >= g_trap_restore_trace.size()) {
 +        return nullptr;
@@ -5736,8 +5775,7 @@ index 64eb0bb..71839cd 100644
 +std::expected<void, OsError> trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +    return trap_threads(from, to, len, len, {}, run_fn);
 +}
- 
--void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++
 +std::expected<void, OsError> trap_threads(uint8_t* original, uint8_t* trampoline, size_t original_size,
 +    size_t trampoline_size, std::span<const InstructionBoundary> boundaries, const std::function<void()>& run_fn,
 +    TrapDirection direction, std::atomic<uint32_t>* route_entries, std::span<const AddressRange> executable_ranges) {
@@ -5789,12 +5827,19 @@ index 64eb0bb..71839cd 100644
 +            new_protect = PAGE_EXECUTE_READWRITE;
 +            break;
 +        }
-+    }
-+
+     }
+ 
+-    auto si = system_info();
+-    auto* from_page_start = align_down(from, si.page_size);
+-    auto* from_page_end = align_up(from + len, si.page_size);
+-    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
+-    auto* vp_end = vp_start + 0x20;
 +    if (new_protect == PAGE_EXECUTE_READWRITE && original_size > 1) {
 +        return std::unexpected{OsError::NON_EXECUTABLE_TRANSACTION_UNAVAILABLE};
 +    }
-+
+ 
+-    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
+-        new_protect = PAGE_EXECUTE_READWRITE;
 +    // The transaction state and both SRW locks live in a never-destroyed cell. Shutdown takes this same lock, so a
 +    // transaction either completes under the registered stable gateway or loses the race and refuses here, before the
 +    // first protection change. No late static caller can touch a destructed C++ mutex.
@@ -5808,8 +5853,10 @@ index 64eb0bb..71839cd 100644
 +    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
 +    if (runtime->transactions_closed) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-+    }
-+
+     }
+ 
+-    if (!TrapManager::is_destructed) {
+-        std::scoped_lock lock{TrapManager::mutex};
 +    {
 +        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
 +        if (!initialize_trap_gateway(*runtime)) {
@@ -5823,13 +5870,8 @@ index 64eb0bb..71839cd 100644
 +        }
 +        runtime->manager->add_trap(
 +            original, trampoline, original_size, trampoline_size, boundaries, direction, route_entries);
-     }
- 
--    auto si = system_info();
--    auto* from_page_start = align_down(from, si.page_size);
--    auto* from_page_end = align_up(from + len, si.page_size);
--    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
--    auto* vp_end = vp_start + 0x20;
++    }
++
 +    const auto remove_trap = [runtime, original] {
 +        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
 +        if (runtime->manager != nullptr) {
@@ -5853,9 +5895,7 @@ index 64eb0bb..71839cd 100644
 +        return VirtualProtect(address, size, protection, previous);
 +    };
 +#endif
- 
--    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
--        new_protect = PAGE_EXECUTE_READWRITE;
++
 +    // VirtualProtect operates on complete pages. The normalized union enters each shared page once.
 +    uint8_t* span0_begin = from_page_start;
 +    uint8_t* span0_end = from_page_end;
@@ -5969,10 +6009,8 @@ index 64eb0bb..71839cd 100644
 +        }
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-     }
- 
--    if (!TrapManager::is_destructed) {
--        std::scoped_lock lock{TrapManager::mutex};
++    }
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_trap_protected_probe != nullptr)
 +        g_trap_protected_probe();

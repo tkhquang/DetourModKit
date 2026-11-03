@@ -49,6 +49,7 @@
 #include "fixtures/scratch_page.hpp"
 #include "fixtures/thread_load.hpp"
 #include "internal/diagnostics_population.hpp"
+#include "internal/hook_coordinator.hpp"
 #include "test_alloc_probe.hpp"
 
 namespace DetourModKit::detail
@@ -87,7 +88,6 @@ namespace DetourModKit::detail
     [[nodiscard]] std::array<std::size_t, 2> backend_instruction_boundary_trace_for_test(std::size_t index) noexcept;
     [[nodiscard]] std::uint8_t backend_last_inline_error_type_for_test() noexcept;
     void omit_backend_relay_cell_for_test(bool omit) noexcept;
-    void set_backend_coordinator_refusal_for_test(unsigned refusal) noexcept;
     struct BackendCoordinatorCounts
     {
         std::size_t live{0};
@@ -2974,6 +2974,246 @@ TEST(HookBackendTrapWindow, VmtForWaitsForTheBackendTrapWindow)
     ASSERT_TRUE(hook.hook_method(1, &vmt_window_detour).has_value());
     EXPECT_EQ(reinterpret_cast<std::uintptr_t>(hook.original<VmtWindowFn>(1)), method_page.addr(0x140));
 }
+
+namespace
+{
+    /**
+     * @brief Opens a real backend trap window on the first bytes of @p page and runs @p install inside it.
+     * @param inside Runs first inside the window, before the install starts.
+     * @param restore Runs inside the window after the install had 100 ms to return.
+     * @return True when the window restored and @p install returned only after the window closed.
+     */
+    template <class Install>
+    bool install_inside_trap_window(
+        dmk_test::ScratchPage &page,
+        Install &&install,
+        const std::function<void()> &inside = {},
+        const std::function<void()> &restore = {}
+    )
+    {
+        using namespace std::chrono_literals;
+        dmk_test::ScratchPage trampoline;
+        if (!trampoline.ok())
+        {
+            return false;
+        }
+        std::atomic<bool> window_open{false};
+        std::atomic<bool> install_attempted{false};
+        std::atomic<bool> install_returned{false};
+        std::atomic<bool> returned_inside_window{false};
+        DetourModKit::detail::TrapTransactionOutcome outcome = DetourModKit::detail::TrapTransactionOutcome::Threw;
+        std::thread transaction(
+            [&]
+            {
+                outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
+                    page.base(),
+                    trampoline.base(),
+                    6,
+                    [&]
+                    {
+                        if (inside)
+                        {
+                            inside();
+                        }
+                        window_open.store(true, std::memory_order_release);
+                        for (int i = 0; i < 2000 && !install_attempted.load(std::memory_order_acquire); ++i)
+                        {
+                            std::this_thread::sleep_for(1ms);
+                        }
+                        std::this_thread::sleep_for(100ms);
+                        returned_inside_window.store(
+                            install_returned.load(std::memory_order_acquire),
+                            std::memory_order_release
+                        );
+                        if (restore)
+                        {
+                            restore();
+                        }
+                    }
+                );
+            }
+        );
+        while (!window_open.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        install_attempted.store(true, std::memory_order_release);
+        install();
+        install_returned.store(true, std::memory_order_release);
+        transaction.join();
+        return outcome == DetourModKit::detail::TrapTransactionOutcome::Restored &&
+               !returned_inside_window.load(std::memory_order_acquire);
+    }
+} // namespace
+
+// A trap window holds the target page at PAGE_READWRITE under the process coordinator. inline_at classifies the
+// target under that coordinator, so an install that starts inside the window returns only after the window closes.
+TEST(HookBackendTrapWindow, InlineAtWaitsForTheBackendTrapWindow)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = std::unexpected(DetourModKit::Error{ErrorCode::UnknownError, "unset"});
+    EXPECT_TRUE(install_inside_trap_window(page, [&] { installed = install_leaf(page, "TrapWindowInline"); }));
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+}
+
+// The counted form classifies under the same coordinator hold as the raw form.
+TEST(HookBackendTrapWindow, CountedInlineAtWaitsForTheBackendTrapWindow)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = std::unexpected(DetourModKit::Error{ErrorCode::UnknownError, "unset"});
+    EXPECT_TRUE(install_inside_trap_window(
+        page,
+        [&]
+        {
+            installed = inline_at<&detour_leaf>(InlineRequest{
+                .name = "TrapWindowCounted",
+                .target = Address{page.addr(0)},
+            });
+        }
+    ));
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+}
+
+// mid_at classifies under the coordinator after it claims its adapter slot.
+TEST(HookBackendTrapWindow, MidAtWaitsForTheBackendTrapWindow)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = std::unexpected(DetourModKit::Error{ErrorCode::UnknownError, "unset"});
+    EXPECT_TRUE(install_inside_trap_window(page, [&] { installed = install_mid_leaf(page, "TrapWindowMid"); }));
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    const std::size_t calls = s_mid_detour_calls.load(std::memory_order_relaxed);
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_EQ(s_mid_detour_calls.load(std::memory_order_relaxed), calls + 1);
+}
+
+// Inside the window, the transaction writes the first three bytes of an E9 jump and restores the prologue before the
+// window closes. A strict install classifies the settled prologue, so it installs and logs no foreign-hook line.
+TEST(HookBackendTrapWindow, PreflightReadsTheSettledPrologue)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    Result<Hook> installed = std::unexpected(DetourModKit::Error{ErrorCode::UnknownError, "unset"});
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        EXPECT_TRUE(install_inside_trap_window(
+            page,
+            [&]
+            {
+                installed = inline_at(
+                    InlineRequest{
+                        .name = "TrapWindowSettled",
+                        .target = Address{page.addr(0)},
+                        .options = Options{.fail_if_already_hooked = true},
+                    },
+                    reinterpret_cast<void (*)()>(&detour_leaf)
+                );
+            },
+            [&] { page.put(0, {0xE9, 0x10, 0x20}); },
+            [&] { plant_leaf(page); }
+        ));
+        text = capture.read_all();
+    }
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_EQ(text.find("inline hook at target"), std::string::npos) << text;
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+}
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(patch_window_target, 0x7A11)
+
+    int patch_window_detour(int) noexcept
+    {
+        return DETOUR_RESULT;
+    }
+} // namespace
+
+// A patcher outside the process coordinator holds the page of an image function at PAGE_READWRITE for 3 s. The image
+// section of that function carries execute access, so the install waits for the page to turn executable again.
+TEST(HookBackendTrapWindow, InstallWaitsForAPatchWindowOutsideTheCoordinator)
+{
+    using namespace std::chrono_literals;
+    const auto target = reinterpret_cast<std::uintptr_t>(&patch_window_target);
+    const int unhooked = dmk_test::call_unfolded(&patch_window_target, 3);
+    std::atomic<bool> window_open{false};
+    std::atomic<bool> window_closed{false};
+    std::thread patcher(
+        [&]
+        {
+            DWORD previous = 0;
+            if (VirtualProtect(reinterpret_cast<void *>(target), 32, PAGE_READWRITE, &previous) == 0)
+            {
+                window_closed.store(true, std::memory_order_release);
+                window_open.store(true, std::memory_order_release);
+                return;
+            }
+            window_open.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(3s);
+            window_closed.store(true, std::memory_order_release);
+            (void)VirtualProtect(reinterpret_cast<void *>(target), 32, previous, &previous);
+        }
+    );
+    while (!window_open.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    std::string text;
+    Result<Hook> installed = std::unexpected(DetourModKit::Error{ErrorCode::UnknownError, "unset"});
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Warning};
+        installed = inline_at(
+            InlineRequest{
+                .name = "ForeignPatchWindow",
+                .target = Address{target},
+            },
+            &patch_window_detour
+        );
+        text = capture.read_all();
+    }
+    const bool closed_before_return = window_closed.load(std::memory_order_acquire);
+    patcher.join();
+    EXPECT_TRUE(closed_before_return);
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_NE(text.find("waits for a patch window"), std::string::npos) << text;
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(dmk_test::call_unfolded(&patch_window_target, 3), DETOUR_RESULT);
+    ASSERT_TRUE(hook.disable().has_value());
+    EXPECT_EQ(dmk_test::call_unfolded(&patch_window_target, 3), unhooked);
+}
+
+// A page outside every image has no section header, so DMK cannot tell a patch window from a data page. A scratch page
+// left at PAGE_READWRITE refuses at once.
+TEST(HookBackendTrapWindow, NonImageTargetOutsideTheCoordinatorKeepsTheRefusal)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    DWORD previous = 0;
+    ASSERT_NE(VirtualProtect(page.base(), 4096, PAGE_READWRITE, &previous), 0);
+    const Result<Hook> installed = install_leaf(page, "NonImagePatchWindow");
+    (void)VirtualProtect(page.base(), 4096, previous, &previous);
+    ASSERT_FALSE(installed.has_value());
+    EXPECT_EQ(installed.error().code, ErrorCode::TargetPrologueUnsafe);
+}
 #endif
 
 namespace
@@ -3152,7 +3392,6 @@ namespace
     constexpr std::uint64_t RELAY_CELL_SEAL = 0x59414C45524B4D44ULL;
     constexpr std::uint32_t ROUTE_LIVE = 0;
     constexpr std::uint32_t ROUTE_CLOSED = 2;
-    constexpr unsigned COORDINATOR_UNAVAILABLE = 1;
     /// The near patch of the planted leaf covers `mov eax, 1`.
     constexpr std::size_t NEAR_PATCH_SIZE = 5;
     /// The far patch covers `FF 25 00000000` and the 8-byte relay address.
@@ -3472,20 +3711,8 @@ namespace
         RelayCellOmissionScope &operator=(RelayCellOmissionScope &&) = delete;
     };
 
-    /// Refuses the process coordinator for the scope.
-    class CoordinatorRefusalScope
-    {
-    public:
-        explicit CoordinatorRefusalScope(unsigned refusal) noexcept
-        {
-            DetourModKit::detail::set_backend_coordinator_refusal_for_test(refusal);
-        }
-        ~CoordinatorRefusalScope() noexcept { DetourModKit::detail::set_backend_coordinator_refusal_for_test(0); }
-        CoordinatorRefusalScope(const CoordinatorRefusalScope &) = delete;
-        CoordinatorRefusalScope &operator=(const CoordinatorRefusalScope &) = delete;
-        CoordinatorRefusalScope(CoordinatorRefusalScope &&) = delete;
-        CoordinatorRefusalScope &operator=(CoordinatorRefusalScope &&) = delete;
-    };
+    using dmk_test::hook_fixture::COORDINATOR_UNAVAILABLE;
+    using dmk_test::hook_fixture::CoordinatorRefusalScope;
 
     /**
      * @brief Commits one read-write page above @p floor and within 2 GB of it, and frees it at scope exit.
@@ -4821,6 +5048,55 @@ TEST(HookToggleWarning, CoordinatorRefusedDisableNamesTheNewerParticipant)
     EXPECT_FALSE(hook.is_enabled());
     EXPECT_EQ(read_prologue_span(page), pristine) << "the second disable did not restore";
     EXPECT_EQ(call_target(page), LEAF_RESULT);
+}
+
+// Each refusal of the bounded backend wait names its cause, so a waiter can tell the one cause that clears by itself
+// from the causes that stay for the process.
+TEST(HookBackendCoordinator, RefusalNamesItsCause)
+{
+    using DetourModKit::detail::BackendCoordinatorHold;
+    using DetourModKit::detail::CoordinatorHoldRefusal;
+    {
+        const BackendCoordinatorHold held;
+        ASSERT_TRUE(held);
+        EXPECT_EQ(held.refusal(), CoordinatorHoldRefusal::None);
+    }
+    const auto refusal_under = [](unsigned mode) -> CoordinatorHoldRefusal
+    {
+        const CoordinatorRefusalScope refusal{mode};
+        const BackendCoordinatorHold hold;
+        return hold ? CoordinatorHoldRefusal::None : hold.refusal();
+    };
+    EXPECT_EQ(refusal_under(COORDINATOR_UNAVAILABLE), CoordinatorHoldRefusal::Unavailable);
+    EXPECT_EQ(refusal_under(2), CoordinatorHoldRefusal::Incompatible);
+    EXPECT_EQ(refusal_under(3), CoordinatorHoldRefusal::Timeout);
+
+    // A real holder on another thread outlasts one bounded wait.
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::thread holder(
+        [&entered, &release]() -> void
+        {
+            const BackendCoordinatorHold hold;
+            entered.store(static_cast<bool>(hold), std::memory_order_release);
+            while (!release.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    );
+    while (!entered.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    CoordinatorHoldRefusal contended = CoordinatorHoldRefusal::None;
+    {
+        const BackendCoordinatorHold hold;
+        contended = hold ? CoordinatorHoldRefusal::None : hold.refusal();
+    }
+    release.store(true, std::memory_order_release);
+    holder.join();
+    EXPECT_EQ(contended, CoordinatorHoldRefusal::Timeout);
 }
 #endif // DMK_ENABLE_TEST_SEAMS
 

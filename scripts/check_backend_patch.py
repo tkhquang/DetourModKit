@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "3791d71b91e612122551c5a27f256a3c4d1fbb0a48cad5c4caeeccafef326d5a"
+EXPECTED_PATCH_SHA256 = "146f128e35ec49e2e3b69275f1f6fb8e71f9464658f7707a93ada36bf392295d"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -231,6 +231,8 @@ PROCESS_COORDINATOR_SENTINELS = [
     "restore_refused = !disabled && disabled.error().type == Error::COORDINATION_UNAVAILABLE;",
     "is_canonical_view(view, view->canonical)",  # a mapping that another process created cannot redirect writes
     "if (reason != RouteRetentionReason::None) {",  # every unpublished retention converts its reservation to a charge
+    "refusal = ProcessCoordinator::Refusal::Timeout;",  # a first connection that times out names a transient cause
+    "m_owner_thread = state->owner.load(std::memory_order_relaxed);",  # a timed-out wait names its holder
 ]
 
 REQUIRED_SENTINELS += PROCESS_COORDINATOR_SENTINELS

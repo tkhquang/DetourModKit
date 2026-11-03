@@ -1841,7 +1841,8 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper legacy-upper
   Lifecycle.RouteCopiesLegacyAroundClaimedPosition legacy-around-claim
   Lifecycle.RouteCopiesResidueBudgetFloorPins budget-floor
-  Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed retire-closed-route)
+  Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed retire-closed-route
+  Lifecycle.ConcurrentCopiesCreateOnOneTarget concurrent-create)
 while(route_copy_proofs)
   list(POP_FRONT route_copy_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}

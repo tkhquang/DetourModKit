@@ -1195,26 +1195,15 @@ namespace DetourModKit
             }
         }
 
-        /// ReservedTarget contains the resolved target and its ledger id from @ref preflight_target.
-        struct PreflightResult
-        {
-            std::uintptr_t address{0};
-            std::uint64_t ledger_id{0};
-        };
-
         /**
-         * @brief Resolves, validates, checks, and reserves a ledger slot for an inline or mid hook target.
-         * @return The target address and its reserved ledger id, or the Error that fails the install.
-         * @details Waits until the reservation is first in the target queue. Backend patches for one target
-         *          follow creation order. On success, the caller owns the returned ledger id. Commit it before handle
+         * @brief Resolves @p target and reserves it in the HookLedger. Reads no target byte.
+         * @return The reserved target, or the Error that fails the install with nothing reserved.
+         * @details Waits until the reservation is first in the target queue, so backend patches for one target
+         *          follow creation order. On success, the caller owns the reservation. Commit it before handle
          *          publication, or roll it back through HookLedger::release_hook.
          */
-        Result<PreflightResult> preflight_target(
-            const hook::Target &target,
-            const hook::Options &options,
-            std::string_view name,
-            const char *where
-        ) noexcept
+        Result<hook::detail::ReservedTarget>
+        reserve_target(const hook::Target &target, const hook::Options &options, const char *where) noexcept
         {
             Result<std::uintptr_t> resolved = resolve_target(target);
             if (!resolved)
@@ -1225,30 +1214,6 @@ namespace DetourModKit
             if (address == 0)
             {
                 return std::unexpected(Error{ErrorCode::InvalidTargetAddress, where});
-            }
-
-            // The backend capability floor runs before any reservation, so a refusal needs no rollback.
-            // Options::prologue does not alter this check. Prologue::Relocate must not authorize an unreadable
-            // prologue.
-            const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
-            if (window.verdict != detail::TargetWindowVerdict::Ok)
-            {
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' refused target 0x{:0{}X}: {}.",
-                    name,
-                    address,
-                    sizeof(std::uintptr_t) * 2,
-                    detail::target_window_description(window.verdict)
-                );
-                return std::unexpected(
-                    Error{
-                        window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
-                                                                                  : ErrorCode::TargetPrologueUnsafe,
-                        where,
-                        window.detail
-                    }
-                );
             }
 
             // try_reserve_hook folds the same-kit duplicate check and the id record into one locked step, so a
@@ -1264,30 +1229,65 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByThisKit, where, address});
             }
+            return hook::detail::ReservedTarget{address, reservation.id, reservation.preexisting};
+        }
 
-            if (reservation.preexisting)
+        /// What a classification under the coordinator found, apart from a refusal.
+        enum class TargetClassification : std::uint8_t
+        {
+            Hookable,
+            /// A patch window outside the coordinator holds the target. Release the hold, yield, and classify again.
+            PatchInFlight
+        };
+
+        /**
+         * @brief Collects the log lines of one classification, so the install emits them after the hold releases.
+         * @details Holds plain fields only, so a classification under the coordinator allocates nothing.
+         */
+        struct ClassificationLog
+        {
+            detail::CoordinatorHoldRefusal refused_hold{detail::CoordinatorHoldRefusal::None};
+            std::optional<detail::TargetWindowVerdict> refused_window;
+            bool layers_on_this_kit{false};
+            std::optional<std::uintptr_t> foreign_jump_destination;
+            bool breakpoint_relocated{false};
+
+            void emit(std::string_view where, std::string_view name, std::uintptr_t address) const noexcept
             {
-                // If this install layers on a same-kit hook, warn and continue.
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. The layers retire "
-                    "in any order.",
-                    name,
-                    address,
-                    sizeof(std::uintptr_t) * 2
-                );
-            }
-            else
-            {
-                // Consult the foreign-JMP heuristic. On a strict refusal, roll back the reservation before failure.
-                const PrehookDetection prehook = detect_existing_inline_hook(address);
-                if (prehook.state == PrehookState::HookedByOtherModule)
+                if (refused_hold != detail::CoordinatorHoldRefusal::None)
                 {
-                    if (options.fail_if_already_hooked)
-                    {
-                        (void)detail::HookLedger::instance().release_hook(address, reservation.id);
-                        return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByAnotherModule, where, address});
-                    }
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "{}: '{}' cannot hold the process coordinator: {}.",
+                        where,
+                        name,
+                        detail::coordinator_hold_refusal_description(refused_hold)
+                    );
+                }
+                if (refused_window)
+                {
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook: '{}' refused target 0x{:0{}X}: {}.",
+                        name,
+                        address,
+                        sizeof(std::uintptr_t) * 2,
+                        detail::target_window_description(*refused_window)
+                    );
+                }
+                if (layers_on_this_kit)
+                {
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. The layers retire "
+                        "in any order.",
+                        name,
+                        address,
+                        sizeof(std::uintptr_t) * 2
+                    );
+                }
+                if (foreign_jump_destination)
+                {
                     (void)log().try_log(
                         LogLevel::Warning,
                         "hook: '{}' detects another module's inline hook at target 0x{:0{}X} "
@@ -1295,38 +1295,169 @@ namespace DetourModKit
                         name,
                         address,
                         sizeof(std::uintptr_t) * 2,
-                        prehook.jmp_destination,
+                        *foreign_jump_destination,
                         sizeof(std::uintptr_t) * 2
                     );
                 }
+                if (breakpoint_relocated)
+                {
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "hook: '{}' target 0x{:0{}X} begins with {}. Installation continues under the "
+                        "Relocate prologue policy.",
+                        name,
+                        address,
+                        sizeof(std::uintptr_t) * 2,
+                        prologue_risk_description(PrologueRisk::Breakpoint)
+                    );
+                }
+            }
+        };
+
+        /**
+         * @brief Runs the steal-window, foreign-jump, and prologue checks on @p reserved under @p hold (`[B-109]`).
+         * @return The classification, or the Error that fails the install. Every Error releases the reservation. A
+         *         refused @p hold returns BackendFailed before any target read.
+         * @details Collects each log line in @p lines. The foreign-jump check runs only for a target that this kit
+         *          does not hook yet.
+         */
+        [[nodiscard]] Result<TargetClassification> classify_target_under_coordinator(
+            const hook::detail::ReservedTarget &reserved,
+            const hook::Options &options,
+            const char *where,
+            const detail::BackendCoordinatorHold &hold,
+            ClassificationLog &lines
+        ) noexcept
+        {
+            const std::uintptr_t address = reserved.address;
+            const auto refuse = [&reserved](const Error &error) noexcept -> Result<TargetClassification>
+            {
+                (void)detail::HookLedger::instance().release_hook(reserved.address, reserved.ledger_id);
+                return std::unexpected(error);
+            };
+            if (!hold)
+            {
+                lines.refused_hold = hold.refusal();
+                return refuse(Error{ErrorCode::BackendFailed, where, address});
             }
 
-            // Prologue preflight is independent of the layer checks. An unhooked target can still start with a call
-            // thunk or patched int3. On a Fail-policy refusal, roll back the reservation before failure.
+            // Options::prologue does not alter the window check. Prologue::Relocate must not authorize an unreadable
+            // prologue.
+            const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
+            if (window.verdict == detail::TargetWindowVerdict::PatchInFlight)
+            {
+                return TargetClassification::PatchInFlight;
+            }
+            if (window.verdict != detail::TargetWindowVerdict::Ok)
+            {
+                lines.refused_window = window.verdict;
+                return refuse(
+                    Error{
+                        window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
+                                                                                  : ErrorCode::TargetPrologueUnsafe,
+                        where,
+                        window.detail
+                    }
+                );
+            }
+
+            if (reserved.preexisting)
+            {
+                lines.layers_on_this_kit = true;
+            }
+            else if (const PrehookDetection prehook = detect_existing_inline_hook(address);
+                     prehook.state == PrehookState::HookedByOtherModule)
+            {
+                if (options.fail_if_already_hooked)
+                {
+                    return refuse(Error{ErrorCode::TargetAlreadyHookedByAnotherModule, where, address});
+                }
+                lines.foreign_jump_destination = prehook.jmp_destination;
+            }
+
+            // An unhooked target can still start with a call thunk or a patched int3.
             const PrologueRisk risk = classify_prologue_risk(address);
             if (risk == PrologueRisk::Unreadable)
             {
-                (void)detail::HookLedger::instance().release_hook(address, reservation.id);
-                return std::unexpected(Error{ErrorCode::ReadFaulted, where, address});
+                return refuse(Error{ErrorCode::ReadFaulted, where, address});
             }
             if (risk == PrologueRisk::Breakpoint)
             {
                 if (options.prologue == hook::Prologue::Fail)
                 {
-                    (void)detail::HookLedger::instance().release_hook(address, reservation.id);
-                    return std::unexpected(Error{ErrorCode::TargetPrologueUnsafe, where, address});
+                    return refuse(Error{ErrorCode::TargetPrologueUnsafe, where, address});
                 }
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' target 0x{:0{}X} begins with {}. Installation continues under the "
-                    "Relocate prologue policy.",
-                    name,
-                    address,
-                    sizeof(std::uintptr_t) * 2,
-                    prologue_risk_description(risk)
-                );
+                lines.breakpoint_relocated = true;
             }
-            return PreflightResult{address, reservation.id};
+            return TargetClassification::Hookable;
+        }
+
+        /**
+         * @brief Classifies @p reserved and runs @p create_backend under one coordinator hold, then emits the lines.
+         * @return The created backend hook, or the Error that fails the install. Every Error releases the reservation.
+         * @details A patch window outside the coordinator releases the hold, yields one scheduler tick, and classifies
+         *          again, with no attempt count and no time cap. The first such pass logs one line. An exception from
+         *          @p create_backend leaves the reservation to the caller.
+         */
+        template <class CreateBackend>
+        [[nodiscard]] auto create_backend_under_coordinator(
+            const hook::detail::ReservedTarget &reserved,
+            const hook::Options &options,
+            std::string_view name,
+            const char *where,
+            CreateBackend &&create_backend
+        ) -> Result<typename std::invoke_result_t<CreateBackend &>::value_type>
+        {
+            bool patch_wait_logged = false;
+            for (;;)
+            {
+                ClassificationLog lines;
+                std::optional<std::invoke_result_t<CreateBackend &>> created;
+                Result<TargetClassification> classified = TargetClassification::Hookable;
+                {
+                    const detail::BackendCoordinatorHold hold{detail::WaitUntilHeld{where, name}};
+                    classified = classify_target_under_coordinator(reserved, options, where, hold, lines);
+                    if (classified && *classified == TargetClassification::Hookable)
+                    {
+                        created.emplace(create_backend());
+                    }
+                }
+                lines.emit(where, name, reserved.address);
+                if (!classified)
+                {
+                    return std::unexpected(classified.error());
+                }
+                if (*classified == TargetClassification::PatchInFlight)
+                {
+                    if (!std::exchange(patch_wait_logged, true))
+                    {
+                        (void)log().try_log(
+                            LogLevel::Warning,
+                            "{}: '{}' waits for a patch window at 0x{:0{}X} that another patcher holds outside the "
+                            "process coordinator.",
+                            where,
+                            name,
+                            reserved.address,
+                            sizeof(std::uintptr_t) * 2
+                        );
+                    }
+                    ::Sleep(1);
+                    continue;
+                }
+                if (!*created)
+                {
+                    log().error(
+                        "{}: backend create failed for '{}' at {}: {}",
+                        where,
+                        name,
+                        format::format_address(reserved.address),
+                        backend_error_string(created->error())
+                    );
+                    (void)detail::HookLedger::instance().release_hook(reserved.address, reserved.ledger_id);
+                    return std::unexpected(Error{ErrorCode::BackendFailed, where, reserved.address});
+                }
+                return std::move(created->value());
+            }
         }
 
         using detail::apply_backend;
@@ -1999,31 +2130,8 @@ namespace DetourModKit
         }
 #endif
 
-        /**
-         * @brief Checks the backend steal window immediately before the patch and releases @p ledger_id on failure.
-         * @details The self-reference acquire takes the loader lock exactly when another thread can complete an unload.
-         * @warning This check narrows the window but does not close it (see hook_fault_boundary.hpp). It provides error
-         *          attribution, not a safety property.
-         */
-        std::optional<Error>
-        revalidate_before_patch(std::uintptr_t target, std::uint64_t ledger_id, const char *where) noexcept
-        {
-            const detail::TargetWindowResult window = detail::validate_backend_steal_window(target);
-            if (window.verdict == detail::TargetWindowVerdict::Ok)
-            {
-                return std::nullopt;
-            }
-            (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-            return Error{
-                window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
-                                                                          : ErrorCode::TargetPrologueUnsafe,
-                where,
-                window.detail
-            };
-        }
-
-        /// Runs the inline_at entry checks, then resolves and reserves the target through @ref preflight_target.
-        [[nodiscard]] Result<PreflightResult>
+        /// Runs the inline_at entry checks, then resolves and reserves the target through @ref reserve_target.
+        [[nodiscard]] Result<hook::detail::ReservedTarget>
         preflight_inline_request(const hook::InlineRequest &request, const void *detour) noexcept
         {
             if (std::optional<Error> vetoed = hook::refuse_on_loader_lock("hook::inline_at"))
@@ -2041,11 +2149,11 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::inline_at"});
             }
-            return preflight_target(request.target, request.options, request.name, "hook::inline_at");
+            return reserve_target(request.target, request.options, "hook::inline_at");
         }
 
-        /// Runs the mid_at entry checks, then resolves and reserves the target through @ref preflight_target.
-        [[nodiscard]] Result<PreflightResult>
+        /// Runs the mid_at entry checks, then resolves and reserves the target through @ref reserve_target.
+        [[nodiscard]] Result<hook::detail::ReservedTarget>
         preflight_mid_request(const hook::MidRequest &request, hook::MidHookFn detour) noexcept
         {
             if (std::optional<Error> vetoed = hook::refuse_on_loader_lock("hook::mid_at"))
@@ -2063,7 +2171,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::mid_at"});
             }
-            return preflight_target(request.target, request.options, request.name, "hook::mid_at");
+            return reserve_target(request.target, request.options, "hook::mid_at");
         }
 
         /// Claims a mid-adapter slot for mid_at and rolls back the @p ledger_id reservation on failure.
@@ -2215,15 +2323,19 @@ namespace DetourModKit
             return *slot_budget;
         }
 
-        void log_vmt_coordinator_refusal(std::string_view name, const void *object) noexcept
+        void log_vmt_coordinator_refusal(
+            std::string_view name,
+            const void *object,
+            DetourModKit::detail::CoordinatorHoldRefusal refusal
+        ) noexcept
         {
             (void)log().try_log(
                 LogLevel::Warning,
-                "hook::vmt_for: refused VMT hook '{}' on object 0x{:0{}X}: process coordinator unavailable or "
-                "timed out.",
+                "hook::vmt_for: refused VMT hook '{}' on object 0x{:0{}X}: {}.",
                 name,
                 reinterpret_cast<std::uintptr_t>(object),
-                sizeof(std::uintptr_t) * 2
+                sizeof(std::uintptr_t) * 2,
+                DetourModKit::detail::coordinator_hold_refusal_description(refusal)
             );
         }
 
@@ -2254,6 +2366,43 @@ namespace DetourModKit
     {
         BackendCoordinatorHold::BackendCoordinatorHold() noexcept
         {
+            acquire();
+        }
+
+        BackendCoordinatorHold::BackendCoordinatorHold(WaitUntilHeld wait) noexcept
+        {
+            bool logged = false;
+            for (acquire(); m_refusal == CoordinatorHoldRefusal::Timeout; acquire())
+            {
+                const std::uint32_t owner =
+                    std::launder(reinterpret_cast<safetyhook::ProcessCoordinator *>(m_storage))->owner_thread();
+                release();
+                if (std::exchange(logged, true))
+                {
+                    continue;
+                }
+                if (owner != 0)
+                {
+                    (void)log().try_log(
+                        LogLevel::Warning,
+                        "{}: '{}' waits for the process coordinator held by thread {}.",
+                        wait.where,
+                        wait.name,
+                        owner
+                    );
+                    continue;
+                }
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "{}: '{}' waits for the process coordinator held by an unknown thread.",
+                    wait.where,
+                    wait.name
+                );
+            }
+        }
+
+        void BackendCoordinatorHold::acquire() noexcept
+        {
             static_assert(
                 sizeof(safetyhook::ProcessCoordinator) <= STORAGE_BYTES &&
                     alignof(safetyhook::ProcessCoordinator) <= alignof(void *),
@@ -2262,6 +2411,24 @@ namespace DetourModKit
             auto *const coordinator = ::new (static_cast<void *>(m_storage)) safetyhook::ProcessCoordinator();
             m_constructed = true;
             m_held = static_cast<bool>(*coordinator);
+            switch (coordinator->refusal())
+            {
+            case safetyhook::ProcessCoordinator::Refusal::None:
+                m_refusal = CoordinatorHoldRefusal::None;
+                break;
+            case safetyhook::ProcessCoordinator::Refusal::Timeout:
+                m_refusal = CoordinatorHoldRefusal::Timeout;
+                break;
+            case safetyhook::ProcessCoordinator::Refusal::Poisoned:
+                m_refusal = CoordinatorHoldRefusal::Poisoned;
+                break;
+            case safetyhook::ProcessCoordinator::Refusal::Incompatible:
+                m_refusal = CoordinatorHoldRefusal::Incompatible;
+                break;
+            case safetyhook::ProcessCoordinator::Refusal::Unavailable:
+                m_refusal = CoordinatorHoldRefusal::Unavailable;
+                break;
+            }
         }
 
         BackendCoordinatorHold::~BackendCoordinatorHold() noexcept
@@ -2654,12 +2821,13 @@ namespace DetourModKit
 
         Result<Hook> detail::HookAccess::install_inline(
             InlineRequest request,
-            std::uintptr_t target,
-            std::uint64_t ledger_id,
+            const ReservedTarget &reserved,
             void *destination,
             std::optional<CountedThunk> counted
         )
         {
+            const std::uintptr_t target = reserved.address;
+            const std::uint64_t ledger_id = reserved.ledger_id;
             const std::shared_ptr<safetyhook::Allocator> &allocator = backend_allocator();
             if (!allocator)
             {
@@ -2675,32 +2843,30 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
             }
-            if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::inline_at"))
-            {
-                return std::unexpected(*stale);
-            }
             try
             {
                 // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
                 // steps below publish the caller state. No fault boundary wraps this code. See
                 // hook_fault_boundary.hpp.
-                auto created = safetyhook::InlineHook::create(
-                    allocator,
-                    reinterpret_cast<void *>(target),
-                    destination,
-                    safetyhook::InlineHook::StartDisabled,
-                    position_claim_for(request.name)
+                Result<safetyhook::InlineHook> created = create_backend_under_coordinator(
+                    reserved,
+                    request.options,
+                    request.name,
+                    "hook::inline_at",
+                    [&]() -> std::expected<safetyhook::InlineHook, safetyhook::InlineHook::Error>
+                    {
+                        return safetyhook::InlineHook::create(
+                            allocator,
+                            reinterpret_cast<void *>(target),
+                            destination,
+                            safetyhook::InlineHook::StartDisabled,
+                            position_claim_for(request.name)
+                        );
+                    }
                 );
                 if (!created)
                 {
-                    log().error(
-                        "hook::inline_at: backend create failed for '{}' at {}: {}",
-                        request.name,
-                        format::format_address(target),
-                        backend_error_string(created.error())
-                    );
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
+                    return std::unexpected(created.error());
                 }
                 auto backend_hook = std::move(created.value());
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -2769,23 +2935,17 @@ namespace DetourModKit
         {
             Result<Hook> inline_at_raw(InlineRequest request, void *detour)
             {
-                Result<PreflightResult> preflight = preflight_inline_request(request, detour);
+                Result<ReservedTarget> preflight = preflight_inline_request(request, detour);
                 if (!preflight)
                 {
                     return std::unexpected(preflight.error());
                 }
-                return HookAccess::install_inline(
-                    std::move(request),
-                    preflight->address,
-                    preflight->ledger_id,
-                    detour,
-                    std::nullopt
-                );
+                return HookAccess::install_inline(std::move(request), *preflight, detour, std::nullopt);
             }
 
             Result<Hook> inline_at_counted(InlineRequest request, CountedInstall install)
             {
-                Result<PreflightResult> preflight = preflight_inline_request(request, install.entry);
+                Result<ReservedTarget> preflight = preflight_inline_request(request, install.entry);
                 if (!preflight)
                 {
                     return std::unexpected(preflight.error());
@@ -2816,19 +2976,13 @@ namespace DetourModKit
                 }
                 CountedThunk thunk = shape->thunk;
                 thunk.block = install.block;
-                return HookAccess::install_inline(
-                    std::move(request),
-                    preflight->address,
-                    preflight->ledger_id,
-                    thunk.range.begin,
-                    thunk
-                );
+                return HookAccess::install_inline(std::move(request), *preflight, thunk.range.begin, thunk);
             }
         } // namespace detail
 
         Result<Hook> mid_at(MidRequest request, MidHookFn detour)
         {
-            Result<PreflightResult> preflight = preflight_mid_request(request, detour);
+            Result<detail::ReservedTarget> preflight = preflight_mid_request(request, detour);
             if (!preflight)
             {
                 return std::unexpected(preflight.error());
@@ -2851,10 +3005,6 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", acquire_error});
             }
-            if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::mid_at"))
-            {
-                return std::unexpected(*stale);
-            }
             // One adapter exists per live mid hook. MidAdapterSlotGuard releases the slot on every failure path below.
             // No adapter entry occurred because StartDisabled leaves the target unpatched until enable().
             const Result<std::size_t> claim = claim_mid_adapter_slot_or_roll_back_reservation(target, ledger_id);
@@ -2874,23 +3024,25 @@ namespace DetourModKit
             {
                 // This is the StartDisabled install transaction. See inline_at_raw and hook_fault_boundary.hpp. The
                 // destination is the pool slot_index adapter, a real void(safetyhook::Context&).
-                auto created = safetyhook::MidHook::create(
-                    allocator,
-                    reinterpret_cast<void *>(target),
-                    DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
-                    safetyhook::MidHook::StartDisabled,
-                    position_claim_for(request.name)
+                Result<safetyhook::MidHook> created = create_backend_under_coordinator(
+                    *preflight,
+                    request.options,
+                    request.name,
+                    "hook::mid_at",
+                    [&]() -> std::expected<safetyhook::MidHook, safetyhook::MidHook::Error>
+                    {
+                        return safetyhook::MidHook::create(
+                            allocator,
+                            reinterpret_cast<void *>(target),
+                            DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
+                            safetyhook::MidHook::StartDisabled,
+                            position_claim_for(request.name)
+                        );
+                    }
                 );
                 if (!created)
                 {
-                    log().error(
-                        "hook::mid_at: backend create failed for '{}' at {}: {}",
-                        request.name,
-                        format::format_address(target),
-                        backend_error_string(created.error())
-                    );
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
+                    return std::unexpected(created.error());
                 }
                 auto backend_hook = std::move(created.value());
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -3498,10 +3650,12 @@ namespace DetourModKit
             // The slot walk and the clone classify method pages through VirtualQuery. The backend coordinator excludes
             // a trap window that holds such a page at PAGE_READWRITE, which ends the walk early and publishes a
             // truncated clone (`[B-66]`). HookBackendTrapWindow.VmtForWaitsForTheBackendTrapWindow pins the exclusion.
-            DetourModKit::detail::BackendCoordinatorHold coordinator;
+            DetourModKit::detail::BackendCoordinatorHold coordinator{
+                DetourModKit::detail::WaitUntilHeld{"hook::vmt_for", name}
+            };
             if (!coordinator)
             {
-                log_vmt_coordinator_refusal(name, object);
+                log_vmt_coordinator_refusal(name, object, coordinator.refusal());
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_for", current_vptr});
             }
             const Result<std::size_t> slot_budget = count_vmt_clone_budget(current_vptr, object);

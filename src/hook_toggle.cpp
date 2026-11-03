@@ -8,6 +8,7 @@
 #include "internal/diagnostics_population.hpp"
 #include "internal/hook_backend.hpp"
 #include "internal/hook_backend_visit.hpp"
+#include "internal/hook_coordinator.hpp"
 #include "internal/hook_emission.hpp"
 #include "internal/hook_ledger.hpp"
 #include "internal/hook_patch_witness.hpp"
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace DetourModKit
@@ -70,7 +72,7 @@ namespace DetourModKit
                     {
                         return;
                     }
-                    if (m_witness)
+                    if (!m_reason.empty())
                     {
                         (void)log().try_log(
                             LogLevel::Warning,
@@ -79,7 +81,7 @@ namespace DetourModKit
                             m_target,
                             sizeof(std::uintptr_t) * 2,
                             m_text,
-                            witness_description(*m_witness)
+                            m_reason
                         );
                         return;
                     }
@@ -100,17 +102,18 @@ namespace DetourModKit
 
                 /**
                  * @brief Stores one warning and contains any name-copy failure.
-                 * @param text A string literal: only its pointer is stored. A witness appends as ": <witness>".
+                 * @param text A string literal: only its pointer is stored.
+                 * @param reason A static description that appends as ": <reason>", or empty.
                  */
                 void
                 arm(const char *text,
                     const std::string &name,
                     std::uintptr_t target,
-                    std::optional<PatchWitness> witness = std::nullopt) noexcept
+                    std::string_view reason = {}) noexcept
                 {
                     m_text = text;
                     m_target = target;
-                    m_witness = witness;
+                    m_reason = reason;
                     copy_name(name);
                 }
 
@@ -172,6 +175,7 @@ namespace DetourModKit
                 }
 
                 const char *m_text{nullptr};
+                std::string_view m_reason;
                 std::string m_name;
                 std::uintptr_t m_target{0};
                 std::optional<PatchWitness> m_witness;
@@ -183,7 +187,8 @@ namespace DetourModKit
              * @class TargetSlot
              * @brief Holds a target's ledger write slot across a toggle that can alter its bytes.
              * @details The slot blocks every same-target install while held, so it MUST be released before the
-             *          caller runs user code or takes the loader lock.
+             *          caller runs user code or takes the loader lock. A coordinator hold nests inside the slot and
+             *          releases first (`[B-109]`).
              */
             class TargetSlot
             {
@@ -201,8 +206,25 @@ namespace DetourModKit
                 TargetSlot(TargetSlot &&) = delete;
                 TargetSlot &operator=(TargetSlot &&) = delete;
 
+                /**
+                 * @brief Waits until this thread holds the backend coordinator, so the backend toggle acquires nested.
+                 * @return False for a refusal that no retry changes. @ref coordinator_refusal names it.
+                 */
+                [[nodiscard]] bool hold_coordinator(std::string_view where, std::string_view name) noexcept
+                {
+                    m_coordinator.emplace(DetourModKit::detail::WaitUntilHeld{where, name});
+                    return static_cast<bool>(*m_coordinator);
+                }
+
+                [[nodiscard]] DetourModKit::detail::CoordinatorHoldRefusal coordinator_refusal() const noexcept
+                {
+                    return m_coordinator ? m_coordinator->refusal()
+                                         : DetourModKit::detail::CoordinatorHoldRefusal::None;
+                }
+
                 void release() noexcept
                 {
+                    m_coordinator.reset();
                     if (!std::exchange(m_released, true))
                     {
                         DetourModKit::detail::HookLedger::instance().release_target_slot(m_target, m_id);
@@ -226,6 +248,7 @@ namespace DetourModKit
                 std::uint64_t m_id;
                 std::size_t m_newer;
                 bool m_released{false};
+                std::optional<DetourModKit::detail::BackendCoordinatorHold> m_coordinator;
             };
 
             /**
@@ -319,7 +342,6 @@ namespace DetourModKit
                 GateT &gate,
                 TargetSlot &slot,
                 std::unique_lock<std::recursive_mutex> &guard,
-                DeferredToggleLog &deferred_warning,
                 CoordinatorRefusal refusal
             ) noexcept
             {
@@ -347,11 +369,6 @@ namespace DetourModKit
                 if (refusal == CoordinatorRefusal::LayerConflict)
                 {
                     return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
-                }
-                if (refusal == CoordinatorRefusal::Unavailable)
-                {
-                    deferred_warning
-                        .arm("refused enable: process coordinator unavailable or timed out", impl.name, impl.target);
                 }
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
             }
@@ -517,13 +534,23 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", m_impl->target});
             }
+            if (!slot.hold_coordinator("hook::enable", m_impl->name))
+            {
+                deferred_warning.arm(
+                    "refused enable",
+                    m_impl->name,
+                    m_impl->target,
+                    DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
+                );
+                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", m_impl->target});
+            }
 
             // Classify before the transition claim. The backend emits its jmp over the current bytes. Foreign or
             // unreadable bytes must refuse here while the hook remains as the caller left it.
             const PatchWitness before = witness_of(m_impl->backend);
             if (!witness_permits_write(before))
             {
-                deferred_warning.arm("refused enable", m_impl->name, m_impl->target, before);
+                deferred_warning.arm("refused enable", m_impl->name, m_impl->target, witness_description(before));
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", m_impl->target});
             }
 
@@ -569,7 +596,7 @@ namespace DetourModKit
             }
             if (!backend_enabled)
             {
-                return settle_backend_enable_failure(*m_impl, *gate, slot, guard, deferred_warning, refusal);
+                return settle_backend_enable_failure(*m_impl, *gate, slot, guard, refusal);
             }
             return settle_unconfirmed_enable(*m_impl, *gate, slot, guard);
         }
@@ -621,6 +648,16 @@ namespace DetourModKit
             }
 
             TargetSlot slot(m_impl->target, m_impl->ledger_id);
+            if (!slot.hold_coordinator("hook::disable", m_impl->name))
+            {
+                deferred_warning.arm(
+                    "refused disable",
+                    m_impl->name,
+                    m_impl->target,
+                    DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
+                );
+                return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
+            }
             const PatchWitness before = witness_of(m_impl->backend);
             // The ledger failed to claim the slot, so the layer order is undecided and the toggle refuses unchanged.
             if (slot.unavailable() && !m_impl->bypassed)
@@ -686,7 +723,7 @@ namespace DetourModKit
             // foreign writer's bytes. Refuse and leave the hook as it is.
             if (!witness_permits_write(before))
             {
-                deferred_warning.arm("refused disable", m_impl->name, m_impl->target, before);
+                deferred_warning.arm("refused disable", m_impl->name, m_impl->target, witness_description(before));
                 return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
             }
 
@@ -748,11 +785,6 @@ namespace DetourModKit
             if (refusal == CoordinatorRefusal::LayerConflict)
             {
                 return std::unexpected(Error{ErrorCode::LayerConflict, "hook::disable", m_impl->target});
-            }
-            if (refusal == CoordinatorRefusal::Unavailable)
-            {
-                deferred_warning
-                    .arm("refused disable: process coordinator unavailable or timed out", m_impl->name, m_impl->target);
             }
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable"});
         }

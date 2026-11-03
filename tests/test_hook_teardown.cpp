@@ -11,6 +11,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -3438,5 +3439,176 @@ TEST(HookStackTest, RetireMidResidueTargetAcceptsTheNextGeneration)
     EXPECT_EQ(call_unfolded(&residue_route_target, 5), pristine);
     EXPECT_EQ(s_parked_route_callbacks.load(std::memory_order_relaxed), 1);
     EXPECT_EQ(s_successor_route_callbacks.load(std::memory_order_relaxed), 1);
+}
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(lock_order_target, 4093)
+    DMK_PROOF_SEEDED_TARGET(retire_bound_target, 4099)
+
+    /// The bound of one backend coordinator wait slice. No operation of a lock order that holds waits this long.
+    constexpr std::chrono::milliseconds COORDINATOR_WAIT_SLICE{2000};
+
+    /// Records the slowest operation and the first unexpected result of one worker thread.
+    struct WorkerRecord
+    {
+        std::chrono::steady_clock::duration slowest{};
+        std::optional<ErrorCode> failure;
+        std::optional<RetirementOutcome> retirement;
+
+        template <class Operation> void time(Operation &&operation)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            operation();
+            slowest = std::max(slowest, std::chrono::steady_clock::now() - start);
+        }
+    };
+} // namespace
+
+// Three threads install and destroy, toggle, and retire hooks on one target. Each path takes the target slot before the
+// coordinator, so no operation waits a whole coordinator slice and none reports a coordinator refusal. The install and
+// retire threads take turns, so each layer above the base is the newest one when it goes and none stays as residue.
+TEST(HookInstallCoordinator, InstallToggleAndRetireKeepTheLockOrder)
+{
+    constexpr int ROUNDS = 2000;
+    const Address target = addr_of(&lock_order_target);
+    Result<Hook> base_created = inline_at(
+        InlineRequest{
+            .name = "LockOrderBase",
+            .target = target,
+        },
+        &echo_detour
+    );
+    ASSERT_TRUE(base_created.has_value()) << base_created.error().message();
+    std::optional<Hook> base{std::move(*base_created)};
+
+    std::mutex layer_turn;
+    WorkerRecord installs;
+    WorkerRecord toggles;
+    WorkerRecord retirements;
+    {
+        std::jthread installer(
+            [&installs, &layer_turn, target]() -> void
+            {
+                for (int round = 0; round < ROUNDS && !installs.failure; ++round)
+                {
+                    const std::scoped_lock turn{layer_turn};
+                    installs.time(
+                        [&installs, target]() -> void
+                        {
+                            const Result<Hook> layer = inline_at(
+                                InlineRequest{
+                                    .name = "LockOrderLayer",
+                                    .target = target,
+                                },
+                                &echo_detour
+                            );
+                            if (!layer)
+                            {
+                                installs.failure = layer.error().code;
+                            }
+                        }
+                    );
+                }
+            }
+        );
+        std::jthread toggler(
+            [&toggles, &base]() -> void
+            {
+                for (int round = 0; round < ROUNDS && !toggles.failure; ++round)
+                {
+                    toggles.time(
+                        [&toggles, &base]() -> void
+                        {
+                            for (const Result<void> toggled : {base->enable(), base->disable()})
+                            {
+                                if (!toggled && toggled.error().code != ErrorCode::LayerConflict)
+                                {
+                                    toggles.failure = toggled.error().code;
+                                }
+                            }
+                        }
+                    );
+                }
+            }
+        );
+        std::jthread retirer(
+            [&retirements, &layer_turn, target]() -> void
+            {
+                for (int round = 0; round < ROUNDS && !retirements.failure && !retirements.retirement; ++round)
+                {
+                    const std::scoped_lock turn{layer_turn};
+                    retirements.time(
+                        [&retirements, target]() -> void
+                        {
+                            HookStack stack;
+                            Result<Hook> created = inline_at(
+                                InlineRequest{
+                                    .name = "LockOrderStack",
+                                    .target = target,
+                                },
+                                &echo_detour
+                            );
+                            if (!created)
+                            {
+                                retirements.failure = created.error().code;
+                                return;
+                            }
+                            stack.push(std::move(*created));
+                            const HookRetirement retired = stack.retire(COORDINATOR_WAIT_SLICE);
+                            if (retired.outcome != RetirementOutcome::Retired)
+                            {
+                                retirements.retirement = retired.outcome;
+                            }
+                        }
+                    );
+                }
+            }
+        );
+    }
+
+    EXPECT_EQ(installs.failure, std::nullopt);
+    EXPECT_EQ(toggles.failure, std::nullopt);
+    EXPECT_EQ(retirements.failure, std::nullopt);
+    EXPECT_EQ(retirements.retirement, std::nullopt);
+    EXPECT_LT(installs.slowest, COORDINATOR_WAIT_SLICE);
+    EXPECT_LT(toggles.slowest, COORDINATOR_WAIT_SLICE);
+    EXPECT_LT(retirements.slowest, COORDINATOR_WAIT_SLICE);
+    base.reset();
+    EXPECT_FALSE(is_target_hooked(target));
+}
+
+// HookStack::retire keeps the single bounded coordinator wait of teardown. Under a holder that outlasts the slice, it
+// returns Busy and changes nothing. After the release, the same call retires the stack.
+TEST(HookStackTest, RetireKeepsItsBoundUnderAHeldCoordinator)
+{
+    using namespace std::chrono_literals;
+    const int pristine = call_unfolded(&retire_bound_target, 5);
+    HookStack stack;
+    Result<Hook> created = inline_at(
+        InlineRequest{
+            .name = "RetireBound",
+            .target = addr_of(&retire_bound_target),
+        },
+        &echo_detour
+    );
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    Hook &hook = stack.push(std::move(*created));
+    ASSERT_TRUE(hook.enable().has_value());
+    {
+        const CoordinatorHolder holder{3500ms};
+        ASSERT_TRUE(holder.held());
+        const HookRetirement busy = stack.retire(RETIRE_DEADLINE);
+        EXPECT_FALSE(holder.released()) << "the retirement waited for the holder";
+        EXPECT_EQ(busy.outcome, RetirementOutcome::Busy);
+        EXPECT_EQ(busy.refusal, ErrorCode::Ok);
+        EXPECT_EQ(stack.size(), 1u);
+        EXPECT_TRUE(hook.is_enabled());
+    }
+    EXPECT_EQ(call_unfolded(&retire_bound_target, 5), 105);
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(call_unfolded(&retire_bound_target, 5), pristine);
+    EXPECT_FALSE(is_target_hooked(addr_of(&retire_bound_target)));
 }
 #endif
