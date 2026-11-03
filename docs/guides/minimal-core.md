@@ -112,7 +112,12 @@ void print_detour(const char *, int type) noexcept
 const auto installed = g_hooks.install<&print_detour>(dmk::hook::InlineInstallRequest{
     .name = "print_hook",
     .target = dmk::scan::OwnedScanRequest{
-        .ladder = {dmk::scan::Candidate::direct("print", dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
+        .ladder = {
+            dmk::scan::Candidate::direct("print_prologue", dmk::scan::Pattern::literal("48 89 5C 24 08 57 48 83 EC 20")),
+            // An inline hook overwrites the prologue. This landmark sits past the longest stolen span, so the scan also
+            // resolves the function after another mod hooks it.
+            dmk::scan::Candidate::direct("print_body", dmk::scan::Pattern::literal("81 FF 00 01 00 00 77"), -15),
+        },
         .label = "print",
         .pages = dmk::scan::Pages::Executable,
         .require_executable_result = true,

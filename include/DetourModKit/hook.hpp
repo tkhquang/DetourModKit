@@ -728,6 +728,7 @@ namespace DetourModKit
              * @brief Works as the counted @ref install, for the raw inline hook of @ref inline_at.
              * @details The constraint sends a mid callback to the mid form, also from a braced request.
              * @warning Quiescence of the raw detour stays caller-owned, as the raw @ref inline_at states.
+             * @note Setup/control-plane only: the install waits as @ref Hook states.
              */
             template <class Fn>
                 requires(!std::is_convertible_v<Fn *, MidHookFn>)
@@ -737,7 +738,10 @@ namespace DetourModKit
                 return install_raw(std::move(request), reinterpret_cast<void *>(detour));
             }
 
-            /// Works as the counted @ref install, for the mid hook of @ref mid_at. A mid hook has no original.
+            /**
+             * @brief Works as the counted @ref install, for the mid hook of @ref mid_at. A mid hook has no original.
+             * @note Setup/control-plane only: the install waits as @ref Hook states.
+             */
             [[nodiscard]] Result<std::reference_wrapper<Hook>> install(MidRequest request, MidHookFn detour);
 
             /**

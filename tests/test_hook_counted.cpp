@@ -21,11 +21,13 @@
 #include <xmmintrin.h>
 
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 
 #include "fixtures/hook_fixture.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -1530,6 +1532,64 @@ TEST(HookCounted, InstallRefusesAThunkWithOneCount)
         &single_count_thunk,
         "the thunk does not hold exactly two locked increments"
     );
+}
+
+namespace
+{
+    /**
+     * @brief Repeats the install of the fake thunk @p entry on @p target with one allocation failed per pass, and
+     *        requires that no pass leaves the target reserved.
+     * @details The name is longer than the inline log buffer, so each thunk diagnostic line allocates.
+     */
+    void expect_thunk_install_contains_allocation_failures(
+        EchoFn target,
+        EchoFn entry,
+        DetourModKit::hook::detail::CountedBlock &block
+    )
+    {
+        const dmk_test::LoggerFileCapture capture{LogLevel::Warning};
+        const std::string name(LOG_INLINE_MESSAGE_SIZE, 'N');
+        const auto install = [&](long long allow) -> long long
+        {
+            InlineRequest request = request_for(name.c_str(), target);
+            std::optional<Result<Hook>> result;
+            const long long before = dmk_test::thread_new_calls();
+            {
+                std::optional<dmk_test::AllocFailScope> armed;
+                if (allow >= 0)
+                {
+                    armed.emplace(allow);
+                }
+                result.emplace(
+                    DetourModKit::hook::detail::inline_at_counted(
+                        std::move(request),
+                        DetourModKit::hook::detail::CountedInstall{
+                            .entry = reinterpret_cast<void *>(entry),
+                            .block = &block,
+                        }
+                    )
+                );
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            result.reset();
+            EXPECT_FALSE(is_target_hooked(addr_of(target))) << "allocation " << allow << " left the target reserved";
+            return measured;
+        };
+        const long long budget = install(-1);
+        ASSERT_GT(budget, 0) << "the install exposed no allocation index";
+        for (long long allow = 0; allow < budget; ++allow)
+        {
+            (void)install(allow);
+        }
+    }
+} // namespace
+
+// A thunk diagnostic that fails to allocate neither escapes the install nor keeps the target reserved.
+TEST(HookCounted, ThunkDiagnosticsContainEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    expect_thunk_install_contains_allocation_failures(&branching_thunk_target, &branching_thunk, s_refused_thunk_block);
+    expect_thunk_install_contains_allocation_failures(&helper_site_target, &helper_site_thunk, s_helper_thunk_block);
 }
 
 // The relay jumps into the thunk, so the frame names the return into the function that called the hooked target.

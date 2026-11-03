@@ -2878,20 +2878,22 @@ namespace DetourModKit
                     detail::inspect_counted_thunk(install.entry);
                 if (!shape || install.block == nullptr)
                 {
-                    log().error(
-                        "hook::inline_at: the counted thunk of '{}' has a shape that the drain proof cannot cover: {}.",
-                        name,
-                        shape ? "it has no counters" : shape.error()
-                    );
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(
                         reserved.address,
                         reserved.ledger_id
+                    );
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "hook::inline_at: the counted thunk of '{}' has a shape that the drain proof cannot cover: {}.",
+                        name,
+                        shape ? "it has no counters" : shape.error()
                     );
                     return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::inline_at"});
                 }
                 if (shape->helper_calls != 0)
                 {
-                    log().warning(
+                    (void)log().try_log(
+                        LogLevel::Warning,
                         "hook::inline_at: the counted thunk of '{}' calls {} helper(s) outside its counted window, so "
                         "its drain also reads thread stacks. A stale stack copy of a helper return can keep a "
                         "retirement Busy.",

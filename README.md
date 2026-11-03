@@ -165,6 +165,7 @@ This example attaches to a process, resolves one function by signature, hooks it
 ```cpp
 // MyMod/src/main.cpp
 #include <atomic>
+#include <chrono>
 #include <windows.h>
 
 #include <DetourModKit.hpp>
@@ -199,8 +200,14 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         dmk::hook::InlineInstallRequest{
             .name = "PrintMessage_Hook",
             .target = dmk::scan::OwnedScanRequest{
-                .ladder = {dmk::scan::Candidate::direct(
-                    "PrintMessage", dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
+                .ladder = {
+                    dmk::scan::Candidate::direct(
+                        "PrintMessage_Prologue", dmk::scan::Pattern::literal("48 89 5C 24 08 57 48 83 EC 20")),
+                    // An inline hook overwrites the prologue. This landmark sits past the longest stolen span, so
+                    // the scan also resolves the function after another mod hooks it.
+                    dmk::scan::Candidate::direct(
+                        "PrintMessage_Body", dmk::scan::Pattern::literal("81 FF 00 01 00 00 77"), -15),
+                },
                 .label = "PrintMessage",
                 .scope = dmk::Region::host(),
                 .pages = dmk::scan::Pages::Executable,
@@ -210,8 +217,14 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         });
     if (!installed)
     {
-        // A failed arm keeps the hook in g_hooks, which still owns its teardown.
         session.log().error("Install failed: {}", installed.error().message());
+        // A failed arm keeps the hook in g_hooks. Retire it here, off the loader lock, before the shutdown.
+        const dmk::hook::HookRetirement retired = g_hooks.retire(std::chrono::milliseconds{100});
+        if (retired.outcome != dmk::hook::RetirementOutcome::Retired || retired.pinned != 0)
+        {
+            // The hook can stay reachable, so this DLL must stay loaded for the rest of the process.
+            session.log().error("PrintMessage_Hook did not retire: {}", dmk::to_string(retired.refusal));
+        }
         dmk::request_shutdown();
         return std::unexpected(installed.error());
     }
