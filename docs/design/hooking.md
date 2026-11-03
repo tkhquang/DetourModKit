@@ -223,6 +223,12 @@ Query and protection failures must return a status, restore only the protections
 
 `inline_at`, `mid_at`, and `install_all` return disabled hooks. Publish the handle and callback context before the `Hook::enable()` call. A byte witness verifies the arm. A rejected witness publishes `Disabled` only when the compensating disable leaves the prologue witnessed original. If that rollback cannot prove it, the handle stays truthfully active and returns `DisableFailed`. This rule is specific to the inline/mid transaction: `hook::vmt_for` is intentionally live on creation and has no `enable()` step. It stays safe by construction because it publishes the real object's vptr last, after the private clone is fully built. No window exists where a caller can observe a half-published clone.
 
+`HookStack::install` keeps that order and closes the gap between the create and the arm. A coordinator record joins the process at create, and an arm refuses under any newer live record. A participant that creates between the create and the arm of another therefore fails that arm with `LayerConflict`.
+
+`HookStack::install` creates the hook, stores the original into the caller atomic, stores the handle, and arms it under one process coordinator hold. No participant can then create between the two. The arm writes through the reservation that `HookLedger::commit_hook_keep_slot` keeps. A slot of its own counts a queued reservation of this kit as a newer layer. A failed arm leaves the hook stored, in the state that the arm error states.
+
+`Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget`, `HookStackTest.Install*`, `HookLedgerSlot.CommitKeepsTheSlotForTheArm`, `HookCounted.InstallArmsTheCountedThunk`, and `MidHookContextTest.InstallArmsTheMidAdapter` prove the rule. `route_copy_host arm-order-probe` measures the gap of `inline_at` then `enable` and has no ctest registration.
+
 ### [B-84]
 
 A throw can cross generated code that does publish valid records, and the routed gateway, wrappers, and exit thunk are exactly that case. A native exception raised in a routed destination is required to reach its caller's handler. Windows x64 unwinds a frame with no registered `RUNTIME_FUNCTION` as a leaf. An escaping throw then walks garbage and terminates the host instead of a report.
@@ -348,7 +354,9 @@ Every hook path takes its locks in this order:
 4. The backend process coordinator.
 5. The memory protection ledger lock.
 
-No DMK path waits for a target slot, takes a counted module reference, or runs a consumer callable while it holds the coordinator. `vmt_for` takes the coordinator after its VMT object gate. Public `enable()` and `disable()` hold the coordinator from the witness read through the backend write, so the backend toggle acquires again with no wait. Teardown and `HookStack::retire` keep their single bounded wait (`[B-73]`, `[B-85]`).
+No DMK path waits for a target slot, takes a counted module reference, or runs a consumer callable while it holds the coordinator. `HookStack::install` holds the coordinator from the create through the arm. Its arm takes the call gate of the new hook, which no other thread can reach yet, and writes through the kept reservation. The hold releases before the reservation, and the log lines and lifecycle events follow both.
+
+`vmt_for` takes the coordinator after its VMT object gate. Public `enable()` and `disable()` hold the coordinator from the witness read through the backend write, so the backend toggle acquires again with no wait. Teardown and `HookStack::retire` keep their single bounded wait (`[B-73]`, `[B-85]`).
 
 Each wait for a held coordinator logs one line that names the holder thread. The line runs while the waiter holds no coordinator, so a wait that never ends stays visible.
 

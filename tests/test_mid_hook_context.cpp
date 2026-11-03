@@ -1226,3 +1226,36 @@ TEST(MidHookCapacityTest, DrainedTeardownRecyclesItsAdapter)
         // Destroyed at end of iteration: tombstone, restore, drain, release.
     }
 }
+
+namespace
+{
+    DMK_PROOF_TARGET int install_site(int a)
+    {
+        volatile int r = a * 3;
+        return r;
+    }
+
+    void record_install_site(MidContext &ctx) noexcept
+    {
+        s_rcx.store(gpr(ctx, Gpr::Rcx));
+        s_calls.fetch_add(1);
+    }
+} // namespace
+
+// HookStack::install arms the mid adapter in the hold of its create. The callback reads the live argument register.
+TEST_F(MidHookContextTest, InstallArmsTheMidAdapter)
+{
+    HookStack stack;
+    const Address site{reinterpret_cast<std::uintptr_t>(&install_site)};
+    const auto installed = stack.install(MidRequest{.name = "MidInstall", .target = site}, &record_install_site);
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_TRUE(installed->get().is_enabled());
+    EXPECT_EQ(call_unfolded(&install_site, 14), 42);
+    EXPECT_EQ(s_calls.load(), 1);
+    EXPECT_EQ(s_rcx.load(), 14u);
+
+    stack.clear();
+    EXPECT_FALSE(is_target_hooked(site));
+    EXPECT_EQ(call_unfolded(&install_site, 14), 42);
+    EXPECT_EQ(s_calls.load(), 1);
+}

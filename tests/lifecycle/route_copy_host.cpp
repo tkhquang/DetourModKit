@@ -4,6 +4,9 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -852,6 +855,142 @@ namespace
             return fail("the newer mid hook did not restore over the pinned layer");
         return 0;
     }
+
+    constexpr std::uint32_t RACE_ROUNDS = 1000;
+
+    /// The install outcomes of one copy, indexed by route_copy::InstallOutcome.
+    using OutcomeCounts = std::array<std::uint32_t, static_cast<std::size_t>(route_copy::InstallOutcome::Count)>;
+
+    /**
+     * @brief Runs @p command in both copies from one barrier for each round, then calls the target once and tears the
+     *        copies down newest-first.
+     * @return Null when every round held, or the failure that ended the race.
+     * @details The detour that a call reaches first belongs to the newest layer, so its copy tears down first and both
+     *          layers restore. @p require_both_armed also requires that every install arms and that the call runs both
+     *          detours.
+     */
+    const char *race_installs(
+        Participant &first,
+        Participant &second,
+        unsigned char *page,
+        Command command,
+        route_copy::HookShape shape,
+        bool require_both_armed,
+        std::array<OutcomeCounts, 2> &counts
+    )
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        const Window pristine = window_of(page);
+        volatile long sequence = 0;
+        route_copy::InstallRound round{.target = page, .sequence = &sequence, .shape = shape};
+        const std::array<Participant *, 2> copies{&first, &second};
+        std::array<std::atomic<std::uintptr_t>, 2> results{};
+        std::atomic<bool> stop{false};
+        std::barrier sync{3};
+        const auto install = [&](std::size_t copy) -> void
+        {
+            for (;;)
+            {
+                sync.arrive_and_wait();
+                if (stop.load(std::memory_order_acquire))
+                    return;
+                results[copy] = copies[copy]->run(command, &round);
+                sync.arrive_and_wait();
+            }
+        };
+        std::thread first_installer(install, 0);
+        std::thread second_installer(install, 1);
+        const char *failure = nullptr;
+        for (std::uint32_t pass = 0; pass < RACE_ROUNDS && failure == nullptr; ++pass)
+        {
+            sync.arrive_and_wait();
+            sync.arrive_and_wait();
+            for (std::size_t copy = 0; copy < copies.size(); ++copy)
+            {
+                const std::uintptr_t result = results[copy];
+                if (result >= counts[copy].size())
+                    failure = "a copy reported an unknown install outcome";
+                else
+                    ++counts[copy][result];
+            }
+            const auto armed = static_cast<std::uintptr_t>(route_copy::InstallOutcome::Armed);
+            if (require_both_armed && (results[0] != armed || results[1] != armed))
+                failure = "an install did not arm on its first call";
+            sequence = 0;
+            if (target() != 37)
+                failure = "a call through the layered target returned the wrong value";
+            const std::uintptr_t first_order = first.run(Command::EntryOrder);
+            const std::uintptr_t second_order = second.run(Command::EntryOrder);
+            if (require_both_armed && first_order + second_order != 3)
+                failure = "one call through the target did not run both detours";
+            Participant &newer = first_order == 1 ? first : second;
+            Participant &older = first_order == 1 ? second : first;
+            if (newer.run(Command::Reset) != 0 || older.run(Command::Reset) != 0)
+                failure = "a teardown pinned a hook";
+            if (window_of(page) != pristine)
+                failure = "the newest-first teardown did not restore the target";
+        }
+        stop.store(true, std::memory_order_release);
+        sync.arrive_and_wait();
+        first_installer.join();
+        second_installer.join();
+        if (failure == nullptr &&
+            (first.run(Command::Records) != 0 || first.run(Command::Residue) != 0 || second.run(Command::Residue) != 0))
+            failure = "the rounds left a process record or a residue";
+        return failure;
+    }
+
+    // Both copies install a hook on one target through HookStack::install from one barrier. The case runs 1000 rounds
+    // of the counted inline shape and then 1000 rounds of the mid shape. Each install arms on its first call, because
+    // no copy can create a hook between the create and the arm of another.
+    int install_and_arm_on_one_target(Participant &first, Participant &second, unsigned char *page)
+    {
+        for (const auto shape : {route_copy::HookShape::CountedInline, route_copy::HookShape::Mid})
+        {
+            std::array<OutcomeCounts, 2> counts{};
+            const char *const failure = race_installs(first, second, page, Command::StackInstall, shape, true, counts);
+            std::printf(
+                "concurrent install: shape=%s armed=%u/%u rounds=%u\n",
+                shape == route_copy::HookShape::Mid ? "mid" : "counted-inline",
+                counts[0][static_cast<std::size_t>(route_copy::InstallOutcome::Armed)],
+                counts[1][static_cast<std::size_t>(route_copy::InstallOutcome::Armed)],
+                RACE_ROUNDS
+            );
+            if (failure != nullptr)
+                return fail(failure);
+        }
+        return 0;
+    }
+
+    // Manual probe with no ctest registration: both copies run inline_at, the original store, HookStack::push, and
+    // enable from one barrier for 1000 rounds. A create of one copy between the create and the enable of the other
+    // fails that enable. The counts measure the race that HookStack::install closes.
+    int probe_two_step_arm_order(Participant &first, Participant &second, unsigned char *page)
+    {
+        std::array<OutcomeCounts, 2> counts{};
+        const char *const failure = race_installs(
+            first,
+            second,
+            page,
+            Command::TwoStepInstall,
+            route_copy::HookShape::CountedInline,
+            false,
+            counts
+        );
+        for (std::size_t copy = 0; copy < counts.size(); ++copy)
+        {
+            std::printf(
+                "arm order probe: copy=%zu armed=%u layer_conflict=%u enable_failed=%u other=%u rounds=%u\n",
+                copy,
+                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::Armed)],
+                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::LayerConflict)],
+                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::EnableFailed)],
+                counts[copy][static_cast<std::size_t>(route_copy::InstallOutcome::OtherFailure)],
+                RACE_ROUNDS
+            );
+        }
+        return failure == nullptr ? 0 : fail(failure);
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -868,7 +1007,7 @@ int main(int argc, char **argv)
         scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page" &&
         scenario != "retire-inline" && scenario != "legacy-lower" && scenario != "legacy-upper" &&
         scenario != "legacy-around-claim" && scenario != "budget-floor" && scenario != "retire-closed-route" &&
-        scenario != "concurrent-create")
+        scenario != "concurrent-create" && scenario != "concurrent-install" && scenario != "arm-order-probe")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -898,6 +1037,10 @@ int main(int argc, char **argv)
         return report_coordinator_refusal(first, second, page);
     if (scenario == "concurrent-create")
         return create_beside_trap_windows(first, second, page);
+    if (scenario == "concurrent-install")
+        return install_and_arm_on_one_target(first, second, page);
+    if (scenario == "arm-order-probe")
+        return probe_two_step_arm_order(first, second, page);
     if (scenario == "retire-inline")
         return retire_older_inline_under_newer_inline(first, second, page);
     if (scenario == "budget-floor")

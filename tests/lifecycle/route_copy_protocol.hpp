@@ -62,6 +62,37 @@ namespace route_copy
         WaitWarnings,
         /// Returns the toggle refusals that this copy logged for an incompatible coordinator.
         IncompatibleWarnings,
+        /// Installs and arms a hook through HookStack::install. The argument is an @ref InstallRound.
+        StackInstall,
+        /// Runs inline_at, the original store, HookStack::push, and enable. The argument is an @ref InstallRound.
+        TwoStepInstall,
+        /// Returns the position of this copy's detour in the last call through the target, or zero if it did not run.
+        EntryOrder,
+    };
+
+    /// The hook shape of an install round.
+    enum class HookShape : std::uint8_t
+    {
+        CountedInline,
+        Mid,
+    };
+
+    /// How the install of one round ended in one copy. @ref InstallOutcome::Count bounds the values.
+    enum class InstallOutcome : std::uint8_t
+    {
+        Armed,
+        LayerConflict,
+        EnableFailed,
+        OtherFailure,
+        Count,
+    };
+
+    /** @brief The target, the entry counter that the host shares, and the hook shape of one install round. */
+    struct InstallRound
+    {
+        void *target{};
+        volatile long *sequence{};
+        HookShape shape{HookShape::CountedInline};
     };
 
     /** @brief Host events that delimit ownership of the process coordinator. */

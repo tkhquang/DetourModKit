@@ -139,6 +139,21 @@ namespace DetourModKit
             return true;
         }
 
+        bool HookLedger::commit_hook_keep_slot(std::uintptr_t target, std::uint64_t id) noexcept
+        {
+            if (inert())
+            {
+                return false;
+            }
+            std::unique_lock<std::mutex> guard = lock_state();
+            if (!guard.owns_lock())
+            {
+                return false;
+            }
+            const auto it = m_by_target->find(target);
+            return it != m_by_target->end() && !it->second.pending.empty() && it->second.pending.front() == id;
+        }
+
         std::size_t HookLedger::release_hook(std::uintptr_t target, std::uint64_t id) noexcept
         {
             if (inert())

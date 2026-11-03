@@ -158,19 +158,12 @@ extern "C"
                 true
             );
 
-            auto installed = dmk::hook::inline_at<&apply_damage_detour>(dmk::hook::InlineRequest{
-                .name = "demo_apply_damage",
-                .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)},
-            });
-            if (!installed)
-            {
-                roll_back_generation();
-                return 0;
-            }
-            dmk::hook::Hook &held = s_hooks.push(std::move(*installed));
-            // Publish the original BEFORE enable(), so nothing can enter the detour unchained.
-            s_original.store(held.original<ApplyDamageFn>(), std::memory_order_release);
-            if (!held.enable())
+            // The install stores the original before the arm, so nothing can enter the detour unchained.
+            if (!s_hooks.install<&apply_damage_detour>(dmk::hook::InlineInstallRequest{
+                    .name = "demo_apply_damage",
+                    .target = dmk::Address{reinterpret_cast<std::uintptr_t>(&demo_apply_damage)},
+                    .original = &s_original,
+                }))
             {
                 roll_back_generation();
                 return 0;

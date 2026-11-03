@@ -164,7 +164,8 @@ This example attaches to a process, resolves one function by signature, hooks it
 
 ```cpp
 // MyMod/src/main.cpp
-#include <optional>
+#include <atomic>
+#include <chrono>
 #include <windows.h>
 
 #include <DetourModKit.hpp>
@@ -173,19 +174,14 @@ using PrintMessage_t = void(__stdcall *)(const char *message, int type);
 
 bool g_greeting_enabled = true;
 
-// hook::Hook is move-only with no default constructor, so a global lives in an optional.
-std::optional<dmk::hook::Hook> g_print_hook;
+// The stack owns the hooks of the mod and tears them down newest-first.
+dmk::hook::HookStack g_hooks;
+std::atomic<PrintMessage_t> g_print_original{nullptr};
 
 void __stdcall Detour_PrintMessage(const char *message, int type) noexcept
 {
-    // original<Fn>() is the unguarded fast path. It is non-null only while the hook is engaged.
-    // Use call<Ret>(args...) instead when a teardown can race this detour.
-    const auto call_original = g_print_hook ? g_print_hook->original<PrintMessage_t>() : nullptr;
-    if (!call_original)
-    {
-        return;
-    }
-    call_original(g_greeting_enabled ? "Hello from DetourModKit!" : message, type);
+    // HookStack::install stores the original before it arms the hook, so no call sees a null original.
+    g_print_original.load(std::memory_order_acquire)(g_greeting_enabled ? "Hello from DetourModKit!" : message, type);
 }
 
 // Runs on the bootstrap worker thread, off the loader lock. An init failure is a returned
@@ -198,41 +194,39 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
                            [](bool v) { g_greeting_enabled = v; }, true);
     session.ini().load("MyMod.ini");   // load after the binds, so file values reach them
 
-    // inline_at<&Detour> resolves the ladder at install time and counts each call into the detour.
-    // Off the loader lock, the handle's destructor waits for those calls before it restores the target.
-    // The hook comes back DISABLED. The target is not patched until enable() below.
-    auto installed = dmk::hook::inline_at<&Detour_PrintMessage>(
-        dmk::hook::InlineRequest{
+    // install<&Detour> resolves the ladder, counts each call into the detour, and arms the hook in one
+    // process coordinator hold. Off the loader lock, the teardown waits for those calls before it restores the target.
+    const auto installed = g_hooks.install<&Detour_PrintMessage>(
+        dmk::hook::InlineInstallRequest{
             .name = "PrintMessage_Hook",
             .target = dmk::scan::OwnedScanRequest{
-                .ladder = {dmk::scan::Candidate::direct(
-                    "PrintMessage", dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
+                .ladder = {
+                    dmk::scan::Candidate::direct(
+                        "PrintMessage_Prologue", dmk::scan::Pattern::literal("48 89 5C 24 08 57 48 83 EC 20")),
+                    // An inline hook overwrites the prologue. This landmark sits past the longest stolen span, so
+                    // the scan also resolves the function after another mod hooks it.
+                    dmk::scan::Candidate::direct(
+                        "PrintMessage_Body", dmk::scan::Pattern::literal("81 FF 00 01 00 00 77"), -15),
+                },
                 .label = "PrintMessage",
                 .scope = dmk::Region::host(),
                 .pages = dmk::scan::Pages::Executable,
                 .require_executable_result = true,
             },
+            .original = &g_print_original,
         });
     if (!installed)
     {
         session.log().error("Install failed: {}", installed.error().message());
-        dmk::request_shutdown();
-        return std::unexpected(installed.error());
-    }
-
-    // Publish the handle BEFORE arming. The detour reaches the original through g_print_hook,
-    // so arming inside inline_at can let the game call the detour while the global is empty.
-    g_print_hook.emplace(std::move(*installed));
-    if (auto armed = g_print_hook->enable(); !armed)
-    {
-        // enable() can fail with the hook still live (BackendFailed, DisableFailed).
-        // Drop the handle only once the target is confirmed unpatched.
-        if (!g_print_hook->is_enabled())
+        // A failed arm keeps the hook in g_hooks. Retire it here, off the loader lock, before the shutdown.
+        const dmk::hook::HookRetirement retired = g_hooks.retire(std::chrono::milliseconds{100});
+        if (retired.outcome != dmk::hook::RetirementOutcome::Retired || retired.pinned != 0)
         {
-            g_print_hook.reset();
+            // The hook can stay reachable, so this DLL must stay loaded for the rest of the process.
+            session.log().error("PrintMessage_Hook did not retire: {}", dmk::to_string(retired.refusal));
         }
         dmk::request_shutdown();
-        return std::unexpected(armed.error());
+        return std::unexpected(installed.error());
     }
 
     session.log().info("MyMod initialized.");
@@ -259,7 +253,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved)
         // reserved != NULL is process exit. Leave the handle. Touching patched pages there is a UAF.
         if (reserved == nullptr)
         {
-            g_print_hook.reset();
+            g_hooks.clear();
         }
         dmk::bootstrap_detach(reserved);   // signals the worker, never waits
     }

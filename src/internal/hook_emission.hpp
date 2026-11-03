@@ -52,6 +52,30 @@ namespace DetourModKit::detail
         return snapshot;
     }
 
+    /// Emits one hook lifecycle event and contains a subscriber failure. It moves no population tally.
+    inline void emit_lifecycle_event(
+        std::string_view name,
+        std::uint64_t ledger_id,
+        diagnostics::HookKind kind,
+        diagnostics::HookTransition transition
+    ) noexcept
+    {
+        try
+        {
+            diagnostics::hook_lifecycle().emit_safe(
+                diagnostics::HookLifecycleEvent{
+                    .name = name,
+                    .ledger_id = ledger_id,
+                    .kind = kind,
+                    .transition = transition,
+                }
+            );
+        }
+        catch (...)
+        {
+        }
+    }
+
     /**
      * @brief Updates the live population tally, then emits the associated hook lifecycle event.
      * @param removal Population state for a Removed event. Teardown must capture @c was_active before it forces its
@@ -84,20 +108,7 @@ namespace DetourModKit::detail
             }
             break;
         }
-        try
-        {
-            diagnostics::hook_lifecycle().emit_safe(
-                diagnostics::HookLifecycleEvent{
-                    .name = name,
-                    .ledger_id = ledger_id,
-                    .kind = kind,
-                    .transition = transition,
-                }
-            );
-        }
-        catch (...)
-        {
-        }
+        emit_lifecycle_event(name, ledger_id, kind, transition);
     }
 } // namespace DetourModKit::detail
 
