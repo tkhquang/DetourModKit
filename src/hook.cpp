@@ -2642,7 +2642,9 @@ namespace DetourModKit
                     "the hook ledger cannot decide the layer order"
                 );
             }
-            if (newer > 0 || DetourModKit::detail::backend_claimed(impl->backend))
+            // No layer chains to a patch that never committed, so such a hook releases under a newer layer too.
+            const bool committed = DetourModKit::detail::backend_committed(impl->backend);
+            if ((newer > 0 && committed) || DetourModKit::detail::backend_claimed(impl->backend))
             {
                 return retire_by_vacate(
                     impl,
@@ -2660,8 +2662,15 @@ namespace DetourModKit
             }
 
             RetirementCause cause{};
-            const TeardownRestore restore =
-                restore_target_or_pin_backend(impl, ledger, name, target, ledger_id, kind, cause);
+            TeardownRestore restore = TeardownRestore::Restored;
+            if (committed)
+            {
+                restore = restore_target_or_pin_backend(impl, ledger, name, target, ledger_id, kind, cause);
+            }
+            else
+            {
+                (void)apply_backend(impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
+            }
             if (restore == TeardownRestore::Pinned)
             {
                 return TeardownOutcome::Pinned;

@@ -261,7 +261,7 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 
 ## Layered reload proof
 
-`layered_generation_reload.cpp` loads two separately linked families of `staged_generation_dll` that hook one `hook_target_lib` export. `route_copy_host` adds `route_copy_legacy`, which applies the refusal policy of DMK 4.3.0 and emits no relay cell. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each `LayeredReload` scenario. These required `lifecycle-proof` processes verify layered retirement:
+`layered_generation_reload.cpp` loads two separately linked families of `staged_generation_dll` that hook one `hook_target_lib` export. `route_copy_host` adds `route_copy_legacy`, which applies the refusal policy of DMK 4.3.0, emits no relay cell, and keeps the 4.4.0 create-order arm through a backend seam. The [hot-reload proof table](../guides/hot-reload/README.md#proof-pointers) defines each `LayeredReload` scenario. These required `lifecycle-proof` processes verify layered retirement:
 
 | Required process | Host |
 | --- | --- |
@@ -286,16 +286,22 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.RouteCopiesLegacyLowerStaysRefused` | `route_copy_host` |
 | `Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper` | `route_copy_host` |
 | `Lifecycle.RouteCopiesLegacyAroundClaimedPosition` | `route_copy_host` |
+| `Lifecycle.RouteCopiesArmOrderWithALegacyCopy` | `route_copy_host` |
+| `Lifecycle.RouteCopiesReArmAboveANewerLayer` | `route_copy_host` |
+| `Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm` | `route_copy_host` |
 | `Lifecycle.RouteCopiesResidueBudgetFloorPins` | `route_copy_host` |
 | `Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed` | `route_copy_host` |
 | `Lifecycle.ConcurrentCopiesCreateOnOneTarget` | `route_copy_host` |
 | `Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget` | `route_copy_host` |
+| `Lifecycle.ConcurrentCopiesArmInEitherOrder` | `route_copy_host` |
 
 `Lifecycle.LayeredReloadAlternatingCopiesKeepConstantDepth` is the constancy soak. It runs 1000 reload cycles under a 1200-second timeout and returns skip code 77 under ASan. `Lifecycle.LayeredReloadMidSuccessorClaimsClosedRoute` runs 128 mid reload cycles under a 600-second timeout. `Lifecycle.LayeredReloadCountedLowerCopyUnmaps` runs 51 generations under a 300-second timeout.
 
 In `Lifecycle.ConcurrentCopiesCreateOnOneTarget`, one copy opens trap windows on a target while the other copy creates and destroys a disabled hook there for 1000 rounds. Its output line records the window count and the install latency.
 
-In `Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget`, both copies call `HookStack::install` on one target from a barrier. The case runs 1000 rounds of the counted inline shape and 1000 rounds of the mid shape. Every install arms on its first call, and one call through the target runs both detours. The scenario `arm-order-probe` runs `inline_at` then `enable` in the same rounds and prints the failed arms. It has no ctest registration.
+In `Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget`, both copies call `HookStack::install` on one target from a barrier. The case runs 1000 rounds of the counted inline shape and 1000 rounds of the mid shape. Every install arms on its first call, and one call through the target runs both detours.
+
+In `Lifecycle.ConcurrentCopiesArmInEitherOrder`, both copies run `inline_at` or `mid_at`, the original store, `HookStack::push`, and `enable()` from a barrier, in the same rounds. Each arm makes its hook the newest layer, so every arm succeeds on its first call (`[B-110]`). `Lifecycle.RouteCopiesArmOrderWithALegacyCopy` runs both create orders and both arm orders beside `route_copy_legacy`.
 
 ## Staged example proof
 

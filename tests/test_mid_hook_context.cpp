@@ -1259,3 +1259,73 @@ TEST_F(MidHookContextTest, InstallArmsTheMidAdapter)
     EXPECT_EQ(call_unfolded(&install_site, 14), 42);
     EXPECT_EQ(s_calls.load(), 1);
 }
+
+namespace
+{
+    DMK_PROOF_TARGET int layered_mid_site(int a)
+    {
+        volatile int r = a * 5;
+        return r;
+    }
+
+    std::atomic<int> s_older_mid_calls{0};
+    std::atomic<int> s_newer_mid_calls{0};
+    /// 1 when the older callback ran first in the latest call, 2 when the newer one did.
+    std::atomic<int> s_first_mid_layer{0};
+
+    void record_older_mid(MidContext &) noexcept
+    {
+        int none = 0;
+        (void)s_first_mid_layer.compare_exchange_strong(none, 1);
+        s_older_mid_calls.fetch_add(1);
+    }
+
+    void record_newer_mid(MidContext &) noexcept
+    {
+        int none = 0;
+        (void)s_first_mid_layer.compare_exchange_strong(none, 2);
+        s_newer_mid_calls.fetch_add(1);
+    }
+
+    [[nodiscard]] int call_layered_mid_site() noexcept
+    {
+        s_first_mid_layer.store(0);
+        return call_unfolded(&layered_mid_site, 2);
+    }
+} // namespace
+
+// The newer mid hook arms first. The older one then arms over its patch, becomes the newest layer, and its route
+// leaves through a continuation exit into the newer layer (`[B-110]`). Teardown in arm order restores each patch.
+TEST_F(MidHookContextTest, OlderMidHookArmsAboveANewerOne)
+{
+    const Address site{reinterpret_cast<std::uintptr_t>(&layered_mid_site)};
+    s_older_mid_calls.store(0);
+    s_newer_mid_calls.store(0);
+    Result<Hook> older_created = mid_at(MidRequest{.name = "MidLayerOlder", .target = site}, &record_older_mid);
+    ASSERT_TRUE(older_created.has_value()) << older_created.error().message();
+    std::optional<Hook> older{std::move(*older_created)};
+    Result<Hook> newer_created = mid_at(MidRequest{.name = "MidLayerNewer", .target = site}, &record_newer_mid);
+    ASSERT_TRUE(newer_created.has_value()) << newer_created.error().message();
+    std::optional<Hook> newer{std::move(*newer_created)};
+
+    ASSERT_TRUE(newer->enable().has_value());
+    EXPECT_EQ(call_layered_mid_site(), 10);
+    EXPECT_EQ(s_first_mid_layer.load(), 2);
+    const Result<void> armed = older->enable();
+    ASSERT_TRUE(armed.has_value()) << "the older mid hook refused its arm over the newer one: "
+                                   << armed.error().message();
+    EXPECT_EQ(call_layered_mid_site(), 10);
+    EXPECT_EQ(s_first_mid_layer.load(), 1) << "the older arm is not the newest layer";
+    EXPECT_EQ(s_older_mid_calls.load(), 1);
+    EXPECT_EQ(s_newer_mid_calls.load(), 2) << "the recaptured route skipped the newer layer";
+
+    older.reset();
+    EXPECT_EQ(call_layered_mid_site(), 10);
+    EXPECT_EQ(s_first_mid_layer.load(), 2);
+    EXPECT_EQ(s_older_mid_calls.load(), 1);
+    EXPECT_EQ(s_newer_mid_calls.load(), 3);
+    newer.reset();
+    EXPECT_FALSE(is_target_hooked(site));
+    EXPECT_EQ(call_layered_mid_site(), 10);
+    EXPECT_EQ(s_newer_mid_calls.load(), 3);
+}

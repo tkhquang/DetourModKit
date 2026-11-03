@@ -478,7 +478,7 @@ namespace DetourModKit
             /**
              * @brief Arms the hook: patches the target so that the detour runs.
              * @return Success when the hook is active. Otherwise LoaderLockActive, LayerConflict, BackendFailed,
-             *         EnableFailed, DisableFailed, or InvalidHookState.
+             *         EnableFailed, DisableFailed, ReentrantCallRejected, or InvalidHookState.
              * @details The target bytes decide the published state (`[B-97]`), and Foreign or unreadable bytes after a
              *          committed arm keep the hook Active. For a restored hook, Foreign or unreadable bytes before the
              *          write refuse with EnableFailed and write nothing. If the hook claims Active over Original
@@ -489,11 +489,15 @@ namespace DetourModKit
              * @warning DisableFailed means that this call did not prove a disarm after a rejected or uncertain arm. The
              *          handle stays active, so quiesce or disable it before teardown.
              * @note A hook that @ref disable bypassed, and a hook that claimed a vacated position, re-arm by one store
-             *       with no target write, under any newer layer. Otherwise only the target's newest live layer writes
-             *       the arm (`[B-16]`). LayerConflict writes no bytes and keeps the hook's state, but a coordinator
-             *       refusal after the reconciliation leaves it Disabled. A restored lower layer gets LayerConflict.
-             *       Under another participant's newer layer, the arm returns LayerConflict, or EnableFailed when that
-             *       patch fails the byte witness first.
+             *       with no target write, under any newer layer. Every other arm makes the hook the newest layer of its
+             *       target. Over the patch of another layer, local or another participant's, the arm chains to it at
+             *       the same trampoline entry (`[B-110]`). Only the newest layer re-arms over its own patch (`[B-16]`).
+             * @note LayerConflict means that the hook cannot chain to the layer on the target, such as a far trampoline
+             *       or a jump out of range, that its own patch lies under a newer layer, or that the ledger cannot
+             *       decide the layer order. It writes no bytes and keeps the hook's state, but a coordinator refusal
+             *       after the reconciliation leaves it Disabled. While another thread runs the trampoline that the arm
+             *       rewrites, the call waits, with no attempt count. ReentrantCallRejected means that the calling
+             *       thread returns into that trampoline, so the wait cannot end.
              * @note Idempotent and thread-safe. Publish everything the detour needs before this call (`[B-83]`).
              * @note Setup/control-plane only: the arm patches the target and serializes on the per-hook call gate. It
              *       waits for a held process coordinator, as @ref Hook states.
@@ -643,7 +647,8 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Move-only owner of Hook handles that tears them down newest-first, so each layer restores (`[B-16]`).
+         * @brief Move-only owner of Hook handles that tears them down newest layer first, so each layer restores
+         *        (`[B-16]`). The hook that armed last on a target is the newest layer (`[B-110]`).
          * @details A `std::vector<Hook>` does not guarantee that order, and a lower layer then retires as residue. Use
          *          HookStack for hooks layered on one target. Use @ref retire for a teardown that must not wait in a
          *          destructor.
@@ -691,7 +696,7 @@ namespace DetourModKit
             ~HookStack() noexcept { teardown_newest_first(); }
 
             /**
-             * @brief Moves @p hook onto the top of the stack. Push order is layer order, so push the base hook first.
+             * @brief Moves @p hook into the stack. Teardown follows layer order, so the push order does not matter.
              * @return The stored @ref Hook. The reference stays valid until the stack destroys that hook.
              * @throws std::bad_alloc If storage growth fails. The stack then destroys @p hook, which restores its
              *         prologue, and keeps the stored hooks.
@@ -711,11 +716,8 @@ namespace DetourModKit
              *         @ref inline_at returns it, or of the arm, as @ref Hook::enable returns it.
              * @details Under the hold, the call creates the hook, stores the original into
              *          @ref InlineInstallRequest::original with release order, stores the hook, and arms it (`[B-83]`).
-             *          No DMK copy can create a hook on the target between the create and the arm. Copies that
-             *          install on one target therefore all arm, in any order. A create failure changes nothing. A
-             *          failed arm keeps the hook stored, in the state that its error states.
-             * @note @ref inline_at then @ref Hook::enable leaves a gap between the two calls. Another copy can create a
-             *       hook there, and the arm then returns LayerConflict.
+             *          A create failure changes nothing. A failed arm keeps the hook stored, in the state that its
+             *          error states.
              * @note Setup/control-plane only: the install waits as @ref Hook states.
              */
             template <auto Detour>
@@ -805,14 +807,18 @@ namespace DetourModKit
             [[nodiscard]] Result<std::reference_wrapper<Hook>>
             install_counted(InlineInstallRequest request, detail::CountedInstall install);
 
-            /// Destroys the owned hooks back to front, newest layer first.
+            /// Destroys the owned hooks newest layer first.
             void teardown_newest_first() noexcept
             {
+                order_by_layer();
                 while (!m_hooks.empty())
                 {
                     m_hooks.pop_back();
                 }
             }
+
+            /// Orders the owned hooks so that the back holds the newest layer. Allocates nothing.
+            void order_by_layer() noexcept;
 
             std::vector<std::unique_ptr<Hook>> m_hooks;
         };

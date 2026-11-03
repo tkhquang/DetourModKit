@@ -1600,6 +1600,47 @@ TEST(HookLedgerSlot, CommitKeepsTheSlotForTheArm)
     }
 }
 
+// An arm moves its id to the newest end of the target's layer order in place, and the stamp it returns is newer than
+// every id before it.
+TEST(HookLedgerSlot, PromoteMovesTheIdWithoutAllocation)
+{
+    using DetourModKit::detail::HookLedger;
+    auto &ledger = HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BAB000;
+
+    std::array<std::uint64_t, 3> ids{};
+    for (std::uint64_t &id : ids)
+    {
+        const auto reserved = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
+        ASSERT_EQ(reserved.status, HookLedger::ReserveStatus::Reserved);
+        ASSERT_TRUE(ledger.commit_hook(target, reserved.id));
+        id = reserved.id;
+    }
+    const auto newer_than = [&ledger](std::uint64_t id)
+    {
+        const std::size_t newer = ledger.acquire_target_slot(target, id);
+        ledger.release_target_slot(target, id);
+        return newer;
+    };
+    ASSERT_EQ(newer_than(ids[0]), 2u);
+
+    const long long calls_before = dmk_test::thread_new_calls();
+    const std::uint64_t stamp = ledger.promote_to_newest(target, ids[0]);
+    EXPECT_EQ(dmk_test::thread_new_calls(), calls_before) << "the promotion allocated";
+    EXPECT_GT(stamp, ids[2]);
+    EXPECT_EQ(newer_than(ids[0]), 0u);
+    EXPECT_EQ(newer_than(ids[1]), 2u);
+    EXPECT_EQ(newer_than(ids[2]), 1u);
+    EXPECT_EQ(ledger.promote_to_newest(target + 0x1000, ids[0]), 0u);
+
+    for (const std::uint64_t id : ids)
+    {
+        (void)ledger.release_hook(target, id);
+    }
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+    EXPECT_EQ(ledger.promote_to_newest(target, ids[0]), 0u);
+}
+
 // Each install step that fails before the arm leaves the stack, the original slot, the ledger, and the target as
 // they were. A later install of the same target then succeeds.
 TEST(HookStackTest, InstallRollsBackEveryStepOnFailure)

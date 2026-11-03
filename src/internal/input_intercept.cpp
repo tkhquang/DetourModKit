@@ -697,7 +697,9 @@ namespace DetourModKit::detail
                 }
                 return XInputArmOutcome::Uncommitted;
             }
-            if (!witness_permits_write(before))
+            // An arm over the patch of another layer recaptures it and becomes the newest layer (`[B-110]`).
+            const bool layered = before == PatchWitness::Foreign && hook.window_holds_layer();
+            if (!witness_permits_write(before) && !layered)
             {
                 hook.reconcile_enabled(false);
                 if (!original_was_published)

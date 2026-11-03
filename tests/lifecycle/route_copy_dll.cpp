@@ -40,8 +40,9 @@ namespace
 #if defined(ROUTE_COPY_LEGACY_POLICY)
     // The 4.3.0 policy over the patched backend. A toggle under a newer record refuses, and a teardown that cannot
     // restore as the top layer leaks the backend. No record turns retained. A create passes no position claim and
-    // emits no relay cell, so this copy never takes or leaves a claimable position. Two layers let this copy sit
-    // above and below another position on one target.
+    // emits no relay cell, so this copy never takes or leaves a claimable position. The backend seam keeps the 4.4.0
+    // arm: no promotion and no recapture. Two layers let this copy sit above and below another position on one
+    // target.
     constexpr std::size_t LEGACY_LAYER_COUNT = 2;
     std::array<std::optional<safetyhook::InlineHook>, LEGACY_LAYER_COUNT> s_layers{};
     std::array<std::atomic<TargetFn>, LEGACY_LAYER_COUNT> s_layer_original{};
@@ -66,6 +67,7 @@ namespace
         if (layer)
             return false;
         safetyhook::omit_relay_cell_for_test(true);
+        safetyhook::arm_in_create_order_for_test(true);
         auto created = safetyhook::InlineHook::create(
             target,
             reinterpret_cast<void *>(LEGACY_DETOURS[s_selected_layer]),
@@ -247,12 +249,18 @@ namespace
         constexpr hook::Options options{.prologue = hook::Prologue::Relocate, .fail_if_already_hooked = false};
         if (command == Command::TwoStepInstall)
         {
-            auto created = hook::inline_at<&counted_callback>(
-                {.name = "route_copy_two_step", .target = target, .options = options}
-            );
+            const bool mid = round.shape == route_copy::HookShape::Mid;
+            auto created = mid ? hook::mid_at(
+                                     {.name = "route_copy_two_step_mid", .target = target, .options = options},
+                                     &stack_callback
+                                 )
+                               : hook::inline_at<&counted_callback>(
+                                     {.name = "route_copy_two_step", .target = target, .options = options}
+                                 );
             if (!created)
                 return outcome(route_copy::InstallOutcome::OtherFailure);
-            s_original.store(created->original<TargetFn>(), std::memory_order_release);
+            if (!mid)
+                s_original.store(created->original<TargetFn>(), std::memory_order_release);
             const auto armed = s_stack.push(std::move(*created)).enable();
             return armed ? outcome(route_copy::InstallOutcome::Armed) : outcome_of(armed.error());
         }
