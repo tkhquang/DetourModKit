@@ -85,8 +85,8 @@ namespace DetourModKit
              * @return A @ref Reservation. On @ref ReserveStatus::Reserved the id is appended newest-last and is next in
              *         the per-target queue.
              * @details One locked step checks and records, so no same-target install slips between them. Reservations
-             *          wait their turn in creation order, so two permissive same-target installs cannot patch
-             *          concurrently or invert the layer order. Allocation or lock failure returns OutOfMemory, so the
+             *          wait their turn in reservation order, so two permissive same-target installs cannot patch
+             *          concurrently. Allocation or lock failure returns OutOfMemory, so the
              *          install fails closed instead of a live hook that the ledger cannot see.
              * @warning Setup/control-plane only, with no wait cap. A thread must commit or roll back its reservation
              *          before it reserves the same @p target again, or the second call blocks forever. A caller must
@@ -98,7 +98,7 @@ namespace DetourModKit
              * @brief Completes a reservation after backend creation and wakes the next same-target installer.
              * @return True when the reservation was committed. False on lock failure or an invalid reservation, so the
              *         installer can fail before publishing a handle.
-             * @details The id stays in the target's creation order for duplicate detection and layer tracking; only the
+             * @details The id stays in the target's layer order for duplicate detection and layer tracking. Only the
              *          pending reservation is removed.
              */
             [[nodiscard]] bool commit_hook(std::uintptr_t target, std::uint64_t id) noexcept;
@@ -123,7 +123,7 @@ namespace DetourModKit
 
             /**
              * @brief Removes hook @p id from @p target and returns how many newer hooks remain recorded on it.
-             * @return The count of ids created AFTER @p id still in @p target's order, or @ref SLOT_UNAVAILABLE on an
+             * @return The count of ids newer than @p id in @p target's layer order, or @ref SLOT_UNAVAILABLE on an
              *         inert ledger or a lock failure. Zero means that @p id is the newest record.
              * @note An id counts until its owner calls this method, so retained and residue ids count too
              *       (docs/design/hooking.md, "A retained id still counts").
@@ -133,7 +133,7 @@ namespace DetourModKit
             /**
              * @brief Claims @p target's serialization slot for an operation that may alter its bytes, returning the
              *        newer-live count measured at the instant the slot is held.
-             * @return The count of ids created AFTER @p id still recorded on @p target (see @ref release_hook for what
+             * @return The count of ids newer than @p id in @p target's layer order (see @ref release_hook for what
              *         that includes). Zero authorizes the caller to write target bytes (enable, disable, or restore).
              *         A newer count means that @p id is not the top layer: an Active disable bypasses, and
              *         teardown retires by bypass. An absent target or id, a bookkeeping allocation failure, or a lock
@@ -142,9 +142,9 @@ namespace DetourModKit
              * @details The write-side counterpart to @ref try_reserve_hook. The slot waits its turn in the same
              *          per-target queue an install waits in, so {decide, write} is atomic against installs (`[B-79]`).
              * @warning The caller MUST release the slot exactly once, through @ref release_hook (which also drops the
-             *          id from the creation order) or @ref release_target_slot (which keeps it). Otherwise later
+             *          id from the layer order) or @ref release_target_slot (which keeps it). Otherwise later
              *          same-target installs block forever behind the unreleased queue sentinel. Only the sentinel can
-             *          block. The creation-order entry never does. Release the slot before running user code or
+             *          block. The layer-order entry never does. Release the slot before running user code or
              *          taking the loader lock: holding it across either invites a deadlock against an install that is
              *          itself under the loader lock.
              * @note A release path that cannot retake the state lock leaves the sentinel in place, because the queue
@@ -155,8 +155,7 @@ namespace DetourModKit
             [[nodiscard]] std::size_t acquire_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
-             * @brief Releases a slot claimed by @ref acquire_target_slot WITHOUT removing @p id from the creation
-             *        order.
+             * @brief Releases a slot claimed by @ref acquire_target_slot WITHOUT removing @p id from the layer order.
              * @details For callers whose hook remains live or remains physically patched: a refused toggle, a
              *          teardown that leaked its backend, or a residue. Only the queue sentinel is removed, which wakes
              *          the next same-target installer. The order entry stays, so @ref is_target_hooked keeps reporting
@@ -166,6 +165,16 @@ namespace DetourModKit
              *       (docs/design/hooking.md, "A retained id still counts").
              */
             void release_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
+
+            /**
+             * @brief Moves @p id to the newest end of @p target's layer order after an arm made it the newest layer
+             *        (`[B-110]`).
+             * @return A layer stamp from the id sequence, newer than every id and stamp before it. Zero on an inert
+             *         ledger, a lock failure, or an absent target or id. Nothing allocates.
+             * @details The caller holds the write slot of @p id. HookLedgerSlot.PromoteMovesTheIdWithoutAllocation
+             *          pins the order and the allocation.
+             */
+            [[nodiscard]] std::uint64_t promote_to_newest(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /// True when this kit currently has at least one live or reserved hook for @p target; true on lock failure.
             [[nodiscard]] bool is_target_hooked(std::uintptr_t target) const noexcept;
@@ -228,7 +237,8 @@ namespace DetourModKit
 
             mutable std::mutex m_mutex;
             std::condition_variable m_install_cv;
-            // target address -> live/reserved hook ids in creation order (back = newest). Null in the inert ledger.
+            // target address -> live/reserved hook ids in layer order: creation order, and an arm moves its id to the
+            // back (`[B-110]`). Null in the inert ledger.
             std::unique_ptr<std::unordered_map<std::uintptr_t, TargetEntry>> m_by_target;
             // Live VMT clones (small; a linear scan is cheaper than a map at this size).
             std::vector<VmtEntry> m_vmt;

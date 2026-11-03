@@ -1833,17 +1833,19 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesRetryArmedTeardownAfterCoordinatorRefusal teardown-retry-armed
   Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
   Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
-  Lifecycle.RouteCopiesReportLayerConflict layer-conflict
-  Lifecycle.RouteCopiesReconcileStaleStateBeforeLayerConflict stale-layer-conflict
+  Lifecycle.RouteCopiesReArmAboveANewerLayer re-arm-above-newer
+  Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm stale-re-arm
   Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause
   Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline retire-inline
   Lifecycle.RouteCopiesLegacyLowerStaysRefused legacy-lower
   Lifecycle.RouteCopiesNewLowerRetiresUnderLegacyUpper legacy-upper
   Lifecycle.RouteCopiesLegacyAroundClaimedPosition legacy-around-claim
+  Lifecycle.RouteCopiesArmOrderWithALegacyCopy legacy-arm-order
   Lifecycle.RouteCopiesResidueBudgetFloorPins budget-floor
   Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed retire-closed-route
   Lifecycle.ConcurrentCopiesCreateOnOneTarget concurrent-create
-  Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget concurrent-install)
+  Lifecycle.ConcurrentCopiesInstallAndArmOnOneTarget concurrent-install
+  Lifecycle.ConcurrentCopiesArmInEitherOrder arm-either-order)
 while(route_copy_proofs)
   list(POP_FRONT route_copy_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}

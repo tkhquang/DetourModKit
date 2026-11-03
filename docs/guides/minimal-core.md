@@ -131,7 +131,7 @@ if (!installed)
 }
 ```
 
-The counted form takes the detour as a template argument and counts its calls, so `HookStack::retire` can prove the detour idle. `hook::inline_at` returns a disabled hook for code that publishes more state before `enable()`. Another mod can create a hook between those two calls, and the arm then fails with `ErrorCode::LayerConflict`.
+The counted form takes the detour as a template argument and counts its calls, so `HookStack::retire` can prove the detour idle. `hook::inline_at` returns a disabled hook for code that publishes more state before `enable()`. The arm makes the hook the newest layer of its target, so it chains to a hook that another mod armed first.
 
 By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. DMK classifies the target under the process coordinator, so an install waits out a patch that another mod has in flight on the same function.
 

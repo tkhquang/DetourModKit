@@ -3294,10 +3294,10 @@ namespace
     }
 
     /// Plants `sub rsp, 0x28; call [rip+0xF6]; add rsp, 0x28; ret`. The call reads the callee address at offset 0x100.
-    void plant_relocated_call(dmk_test::ScratchPage &page) noexcept
+    void plant_relocated_call(dmk_test::ScratchPage &page, LeafFn callee_function = &parked_callee) noexcept
     {
         page.put(0, {0x48, 0x83, 0xEC, 0x28, 0xFF, 0x15, 0xF6, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x28, 0xC3});
-        const auto callee = reinterpret_cast<std::uintptr_t>(&parked_callee);
+        const auto callee = reinterpret_cast<std::uintptr_t>(callee_function);
         std::memcpy(reinterpret_cast<void *>(page.addr(0x100)), &callee, sizeof(callee));
     }
 
@@ -5175,23 +5175,6 @@ namespace
         return backend_idle_pass_for_test(begin, begin + dmk_test::ScratchPage::PAGE_SIZE);
     }
 
-    /**
-     * @brief Runs up to three idle passes over @p page and reports whether one was clean.
-     * @details A thread that exits during a pass, such as a loader worker, reads busy for that pass only.
-     */
-    [[nodiscard]] bool page_idle(const dmk_test::ScratchPage &page) noexcept
-    {
-        constexpr int ATTEMPTS = 3;
-        for (int attempt = 0; attempt < ATTEMPTS; ++attempt)
-        {
-            if (page_pass_idle(page))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /// Makes the NtGetNextThread lookup fail for the scope.
     struct NextThreadLookupFailure
     {
@@ -5249,7 +5232,7 @@ TEST(HookBackendIdleProof, WalkOpensEveryOtherThreadOfTheProcess)
     const std::size_t passes_before = backend_idle_pass_calls_for_test();
     const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
 
-    EXPECT_TRUE(page_idle(page)) << "a pass with no thread inside the range read busy";
+    EXPECT_TRUE(page_pass_idle(page)) << "a pass with no thread inside the range read busy";
     {
         const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
         ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
@@ -5270,10 +5253,53 @@ TEST(HookBackendIdleProof, ExitedThreadWithAnOpenHandleReadsIdle)
     ASSERT_EQ(WaitForSingleObject(exited, static_cast<DWORD>(THREAD_LOAD_BOUND.count() * 1000)), WAIT_OBJECT_0);
     const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
 
-    const bool idle = page_idle(page);
+    const bool idle = page_pass_idle(page);
     (void)CloseHandle(exited);
     EXPECT_TRUE(idle) << "an exited thread with an open handle kept the pass busy";
     EXPECT_EQ(backend_idle_snapshot_walks_for_test(), walks_before) << "the pass walked a thread snapshot";
+}
+
+// Threads exit while passes run. A thread that the kernel terminates refuses its suspension before its handle
+// signals. It runs no more of its code, so the pass skips it as it skips an exited thread, and every pass reads idle.
+TEST(HookBackendIdleProof, TerminatingThreadReadsIdle)
+{
+    constexpr std::size_t EXITING_THREADS = 300;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    auto *const begin = static_cast<std::uint8_t *>(page.base());
+    auto *const end = begin + dmk_test::ScratchPage::PAGE_SIZE;
+    std::atomic<bool> exits_done{false};
+    std::thread exiting{
+        [&exits_done]
+        {
+            for (std::size_t index = 0; index < EXITING_THREADS; ++index)
+            {
+                const HANDLE thread = CreateThread(nullptr, 0, &exits_at_once, nullptr, 0, nullptr);
+                if (thread != nullptr)
+                {
+                    (void)WaitForSingleObject(thread, static_cast<DWORD>(THREAD_LOAD_BOUND.count() * 1000));
+                    (void)CloseHandle(thread);
+                }
+            }
+            exits_done.store(true, std::memory_order_release);
+        }
+    };
+
+    std::size_t passes = 0;
+    std::size_t refused = 0;
+    std::string first_refusal;
+    while (!exits_done.load(std::memory_order_acquire))
+    {
+        const BackendIdleRefusal refusal = backend_idle_refusal_for_test(begin, end, nullptr, 0);
+        ++passes;
+        if (!refusal.idle && refused++ == 0)
+        {
+            first_refusal = refusal_sentence(refusal);
+        }
+    }
+    exiting.join();
+    EXPECT_GT(passes, 0u);
+    EXPECT_EQ(refused, 0u) << refused << " of " << passes << " passes refused, first:" << first_refusal;
 }
 
 TEST(HookBackendIdleProof, MissingNextThreadExportFallsBackToTheSnapshot)
@@ -5284,7 +5310,7 @@ TEST(HookBackendIdleProof, MissingNextThreadExportFallsBackToTheSnapshot)
     const std::size_t passes_before = backend_idle_pass_calls_for_test();
     const std::size_t walks_before = backend_idle_snapshot_walks_for_test();
 
-    EXPECT_TRUE(page_idle(page)) << "a snapshot pass with no thread inside the range read busy";
+    EXPECT_TRUE(page_pass_idle(page)) << "a snapshot pass with no thread inside the range read busy";
     {
         const SuspendedThreadAt inside{reinterpret_cast<void *>(page.addr(0x10))};
         ASSERT_TRUE(inside.ready()) << "the synthetic thread did not take the range address";
@@ -5328,11 +5354,8 @@ TEST(HookBackendIdleProof, RefusalNamesTheThreadAndTheCheck)
     auto *const begin = static_cast<std::uint8_t *>(page.base());
     auto *const end = begin + dmk_test::ScratchPage::PAGE_SIZE;
 
-    BackendIdleRefusal clean{};
-    for (int attempt = 0; attempt < 3 && !clean.idle; ++attempt)
-    {
-        clean = backend_idle_refusal_for_test(begin, end, s_fake_return_site_base.data(), FAKE_RETURN_SITE_OFFSET);
-    }
+    const BackendIdleRefusal clean =
+        backend_idle_refusal_for_test(begin, end, s_fake_return_site_base.data(), FAKE_RETURN_SITE_OFFSET);
     EXPECT_TRUE(clean.idle) << refusal_sentence(clean);
     EXPECT_EQ(clean.thread_id, 0u);
     EXPECT_EQ(refusal_sentence(clean), "");
@@ -5369,5 +5392,391 @@ TEST(HookBackendIdleProof, RefusalNamesTheThreadAndTheCheck)
     EXPECT_FALSE(refusal.idle);
     EXPECT_EQ(refusal.thread_id, holder_id);
     EXPECT_EQ(refusal_sentence(refusal), std::format(" Thread {} can still return into the retired code.", holder_id));
+}
+
+// An older disabled hook arms under a newer disabled record on its target. The arm makes it the newest layer, so its
+// later restore runs as the top layer.
+TEST(HookBackendArmOrder, OlderHookArmsAboveANewerDisabledHook)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle older =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "ArmOrderOlderAboveNewer");
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "ArmOrderNewerBelow");
+    ASSERT_TRUE(newer);
+
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Enable)) << "the older hook refused its arm under a newer record";
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Disable)) << "the armed hook is not the top layer";
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    older.reset();
+    newer.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// An older hook arms over the patch of an armed newer hook. The arm recaptures that patch in place, so the older
+// trampoline keeps its entry and now enters the newer layer. Teardown in arm order restores each patch in turn.
+TEST(HookBackendArmOrder, ArmOverAnArmedLayerRecapturesThePrologue)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle older =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "RecaptureOlder");
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "RecaptureNewer");
+    ASSERT_TRUE(newer);
+    void *const entry = older.state().trampoline;
+    ASSERT_NE(entry, nullptr);
+
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Enable));
+    const PrologueSpan newer_patch = read_prologue_span(page);
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Enable)) << "the older hook refused its arm over the newer layer";
+    EXPECT_EQ(older.state().trampoline, entry) << "the recapture moved the trampoline entry";
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    EXPECT_EQ(reinterpret_cast<LeafFn>(entry)(), SUCCESSOR_RESULT) << "the older original skips the newer layer";
+
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Disable)) << "the older hook is not the newest layer";
+    EXPECT_EQ(read_prologue_span(page), newer_patch);
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+    // The disarmed older record holds the newer patch as its prologue, so the newer hook restores after it leaves.
+    older.reset();
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    newer.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// A hook that never armed owns no patch, so no layer chains to it. Its destroy under a promoted layer frees its
+// record at once.
+TEST(HookBackendArmOrder, NeverArmedHookBelowAPromotedLayerFrees)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle older =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "NeverArmedPromoted");
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "NeverArmedBelow");
+    ASSERT_TRUE(newer);
+
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Enable)) << "the older hook refused its arm under a newer record";
+    const BackendCoordinatorCounts armed = coordinator_counts();
+    newer.reset();
+    BackendCoordinatorCounts freed = armed;
+    --freed.live;
+    ++freed.free;
+    EXPECT_TRUE(counts_equal(coordinator_counts(), freed)) << "the never-armed hook kept its record";
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    older.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+namespace
+{
+    /// The InlineHook::Error ordinals that an arm refusal reports.
+    constexpr std::uint8_t LAYER_CONFLICT_ERROR = 12;
+    constexpr std::uint8_t CALLER_IN_TRAMPOLINE_ERROR = 14;
+
+    /// A second leaf in the scratch page that no coordinator record owns.
+    constexpr std::size_t FOREIGN_LEAF_OFFSET = 0x40;
+    constexpr int FOREIGN_RESULT = 2;
+
+    /// The bound for the busy arm to stay inside its wait while the caller stays parked.
+    constexpr std::chrono::milliseconds BUSY_ARM_HOLD{200};
+
+    /**
+     * @brief Plants a 14-byte `nop word ptr cs:[rax+rax*1]`, then `mov eax, 1; ret`.
+     * @details The near and the far patch then cover the same window, so a near patch fills the far window.
+     */
+    void plant_long_nop_leaf(dmk_test::ScratchPage &page) noexcept
+    {
+        page.put(0, {0x66, 0x66, 0x66, 0x66, 0x66, 0x2E, 0x0F, 0x1F, 0x84, 0x00,
+                     0x00, 0x00, 0x00, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
+    }
+
+    /// The arm that inside_arm_callee runs on the thread that returns into the trampoline.
+    std::atomic<void (*)() noexcept> s_inside_arm{nullptr};
+    std::atomic<const ProbeHandle *> s_inside_probe{nullptr};
+    std::atomic<Hook *> s_inside_hook{nullptr};
+    std::atomic<bool> s_inside_armed{false};
+    std::atomic<std::uint8_t> s_inside_error_type{0};
+    std::atomic<ErrorCode> s_inside_error_code{ErrorCode::Ok};
+
+    /// Runs s_inside_arm from inside the relocated call, so a return site of the trampoline is on this stack.
+    DMK_TEST_NOINLINE int inside_arm_callee() noexcept
+    {
+        s_inside_arm.load(std::memory_order_acquire)();
+        return LEAF_RESULT;
+    }
+
+    /// Calls @p entry on its own thread and returns the call result after the thread exits.
+    [[nodiscard]] int call_on_own_thread(void *entry)
+    {
+        int result = 0;
+        std::thread caller{[entry, &result] { result = dmk_test::call_unfolded(reinterpret_cast<LeafFn>(entry)); }};
+        caller.join();
+        return result;
+    }
+} // namespace
+
+// A window that jumps into code that no coordinator record owns holds no layer. The arm keeps the Foreign refusal and
+// writes nothing.
+TEST(HookBackendArmOrder, ForeignWindowKeepsTheRefusal)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    page.put(FOREIGN_LEAF_OFFSET, {0xB8, static_cast<std::uint8_t>(FOREIGN_RESULT), 0x00, 0x00, 0x00, 0xC3});
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle probe =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "ForeignWindowRefusal");
+    ASSERT_TRUE(probe);
+
+    page.put(0, {0xE9, static_cast<std::uint8_t>(FOREIGN_LEAF_OFFSET - NEAR_PATCH_SIZE), 0x00, 0x00, 0x00});
+    const PrologueSpan foreign = read_prologue_span(page);
+    ASSERT_EQ(call_target(page), FOREIGN_RESULT);
+    EXPECT_FALSE(probe.drive(BackendProbeOperation::Enable)) << "the arm accepted a jump that no layer owns";
+    EXPECT_EQ(DetourModKit::detail::backend_last_inline_error_type_for_test(), LAYER_CONFLICT_ERROR);
+    EXPECT_EQ(read_prologue_span(page), foreign) << "the refused arm wrote the window";
+    EXPECT_FALSE(probe.state().enabled);
+
+    plant_leaf(page);
+    probe.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// A thread that returns into the older trampoline holds the recapture. The arm waits with no count while the thread
+// stays parked, and arms over the newer layer after it leaves.
+TEST(HookBackendArmOrder, BusyTrampolineWaitsThenArms)
+{
+    using namespace std::chrono_literals;
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_relocated_call(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    s_parked_callee_reached.store(false, std::memory_order_release);
+    s_parked_callee_release.store(false, std::memory_order_release);
+    s_parked_result.store(0, std::memory_order_release);
+    ProbeHandle older =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&upper_chaining_detour), "BusyOlder");
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "BusyNewer");
+    ASSERT_TRUE(newer);
+    void *const entry = older.state().trampoline;
+    ASSERT_NE(entry, nullptr);
+    const UpperOriginalScope upper_original{entry};
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Enable));
+
+    ParkedCaller caller{address_of(entry)};
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!s_parked_callee_reached.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(s_parked_callee_reached.load(std::memory_order_acquire)) << "the caller never reached the callee";
+
+    std::atomic<bool> arm_returned{false};
+    std::atomic<bool> armed{false};
+    std::thread arming{[&older, &arm_returned, &armed]
+                       {
+                           armed.store(older.drive(BackendProbeOperation::Enable), std::memory_order_release);
+                           arm_returned.store(true, std::memory_order_release);
+                       }};
+    std::this_thread::sleep_for(BUSY_ARM_HOLD);
+    const bool returned_while_parked = arm_returned.load(std::memory_order_acquire);
+    EXPECT_EQ(caller.release_and_join(), LEAF_RESULT);
+    arming.join();
+
+    EXPECT_FALSE(returned_while_parked) << "the arm did not wait for the parked thread";
+    ASSERT_TRUE(armed.load(std::memory_order_acquire))
+        << "the arm failed after the parked thread left, error type "
+        << static_cast<int>(DetourModKit::detail::backend_last_inline_error_type_for_test());
+    EXPECT_EQ(older.state().trampoline, entry) << "the recapture moved the trampoline entry";
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT + UPPER_BONUS) << "one call did not run both destinations";
+
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+    older.reset();
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// A far trampoline lies outside the rel32 reach that a recapture writes. Its arm over a near layer that fills the same
+// window fails with LayerConflict and leaves the newer layer as the only destination.
+TEST(HookBackendArmOrder, FfTrampolineKeepsLayerConflict)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_long_nop_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle older;
+    {
+        const FarHookScope far_hook;
+        older = create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "FarOlderLayer");
+    }
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "NearNewerLayer");
+    ASSERT_TRUE(newer);
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Enable));
+    const PrologueSpan newer_patch = read_prologue_span(page);
+    ASSERT_EQ(newer_patch[0], 0xE9);
+    ASSERT_TRUE(
+        std::all_of(
+            newer_patch.begin() + NEAR_PATCH_SIZE,
+            newer_patch.begin() + FAR_PATCH_SIZE,
+            [](std::uint8_t byte) { return byte == 0x90; }
+        )
+    ) << "the near patch does not fill the far window";
+
+    EXPECT_FALSE(older.drive(BackendProbeOperation::Enable)) << "the far trampoline recaptured a near layer";
+    EXPECT_EQ(DetourModKit::detail::backend_last_inline_error_type_for_test(), LAYER_CONFLICT_ERROR);
+    EXPECT_EQ(read_prologue_span(page), newer_patch);
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+
+    older.reset();
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// The calling thread returns into the trampoline that its arm recaptures, so no wait can end. The arm fails at once
+// with CALLER_IN_TRAMPOLINE and writes nothing.
+TEST(HookBackendArmOrder, ArmFromInsideTheTrampolineFailsAtOnce)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_relocated_call(page, &inside_arm_callee);
+    const PrologueSpan pristine = read_prologue_span(page);
+    ProbeHandle older =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&detour_leaf), "InsideArmOlder");
+    ASSERT_TRUE(older);
+    ProbeHandle newer =
+        create_probe(BackendProbeKind::Inline, page.addr(0), code_address(&successor_detour), "InsideArmNewer");
+    ASSERT_TRUE(newer);
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Enable));
+    const PrologueSpan newer_patch = read_prologue_span(page);
+
+    s_inside_probe.store(&older, std::memory_order_release);
+    s_inside_armed.store(true, std::memory_order_release);
+    s_inside_error_type.store(0, std::memory_order_release);
+    s_inside_arm.store(
+        []() noexcept
+        {
+            s_inside_armed.store(
+                s_inside_probe.load(std::memory_order_acquire)->drive(BackendProbeOperation::Enable),
+                std::memory_order_release
+            );
+            s_inside_error_type.store(
+                DetourModKit::detail::backend_last_inline_error_type_for_test(),
+                std::memory_order_release
+            );
+        },
+        std::memory_order_release
+    );
+    EXPECT_EQ(call_on_own_thread(older.state().trampoline), LEAF_RESULT);
+    s_inside_arm.store(nullptr, std::memory_order_release);
+    s_inside_probe.store(nullptr, std::memory_order_release);
+
+    EXPECT_FALSE(s_inside_armed.load(std::memory_order_acquire)) << "the arm ran over its own return site";
+    EXPECT_EQ(s_inside_error_type.load(std::memory_order_acquire), CALLER_IN_TRAMPOLINE_ERROR);
+    EXPECT_EQ(read_prologue_span(page), newer_patch);
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+
+    // The refusal binds the calling thread only. The same arm from outside the trampoline succeeds.
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Enable));
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    ASSERT_TRUE(older.drive(BackendProbeOperation::Disable));
+    older.reset();
+    ASSERT_TRUE(newer.drive(BackendProbeOperation::Disable));
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+// Hook::enable() from inside the trampoline maps CALLER_IN_TRAMPOLINE to ReentrantCallRejected, logs the refusal, and
+// leaves the hook disabled for a later arm.
+TEST(HookBackendArmOrder, HookEnableFromInsideTheTrampolineIsRejected)
+{
+    constexpr const char *OLDER_NAME = "InsideEnableOlder";
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_relocated_call(page, &inside_arm_callee);
+    const PrologueSpan pristine = read_prologue_span(page);
+    std::optional<Hook> older;
+    std::optional<Hook> newer;
+    {
+        Result<Hook> installed = inline_at(
+            InlineRequest{
+                .name = OLDER_NAME,
+                .target = Address{page.addr(0)},
+            },
+            reinterpret_cast<void (*)()>(&detour_leaf)
+        );
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        older.emplace(std::move(*installed));
+    }
+    {
+        Result<Hook> installed = inline_at(
+            InlineRequest{
+                .name = "InsideEnableNewer",
+                .target = Address{page.addr(0)},
+            },
+            reinterpret_cast<void (*)()>(&successor_detour)
+        );
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        newer.emplace(std::move(*installed));
+    }
+    ASSERT_TRUE(newer->enable().has_value());
+    const PrologueSpan newer_patch = read_prologue_span(page);
+
+    s_inside_hook.store(&*older, std::memory_order_release);
+    s_inside_armed.store(true, std::memory_order_release);
+    s_inside_error_code.store(ErrorCode::Ok, std::memory_order_release);
+    s_inside_arm.store(
+        []() noexcept
+        {
+            const Result<void> enabled = s_inside_hook.load(std::memory_order_acquire)->enable();
+            s_inside_armed.store(enabled.has_value(), std::memory_order_release);
+            if (!enabled)
+            {
+                s_inside_error_code.store(enabled.error().code, std::memory_order_release);
+            }
+        },
+        std::memory_order_release
+    );
+    std::string text;
+    {
+        dmk_test::LoggerFileCapture capture{DetourModKit::LogLevel::Info};
+        EXPECT_EQ(call_on_own_thread(reinterpret_cast<void *>(older->original<LeafFn>())), LEAF_RESULT);
+        text = capture.read_all();
+    }
+    s_inside_arm.store(nullptr, std::memory_order_release);
+    s_inside_hook.store(nullptr, std::memory_order_release);
+
+    EXPECT_FALSE(s_inside_armed.load(std::memory_order_acquire)) << "the enable ran over its own return site";
+    EXPECT_EQ(s_inside_error_code.load(std::memory_order_acquire), ErrorCode::ReentrantCallRejected);
+    const std::string expected =
+        toggle_warning_prefix(OLDER_NAME, page) + "refused enable: the calling thread returns into the trampoline.";
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+    EXPECT_EQ(read_prologue_span(page), newer_patch);
+    EXPECT_EQ(call_target(page), SUCCESSOR_RESULT);
+
+    ASSERT_TRUE(older->enable().has_value()) << "the refusal left the hook unable to arm";
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    older.reset();
+    EXPECT_EQ(read_prologue_span(page), newer_patch);
+    newer.reset();
+    EXPECT_EQ(read_prologue_span(page), pristine);
 }
 #endif // DMK_ENABLE_TEST_SEAMS

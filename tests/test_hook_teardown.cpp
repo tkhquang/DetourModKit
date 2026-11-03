@@ -175,9 +175,9 @@ namespace
     }
 } // namespace
 
-// Two disabled installs capture the pristine prologue and cannot chain. StacksOnAnArmedLowerLayer covers a second
-// install after the first patch becomes live.
-TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
+// Two disabled installs capture the pristine prologue. Each arm makes its hook the newest layer, and the second arm
+// recaptures the patch of the first, so both layers arm in either enable order (`[B-110]`).
+TEST(HookLayeredDisabled, EveryLayerArmsInEitherEnableOrder)
 {
     for (const bool enable_base_first : {true, false})
     {
@@ -202,31 +202,24 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
             );
             ASSERT_TRUE(top.has_value()) << top.error().message();
 
-            Hook h_base = std::move(*base);
-            Hook h_top = std::move(*top); // declared last, so destroyed first: newest-first teardown
+            std::optional<Hook> h_base{std::move(*base)};
+            std::optional<Hook> h_top{std::move(*top)};
+            std::optional<Hook> &first = enable_base_first ? h_base : h_top;
+            std::optional<Hook> &last = enable_base_first ? h_top : h_base;
+            ASSERT_TRUE(first->enable().has_value());
+            ASSERT_TRUE(last->enable().has_value());
+            EXPECT_TRUE(h_base->is_enabled());
+            EXPECT_TRUE(h_top->is_enabled());
+            // Neither detour calls its original, so only the last arm, the newest layer, runs.
+            EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), enable_base_first ? 205 : 105);
 
-            if (enable_base_first)
-            {
-                const Result<void> refused = h_base.enable();
-                ASSERT_FALSE(refused.has_value());
-                EXPECT_EQ(refused.error().code, ErrorCode::LayerConflict);
-                ASSERT_TRUE(h_top.enable().has_value());
-            }
-            else
-            {
-                ASSERT_TRUE(h_top.enable().has_value());
-                const Result<void> refused = h_base.enable();
-                ASSERT_FALSE(refused.has_value());
-                EXPECT_EQ(refused.error().code, ErrorCode::LayerConflict);
-            }
-
-            // The refused base layer stays disabled. The top detour stays reachable in both orders.
-            EXPECT_FALSE(h_base.is_enabled());
-            EXPECT_TRUE(h_top.is_enabled());
-            EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 205);
+            // Teardown in arm order restores each layer.
+            last.reset();
+            EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), enable_base_first ? 105 : 205);
+            first.reset();
         }
 
-        // Both handles dropped newest-first: the target is restored to its original body.
+        // Both handles dropped newest layer first: the target is restored to its original body.
         EXPECT_FALSE(is_target_hooked(addr_of(&layered_disabled_target)));
         EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5);
     }
@@ -491,6 +484,67 @@ TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
     // Both released and the prologue cleanly restored, which only holds because teardown ran in the safe order.
     EXPECT_FALSE(is_target_hooked(addr_of(&stack_target_primary)));
     EXPECT_EQ(stack_target_primary(5, 3), 8);
+}
+
+namespace
+{
+    DMK_PROOF_TARGET int stack_arm_order_target(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+} // namespace
+
+// The older hook arms last, so it is the newest layer and the stack tears it down first. A push-order teardown
+// retires the newer hook under it in place of a restore.
+TEST(HookStackTest, TeardownFollowsArmOrder)
+{
+    const std::size_t residue_before = hook_residue_leaks();
+    const std::size_t manager_before = hook_manager_leaks();
+    std::vector<std::string> removed;
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&removed](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.transition == diagnostics::HookTransition::Removed)
+            {
+                removed.emplace_back(e.name);
+            }
+        }
+    );
+
+    {
+        HookStack stack;
+        Result<Hook> older = inline_at(
+            InlineRequest{
+                .name = "ArmOrderOlder",
+                .target = addr_of(&stack_arm_order_target),
+            },
+            &stack_detour
+        );
+        ASSERT_TRUE(older.has_value()) << older.error().message();
+        Hook &older_hook = stack.push(std::move(*older));
+        Result<Hook> newer = inline_at(
+            InlineRequest{
+                .name = "ArmOrderNewer",
+                .target = addr_of(&stack_arm_order_target),
+            },
+            &stack_detour
+        );
+        ASSERT_TRUE(newer.has_value()) << newer.error().message();
+        Hook &newer_hook = stack.push(std::move(*newer));
+
+        ASSERT_TRUE(newer_hook.enable().has_value());
+        ASSERT_TRUE(older_hook.enable().has_value());
+        EXPECT_EQ(call_unfolded(&stack_arm_order_target, 5, 3), 9);
+    }
+
+    ASSERT_EQ(removed.size(), 2u);
+    EXPECT_EQ(removed[0], "ArmOrderOlder");
+    EXPECT_EQ(removed[1], "ArmOrderNewer");
+    EXPECT_EQ(hook_residue_leaks(), residue_before) << "a layer retired in place of a restore";
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_FALSE(is_target_hooked(addr_of(&stack_arm_order_target)));
+    EXPECT_EQ(call_unfolded(&stack_arm_order_target, 5, 3), 8);
 }
 
 TEST(HookStackTest, MoveConstructTransfersOwnershipAndLeavesSourceEmpty)
@@ -1274,9 +1328,9 @@ TEST(HookLedgerTargetSlot, MissingEntryFailsClosedToLeakDecision)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
-// A bare vector produces oldest-first teardown. The older layer retires under the newer one. It never armed, so it
-// owns no position: the vacate is refused and the Impl leaks. No path reaches its detour, so it books HookResidue.
-TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
+// A bare vector produces oldest-first teardown. The older layer never armed, so no layer chains to it, and it
+// releases under the newer one with no residue and no pin (`[B-110]`).
+TEST(HookInlineLayered, OldestFirstTeardownReleasesANeverArmedLayer)
 {
     // Measure a delta rather than resetting the process-wide counters, so this test does not perturb any other
     // leak-count assertion in the suite.
@@ -1306,26 +1360,23 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
     // Destroy the OLDER layer while the newer one is still live: the inverted (oldest-first) order.
     old_handle.reset();
 
-    EXPECT_EQ(hook_residue_leaks(), residue_before + 1)
-        << "oldest-first layered teardown must retire the older layer as residue, not restore it";
-    EXPECT_EQ(hook_manager_leaks(), manager_before) << "a residue reaches no detour, so it books no HookManager pin";
+    EXPECT_EQ(hook_residue_leaks(), residue_before) << "a layer that never armed left a residue";
+    EXPECT_EQ(hook_manager_leaks(), manager_before);
+    EXPECT_TRUE(is_target_hooked(addr_of(&leak_target_layered))) << "the newer layer lost its ledger entry";
 
-    // The newer layer is now the top layer, so it restores and adds no leak.
     new_handle.reset();
-    EXPECT_EQ(hook_residue_leaks(), residue_before + 1);
+    EXPECT_EQ(hook_residue_leaks(), residue_before);
     EXPECT_EQ(hook_manager_leaks(), manager_before);
 
-    Result<Hook> blocked = inline_at(
+    Result<Hook> strict = inline_at(
         InlineRequest{
-            .name = "LayerAfterLeak",
+            .name = "LayerAfterRelease",
             .target = addr_of(&leak_target_layered),
             .options = Options{.fail_if_already_hooked = true},
         },
         &real_hook_detour_add
     );
-    ASSERT_FALSE(blocked.has_value());
-    EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedByThisKit)
-        << "a residue keeps its ledger entry, so a strict install must still see the hooked target";
+    ASSERT_TRUE(strict.has_value()) << "a released layer kept its ledger entry: " << strict.error().message();
 }
 
 // A pinned newer backend still resumes through the older prologue. Its retained creation ID protects that continuation
@@ -1830,8 +1881,9 @@ namespace
     }
 
     /**
-     * @brief Retires a lower layer under an upper one and checks that the residue gives its module reference back.
-     * @param arm False keeps both layers unarmed, so the lower layer owns no position and its vacate is refused.
+     * @brief Retires a lower layer under an upper one and checks that it gives its module reference back.
+     * @param arm True arms both layers, so the lower layer retires as a residue. False keeps both unarmed, so no layer
+     *        chains to the lower one and it releases with no residue (`[B-110]`).
      */
     template <int Case> void expect_residue_releases_module_reference(ChainFn target_function, bool arm)
     {
@@ -1858,7 +1910,7 @@ namespace
         ASSERT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook), pins_before + 2);
 
         lower.reset();
-        EXPECT_EQ(hook_residue_leaks(), residue_before + 1);
+        EXPECT_EQ(hook_residue_leaks(), residue_before + (arm ? 1 : 0));
         EXPECT_EQ(hook_manager_leaks(), manager_before);
         EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::Hook), pins_before + 1)
             << "a residue kept the module reference of a detour that no path reaches";
@@ -2129,8 +2181,8 @@ TEST(HookLayerBypass, OldestFirstTeardownLeavesResidueNotPin)
     EXPECT_TRUE(is_target_hooked(target)) << "the residue lost its ledger entry";
 }
 
-// A residue reaches no image code, so it gives its module reference back. A lower layer that never armed owns no
-// position, so its vacate is refused, and it gives the reference back too.
+// A residue reaches no image code, so it gives its module reference back. A lower layer that never armed releases,
+// and it gives the reference back too.
 TEST(HookLayerBypass, ResidueReleasesTheModuleReference)
 {
     {

@@ -107,6 +107,9 @@ namespace DetourModKit
             // True while the switch word sends every caller past the detour and the target patch stays in the chain.
             // Written under the call gate mutex. A claimed backend starts bypassed.
             bool bypassed{false};
+            // The layer order of this kit: the ledger id, and a fresh ledger stamp after each arm that made the hook
+            // the newest layer. HookStack tears its hooks down by descending stamp (`[B-110]`).
+            std::uint64_t layer_stamp{0};
             // The thunk of a counted inline hook, or empty for a raw inline or a mid hook.
             std::optional<CountedThunk> counted;
 
@@ -122,7 +125,7 @@ namespace DetourModKit
                 HookState initial_state
             )
                 : backend(std::move(hook)), status(initial_state), name(std::move(hook_name)), target(hook_target),
-                  ledger_id(ledger), is_inline(true)
+                  ledger_id(ledger), is_inline(true), layer_stamp(ledger)
             {
             }
 
@@ -134,7 +137,7 @@ namespace DetourModKit
                 HookState initial_state
             )
                 : backend(std::move(hook)), status(initial_state), name(std::move(hook_name)), target(hook_target),
-                  ledger_id(ledger), is_inline(false)
+                  ledger_id(ledger), is_inline(false), layer_stamp(ledger)
             {
             }
         };

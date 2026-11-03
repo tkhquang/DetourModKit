@@ -124,8 +124,9 @@ namespace DetourModKit
         /// An unclassified hook error: an unmapped backend failure, or a failed hook gate acquisition.
         UnknownError,
         /**
-         * @brief Refused with no change. An arm or restore over restored bytes writes under a newer layered hook, or
-         *        the hook ledger cannot decide the layer order. An armed lower layer bypasses instead.
+         * @brief Refused with no change. A restore, or an arm over the hook's own patch, writes under a newer layered
+         *        hook, an arm cannot chain to the layer on the target, or the hook ledger cannot decide the layer order.
+         *        An armed lower layer bypasses instead.
          */
         LayerConflict,
         /**

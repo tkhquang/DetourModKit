@@ -282,6 +282,32 @@ namespace DetourModKit
             m_install_cv.notify_all();
         }
 
+        std::uint64_t HookLedger::promote_to_newest(std::uintptr_t target, std::uint64_t id) noexcept
+        {
+            if (inert())
+            {
+                return 0;
+            }
+            std::unique_lock<std::mutex> guard = lock_state();
+            if (!guard.owns_lock())
+            {
+                return 0;
+            }
+            auto it = m_by_target->find(target);
+            if (it == m_by_target->end())
+            {
+                return 0;
+            }
+            std::vector<std::uint64_t> &order = it->second.order;
+            const auto found = std::find(order.begin(), order.end(), id);
+            if (found == order.end())
+            {
+                return 0;
+            }
+            std::rotate(found, std::next(found), order.end());
+            return m_next_id.fetch_add(1, std::memory_order_relaxed);
+        }
+
         bool HookLedger::is_target_hooked(std::uintptr_t target) const noexcept
         {
             if (inert())
