@@ -25,6 +25,8 @@ The raw `inline_at(request, detour)` has no adapter, because the detour *is* the
 
 The install step and the arm step are separate. `inline_at`, `mid_at`, and `install_all` return a hook whose target is untouched. `Hook::enable()` arms it. Publish the handle where the detour will look for it before you arm, because a detour typically reaches the original through the handle itself. A hook armed inside the install verb is reachable before that verb returns.
 
+`HookStack::install` runs both steps in one process coordinator hold. It stores the original into a caller atomic before the arm. The detour reaches the original through that atomic, and DMK mods that hook one target arm in any order.
+
 **Inline.** `hook::inline_at(request, detour)` returns a `Hook`. `Hook::enable()` then rewrites the target function's prologue to a JMP into a trampoline and lets the detour call the original through the typed trampoline. `hook::install_all(table)` is the declarative batch form over the same mechanism. It returns `Result<std::vector<hook::InstallOutcome>>` in table order rather than a single handle, and each successful row carries its own `Hook`.
 
 **Mid-function.** `hook::mid_at(request, detour)` returns a `Hook`. `Hook::enable()` then plants a JMP at an arbitrary instruction boundary into a detour that receives the captured CPU register / stack / XMM state through the opaque `hook::MidContext`, then resumes. Use it to observe or rewrite register state at a point that is not a function entry.

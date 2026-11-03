@@ -5,7 +5,8 @@
  * @file hook.hpp
  * @brief The hooking surface: free verbs that return move-only RAII handles. It hides SafetyHook and Zydis.
  * @details @ref inline_at, @ref mid_at, and @ref install_all return a disabled hook, and `Hook::enable()` arms it
- *          (`[B-83]`). @ref vmt_for is live at creation.
+ *          (`[B-83]`). @ref HookStack::install creates and arms a hook in one process coordinator hold. @ref vmt_for
+ *          is live at creation.
  *
  *          Do not call a hook mutation from DllMain or from a thread that holds the loader lock. Every install, toggle,
  *          batch, VMT creation, and VMT mutation returns @ref ErrorCode::LoaderLockActive before its own object-gate,
@@ -30,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -241,7 +243,81 @@ namespace DetourModKit
 
             /// The non-template inline-install primitive behind the counted @ref inline_at.
             [[nodiscard]] Result<Hook> inline_at_counted(InlineRequest request, CountedInstall install);
+
+            /// Checks the counted detour signature of @ref inline_at and @ref HookStack::install, and names its thunk.
+            template <auto Detour> [[nodiscard]] CountedInstall counted_install_for() noexcept
+            {
+                // GCC drops the may_alias attribute of a vector type such as __m128 inside a template argument and
+                // warns. The thunk forwards such a value by the ABI of the vector type, which that attribute does not
+                // change.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+#endif
+                using Signature = CountedSignature<decltype(Detour), CallerFrame>;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+                static_assert(
+                    Signature::valid,
+                    "A counted inline hook needs a noexcept, non-variadic detour whose parameters and result are "
+                    "references or trivially copyable. Pass the detour as an argument for another signature."
+                );
+                static_assert(Detour != nullptr, "A counted inline hook needs a detour");
+                using Entry = typename Signature::template entry<Detour>;
+                return CountedInstall{
+                    .entry = reinterpret_cast<void *>(&Entry::entry),
+                    .block = &Entry::block,
+                };
+            }
         } // namespace detail
+
+        /**
+         * @brief The caller atomic that receives the original of an inline hook from @ref HookStack::install.
+         * @details It converts from a pointer to `std::atomic<Fn>` for any function pointer type, so a designated
+         *          initializer names the caller's own atomic. A default slot receives nothing.
+         */
+        class OriginalSlot
+        {
+        public:
+            OriginalSlot() noexcept = default;
+
+            /// Selects @p slot. The atomic must outlive every call that can load it.
+            template <detail::FunctionPointer Fn>
+            OriginalSlot(std::atomic<Fn> *slot) noexcept : m_slot(slot), m_store(&store_original<Fn>)
+            {
+            }
+
+        private:
+            template <class Fn> static void store_original(void *slot, void *original) noexcept
+            {
+                static_cast<std::atomic<Fn> *>(slot)->store(reinterpret_cast<Fn>(original), std::memory_order_release);
+            }
+
+            /// Stores @p original into the selected atomic with release order. A default slot ignores the call.
+            void publish(void *original) const noexcept
+            {
+                if (m_slot != nullptr)
+                {
+                    m_store(m_slot, original);
+                }
+            }
+
+            void *m_slot{nullptr};
+            void (*m_store)(void *, void *) noexcept {nullptr};
+
+            friend struct detail::HookAccess;
+        };
+
+        /// The request of the inline @ref HookStack::install forms. @ref InlineRequest states what the name identifies.
+        struct InlineInstallRequest
+        {
+            std::string name;
+            Target target;
+            Options options{};
+            /// Receives the original before the arm. Leave it empty for a detour that never calls the original.
+            OriginalSlot original{};
+        };
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -629,6 +705,42 @@ namespace DetourModKit
             }
 
             /**
+             * @brief Installs and arms a counted inline hook on top of the stack in one process coordinator hold.
+             * @tparam Detour As the counted @ref inline_at states.
+             * @return The stored @ref Hook, valid until the stack destroys it. Otherwise the Error of the create, as
+             *         @ref inline_at returns it, or of the arm, as @ref Hook::enable returns it.
+             * @details Under the hold, the call creates the hook, stores the original into
+             *          @ref InlineInstallRequest::original with release order, stores the hook, and arms it (`[B-83]`).
+             *          No DMK copy can create a hook on the target between the create and the arm. Copies that
+             *          install on one target therefore all arm, in any order. A create failure changes nothing. A
+             *          failed arm keeps the hook stored, in the state that its error states.
+             * @note @ref inline_at then @ref Hook::enable leaves a gap between the two calls. Another copy can create a
+             *       hook there, and the arm then returns LayerConflict.
+             * @note Setup/control-plane only: the install waits as @ref Hook states.
+             */
+            template <auto Detour>
+            [[nodiscard]] Result<std::reference_wrapper<Hook>> install(InlineInstallRequest request)
+            {
+                return install_counted(std::move(request), detail::counted_install_for<Detour>());
+            }
+
+            /**
+             * @brief Works as the counted @ref install, for the raw inline hook of @ref inline_at.
+             * @details The constraint sends a mid callback to the mid form, also from a braced request.
+             * @warning Quiescence of the raw detour stays caller-owned, as the raw @ref inline_at states.
+             */
+            template <class Fn>
+                requires(!std::is_convertible_v<Fn *, MidHookFn>)
+            [[nodiscard]] Result<std::reference_wrapper<Hook>> install(InlineInstallRequest request, Fn *detour)
+            {
+                static_assert(sizeof(Fn *) == sizeof(void *), "function pointer must be word-sized");
+                return install_raw(std::move(request), reinterpret_cast<void *>(detour));
+            }
+
+            /// Works as the counted @ref install, for the mid hook of @ref mid_at. A mid hook has no original.
+            [[nodiscard]] Result<std::reference_wrapper<Hook>> install(MidRequest request, MidHookFn detour);
+
+            /**
              * @brief Reserves slots for @p capacity hooks, so a batch of @ref push calls does not grow the slot list.
              * @note Setup/control-plane only: the reserve can allocate.
              */
@@ -684,6 +796,11 @@ namespace DetourModKit
             [[nodiscard]] HookRetirement retire(std::chrono::milliseconds deadline) noexcept;
 
         private:
+            [[nodiscard]] Result<std::reference_wrapper<Hook>> install_raw(InlineInstallRequest request, void *detour);
+
+            [[nodiscard]] Result<std::reference_wrapper<Hook>>
+            install_counted(InlineInstallRequest request, detail::CountedInstall install);
+
             /// Destroys the owned hooks back to front, newest layer first.
             void teardown_newest_first() noexcept
             {
@@ -735,34 +852,13 @@ namespace DetourModKit
          *          `_AddressOfReturnAddress()` names the return slot of the thunk. A detour that identifies its caller
          *          takes @ref CallerFrame first.
          * @note Hooks that share one detour share its counters, so each drain also waits for the calls of the others.
+         * @note For a target that other DMK copies can hook, use @ref HookStack::install, which arms in the hold of the
+         *       create.
          * @note Setup/control-plane only: the install allocates the trampoline and decodes the thunk.
          */
         template <auto Detour> [[nodiscard]] Result<Hook> inline_at(InlineRequest request)
         {
-            // GCC drops the may_alias attribute of a vector type such as __m128 inside a template argument and warns.
-            // The thunk forwards such a value by the ABI of the vector type, which that attribute does not change.
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wignored-attributes"
-#endif
-            using Signature = detail::CountedSignature<decltype(Detour), CallerFrame>;
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-            static_assert(
-                Signature::valid,
-                "inline_at<Detour> needs a noexcept, non-variadic detour whose parameters and result are references or "
-                "trivially copyable. Use inline_at(request, detour) for another signature."
-            );
-            static_assert(Detour != nullptr, "inline_at<Detour> needs a detour");
-            using Entry = typename Signature::template entry<Detour>;
-            return detail::inline_at_counted(
-                std::move(request),
-                detail::CountedInstall{
-                    .entry = reinterpret_cast<void *>(&Entry::entry),
-                    .block = &Entry::block,
-                }
-            );
+            return detail::inline_at_counted(std::move(request), detail::counted_install_for<Detour>());
         }
 
         /**

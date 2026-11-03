@@ -235,7 +235,7 @@ Keep debugger symbols from the same build as each staged DLL. A debugger can cac
 
 A prologue rewrite uses execute traps instead of a process-wide thread freeze. The backend removes execute permission and tracks patch windows during the rewrite. Its vectored handler retries closed-window faults and relocates instruction pointers inside a tracked window. That handler does not drain detour bodies or code outside those windows. Route reclamation separately suspends every other thread once per pass for its idle proof. The [hook note](../../design/hooking.md#concurrency-model) defines that proof.
 
-A fixed sleep cannot prove quiescence. A counter inside the detour also misses a caller that selected the detour before its counter entry. The counted `inline_at<&Detour>` form owns that proof (`[B-106]`). `HookStack::retire` drains its calls and returns Busy while one stays. The raw `inline_at(request, detour)` form requires caller quiescence before teardown, as the [`inline_at` contract](../../../include/DetourModKit/hook.hpp) states. The reference sample uses the counted form, so it retires its hook before it joins its heartbeat worker.
+A fixed sleep cannot prove quiescence. A counter inside the detour also misses a caller that selected the detour before its counter entry. The counted form of `HookStack::install<&Detour>` and `inline_at<&Detour>` owns that proof (`[B-106]`). `HookStack::retire` drains its calls and returns Busy while one stays. The raw `inline_at(request, detour)` form requires caller quiescence before teardown, as the [`inline_at` contract](../../../include/DetourModKit/hook.hpp) states. The reference sample installs the counted form through `HookStack::install`, so it retires its hook before it joins its heartbeat worker.
 
 The [`inline_at<&Detour>` contract](../../../include/DetourModKit/hook.hpp) states what `_ReturnAddress()` names inside a counted detour.
 
@@ -252,6 +252,8 @@ Hooks that share a target retire in any order, in one DMK copy or across copies 
 - The claim matches hook names across every DMK copy in the process. Give each hook a name that no other mod uses on the same target.
 - A position that no generation claims stays for the process. It keeps one process record and adds two jumps to each call. `DetourModKit_bench_hook` measures those jumps as `hook.residue_hop_ns`: 0.7 ns per position on the development host under game load (MinGW release, nine-round medians, 2026-10-17). A chain of 16 positions costs about 10 ns more per call than a chain of one.
 - VMT hook stacks fall outside this rule. [Destroy stacked VMT hooks newest-first](../hooking/vmt-hook-config.md#destroy-stacked-vmt-hooks-newest-first).
+
+Install each hook through `HookStack::install`. It creates the hook, stores the original, and arms it under one process coordinator hold. DMK copies that hook one target then arm in any startup order. `inline_at` then `enable()` leaves a gap where another copy can create a hook, and the arm then fails with `LayerConflict`.
 
 ### Session teardown owns one instance's subsystems
 

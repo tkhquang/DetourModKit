@@ -1923,3 +1923,44 @@ TEST(HookCounted, ThreadAtTheRelayRetires)
     EXPECT_EQ(dmk_test::call_unfolded(&relay_target, RELAY_ARGUMENT), pristine);
 }
 #endif
+
+namespace
+{
+    DMK_PROOF_SEEDED_TARGET(install_target, 353)
+
+    constexpr int INSTALL_DELTA = 0x600;
+    std::atomic<EchoFn> s_install_original{nullptr};
+    std::atomic<int> s_install_detour_calls{0};
+
+    DMK_TEST_NOINLINE int install_detour(int value) noexcept
+    {
+        s_install_detour_calls.fetch_add(1, std::memory_order_relaxed);
+        return s_install_original.load(std::memory_order_acquire)(value) + INSTALL_DELTA;
+    }
+} // namespace
+
+// HookStack::install arms the counted thunk in the hold of its create. The thunk counts the call, so the retirement
+// drains the detour and restores the target.
+TEST(HookCounted, InstallArmsTheCountedThunk)
+{
+    const int pristine = dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT);
+    const std::array<std::uint8_t, 16> pristine_bytes = entry_bytes(&install_target);
+    HookStack stack;
+    const auto installed = stack.install<&install_detour>(InlineInstallRequest{
+        .name = "CountedInstall",
+        .target = addr_of(&install_target),
+        .original = &s_install_original,
+    });
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_TRUE(installed->get().is_enabled());
+    EXPECT_EQ(installed->get().original<EchoFn>(), s_install_original.load(std::memory_order_acquire));
+    EXPECT_EQ(dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT), pristine + INSTALL_DELTA);
+    EXPECT_EQ(s_install_detour_calls.load(std::memory_order_relaxed), 1);
+
+    const HookRetirement retired = stack.retire(RETIRE_DEADLINE);
+    EXPECT_EQ(retired.outcome, RetirementOutcome::Retired);
+    EXPECT_EQ(retired.restored, 1u);
+    EXPECT_EQ(retired.pinned, 0u);
+    EXPECT_EQ(entry_bytes(&install_target), pristine_bytes);
+    EXPECT_EQ(dmk_test::call_unfolded(&install_target, RELAY_ARGUMENT), pristine);
+}

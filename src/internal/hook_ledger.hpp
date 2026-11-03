@@ -104,6 +104,18 @@ namespace DetourModKit
             [[nodiscard]] bool commit_hook(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
+             * @brief Completes a reservation and keeps its queue entry as the write slot of the same thread.
+             * @return True when @p id is the front of the target queue. No newer id of this kit is then committed, so
+             *         @p id is the top layer of this kit. False on lock failure or an invalid reservation.
+             * @details HookStack::install arms through the kept slot under its coordinator hold. A slot from
+             *          @ref acquire_target_slot counts a queued reservation of this kit as a newer layer, and its
+             *          queue entry allocates under the hold. HookLedgerSlot.CommitKeepsTheSlotForTheArm pins it.
+             * @warning The caller MUST release the slot through @ref release_target_slot, as @ref acquire_target_slot
+             *          states. On false, roll the reservation back through @ref release_hook.
+             */
+            [[nodiscard]] bool commit_hook_keep_slot(std::uintptr_t target, std::uint64_t id) noexcept;
+
+            /**
              * @brief The result of a slot or release call that cannot decide a count.
              * @details It is positive, so a caller that reads only the count still fails closed.
              */

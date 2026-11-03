@@ -662,6 +662,180 @@ TEST(HookStackTest, PushReturnsUsableHandleAndReportsSize)
     // Scope exit restores echo cleanly (single hook, so order is moot but the stack still owns the teardown).
 }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
+    void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    DMK_PROOF_TARGET int stack_install_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    using StackInstallFn = int (*)(int);
+    std::atomic<StackInstallFn> s_stack_install_original{nullptr};
+
+    int stack_install_detour(int x) noexcept
+    {
+        return s_stack_install_original.load(std::memory_order_acquire)(x) + 4000;
+    }
+
+    // What the detour context held when the arm published Active under the call gate.
+    std::atomic<const HookStack *> s_arming_stack{nullptr};
+    std::atomic<bool> s_arm_saw_original{false};
+    std::atomic<std::size_t> s_arm_saw_stored_hooks{0};
+
+    void observe_install_arm(bool armed, bool, bool, bool) noexcept
+    {
+        if (!armed)
+        {
+            return;
+        }
+        s_arm_saw_original.store(s_stack_install_original.load(std::memory_order_acquire) != nullptr);
+        if (const HookStack *stack = s_arming_stack.load(std::memory_order_acquire))
+        {
+            s_arm_saw_stored_hooks.store(stack->size());
+        }
+    }
+
+    class TogglePublicationProbeScope
+    {
+    public:
+        explicit TogglePublicationProbeScope(void (*probe)(bool, bool, bool, bool) noexcept) noexcept
+        {
+            DetourModKit::detail::g_hook_toggle_publication_probe = probe;
+        }
+        ~TogglePublicationProbeScope() noexcept { DetourModKit::detail::g_hook_toggle_publication_probe = nullptr; }
+        TogglePublicationProbeScope(const TogglePublicationProbeScope &) = delete;
+        TogglePublicationProbeScope &operator=(const TogglePublicationProbeScope &) = delete;
+        TogglePublicationProbeScope(TogglePublicationProbeScope &&) = delete;
+        TogglePublicationProbeScope &operator=(TogglePublicationProbeScope &&) = delete;
+    };
+} // namespace
+
+// `[B-83]` under HookStack::install: the arm publishes Active only after the original and the stack entry exist. The
+// lifecycle events follow the hold in create-then-enable order.
+TEST(HookStackTest, InstallPublishesTheOriginalBeforeTheArm)
+{
+    s_stack_install_original.store(nullptr);
+    s_arm_saw_original.store(false);
+    s_arm_saw_stored_hooks.store(0);
+    std::vector<diagnostics::HookTransition> transitions;
+    auto subscription = diagnostics::hook_lifecycle().subscribe(
+        [&transitions](const diagnostics::HookLifecycleEvent &event)
+        {
+            if (event.name == "StackInstallOrder")
+            {
+                transitions.push_back(event.transition);
+            }
+        }
+    );
+    HookStack stack;
+    s_arming_stack.store(&stack);
+    {
+        const TogglePublicationProbeScope probe{&observe_install_arm};
+        const auto installed = stack.install<&stack_install_detour>(InlineInstallRequest{
+            .name = "StackInstallOrder",
+            .target = addr_of(&stack_install_target),
+            .original = &s_stack_install_original,
+        });
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        EXPECT_TRUE(installed->get().is_enabled());
+        EXPECT_EQ(installed->get().name(), "StackInstallOrder");
+    }
+    s_arming_stack.store(nullptr);
+    EXPECT_TRUE(s_arm_saw_original.load()) << "the arm published before the original";
+    EXPECT_EQ(s_arm_saw_stored_hooks.load(), 1u) << "the arm published before the stack stored the hook";
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 4007);
+    EXPECT_EQ(transitions, (std::vector{diagnostics::HookTransition::Created, diagnostics::HookTransition::Enabled}));
+    stack.clear();
+    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
+}
+
+// A failed arm keeps the created hook stored and Disabled, so the stack still owns its teardown.
+TEST(HookStackTest, InstallKeepsAFailedArmInTheStack)
+{
+    s_stack_install_original.store(nullptr);
+    HookStack stack;
+    const Address target = addr_of(&stack_install_target);
+    Result<std::reference_wrapper<Hook>> failed = std::unexpected(Error{});
+    {
+        DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target.raw()), false);
+        failed = stack.install<&stack_install_detour>(InlineInstallRequest{
+            .name = "StackInstallFailedArm",
+            .target = target,
+            .original = &s_stack_install_original,
+        });
+        DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false);
+    }
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().code, ErrorCode::EnableFailed);
+    ASSERT_EQ(stack.size(), 1u);
+    EXPECT_TRUE(is_target_hooked(target));
+    EXPECT_NE(s_stack_install_original.load(), nullptr);
+    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
+
+    // The failed result names no hook, so the stack teardown proves that the stack owns it.
+    stack.clear();
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
+}
+#endif
+
+namespace
+{
+    DMK_PROOF_TARGET int raw_install_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    using RawInstallFn = int (*)(int);
+    std::atomic<RawInstallFn> s_raw_install_original{nullptr};
+
+    int raw_install_detour(int x)
+    {
+        return s_raw_install_original.load(std::memory_order_acquire)(x) + 5000;
+    }
+
+    template <class Fn>
+    concept RawInstallAccepts = requires(HookStack &stack, InlineInstallRequest request, Fn *detour) {
+        stack.template install<Fn>(std::move(request), detour);
+    };
+} // namespace
+
+// A mid callback selects the mid form, also from a braced request, so the raw inline form never jumps into it.
+static_assert(RawInstallAccepts<int(int)>);
+static_assert(!RawInstallAccepts<void(MidContext &) noexcept>);
+static_assert(!RawInstallAccepts<void(MidContext &)>);
+
+// The raw inline form stores the trampoline into the request atomic and arms in the hold of its create.
+TEST(HookStackTest, InstallArmsTheRawInlineHook)
+{
+    s_raw_install_original.store(nullptr);
+    HookStack stack;
+    const Address target = addr_of(&raw_install_target);
+    const auto installed = stack.install(
+        InlineInstallRequest{.name = "StackInstallRaw", .target = target, .original = &s_raw_install_original},
+        &raw_install_detour
+    );
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    EXPECT_TRUE(installed->get().is_enabled());
+    EXPECT_EQ(installed->get().original<RawInstallFn>(), s_raw_install_original.load());
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_EQ(call_unfolded(&raw_install_target, 7), 5007);
+
+    stack.clear();
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&raw_install_target, 7), 7);
+}
+
 // Concurrency + reentrancy: the per-hook status machine and the call() guard under thread stress and self-reentry. The
 // per-hook recursive_mutex is held across call(), and disable()/~Hook must drain that mutex before the trampoline can
 // be restored or freed. These tests pin the caller-visible guarantees directly, including a parked original that keeps

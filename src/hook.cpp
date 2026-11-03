@@ -1393,11 +1393,13 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Classifies @p reserved and runs @p create_backend under one coordinator hold, then emits the lines.
+         * @brief Classifies @p reserved and runs @p create_backend under one coordinator hold.
          * @return The created backend hook, or the Error that fails the install. Every Error releases the reservation.
-         * @details A patch window outside the coordinator releases the hold, yields one scheduler tick, and classifies
-         *          again, with no attempt count and no time cap. The first such pass logs one line. An exception from
-         *          @p create_backend leaves the reservation to the caller.
+         * @details On success @p hold stays held, and @p lines keeps the lines of the final pass. The caller emits them
+         *          after it releases @p hold. Every other return releases the hold and emits the lines. A patch window
+         *          outside the coordinator releases the hold, yields one scheduler tick, and classifies again, with no
+         *          attempt count and no time cap. The first such pass logs one line. An exception from
+         *          @p create_backend leaves the reservation and the hold to the caller.
          */
         template <class CreateBackend>
         [[nodiscard]] auto create_backend_under_coordinator(
@@ -1405,23 +1407,28 @@ namespace DetourModKit
             const hook::Options &options,
             std::string_view name,
             const char *where,
+            std::optional<detail::BackendCoordinatorHold> &hold,
+            ClassificationLog &lines,
             CreateBackend &&create_backend
         ) -> Result<typename std::invoke_result_t<CreateBackend &>::value_type>
         {
             bool patch_wait_logged = false;
             for (;;)
             {
-                ClassificationLog lines;
+                lines = ClassificationLog{};
                 std::optional<std::invoke_result_t<CreateBackend &>> created;
-                Result<TargetClassification> classified = TargetClassification::Hookable;
+                hold.emplace(detail::WaitUntilHeld{where, name});
+                const Result<TargetClassification> classified =
+                    classify_target_under_coordinator(reserved, options, where, *hold, lines);
+                if (classified && *classified == TargetClassification::Hookable)
                 {
-                    const detail::BackendCoordinatorHold hold{detail::WaitUntilHeld{where, name}};
-                    classified = classify_target_under_coordinator(reserved, options, where, hold, lines);
-                    if (classified && *classified == TargetClassification::Hookable)
+                    created.emplace(create_backend());
+                    if (*created)
                     {
-                        created.emplace(create_backend());
+                        return std::move(created->value());
                     }
                 }
+                hold.reset();
                 lines.emit(where, name, reserved.address);
                 if (!classified)
                 {
@@ -1444,19 +1451,15 @@ namespace DetourModKit
                     ::Sleep(1);
                     continue;
                 }
-                if (!*created)
-                {
-                    log().error(
-                        "{}: backend create failed for '{}' at {}: {}",
-                        where,
-                        name,
-                        format::format_address(reserved.address),
-                        backend_error_string(created->error())
-                    );
-                    (void)detail::HookLedger::instance().release_hook(reserved.address, reserved.ledger_id);
-                    return std::unexpected(Error{ErrorCode::BackendFailed, where, reserved.address});
-                }
-                return std::move(created->value());
+                log().error(
+                    "{}: backend create failed for '{}' at {}: {}",
+                    where,
+                    name,
+                    format::format_address(reserved.address),
+                    backend_error_string(created->error())
+                );
+                (void)detail::HookLedger::instance().release_hook(reserved.address, reserved.ledger_id);
+                return std::unexpected(Error{ErrorCode::BackendFailed, where, reserved.address});
             }
         }
 
@@ -2174,9 +2177,14 @@ namespace DetourModKit
             return reserve_target(request.target, request.options, "hook::mid_at");
         }
 
-        /// Claims a mid-adapter slot for mid_at and rolls back the @p ledger_id reservation on failure.
+        /**
+         * @brief Claims a mid-adapter slot for @p detour, or rolls back the @p ledger_id reservation.
+         * @details One adapter exists per live mid hook. The caller's MidAdapterSlotGuard releases the slot on every
+         *          later failure. No adapter entry occurs, because StartDisabled leaves the target unpatched until the
+         *          arm. The callback publishes before the adapter address reaches the backend.
+         */
         [[nodiscard]] Result<std::size_t>
-        claim_mid_adapter_slot_or_roll_back_reservation(std::uintptr_t target, std::uint64_t ledger_id) noexcept
+        claim_mid_adapter_for_install(std::uintptr_t target, std::uint64_t ledger_id, hook::MidHookFn detour) noexcept
         {
             const DetourModKit::detail::MidSlotClaim claim = DetourModKit::detail::claim_mid_adapter_slot();
             if (claim.status == DetourModKit::detail::MidSlotClaimStatus::EntryIndexUnavailable)
@@ -2189,6 +2197,11 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::MidHookCapacityExhausted, "hook::mid_at", target});
             }
+            DetourModKit::detail::MidAdapterSlot &slot = DetourModKit::detail::mid_adapter_slots()[claim.index];
+            slot.target.store(target, std::memory_order_relaxed);
+            slot.detour.store(detour, std::memory_order_relaxed);
+            slot.contained_exceptions.store(0, std::memory_order_relaxed);
+            slot.live.store(true, std::memory_order_release);
             return claim.index;
         }
 
@@ -2819,6 +2832,105 @@ namespace DetourModKit
             gate_slot().store(nullptr, std::memory_order_release);
         }
 
+        namespace
+        {
+            /**
+             * @brief Checks the backend allocator and takes the module reference of an install on @p reserved.
+             * @return The module reference, or the Error after the reservation rolled back.
+             */
+            [[nodiscard]] Result<HMODULE>
+            acquire_install_module_ref(const detail::ReservedTarget &reserved, const char *where) noexcept
+            {
+                if (!backend_allocator())
+                {
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(
+                        reserved.address,
+                        reserved.ledger_id
+                    );
+                    return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, where});
+                }
+                const HMODULE module = acquire_hook_self_ref();
+                if (module == nullptr)
+                {
+                    // Capture the acquire's last-error before release_hook can clobber it (error.hpp documents
+                    // SystemCallFailed's detail = GetLastError()).
+                    const DWORD acquire_error = ::GetLastError();
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(
+                        reserved.address,
+                        reserved.ledger_id
+                    );
+                    return std::unexpected(Error{ErrorCode::SystemCallFailed, where, acquire_error});
+                }
+                return module;
+            }
+
+            /**
+             * @brief Decodes the counted thunk of @p install for its drain proof, or rolls @p reserved back.
+             * @return The thunk, or InvalidDetourFunction after one log line that names the cause.
+             */
+            [[nodiscard]] Result<CountedThunk> inspect_counted_install(
+                std::string_view name,
+                const detail::CountedInstall &install,
+                const detail::ReservedTarget &reserved
+            )
+            {
+                const std::expected<detail::CountedThunkShape, const char *> shape =
+                    detail::inspect_counted_thunk(install.entry);
+                if (!shape || install.block == nullptr)
+                {
+                    log().error(
+                        "hook::inline_at: the counted thunk of '{}' has a shape that the drain proof cannot cover: {}.",
+                        name,
+                        shape ? "it has no counters" : shape.error()
+                    );
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(
+                        reserved.address,
+                        reserved.ledger_id
+                    );
+                    return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::inline_at"});
+                }
+                if (shape->helper_calls != 0)
+                {
+                    log().warning(
+                        "hook::inline_at: the counted thunk of '{}' calls {} helper(s) outside its counted window, so "
+                        "its drain also reads thread stacks. A stale stack copy of a helper return can keep a "
+                        "retirement Busy.",
+                        name,
+                        shape->helper_calls
+                    );
+                }
+                CountedThunk thunk = shape->thunk;
+                thunk.block = install.block;
+                return thunk;
+            }
+
+            /// Creates the disabled inline backend hook at @p target whose relay jumps to @p destination.
+            [[nodiscard]] std::expected<safetyhook::InlineHook, safetyhook::InlineHook::Error>
+            create_inline_backend(std::uintptr_t target, void *destination, std::string_view name)
+            {
+                return safetyhook::InlineHook::create(
+                    backend_allocator(),
+                    reinterpret_cast<void *>(target),
+                    destination,
+                    safetyhook::InlineHook::StartDisabled,
+                    position_claim_for(name)
+                );
+            }
+
+            /// Creates the disabled mid backend hook at @p target that enters the adapter of @p slot_index.
+            [[nodiscard]] std::expected<safetyhook::MidHook, safetyhook::MidHook::Error>
+            create_mid_backend(std::uintptr_t target, std::size_t slot_index, std::string_view name)
+            {
+                return safetyhook::MidHook::create(
+                    backend_allocator(),
+                    reinterpret_cast<void *>(target),
+                    DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
+                    safetyhook::MidHook::StartDisabled,
+                    position_claim_for(name)
+                );
+            }
+        } // namespace
+
         Result<Hook> detail::HookAccess::install_inline(
             InlineRequest request,
             const ReservedTarget &reserved,
@@ -2828,46 +2940,34 @@ namespace DetourModKit
         {
             const std::uintptr_t target = reserved.address;
             const std::uint64_t ledger_id = reserved.ledger_id;
-            const std::shared_ptr<safetyhook::Allocator> &allocator = backend_allocator();
-            if (!allocator)
+            const Result<HMODULE> module = acquire_install_module_ref(reserved, "hook::inline_at");
+            if (!module)
             {
-                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::inline_at"});
+                return std::unexpected(module.error());
             }
-            ModuleRefGuard self_ref(acquire_hook_self_ref());
-            if (self_ref.get() == nullptr)
-            {
-                // Capture the acquire's last-error before release_hook can clobber it (error.hpp documents
-                // SystemCallFailed's detail = GetLastError()).
-                const DWORD acquire_error = ::GetLastError();
-                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
-            }
+            ModuleRefGuard self_ref(*module);
             try
             {
                 // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
                 // steps below publish the caller state. No fault boundary wraps this code. See
                 // hook_fault_boundary.hpp.
+                std::optional<DetourModKit::detail::BackendCoordinatorHold> hold;
+                ClassificationLog lines;
                 Result<safetyhook::InlineHook> created = create_backend_under_coordinator(
                     reserved,
                     request.options,
                     request.name,
                     "hook::inline_at",
-                    [&]() -> std::expected<safetyhook::InlineHook, safetyhook::InlineHook::Error>
-                    {
-                        return safetyhook::InlineHook::create(
-                            allocator,
-                            reinterpret_cast<void *>(target),
-                            destination,
-                            safetyhook::InlineHook::StartDisabled,
-                            position_claim_for(request.name)
-                        );
-                    }
+                    hold,
+                    lines,
+                    [&]() { return create_inline_backend(target, destination, request.name); }
                 );
                 if (!created)
                 {
                     return std::unexpected(created.error());
                 }
+                hold.reset();
+                lines.emit("hook::inline_at", request.name, target);
                 auto backend_hook = std::move(created.value());
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
@@ -2950,33 +3050,12 @@ namespace DetourModKit
                 {
                     return std::unexpected(preflight.error());
                 }
-                const std::expected<CountedThunkShape, const char *> shape = inspect_counted_thunk(install.entry);
-                if (!shape || install.block == nullptr)
+                const Result<CountedThunk> thunk = inspect_counted_install(request.name, install, *preflight);
+                if (!thunk)
                 {
-                    log().error(
-                        "hook::inline_at: the counted thunk of '{}' has a shape that the drain proof cannot cover: {}.",
-                        request.name,
-                        shape ? "it has no counters" : shape.error()
-                    );
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(
-                        preflight->address,
-                        preflight->ledger_id
-                    );
-                    return std::unexpected(Error{ErrorCode::InvalidDetourFunction, "hook::inline_at"});
+                    return std::unexpected(thunk.error());
                 }
-                if (shape->helper_calls != 0)
-                {
-                    log().warning(
-                        "hook::inline_at: the counted thunk of '{}' calls {} helper(s) outside its counted window, so "
-                        "its drain also reads thread stacks. A stale stack copy of a helper return can keep a "
-                        "retirement Busy.",
-                        request.name,
-                        shape->helper_calls
-                    );
-                }
-                CountedThunk thunk = shape->thunk;
-                thunk.block = install.block;
-                return HookAccess::install_inline(std::move(request), *preflight, thunk.range.begin, thunk);
+                return HookAccess::install_inline(std::move(request), *preflight, thunk->range.begin, *thunk);
             }
         } // namespace detail
 
@@ -2991,59 +3070,40 @@ namespace DetourModKit
             // Every failure path below rolls back this reservation. Success commits it after all fallible setup.
             const std::uint64_t ledger_id = preflight->ledger_id;
 
-            const std::shared_ptr<safetyhook::Allocator> &allocator = backend_allocator();
-            if (!allocator)
+            const Result<HMODULE> module = acquire_install_module_ref(*preflight, "hook::mid_at");
+            if (!module)
             {
-                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::mid_at"});
+                return std::unexpected(module.error());
             }
-            ModuleRefGuard self_ref(acquire_hook_self_ref());
-            if (self_ref.get() == nullptr)
-            {
-                // Capture the acquire's last-error before release_hook can clobber it (see inline_at_raw).
-                const DWORD acquire_error = ::GetLastError();
-                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", acquire_error});
-            }
-            // One adapter exists per live mid hook. MidAdapterSlotGuard releases the slot on every failure path below.
-            // No adapter entry occurred because StartDisabled leaves the target unpatched until enable().
-            const Result<std::size_t> claim = claim_mid_adapter_slot_or_roll_back_reservation(target, ledger_id);
+            ModuleRefGuard self_ref(*module);
+            const Result<std::size_t> claim = claim_mid_adapter_for_install(target, ledger_id, detour);
             if (!claim)
             {
                 return std::unexpected(claim.error());
             }
             const std::size_t slot_index = *claim;
             MidAdapterSlotGuard slot_guard(slot_index);
-            DetourModKit::detail::MidAdapterSlot &slot = DetourModKit::detail::mid_adapter_slots()[slot_index];
-            slot.target.store(target, std::memory_order_relaxed);
-            slot.detour.store(detour, std::memory_order_relaxed);
-            slot.contained_exceptions.store(0, std::memory_order_relaxed);
-            // Publish the callback before the adapter address reaches the backend.
-            slot.live.store(true, std::memory_order_release);
             try
             {
                 // This is the StartDisabled install transaction. See inline_at_raw and hook_fault_boundary.hpp. The
                 // destination is the pool slot_index adapter, a real void(safetyhook::Context&).
+                std::optional<DetourModKit::detail::BackendCoordinatorHold> hold;
+                ClassificationLog lines;
                 Result<safetyhook::MidHook> created = create_backend_under_coordinator(
                     *preflight,
                     request.options,
                     request.name,
                     "hook::mid_at",
-                    [&]() -> std::expected<safetyhook::MidHook, safetyhook::MidHook::Error>
-                    {
-                        return safetyhook::MidHook::create(
-                            allocator,
-                            reinterpret_cast<void *>(target),
-                            DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
-                            safetyhook::MidHook::StartDisabled,
-                            position_claim_for(request.name)
-                        );
-                    }
+                    hold,
+                    lines,
+                    [&]() { return create_mid_backend(target, slot_index, request.name); }
                 );
                 if (!created)
                 {
                     return std::unexpected(created.error());
                 }
+                hold.reset();
+                lines.emit("hook::mid_at", request.name, target);
                 auto backend_hook = std::move(created.value());
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
@@ -3104,6 +3164,249 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::mid_at", target});
             }
+        }
+
+        template <class Backend, class CreateBackend, class HandOff>
+        Result<std::reference_wrapper<Hook>> detail::HookAccess::install_into_stack(
+            std::vector<std::unique_ptr<Hook>> &hooks,
+            std::string name,
+            const ReservedTarget &reserved,
+            const Options &options,
+            const OriginalSlot &original,
+            CreateBackend &&create_backend,
+            HandOff &&hand_off
+        ) noexcept
+        {
+            constexpr bool is_inline = std::is_same_v<Backend, safetyhook::InlineHook>;
+            const char *const where = is_inline ? "hook::inline_at" : "hook::mid_at";
+            const std::uintptr_t target = reserved.address;
+            const auto roll_back = [&reserved, where](ErrorCode code) noexcept -> Error
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(reserved.address, reserved.ledger_id);
+                return Error{code, where, reserved.address};
+            };
+
+            std::unique_ptr<Hook> entry;
+            std::shared_ptr<Hook::CallGate> gate;
+            std::unique_ptr<Hook::Impl> impl;
+            DetourModKit::detail::LifecycleSnapshot snapshot;
+            try
+            {
+                if (hooks.size() == hooks.capacity())
+                {
+                    hooks.reserve(std::max<std::size_t>(4, hooks.size() * 2));
+                }
+                entry = std::make_unique<Hook>(make(nullptr, nullptr));
+                gate = std::make_shared<Hook::CallGate>();
+                snapshot.name = name;
+                snapshot.ledger_id = reserved.ledger_id;
+                snapshot.kind = is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
+                impl = std::make_unique<Hook::Impl>(
+                    Backend{},
+                    std::move(name),
+                    target,
+                    reserved.ledger_id,
+                    HookState::Disabled
+                );
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(roll_back(ErrorCode::OutOfMemory));
+            }
+            catch (...)
+            {
+                return std::unexpected(roll_back(ErrorCode::UnknownError));
+            }
+
+            std::optional<DetourModKit::detail::BackendCoordinatorHold> hold;
+            ClassificationLog lines;
+            Result<Backend> created = [&]() noexcept -> Result<Backend>
+            {
+                try
+                {
+                    return create_backend_under_coordinator(
+                        reserved,
+                        options,
+                        snapshot.name,
+                        where,
+                        hold,
+                        lines,
+                        [&]() { return create_backend(std::string_view{snapshot.name}); }
+                    );
+                }
+                catch (const std::bad_alloc &)
+                {
+                    hold.reset();
+                    return std::unexpected(roll_back(ErrorCode::OutOfMemory));
+                }
+                catch (...)
+                {
+                    hold.reset();
+                    return std::unexpected(roll_back(ErrorCode::UnknownError));
+                }
+            }();
+            if (!created)
+            {
+                return std::unexpected(created.error());
+            }
+            const bool claimed = created->claimed();
+            impl->backend = std::move(*created);
+            impl->bypassed = claimed;
+            if (!DetourModKit::detail::HookLedger::instance().commit_hook_keep_slot(target, reserved.ledger_id))
+            {
+                hold.reset();
+                lines.emit(where, snapshot.name, target);
+                return std::unexpected(roll_back(ErrorCode::OutOfMemory));
+            }
+            // The arm moves the enabled tally, so the created tally moves first.
+            DetourModKit::detail::hook_population::record_created(false);
+            hand_off(*impl);
+            void *const trampoline = inline_trampoline(impl->backend);
+            *entry = make(std::move(impl), std::move(gate));
+            Hook &stored = *hooks.emplace_back(std::move(entry));
+            publish_original(original, trampoline);
+            DeferredArm deferred;
+            const Result<void> armed = arm_installed(stored, deferred);
+            hold.reset();
+            DetourModKit::detail::HookLedger::instance().release_target_slot(target, reserved.ledger_id);
+
+            lines.emit(where, snapshot.name, target);
+            (void)log().try_log(
+                armed ? LogLevel::Info : LogLevel::Warning,
+                "{}: created {} hook '{}' at 0x{:0{}X}{}.",
+                where,
+                is_inline ? "inline" : "mid",
+                snapshot.name,
+                target,
+                sizeof(std::uintptr_t) * 2,
+                armed ? " and armed it" : ", and its arm failed"
+            );
+            if (claimed)
+            {
+                note_position_claim(snapshot.name, target);
+            }
+            DetourModKit::detail::emit_lifecycle_event(
+                snapshot.name,
+                snapshot.ledger_id,
+                snapshot.kind,
+                diagnostics::HookTransition::Created
+            );
+            log_deferred_arm(deferred, snapshot.name, target);
+            if (deferred.transition)
+            {
+                DetourModKit::detail::emit_lifecycle_event(
+                    snapshot.name,
+                    snapshot.ledger_id,
+                    snapshot.kind,
+                    *deferred.transition
+                );
+            }
+            if (!armed)
+            {
+                return std::unexpected(armed.error());
+            }
+            return std::ref(stored);
+        }
+
+        namespace
+        {
+            /// Runs HookStack::install for an inline hook. @p counted_install names the thunk of the counted form.
+            [[nodiscard]] Result<std::reference_wrapper<Hook>> install_inline_into_stack(
+                std::vector<std::unique_ptr<Hook>> &hooks,
+                InlineInstallRequest request,
+                void *detour,
+                std::optional<detail::CountedInstall> counted_install
+            )
+            {
+                InlineRequest create_request{std::move(request.name), std::move(request.target), request.options};
+                const Result<detail::ReservedTarget> preflight =
+                    preflight_inline_request(create_request, counted_install ? counted_install->entry : detour);
+                if (!preflight)
+                {
+                    return std::unexpected(preflight.error());
+                }
+                std::optional<CountedThunk> counted;
+                void *destination = detour;
+                if (counted_install)
+                {
+                    Result<CountedThunk> thunk =
+                        inspect_counted_install(create_request.name, *counted_install, *preflight);
+                    if (!thunk)
+                    {
+                        return std::unexpected(thunk.error());
+                    }
+                    destination = thunk->range.begin;
+                    counted = *thunk;
+                }
+                const Result<HMODULE> module = acquire_install_module_ref(*preflight, "hook::inline_at");
+                if (!module)
+                {
+                    return std::unexpected(module.error());
+                }
+                ModuleRefGuard self_ref(*module);
+                const std::uintptr_t target = preflight->address;
+                return detail::HookAccess::install_into_stack<safetyhook::InlineHook>(
+                    hooks,
+                    std::move(create_request.name),
+                    *preflight,
+                    create_request.options,
+                    request.original,
+                    [target, destination](std::string_view name)
+                    { return create_inline_backend(target, destination, name); },
+                    [&self_ref, &counted](auto &impl) noexcept
+                    {
+                        impl.counted = counted;
+                        impl.self_ref = self_ref.release();
+                    }
+                );
+            }
+        } // namespace
+
+        Result<std::reference_wrapper<Hook>> HookStack::install_raw(InlineInstallRequest request, void *detour)
+        {
+            return install_inline_into_stack(m_hooks, std::move(request), detour, std::nullopt);
+        }
+
+        Result<std::reference_wrapper<Hook>>
+        HookStack::install_counted(InlineInstallRequest request, detail::CountedInstall install)
+        {
+            return install_inline_into_stack(m_hooks, std::move(request), nullptr, install);
+        }
+
+        Result<std::reference_wrapper<Hook>> HookStack::install(MidRequest request, MidHookFn detour)
+        {
+            const Result<detail::ReservedTarget> preflight = preflight_mid_request(request, detour);
+            if (!preflight)
+            {
+                return std::unexpected(preflight.error());
+            }
+            const std::uintptr_t target = preflight->address;
+            const Result<HMODULE> module = acquire_install_module_ref(*preflight, "hook::mid_at");
+            if (!module)
+            {
+                return std::unexpected(module.error());
+            }
+            ModuleRefGuard self_ref(*module);
+            const Result<std::size_t> claim = claim_mid_adapter_for_install(target, preflight->ledger_id, detour);
+            if (!claim)
+            {
+                return std::unexpected(claim.error());
+            }
+            const std::size_t slot_index = *claim;
+            MidAdapterSlotGuard slot_guard(slot_index);
+            return detail::HookAccess::install_into_stack<safetyhook::MidHook>(
+                m_hooks,
+                std::move(request.name),
+                *preflight,
+                request.options,
+                OriginalSlot{},
+                [target, slot_index](std::string_view name) { return create_mid_backend(target, slot_index, name); },
+                [&self_ref, &slot_guard](auto &impl) noexcept
+                {
+                    impl.self_ref = self_ref.release();
+                    impl.mid_slot = slot_guard.release();
+                }
+            );
         }
 
         Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept
