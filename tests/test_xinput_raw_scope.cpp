@@ -1,4 +1,5 @@
 #include "internal/xinput_raw_scope.hpp"
+#include "fixtures/child_process.hpp"
 #include "test_alloc_probe.hpp"
 
 #include <gtest/gtest.h>
@@ -23,46 +24,6 @@ namespace
     const auto s_close_handle = [](void *handle) noexcept -> void { ::CloseHandle(handle); };
     using NativeHandle = std::unique_ptr<void, decltype(s_close_handle)>;
 
-    void run_scope_case_in_fresh_process(const wchar_t *filter)
-    {
-        std::array<wchar_t, 4096> executable{};
-        ASSERT_NE(::GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())), 0u);
-        std::array<wchar_t, 8192> command{};
-        ASSERT_GT(
-            std::swprintf(command.data(), command.size(), L"\"%ls\" --gtest_filter=%ls", executable.data(), filter),
-            0
-        );
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        PROCESS_INFORMATION process{};
-        ASSERT_TRUE(
-            ::CreateProcessW(
-                nullptr,
-                command.data(),
-                nullptr,
-                nullptr,
-                FALSE,
-                CREATE_NO_WINDOW,
-                nullptr,
-                nullptr,
-                &startup,
-                &process
-            )
-        );
-        const NativeHandle process_handle{process.hProcess, s_close_handle};
-        const NativeHandle thread_handle{process.hThread, s_close_handle};
-        const DWORD waited = ::WaitForSingleObject(process_handle.get(), 15000);
-        if (waited != WAIT_OBJECT_0)
-        {
-            ::TerminateProcess(process_handle.get(), 1);
-            ::WaitForSingleObject(process_handle.get(), 1000);
-        }
-        ASSERT_EQ(waited, static_cast<DWORD>(WAIT_OBJECT_0));
-        DWORD exit_code = 1;
-        ASSERT_TRUE(::GetExitCodeProcess(process_handle.get(), &exit_code));
-        EXPECT_EQ(exit_code, 0u);
-    }
-
     void run_current_scope_case_in_fresh_process()
     {
         const auto *const info = ::testing::UnitTest::GetInstance()->current_test_info();
@@ -81,7 +42,7 @@ namespace
         ASSERT_LT(length + 1, filter.size());
         filter[length++] = L'.';
         append(info->name());
-        run_scope_case_in_fresh_process(filter.data());
+        dmk_test::run_case_in_child(filter.data());
     }
 
     [[nodiscard]] bool delegate_scope_case_if_owned()
@@ -926,7 +887,7 @@ TEST(XInputConsumeScopeTest, ChildFaultProofPreservesTheLiveParentOwner)
     const DWORD identity_index = DetourModKit::detail::xinput_consume_identity_index_for_test();
     const DWORD metadata_index = DetourModKit::detail::xinput_consume_metadata_index_for_test();
     const auto owners = DetourModKit::detail::xinput_raw_scope_owners_for_test();
-    run_scope_case_in_fresh_process(L"XInputConsumeScopeTest.CaptureAndRestoreFaultsRefuseMasksAndBalanceLeases");
+    dmk_test::run_case_in_child(L"XInputConsumeScopeTest.CaptureAndRestoreFaultsRefuseMasksAndBalanceLeases");
     EXPECT_EQ(DetourModKit::detail::xinput_raw_scope_index_for_test(), raw_index);
     EXPECT_EQ(DetourModKit::detail::xinput_consume_identity_index_for_test(), identity_index);
     EXPECT_EQ(DetourModKit::detail::xinput_consume_metadata_index_for_test(), metadata_index);

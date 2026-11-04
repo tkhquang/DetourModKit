@@ -234,6 +234,20 @@ namespace DetourModKit::detail
         return safetyhook::g_idle_pass_calls.load(std::memory_order_relaxed);
     }
 
+    void set_backend_idle_scan_hold_for_test(bool hold) noexcept
+    {
+        if (hold)
+        {
+            safetyhook::g_route_scan_reached.store(false);
+        }
+        safetyhook::g_route_scan_hold.store(hold);
+    }
+
+    bool backend_idle_scan_reached_for_test() noexcept
+    {
+        return safetyhook::g_route_scan_reached.load();
+    }
+
     std::size_t backend_idle_snapshot_walks_for_test() noexcept
     {
         return safetyhook::g_idle_pass_snapshot_walks.load(std::memory_order_relaxed);
