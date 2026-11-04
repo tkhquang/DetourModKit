@@ -1199,8 +1199,15 @@ TEST(HookLayeredEnable, DISABLED_RecaptureTakesNoLockUnderSuspensionChild)
     std::thread holder(
         [&held]
         {
+            // The parent deadline bounds an enable() that blocks. This one bounds an enable() that runs no idle pass.
+            const auto deadline = std::chrono::steady_clock::now() + 5s;
             while (!backend_idle_scan_reached_for_test())
             {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    set_backend_idle_scan_hold_for_test(false);
+                    return;
+                }
                 ::Sleep(1);
             }
             const std::_Lockit lock(_LOCK_DEBUG);
@@ -1211,7 +1218,7 @@ TEST(HookLayeredEnable, DISABLED_RecaptureTakesNoLockUnderSuspensionChild)
     );
     const Result<void> again = lower->enable();
     holder.join();
-    ASSERT_TRUE(held.load());
+    ASSERT_TRUE(held.load()) << "the enable() reached no backend idle scan within 5 s";
     ASSERT_TRUE(again.has_value()) << again.error().message();
     EXPECT_EQ(backend_idle_pass_calls_for_test() - passes_before, 1u);
     EXPECT_EQ(call_unfolded(&suspended_recapture_target, 5), 125);
