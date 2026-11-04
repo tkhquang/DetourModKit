@@ -126,7 +126,7 @@ const auto installed = g_hooks.install<&print_detour>(dmk::hook::InlineInstallRe
 });
 if (!installed)
 {
-    // A failed create changes nothing. A failed arm keeps the hook in g_hooks, which still owns its teardown.
+    // A failed create or arm leaves g_hooks unchanged.
     session.log().warning("print_hook: {}", installed.error().message());
 }
 ```

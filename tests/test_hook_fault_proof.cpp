@@ -1459,6 +1459,7 @@ TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
 namespace DetourModKit::detail
 {
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
+    void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1641,7 +1642,7 @@ TEST(HookLedgerSlot, PromoteMovesTheIdWithoutAllocation)
     EXPECT_EQ(ledger.promote_to_newest(target, ids[0]), 0u);
 }
 
-// Each install step that fails before the arm leaves the stack, the original slot, the ledger, and the target as
+// Each install step that fails, the arm included, leaves the stack, the original slot, the ledger, and the target as
 // they were. A later install of the same target then succeeds.
 TEST(HookStackTest, InstallRollsBackEveryStepOnFailure)
 {
@@ -1698,6 +1699,15 @@ TEST(HookStackTest, InstallRollsBackEveryStepOnFailure)
     }();
     expect_unchanged(commit_refused, ErrorCode::OutOfMemory, target);
     EXPECT_EQ(ledger_locks, 3u);
+
+    const auto arm_refused = [&install, target]
+    {
+        DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target.raw()), false);
+        auto refused = install(target);
+        DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false);
+        return refused;
+    }();
+    expect_unchanged(arm_refused, ErrorCode::EnableFailed, target);
 
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());

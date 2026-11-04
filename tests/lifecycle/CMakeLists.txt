@@ -1834,6 +1834,7 @@ set(route_copy_proofs
   Lifecycle.RouteCopiesRetryRefusedConnection connect-retry
   Lifecycle.RouteCopiesRejectForeignCoordinatorView foreign-view
   Lifecycle.RouteCopiesReArmAboveANewerLayer re-arm-above-newer
+  Lifecycle.RouteCopiesRepeatEnableUnderANewerLayer repeat-enable
   Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm stale-re-arm
   Lifecycle.RouteCopiesReportCoordinatorRefusal refusal-cause
   Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline retire-inline

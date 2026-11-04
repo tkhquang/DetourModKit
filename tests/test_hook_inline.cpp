@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 #include <windows.h>
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "DetourModKit/hook.hpp"
@@ -902,4 +906,250 @@ TEST(HookToggle, EnableAndDisableWaitForAHolderPastTheWaitSlice)
         ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
     }
     EXPECT_FALSE(hook.is_enabled());
+}
+
+// LAYERED TOGGLES
+
+namespace
+{
+#define DMK_LAYERED_TOGGLE_TARGET(NAME, TAG)                                                                           \
+    DMK_PROOF_TARGET int NAME(int x)                                                                                   \
+    {                                                                                                                  \
+        volatile int r = x;                                                                                            \
+        volatile int tag = TAG;                                                                                        \
+        (void)tag;                                                                                                     \
+        return r;                                                                                                      \
+    }
+    DMK_LAYERED_TOGGLE_TARGET(repeat_enable_target, 201)
+    DMK_LAYERED_TOGGLE_TARGET(stale_claim_target, 203)
+    DMK_LAYERED_TOGGLE_TARGET(two_layer_target, 207)
+    DMK_LAYERED_TOGGLE_TARGET(stale_mid_target, 209)
+    DMK_LAYERED_TOGGLE_TARGET(bypass_refusal_target, 211)
+#undef DMK_LAYERED_TOGGLE_TARGET
+
+    using LayerFn = int (*)(int);
+    std::atomic<LayerFn> s_lower_original{nullptr};
+    std::atomic<LayerFn> s_middle_original{nullptr};
+    std::atomic<LayerFn> s_upper_original{nullptr};
+    std::atomic<int> s_layer_mid_calls{0};
+
+    int lower_layer_detour(int x)
+    {
+        return s_lower_original.load(std::memory_order_acquire)(x) + 100;
+    }
+
+    int middle_layer_detour(int x)
+    {
+        return s_middle_original.load(std::memory_order_acquire)(x) + 3;
+    }
+
+    int upper_layer_detour(int x)
+    {
+        return s_upper_original.load(std::memory_order_acquire)(x) + 20;
+    }
+
+    void layer_mid_callback(MidContext &) noexcept
+    {
+        s_layer_mid_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// Creates an inline hook on @p target, publishes its original into @p original, and arms it.
+    [[nodiscard]] std::optional<Hook>
+    armed_layer(const char *name, Address target, int (*detour)(int), std::atomic<LayerFn> &original)
+    {
+        Result<Hook> created =
+            inline_at(InlineRequest{.name = name, .target = target}, reinterpret_cast<void (*)()>(detour));
+        if (!created)
+        {
+            ADD_FAILURE() << name << ": " << created.error().message();
+            return std::nullopt;
+        }
+        std::optional<Hook> hook{std::move(*created)};
+        original.store(hook->original<LayerFn>(), std::memory_order_release);
+        if (const Result<void> armed = hook->enable(); !armed)
+        {
+            ADD_FAILURE() << name << ": " << armed.error().message();
+            return std::nullopt;
+        }
+        return hook;
+    }
+
+    /// Writes @p bytes over @p target with no coordinator, as a patcher outside DMK does.
+    void write_outside_dmk(Address target, const std::array<std::uint8_t, 16> &bytes)
+    {
+        auto *const code = reinterpret_cast<void *>(target.raw());
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(code, bytes.size(), PAGE_EXECUTE_READWRITE, &previous), 0);
+        std::memcpy(code, bytes.data(), bytes.size());
+        (void)VirtualProtect(code, bytes.size(), previous, &previous);
+        (void)FlushInstructionCache(GetCurrentProcess(), code, bytes.size());
+    }
+
+    constexpr std::string_view REFUSED_ENABLE = "refused enable";
+    constexpr std::string_view LEFT_THE_CHAIN = "left the layer chain under an active state";
+} // namespace
+
+// A repeat enable() of an Active hook succeeds under a newer layer whose chain reaches it. It logs nothing and keeps
+// both detours on the call path.
+TEST(HookLayeredEnable, RepeatEnableUnderANewerLayerSucceeds)
+{
+    const Address target = addr_of(&repeat_enable_target);
+    std::optional<Hook> lower = armed_layer("RepeatEnableLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    std::optional<Hook> upper = armed_layer("RepeatEnableUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    ASSERT_EQ(call_unfolded(&repeat_enable_target, 5), 125);
+
+    std::string text;
+    Result<void> again;
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Info};
+        again = lower->enable();
+        text = capture.read_all();
+    }
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_EQ(text.find(REFUSED_ENABLE), std::string::npos) << text;
+    EXPECT_EQ(text.find(LEFT_THE_CHAIN), std::string::npos) << text;
+    EXPECT_TRUE(lower->is_enabled());
+    EXPECT_EQ(call_unfolded(&repeat_enable_target, 5), 125);
+
+    upper.reset();
+    lower.reset();
+    EXPECT_EQ(call_unfolded(&repeat_enable_target, 5), 5);
+}
+
+// A restore outside DMK takes an Active hook out of the chain, and a newer hook arms over the restored bytes. The
+// repeat enable() of the older hook proves the claim stale, re-arms it above the newer layer, and chains both detours.
+TEST(HookLayeredEnable, StaleActiveClaimReArmsAboveTheNewerLayer)
+{
+    const Address target = addr_of(&stale_claim_target);
+    const std::array<std::uint8_t, 16> pristine = entry_bytes(&stale_claim_target);
+    std::optional<Hook> lower = armed_layer("StaleClaimLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    ASSERT_EQ(call_unfolded(&stale_claim_target, 5), 105);
+    write_outside_dmk(target, pristine);
+    ASSERT_EQ(call_unfolded(&stale_claim_target, 5), 5);
+    std::optional<Hook> upper = armed_layer("StaleClaimUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    ASSERT_EQ(call_unfolded(&stale_claim_target, 5), 25);
+
+    std::string text;
+    Result<void> again;
+    {
+        dmk_test::LoggerFileCapture capture{LogLevel::Info};
+        again = lower->enable();
+        text = capture.read_all();
+    }
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_NE(text.find(LEFT_THE_CHAIN), std::string::npos) << text;
+    EXPECT_TRUE(lower->is_enabled());
+    EXPECT_EQ(call_unfolded(&stale_claim_target, 5), 125) << "the repeat enable did not chain both detours";
+
+    // The re-armed hook is the newest layer, so it restores first.
+    lower.reset();
+    EXPECT_EQ(call_unfolded(&stale_claim_target, 5), 25);
+    upper.reset();
+    EXPECT_EQ(call_unfolded(&stale_claim_target, 5), 5);
+}
+
+// The chain answer follows every layer jump, not the top layer only. A lower hook under two newer layers succeeds
+// with no re-arm. A re-arm above them makes the top layer chain back into itself.
+TEST(HookLayeredEnable, RepeatEnableUnderTwoNewerLayersSucceeds)
+{
+    const Address target = addr_of(&two_layer_target);
+    std::optional<Hook> lower = armed_layer("TwoLayerLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    std::optional<Hook> middle = armed_layer("TwoLayerMiddle", target, &middle_layer_detour, s_middle_original);
+    ASSERT_TRUE(middle);
+    std::optional<Hook> upper = armed_layer("TwoLayerUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    ASSERT_EQ(call_unfolded(&two_layer_target, 5), 128);
+
+    const Result<void> again = lower->enable();
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_EQ(call_unfolded(&two_layer_target, 5), 128);
+
+    upper.reset();
+    middle.reset();
+    lower.reset();
+    EXPECT_EQ(call_unfolded(&two_layer_target, 5), 5);
+}
+
+// A mid layer leaves its relocated jump through a continuation slot. The chain answer follows that slot. It proves the
+// claim of an inline hook under the mid layer stale, and the hook re-arms above both layers.
+TEST(HookLayeredEnable, StaleClaimUnderAMidLayerReArms)
+{
+    const Address target = addr_of(&stale_mid_target);
+    const std::array<std::uint8_t, 16> pristine = entry_bytes(&stale_mid_target);
+    s_layer_mid_calls.store(0, std::memory_order_relaxed);
+    std::optional<Hook> lower = armed_layer("StaleMidLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    write_outside_dmk(target, pristine);
+    std::optional<Hook> upper = armed_layer("StaleMidUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    Result<Hook> mid_created = mid_at(MidRequest{.name = "StaleMidLayer", .target = target}, &layer_mid_callback);
+    ASSERT_TRUE(mid_created.has_value()) << mid_created.error().message();
+    std::optional<Hook> mid{std::move(*mid_created)};
+    ASSERT_TRUE(mid->enable().has_value());
+    ASSERT_EQ(call_unfolded(&stale_mid_target, 5), 25);
+    ASSERT_EQ(s_layer_mid_calls.load(std::memory_order_relaxed), 1);
+
+    const Result<void> again = lower->enable();
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_EQ(call_unfolded(&stale_mid_target, 5), 125) << "the repeat enable did not chain every layer";
+    EXPECT_EQ(s_layer_mid_calls.load(std::memory_order_relaxed), 2);
+
+    lower.reset();
+    mid.reset();
+    upper.reset();
+    EXPECT_EQ(call_unfolded(&stale_mid_target, 5), 5);
+}
+
+// A bypass writes no target byte, so a coordinator that refuses for good does not fail it. An Active lower layer
+// bypasses, and a repeat disable of it succeeds. Once it is the newest layer, a refused hold keeps the bypass. A repeat
+// disable of a restored hook also succeeds. The top-layer restore still fails.
+TEST(HookToggle, DisableBypassesUnderARefusingCoordinator)
+{
+    const Address target = addr_of(&bypass_refusal_target);
+    const std::array<std::uint8_t, 16> pristine = entry_bytes(&bypass_refusal_target);
+    std::optional<Hook> lower = armed_layer("RefusedBypassLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    std::optional<Hook> upper = armed_layer("RefusedBypassUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    ASSERT_EQ(call_unfolded(&bypass_refusal_target, 5), 125);
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+        const Result<void> bypassed = lower->disable();
+        ASSERT_TRUE(bypassed.has_value()) << bypassed.error().message();
+        EXPECT_FALSE(lower->is_enabled());
+        EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 25);
+        const Result<void> repeated = lower->disable();
+        EXPECT_TRUE(repeated.has_value()) << repeated.error().message();
+
+        const Result<void> restore = upper->disable();
+        ASSERT_FALSE(restore.has_value());
+        EXPECT_EQ(restore.error().code, ErrorCode::DisableFailed);
+        EXPECT_TRUE(upper->is_enabled());
+        EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 25);
+    }
+    ASSERT_TRUE(upper->disable().has_value());
+    upper.reset();
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+        const Result<void> kept = lower->disable();
+        EXPECT_TRUE(kept.has_value()) << kept.error().message();
+        EXPECT_FALSE(lower->is_enabled());
+        EXPECT_NE(entry_bytes(&bypass_refusal_target), pristine) << "the refused hold restored the target";
+        EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 5);
+    }
+    ASSERT_TRUE(lower->disable().has_value());
+    EXPECT_EQ(entry_bytes(&bypass_refusal_target), pristine);
+    EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 5);
+    {
+        const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+        const Result<void> repeated = lower->disable();
+        EXPECT_TRUE(repeated.has_value()) << repeated.error().message();
+    }
+    lower.reset();
+    EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 5);
 }

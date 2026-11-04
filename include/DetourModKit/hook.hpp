@@ -331,8 +331,8 @@ namespace DetourModKit
          * @note Hooks that share one target, in this copy or in other copies, retire in any order (`[B-16]`).
          * @note Lock order (`[B-109]`): a toggle takes the per-hook call gate, then the HookLedger target slot, and
          *       then the backend process coordinator. It releases them in reverse order. An install takes its target
-         *       reservation and its module reference before the coordinator. Logs and lifecycle events follow every
-         *       release.
+         *       reservation and its module reference before the coordinator. A wait line logs while the call holds no
+         *       coordinator. Every other log line and lifecycle event follows every release.
          * @note An install and a public toggle wait while another thread or DMK copy holds the process coordinator. An
          *       install also waits while a patcher outside the coordinator holds the page of an image target without
          *       execute access. No attempt count or time cap applies, and each wait logs one line. Only a coordinator
@@ -481,11 +481,13 @@ namespace DetourModKit
              *         EnableFailed, DisableFailed, ReentrantCallRejected, or InvalidHookState.
              * @details The target bytes decide the published state (`[B-97]`), and Foreign or unreadable bytes after a
              *          committed arm keep the hook Active. For a restored hook, Foreign or unreadable bytes before the
-             *          write refuse with EnableFailed and write nothing. If the hook claims Active over Original
-             *          bytes, the call first reconciles it to Disabled. EnableFailed means that this call published no
-             *          new arm. A byte refusal keeps the prior state and bytes, and any other EnableFailed leaves the
-             *          hook Disabled. BackendFailed means that the hook is active, but page protection can stay
-             *          unrestored.
+             *          write refuse with EnableFailed and write nothing. An Active hook under a newer layer succeeds,
+             *          unless a layer on the chain from the target saved this hook's window. That saved window proves
+             *          that a restore outside DMK removed this hook's patch. For such a hook, and for a hook that
+             *          claims Active over Original bytes, the call first reconciles it to Disabled and arms again
+             *          (HookLayeredEnable.*). EnableFailed means that this call published no new arm. A byte refusal
+             *          keeps the prior state and bytes, and any other EnableFailed leaves the hook Disabled.
+             *          BackendFailed means that the hook is active, but page protection can stay unrestored.
              * @warning DisableFailed means that this call did not prove a disarm after a rejected or uncertain arm. The
              *          handle stays active, so quiesce or disable it before teardown.
              * @note A hook that @ref disable bypassed, and a hook that claimed a vacated position, re-arm by one store
@@ -496,8 +498,10 @@ namespace DetourModKit
              *       or a jump out of range, that its own patch lies under a newer layer, or that the ledger cannot
              *       decide the layer order. It writes no bytes and keeps the hook's state, but a coordinator refusal
              *       after the reconciliation leaves it Disabled. While another thread runs the trampoline that the arm
-             *       rewrites, the call waits, with no attempt count. ReentrantCallRejected means that the calling
-             *       thread returns into that trampoline, so the wait cannot end.
+             *       rewrites, the call waits, with no attempt count. The wait holds no DMK lock and the hook stays
+             *       Disabled, so that thread can call @ref is_enabled, @ref call, or a toggle on the same target.
+             *       ReentrantCallRejected means that the calling thread returns into that trampoline, so the wait
+             *       cannot end.
              * @note Idempotent and thread-safe. Publish everything the detour needs before this call (`[B-83]`).
              * @note Setup/control-plane only: the arm patches the target and serializes on the per-hook call gate. It
              *       waits for a held process coordinator, as @ref Hook states.
@@ -512,7 +516,7 @@ namespace DetourModKit
              *          Active layer over foreign or unreadable bytes. One store sends every caller past its detour, no
              *          target byte changes, and the hook publishes Disabled (`[B-97]`, `[B-104]`). A second disable
              *          succeeds. Once the bypassed hook is the newest layer over its own patch again, that call also
-             *          restores.
+             *          restores. A refused process coordinator fails only a restore.
              *
              *          The newest layer over its own patch restores, and Disabled publishes only once Original bytes
              *          read back. Any other bytes after the restore keep the hook Active, so a retry can disarm after
@@ -524,7 +528,9 @@ namespace DetourModKit
              *       bytes gets DisableFailed. A ledger that cannot decide the layer order returns LayerConflict and
              *       changes nothing.
              * @note Setup/control-plane only: the disarm restores the target and serializes on the per-hook call gate.
-             *       It waits for a held process coordinator, as @ref Hook states.
+             *       The newest local layer waits for a held process coordinator before it reads its bytes, as
+             *       @ref Hook states. That includes a hook under a newer layer of another participant. A claimed hook
+             *       and a layer under a newer local layer do not wait.
              */
             [[nodiscard]] Result<void> disable() noexcept;
 
@@ -716,8 +722,8 @@ namespace DetourModKit
              *         @ref inline_at returns it, or of the arm, as @ref Hook::enable returns it.
              * @details Under the hold, the call creates the hook, stores the original into
              *          @ref InlineInstallRequest::original with release order, stores the hook, and arms it (`[B-83]`).
-             *          A create failure changes nothing. A failed arm keeps the hook stored, in the state that its
-             *          error states.
+             *          A failed create or arm leaves the stack unchanged. A failed arm destroys the hook through its
+             *          teardown and then stores null into the original, unless the teardown pins a reachable detour.
              * @note Setup/control-plane only: the install waits as @ref Hook states.
              */
             template <auto Detour>
@@ -728,7 +734,9 @@ namespace DetourModKit
 
             /**
              * @brief Works as the counted @ref install, for the raw inline hook of @ref inline_at.
-             * @details The constraint sends a mid callback to the mid form, also from a braced request.
+             * @details The constraint sends a mid callback to the mid form, also from a braced request. A failed arm
+             *          whose patch committed pins the hook with its detour reachable and keeps the original, because
+             *          no drain covers a raw detour (HookStackTest.InstallRollbackPinsACommittedRawHook).
              * @warning Quiescence of the raw detour stays caller-owned, as the raw @ref inline_at states.
              * @note Setup/control-plane only: the install waits as @ref Hook states.
              */

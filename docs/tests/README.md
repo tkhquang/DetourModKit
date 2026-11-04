@@ -288,6 +288,7 @@ The XInput diagnostic routes use `xinput_layered_consume` as separate required `
 | `Lifecycle.RouteCopiesLegacyAroundClaimedPosition` | `route_copy_host` |
 | `Lifecycle.RouteCopiesArmOrderWithALegacyCopy` | `route_copy_host` |
 | `Lifecycle.RouteCopiesReArmAboveANewerLayer` | `route_copy_host` |
+| `Lifecycle.RouteCopiesRepeatEnableUnderANewerLayer` | `route_copy_host` |
 | `Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm` | `route_copy_host` |
 | `Lifecycle.RouteCopiesResidueBudgetFloorPins` | `route_copy_host` |
 | `Lifecycle.RouteCopiesRetirementKeepsABypassedRouteClosed` | `route_copy_host` |

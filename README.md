@@ -165,7 +165,6 @@ This example attaches to a process, resolves one function by signature, hooks it
 ```cpp
 // MyMod/src/main.cpp
 #include <atomic>
-#include <chrono>
 #include <windows.h>
 
 #include <DetourModKit.hpp>
@@ -217,14 +216,8 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         });
     if (!installed)
     {
+        // A failed install leaves g_hooks unchanged.
         session.log().error("Install failed: {}", installed.error().message());
-        // A failed arm keeps the hook in g_hooks. Retire it here, off the loader lock, before the shutdown.
-        const dmk::hook::HookRetirement retired = g_hooks.retire(std::chrono::milliseconds{100});
-        if (retired.outcome != dmk::hook::RetirementOutcome::Retired || retired.pinned != 0)
-        {
-            // The hook can stay reachable, so this DLL must stay loaded for the rest of the process.
-            session.log().error("PrintMessage_Hook did not retire: {}", dmk::to_string(retired.refusal));
-        }
         dmk::request_shutdown();
         return std::unexpected(installed.error());
     }
