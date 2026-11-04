@@ -83,6 +83,41 @@ def test_plusplusplus_header_excluded() -> None:
     )
 
 
+def _suspended_action_patch(body_lines) -> str:
+    """Return a patch that adds the recapture rewrite with `body_lines` as its body."""
+    return "\n".join(
+        ["--- a/src/inline_hook.cpp", "+++ b/src/inline_hook.cpp", "@@ -1 +1 @@"]
+        + ["+bool InlineHook::recapture_in_place(ProcessCoordinator& coordinator, uint8_t* destination) noexcept {"]
+        + [f"+{line}" for line in body_lines]
+        + ["+}", " unchanged context line"]
+    )
+
+
+def test_a_suspended_action_reaches_vectors_through_data_and_size_only() -> None:
+    clean = [
+        "    std::copy_n(m_target, m_original_bytes.size(), m_original_bytes.data());",
+        "    m_instruction_boundaries.data()[0] = InstructionBoundary{0, 0};",
+        "    if (m_patch_bytes.size() != 0) {",
+        "        store(cell, m_patch_bytes.data());",
+        "    }",
+    ]
+    assert MODULE.suspended_action_problems(_added(_suspended_action_patch(clean))) == []
+    for forbidden in (
+        "    std::copy_n(m_target, m_original_bytes.size(), m_original_bytes.begin());",
+        "    m_instruction_boundaries.resize(1);",
+        "    for (const auto& boundary : m_instruction_boundaries) {}",
+        "    m_patch_bytes[0] = 0;",
+    ):
+        problems = MODULE.suspended_action_problems(_added(_suspended_action_patch(clean + [forbidden])))
+        assert len(problems) == 1, f"{forbidden!r} must fail the suspended-action check once, got {problems!r}"
+
+
+def test_a_suspended_action_missing_from_the_added_lines_is_refused() -> None:
+    problems = MODULE.suspended_action_problems(_added(GOOD_PATCH))
+    assert len(problems) == len(MODULE.SUSPENDED_ACTION_SENTINELS), problems
+    assert all("is missing" in problem for problem in problems), problems
+
+
 def test_patch_files_sorted_order() -> None:
     with tempfile.TemporaryDirectory() as d:
         dp = Path(d)
@@ -806,6 +841,8 @@ def test_shipped_patchset_matches_pinned_hash() -> None:
     assert MODULE.patchset_sha256(paths) == MODULE.EXPECTED_PATCH_SHA256, (
         "shipped patch set != EXPECTED_PATCH_SHA256; regenerate the patch or update the constant"
     )
+    added = MODULE.combined_added_lines(paths)
+    assert MODULE.suspended_action_problems(added) == [], "a shipped suspended action takes a lock"
 
 
 def test_base_commit_is_full_sha() -> None:

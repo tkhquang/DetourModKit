@@ -11,12 +11,14 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "fixtures/child_process.hpp"
 #include "fixtures/log_capture.hpp"
 #include "fixtures/proof_section.hpp"
 #include "fixtures/scratch_page.hpp"
@@ -925,6 +927,8 @@ namespace
     DMK_LAYERED_TOGGLE_TARGET(two_layer_target, 207)
     DMK_LAYERED_TOGGLE_TARGET(stale_mid_target, 209)
     DMK_LAYERED_TOGGLE_TARGET(bypass_refusal_target, 211)
+    DMK_LAYERED_TOGGLE_TARGET(queued_install_target, 215)
+    DMK_LAYERED_TOGGLE_TARGET(install_after_arm_target, 217)
 #undef DMK_LAYERED_TOGGLE_TARGET
 
     using LayerFn = int (*)(int);
@@ -1152,4 +1156,174 @@ TEST(HookToggle, DisableBypassesUnderARefusingCoordinator)
     }
     lower.reset();
     EXPECT_EQ(call_unfolded(&bypass_refusal_target, 5), 5);
+}
+
+// RECAPTURE UNDER SUSPENSION
+
+namespace DetourModKit::detail
+{
+    [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
+    void set_backend_idle_scan_hold_for_test(bool hold) noexcept;
+    [[nodiscard]] bool backend_idle_scan_reached_for_test() noexcept;
+} // namespace DetourModKit::detail
+
+#if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL == 2
+namespace
+{
+    DMK_PROOF_TARGET int suspended_recapture_target(int x)
+    {
+        volatile int r = x;
+        volatile int tag = 213;
+        (void)tag;
+        return r;
+    }
+} // namespace
+
+// The child of RecaptureTakesNoLockUnderSuspension. A helper takes the MSVC debug-iterator lock at the idle-scan park
+// and holds it for 500 ms. The pass then suspends the helper, so a rewrite that takes the lock never returns.
+TEST(HookLayeredEnable, DISABLED_RecaptureTakesNoLockUnderSuspensionChild)
+{
+    using namespace DetourModKit::detail;
+    const Address target = addr_of(&suspended_recapture_target);
+    const std::array<std::uint8_t, 16> pristine = entry_bytes(&suspended_recapture_target);
+    std::optional<Hook> lower = armed_layer("SuspendedRecaptureLower", target, &lower_layer_detour, s_lower_original);
+    ASSERT_TRUE(lower);
+    write_outside_dmk(target, pristine);
+    std::optional<Hook> upper = armed_layer("SuspendedRecaptureUpper", target, &upper_layer_detour, s_upper_original);
+    ASSERT_TRUE(upper);
+    ASSERT_EQ(call_unfolded(&suspended_recapture_target, 5), 25);
+
+    const std::size_t passes_before = backend_idle_pass_calls_for_test();
+    std::atomic<bool> held{false};
+    set_backend_idle_scan_hold_for_test(true);
+    std::thread holder(
+        [&held]
+        {
+            while (!backend_idle_scan_reached_for_test())
+            {
+                ::Sleep(1);
+            }
+            const std::_Lockit lock(_LOCK_DEBUG);
+            held.store(true);
+            set_backend_idle_scan_hold_for_test(false);
+            ::Sleep(500);
+        }
+    );
+    const Result<void> again = lower->enable();
+    holder.join();
+    ASSERT_TRUE(held.load());
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_EQ(backend_idle_pass_calls_for_test() - passes_before, 1u);
+    EXPECT_EQ(call_unfolded(&suspended_recapture_target, 5), 125);
+
+    lower.reset();
+    EXPECT_EQ(call_unfolded(&suspended_recapture_target, 5), 25);
+    upper.reset();
+    EXPECT_EQ(call_unfolded(&suspended_recapture_target, 5), 5);
+}
+#endif
+
+// The recapture rewrite runs while its idle pass holds every other thread suspended, so it takes no lock that a
+// suspended thread can hold. The case runs in a child process, because the pass also suspends every watchdog thread.
+TEST(HookLayeredEnable, RecaptureTakesNoLockUnderSuspension)
+{
+#if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL == 2
+    dmk_test::run_case_in_child(L"HookLayeredEnable.DISABLED_RecaptureTakesNoLockUnderSuspensionChild");
+#else
+    GTEST_SKIP() << "only MSVC at _ITERATOR_DEBUG_LEVEL 2 takes a lock in a standard-container member";
+#endif
+}
+
+// ARM ORDER UNDER A QUEUED INSTALL
+
+namespace
+{
+    constexpr std::string_view LOCAL_BYPASS = "bypassed under 1 newer layer(s).";
+
+    /**
+     * @brief Arms an older hook on @p Target and installs a newer hook over it.
+     * @details With @p queue_during_arm, the newer install queues while a coordinator holder parks the arm of the older
+     *          hook with its target slot held.
+     */
+    template <int (*Target)(int)>
+    void expect_install_stays_newer(bool queue_during_arm, const char *older_name, const char *newer_name)
+    {
+        using namespace std::chrono_literals;
+        const Address target = addr_of(Target);
+        Result<Hook> older_created = inline_at(
+            InlineRequest{.name = older_name, .target = target},
+            reinterpret_cast<void (*)()>(&lower_layer_detour)
+        );
+        ASSERT_TRUE(older_created.has_value()) << older_created.error().message();
+        std::optional<Hook> older{std::move(*older_created)};
+        s_lower_original.store(older->original<LayerFn>(), std::memory_order_release);
+
+        std::optional<Result<Hook>> newer_created;
+        const auto install_newer = [&newer_created, target, newer_name]
+        {
+            newer_created.emplace(inline_at(
+                InlineRequest{.name = newer_name, .target = target},
+                reinterpret_cast<void (*)()>(&upper_layer_detour)
+            ));
+        };
+        Result<void> older_armed;
+        if (queue_during_arm)
+        {
+            const CoordinatorHolder holder{1500ms};
+            ASSERT_TRUE(holder.held());
+            bool queued_during_the_arm = false;
+            std::thread installer(
+                [&install_newer, &holder, &queued_during_the_arm]
+                {
+                    std::this_thread::sleep_for(300ms);
+                    queued_during_the_arm = !holder.released();
+                    install_newer();
+                }
+            );
+            older_armed = older->enable();
+            installer.join();
+            EXPECT_TRUE(queued_during_the_arm) << "the newer install started after the arm";
+        }
+        else
+        {
+            older_armed = older->enable();
+            install_newer();
+        }
+        ASSERT_TRUE(older_armed.has_value()) << older_armed.error().message();
+        ASSERT_TRUE(newer_created.has_value());
+        ASSERT_TRUE(newer_created->has_value()) << newer_created->error().message();
+        std::optional<Hook> newer{std::move(**newer_created)};
+        s_upper_original.store(newer->original<LayerFn>(), std::memory_order_release);
+        ASSERT_EQ(call_unfolded(Target, 5), 105);
+
+        std::string text;
+        Result<void> bypassed;
+        {
+            dmk_test::LoggerFileCapture capture{LogLevel::Info};
+            const CoordinatorRefusalScope refusal{COORDINATOR_INCOMPATIBLE};
+            bypassed = older->disable();
+            text = capture.read_all();
+        }
+        ASSERT_TRUE(bypassed.has_value()) << bypassed.error().message();
+        EXPECT_NE(text.find(LOCAL_BYPASS), std::string::npos) << text;
+        EXPECT_EQ(call_unfolded(Target, 5), 5);
+
+        ASSERT_TRUE(newer->enable().has_value());
+        EXPECT_EQ(call_unfolded(Target, 5), 25);
+        ASSERT_TRUE(older->enable().has_value());
+        EXPECT_EQ(call_unfolded(Target, 5), 125);
+        older.reset();
+        EXPECT_EQ(call_unfolded(Target, 5), 25);
+        newer.reset();
+        EXPECT_EQ(call_unfolded(Target, 5), 5);
+    }
+} // namespace
+
+// An install that queues while the arm of an older hook holds its slot creates over the armed patch, so it stays the
+// newer layer. The older hook then bypasses under a refusing coordinator, as it does when the install follows the
+// arm. Each variant has its own target and names, because a create can claim the vacated relay cell of a prior hook.
+TEST(HookArmOrder, InstallQueuedDuringAnArmStaysNewer)
+{
+    expect_install_stays_newer<&install_after_arm_target>(false, "InstallAfterArmOlder", "InstallAfterArmNewer");
+    expect_install_stays_newer<&queued_install_target>(true, "QueuedInstallOlder", "QueuedInstallNewer");
 }

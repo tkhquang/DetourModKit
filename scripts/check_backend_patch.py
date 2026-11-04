@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "aa0de0f047f6637120a161ada71fdce764f398ccb295de532b187c95d1a7c5e4"
+EXPECTED_PATCH_SHA256 = "7ad73da71d244c8497d0f14a59c8f73a080dbdf92a1647e9a1c89b1b4e073d01"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -295,6 +295,14 @@ LAYER_CHAIN_SENTINELS = [
 
 REQUIRED_SENTINELS += LAYER_CHAIN_SENTINELS
 
+# Each action that runs while threads_idle_outside holds every other thread suspended, with the std::vector members
+# that it touches. At _ITERATOR_DEBUG_LEVEL 2 every other vector member takes the process-wide MSVC debug-iterator
+# lock, which a suspended thread can hold, so the body reaches these vectors through data() and size() only.
+SUSPENDED_ACTION_SENTINELS = {
+    "bool InlineHook::recapture_in_place(": ("m_original_bytes", "m_instruction_boundaries", "m_patch_bytes"),
+}
+SUSPENDED_ACTION_ACCESS = re.compile(r"\.(?:data|size)\(\)")
+
 
 def patch_files(patch_dir: Path):
     """Return the *.patch files in application order (filename-sorted, as CMake globs them)."""
@@ -327,6 +335,43 @@ def combined_added_lines(paths) -> str:
 def missing_sentinels(added_text: str, sentinels=REQUIRED_SENTINELS):
     """Return the required sentinels absent from the patch set's added lines."""
     return [s for s in sentinels if s not in added_text]
+
+
+def added_function_body(added_text: str, signature: str):
+    """Return the brace-balanced body that follows `signature` in the added lines, or None."""
+    start = added_text.find(signature)
+    opening = added_text.find("{", start) if start >= 0 else -1
+    if opening < 0:
+        return None
+    depth = 0
+    for index in range(opening, len(added_text)):
+        if added_text[index] == "{":
+            depth += 1
+        elif added_text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return added_text[opening : index + 1]
+    return None
+
+
+def suspended_action_problems(added_text: str, actions=SUSPENDED_ACTION_SENTINELS):
+    """Return one problem for each absent action and each vector use past data() and size() in an action body."""
+    problems = []
+    for signature, vectors in actions.items():
+        body = added_function_body(added_text, signature)
+        if body is None:
+            problems.append(f"the suspended action '{signature}' is missing from the added lines of the patch set.")
+            continue
+        for vector in vectors:
+            for use in re.finditer(rf"\b{re.escape(vector)}\b", body):
+                if not SUSPENDED_ACTION_ACCESS.match(body, use.end()):
+                    line_end = body.find("\n", use.start())
+                    statement = body[use.start() : line_end if line_end >= 0 else len(body)].strip()
+                    problems.append(
+                        f"the suspended action '{signature}' uses '{statement}'. Under suspended threads it must reach "
+                        "a std::vector through data() and size() only (AGENTS.md [B-107])."
+                    )
+    return problems
 
 
 def submodule_url(repo_root: Path, name: str = SUBMODULE):
@@ -641,12 +686,14 @@ def main() -> int:
                 f"(sha256 {actual[:12]}... vs expected {EXPECTED_PATCH_SHA256[:12]}...). If this is a deliberate "
                 "reviewed backend-delta update or re-pin, regenerate the patch and update EXPECTED_PATCH_SHA256."
             )
-        absent = missing_sentinels(combined_added_lines(paths))
+        added = combined_added_lines(paths)
+        absent = missing_sentinels(added)
         if absent:
             failures.append(
                 f"the patch set in '{PATCH_DIR}' is missing required fix markers: {absent}. "
                 "A backend fix was edited out of its patch."
             )
+        failures.extend(suspended_action_problems(added))
 
     # 3. Patches reconstruct the reviewed tree (only checkable with the submodule initialized).
     submodule_dir = root / SUBMODULE

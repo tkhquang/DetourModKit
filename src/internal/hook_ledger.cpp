@@ -80,9 +80,10 @@ namespace DetourModKit
                 // event-rate backlog.
                 if (preexisting)
                 {
-                    // push_back gives the strong guarantee, so a failed growth leaves the existing order unchanged.
+                    // Each push_back gives the strong guarantee, and the catch below drops the id from every list.
                     it->second.order.push_back(id);
                     it->second.pending.push_back(id);
+                    it->second.uncommitted.push_back(id);
                 }
                 else
                 {
@@ -91,6 +92,7 @@ namespace DetourModKit
                     TargetEntry entry;
                     entry.order.push_back(id);
                     entry.pending.push_back(id);
+                    entry.uncommitted.push_back(id);
                     m_by_target->emplace(target, std::move(entry));
                 }
 
@@ -135,6 +137,7 @@ namespace DetourModKit
                 return false;
             }
             pending.erase(found);
+            std::erase(it->second.uncommitted, id);
             m_install_cv.notify_all();
             return true;
         }
@@ -151,7 +154,12 @@ namespace DetourModKit
                 return false;
             }
             const auto it = m_by_target->find(target);
-            return it != m_by_target->end() && !it->second.pending.empty() && it->second.pending.front() == id;
+            if (it == m_by_target->end() || it->second.pending.empty() || it->second.pending.front() != id)
+            {
+                return false;
+            }
+            std::erase(it->second.uncommitted, id);
+            return true;
         }
 
         std::size_t HookLedger::release_hook(std::uintptr_t target, std::uint64_t id) noexcept
@@ -178,6 +186,7 @@ namespace DetourModKit
             {
                 pending.erase(pending_found);
             }
+            std::erase(it->second.uncommitted, id);
 
             std::vector<std::uint64_t> &order = it->second.order;
             const auto found = std::find(order.begin(), order.end(), id);
@@ -304,7 +313,10 @@ namespace DetourModKit
             {
                 return 0;
             }
-            std::rotate(found, std::next(found), order.end());
+            const std::vector<std::uint64_t> &uncommitted = it->second.uncommitted;
+            const auto first_uncommitted =
+                std::find_first_of(std::next(found), order.end(), uncommitted.begin(), uncommitted.end());
+            std::rotate(found, std::next(found), first_uncommitted);
             return m_next_id.fetch_add(1, std::memory_order_relaxed);
         }
 

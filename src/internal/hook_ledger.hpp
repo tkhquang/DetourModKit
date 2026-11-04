@@ -109,7 +109,8 @@ namespace DetourModKit
              *         @p id is the top layer of this kit. False on lock failure or an invalid reservation.
              * @details HookStack::install arms through the kept slot under its coordinator hold. A slot from
              *          @ref acquire_target_slot counts a queued reservation of this kit as a newer layer, and its
-             *          queue entry allocates under the hold. HookLedgerSlot.CommitKeepsTheSlotForTheArm pins it.
+             *          queue entry allocates under the hold. The commit settles @p id, so the arm promotes past it.
+             *          HookLedgerSlot.CommitKeepsTheSlotForTheArm pins it.
              * @warning The caller MUST release the slot through @ref release_target_slot, as @ref acquire_target_slot
              *          states. On false, roll the reservation back through @ref release_hook.
              */
@@ -167,12 +168,14 @@ namespace DetourModKit
             void release_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
-             * @brief Moves @p id to the newest end of @p target's layer order after an arm made it the newest layer
-             *        (`[B-110]`).
+             * @brief Moves @p id below the uncommitted installs of @p target after an arm made it the newest armed
+             *        layer (`[B-110]`).
              * @return A layer stamp from the id sequence, newer than every id and stamp before it. Zero on an inert
              *         ledger, a lock failure, or an absent target or id. Nothing allocates.
-             * @details The caller holds the write slot of @p id. HookLedgerSlot.PromoteMovesTheIdWithoutAllocation
-             *          pins the order and the allocation.
+             * @details The caller holds the write slot of @p id. An install that queued behind that slot creates over
+             *          the armed patch, so it stays newer. HookLedgerSlot.PromoteMovesTheIdWithoutAllocation pins the
+             *          order and the allocation, and HookLedgerTargetSlot.PromoteKeepsAQueuedInstallNewer pins the
+             *          queued install.
              */
             [[nodiscard]] std::uint64_t promote_to_newest(std::uintptr_t target, std::uint64_t id) noexcept;
 
@@ -233,12 +236,14 @@ namespace DetourModKit
             {
                 std::vector<std::uint64_t> order;
                 std::vector<std::uint64_t> pending;
+                // Reserved install ids that no commit or release settled. They stay the newest end of order.
+                std::vector<std::uint64_t> uncommitted;
             };
 
             mutable std::mutex m_mutex;
             std::condition_variable m_install_cv;
-            // target address -> live/reserved hook ids in layer order: creation order, and an arm moves its id to the
-            // back (`[B-110]`). Null in the inert ledger.
+            // target address -> live/reserved hook ids in layer order: creation order, and an arm moves its id below
+            // the uncommitted installs (`[B-110]`). Null in the inert ledger.
             std::unique_ptr<std::unordered_map<std::uintptr_t, TargetEntry>> m_by_target;
             // Live VMT clones (small; a linear scan is cheaper than a map at this size).
             std::vector<VmtEntry> m_vmt;
