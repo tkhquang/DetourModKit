@@ -243,6 +243,15 @@ namespace DetourModKit::detail
     }
 
     /**
+     * @brief Reports whether the chain from the target can reach an Active hook under a newer layer (`[B-110]`). False
+     *        proves that a restore outside DMK removed the hook from the chain. Call it under the coordinator hold.
+     */
+    template <class BackendVariant> [[nodiscard]] bool backend_layer_chains_here(BackendVariant &backend) noexcept
+    {
+        return backend_value_or(backend, true, [](const auto &one) noexcept { return one.layer_chains_here(); });
+    }
+
+    /**
      * @brief Switches the backend off (@p on false) or back on without a target write.
      * @details An inline hook stores its relay slot, and a mid hook stores its route state. Neither waits.
      * @return False when the backend cannot switch, so the caller keeps its published state.

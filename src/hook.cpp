@@ -2617,12 +2617,26 @@ namespace DetourModKit
             }
 
             // A counted detour drains before the layer decision, so the wait holds no ledger slot (`[B-106]`).
-            if (impl->counted && proof == CountedDrainProof::Required)
+            if (impl->counted && proof != CountedDrainProof::ProvenByRetire)
             {
                 if (const char *const blocked = drain_counted_hook(impl->backend, *impl->counted))
                 {
                     return pin_backend_with_live_detour(impl, nullptr, name, target, ledger_id, kind, blocked);
                 }
+            }
+            // A thread can still run a raw detour that a failed install arm made reachable, and no drain covers it.
+            if (!impl->counted && impl->is_inline && proof == CountedDrainProof::InstallRollback &&
+                DetourModKit::detail::backend_committed(impl->backend))
+            {
+                return pin_backend_with_live_detour(
+                    impl,
+                    nullptr,
+                    name,
+                    target,
+                    ledger_id,
+                    kind,
+                    "no drain covers the raw detour of a failed install arm"
+                );
             }
 
             // Decide restore or retirement under this target's install-serialization slot. The slot makes the
@@ -3314,6 +3328,23 @@ namespace DetourModKit
             }
             if (!armed)
             {
+                // The teardown runs before the null store, so no thread that enters the detour reads a null original.
+                // A pinned backend keeps its detour reachable and its trampoline valid, so its original stays.
+                const auto failed = std::ranges::find_if(
+                    hooks,
+                    [&stored](const std::unique_ptr<Hook> &hook) noexcept { return hook.get() == &stored; }
+                );
+                bool pinned = false;
+                if (failed != hooks.end())
+                {
+                    std::unique_ptr<Hook> destroyed = std::move(*failed);
+                    hooks.erase(failed);
+                    pinned = teardown(*destroyed, CountedDrainProof::InstallRollback) == TeardownOutcome::Pinned;
+                }
+                if (!pinned)
+                {
+                    publish_original(original, nullptr);
+                }
                 return std::unexpected(armed.error());
             }
             return std::ref(stored);

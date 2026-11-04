@@ -482,6 +482,40 @@ namespace
         return 0;
     }
 
+    // A repeat enable of an armed lower participant under an armed newer participant succeeds. The case runs in either
+    // arm order, for the inline and the mid shape. One call still runs both detours.
+    int repeat_enable_under_newer_layer(
+        Participant &first,
+        Participant &second,
+        unsigned char *page,
+        const std::array<unsigned char, 11> &code
+    )
+    {
+        TargetFn volatile target = reinterpret_cast<TargetFn>(page);
+        const auto pristine = [page, &code]() { return std::memcmp(page, code.data(), code.size()) == 0; };
+        for (const Command install : {Command::InstallInline, Command::Install})
+        {
+            for (const bool first_is_lower : {true, false})
+            {
+                Participant &lower = first_is_lower ? first : second;
+                Participant &upper = first_is_lower ? second : first;
+                if (lower.run(install, page) == 0 || upper.run(install, page) == 0)
+                    return fail("the participants did not arm in order");
+                const auto lower_hits = lower.run(Command::Hits);
+                const auto upper_hits = upper.run(Command::Hits);
+                if (lower.run(Command::Enable) == 0)
+                    return fail("a repeat enable under a newer participant failed");
+                if (target() != 37 || lower.run(Command::Hits) != lower_hits + 1 ||
+                    upper.run(Command::Hits) != upper_hits + 1)
+                    return fail("one call did not run both detours after the repeat enable");
+                if (upper.run(Command::Reset) != 0 || lower.run(Command::Reset) != 0 || !pristine() ||
+                    first.run(Command::Records) != 0)
+                    return fail("the layers did not restore after the repeat enable");
+            }
+        }
+        return 0;
+    }
+
     // A foreign restore leaves the older hook Active over Original bytes. Its arm reconciles that state to Disabled,
     // then arms above the newer participant, which saved and restored the original prologue.
     int reconcile_stale_state_before_the_arm(
@@ -1062,13 +1096,13 @@ int main(int argc, char **argv)
         scenario != "layers-inline" && scenario != "missing" && scenario != "incompatible" && scenario != "capacity" &&
         scenario != "timeout" && scenario != "stub-page" && scenario != "layers-overlap" && scenario != "drain-leak" &&
         scenario != "adapter-leak" && scenario != "wait-export" && scenario != "stub-thread" &&
-        scenario != "connect-retry" && scenario != "re-arm-above-newer" && scenario != "stale-re-arm" &&
-        scenario != "refusal-cause" && scenario != "foreign-view" && scenario != "timeout-armed" &&
-        scenario != "teardown-retry" && scenario != "teardown-retry-armed" && scenario != "tls-page" &&
-        scenario != "retire-inline" && scenario != "legacy-lower" && scenario != "legacy-upper" &&
-        scenario != "legacy-around-claim" && scenario != "legacy-arm-order" && scenario != "budget-floor" &&
-        scenario != "retire-closed-route" && scenario != "concurrent-create" && scenario != "concurrent-install" &&
-        scenario != "arm-either-order")
+        scenario != "connect-retry" && scenario != "re-arm-above-newer" && scenario != "repeat-enable" &&
+        scenario != "stale-re-arm" && scenario != "refusal-cause" && scenario != "foreign-view" &&
+        scenario != "timeout-armed" && scenario != "teardown-retry" && scenario != "teardown-retry-armed" &&
+        scenario != "tls-page" && scenario != "retire-inline" && scenario != "legacy-lower" &&
+        scenario != "legacy-upper" && scenario != "legacy-around-claim" && scenario != "legacy-arm-order" &&
+        scenario != "budget-floor" && scenario != "retire-closed-route" && scenario != "concurrent-create" &&
+        scenario != "concurrent-install" && scenario != "arm-either-order")
         return 2;
     Participant first{"route_copy_a.dll"};
     Participant second{"route_copy_b.dll"};
@@ -1092,6 +1126,8 @@ int main(int argc, char **argv)
         return fail("participants did not share the same data owner");
     if (scenario == "re-arm-above-newer")
         return re_arm_above_newer_layer(first, second, page, code);
+    if (scenario == "repeat-enable")
+        return repeat_enable_under_newer_layer(first, second, page, code);
     if (scenario == "stale-re-arm")
         return reconcile_stale_state_before_the_arm(first, second, page, code);
     if (scenario == "refusal-cause")
