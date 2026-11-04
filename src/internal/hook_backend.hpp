@@ -303,7 +303,9 @@ namespace DetourModKit
                  * @brief Runs the Hook::enable arm on a hook that HookStack::install created under its hold.
                  * @details The arm writes through the kept target slot of the install and acquires the coordinator
                  *          again with no wait. The call gate of @p hook is unpublished, so its lock cannot wait. The
-                 *          arm emits nothing: @p deferred receives its warning line and its lifecycle event.
+                 *          target still holds the bytes that the create saved, so the arm never recaptures and never
+                 *          waits for a busy trampoline (HookStackTest.InstallOverAnArmedLayerRunsNoIdlePass). The arm
+                 *          emits nothing: @p deferred receives its warning line and its lifecycle event.
                  */
                 [[nodiscard]] static Result<void> arm_installed(Hook &hook, DeferredArm &deferred) noexcept;
 
@@ -322,11 +324,13 @@ namespace DetourModKit
                  * @param create_backend Creates the disabled backend hook from the hook name, under the hold.
                  * @param hand_off Moves the module reference and the state of the hook kind into the Impl. No step
                  *        after it can fail.
-                 * @return The stored hook, or the Error of the create or of the arm. A create Error releases the
-                 *         reservation and leaves @p hooks unchanged.
+                 * @return The stored hook, or the Error of the create or of the arm. Either Error leaves @p hooks
+                 *         unchanged. A create Error releases the reservation.
                  * @details The stack slot, the handle, and the Impl allocate before the hold. Under the hold, the
                  *          create, the original store, the stack store, and the arm run in that order. The hold
-                 *          releases first, then the kept slot, and then the log lines and lifecycle events run.
+                 *          releases first, then the kept slot, and then the log lines and lifecycle events run. A
+                 *          failed arm then destroys the hook through its teardown and stores null into @p original,
+                 *          unless the teardown pins a reachable detour.
                  *          src/hook.cpp defines it.
                  */
                 template <class Backend, class CreateBackend, class HandOff>

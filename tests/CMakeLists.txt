@@ -567,6 +567,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.RouteCopiesRetryRefusedConnection
     Lifecycle.RouteCopiesRejectForeignCoordinatorView
     Lifecycle.RouteCopiesReArmAboveANewerLayer
+    Lifecycle.RouteCopiesRepeatEnableUnderANewerLayer
     Lifecycle.RouteCopiesReconcileStaleStateBeforeTheArm
     Lifecycle.RouteCopiesReportCoordinatorRefusal
     Lifecycle.RouteCopiesRetireOlderInlineUnderNewerInline
@@ -657,7 +658,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 322)
+    --minimum 323)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

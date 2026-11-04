@@ -44,7 +44,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "5621634b44b4cd534f692f16e4c41ff32f26fccbebfc1c29fe755c3633d8298c"
+EXPECTED_PATCH_SHA256 = "aa0de0f047f6637120a161ada71fdce764f398ccb295de532b187c95d1a7c5e4"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -285,6 +285,15 @@ MID_ROUTE_RESIDUE_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += MID_ROUTE_RESIDUE_SENTINELS
+
+# A repeat arm under a newer layer re-arms only when a layer on the chain saved this hook's window.
+LAYER_CHAIN_SENTINELS = [
+    "bool InlineHook::layer_chains_here() const noexcept",  # the chain walk ...
+    "if (cell_saved_window(layer->trampoline, m_original_bytes))",  # ... proves a stale claim from a saved window ...
+    "destination = mid_exit_destination(layer->gateway, destination);",  # ... and follows a mid continuation slot
+]
+
+REQUIRED_SENTINELS += LAYER_CHAIN_SENTINELS
 
 
 def patch_files(patch_dir: Path):

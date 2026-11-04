@@ -39,6 +39,7 @@ namespace DetourModKit
             using DetourModKit::detail::apply_backend;
             using DetourModKit::detail::arm_witness_of;
             using DetourModKit::detail::backend_claimed;
+            using DetourModKit::detail::backend_layer_chains_here;
             using DetourModKit::detail::backend_value_or;
             using DetourModKit::detail::CoordinatorRefusal;
             using DetourModKit::detail::emit_lifecycle;
@@ -245,13 +246,6 @@ namespace DetourModKit
                     }
                     m_coordinator.emplace(DetourModKit::detail::WaitUntilHeld{where, name});
                     return static_cast<bool>(*m_coordinator);
-                }
-
-                /// Releases the coordinator. Returns false for a kept slot, whose install owns the coordinator.
-                [[nodiscard]] bool release_coordinator() noexcept
-                {
-                    m_coordinator.reset();
-                    return !m_kept;
                 }
 
                 /// Records @p transition for the install of a kept slot. Returns false, and records nothing, otherwise.
@@ -541,9 +535,26 @@ namespace DetourModKit
                 return {};
             }
 
+            /// Takes the call gate again after a wait. A lock that throws fails closed, as the first acquisition does.
+            [[nodiscard]] bool relock_call_gate(std::unique_lock<std::recursive_mutex> &guard) noexcept
+            {
+                try
+                {
+                    guard.lock();
+                    return true;
+                }
+                catch (...)
+                {
+                    return false;
+                }
+            }
+
             /**
              * @brief Runs the arm of Hook::enable after its call-gate lock and backend check.
              * @param kept_slot The kept slot of HookStack::install, or null to claim the target slot here.
+             * @details A thread inside the trampoline that the arm recaptures can need the call gate or the target slot
+             *          to leave. The busy wait therefore holds no DMK lock (`[B-110]`). A kept slot refuses instead,
+             *          because an install arm never recaptures (HookStackTest.InstallOverAnArmedLayerRunsNoIdlePass).
              * @note An Active outcome releases the lock through publish_toggle(), so the caller must read no hook state
              *       after the call.
              */
@@ -556,35 +567,39 @@ namespace DetourModKit
                 TargetSlot *kept_slot
             ) noexcept
             {
-                // A claimed hook writes no target byte, so it toggles by one store with no ledger slot or byte witness.
-                if (backend_claimed(impl.backend))
-                {
-                    return publish_resume(impl, gate, kept_slot, guard);
-                }
-                // A bypassed hook keeps its position. Unless the bytes are back to Original, which no chain reaches,
-                // the resume needs no top-layer authority.
-                if (impl.bypassed)
-                {
-                    if (witness_of(impl.backend) != PatchWitness::Original)
-                    {
-                        return publish_resume(impl, gate, kept_slot, guard);
-                    }
-                    (void)apply_backend(impl.backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                    impl.bypassed = false;
-                }
-
-                // The slot makes the {decide, patch} pair atomic against a concurrent same-target install. Claim it
-                // before the state CAS so a refusal changes nothing. A ledger that cannot decide the order refuses.
-                std::optional<TargetSlot> acquired_slot;
-                TargetSlot &slot =
-                    kept_slot != nullptr ? *kept_slot : acquired_slot.emplace(impl.target, impl.ledger_id);
-                if (slot.unavailable())
-                {
-                    return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
-                }
                 bool busy_logged = false;
                 for (;;)
                 {
+                    // A claimed hook writes no target byte, so it toggles by one store with no ledger slot or byte
+                    // witness.
+                    if (backend_claimed(impl.backend))
+                    {
+                        return publish_resume(impl, gate, kept_slot, guard);
+                    }
+                    // A bypassed hook keeps its position. Unless the bytes are back to Original, which no chain
+                    // reaches, the resume needs no top-layer authority.
+                    if (impl.bypassed)
+                    {
+                        if (witness_of(impl.backend) != PatchWitness::Original)
+                        {
+                            return publish_resume(impl, gate, kept_slot, guard);
+                        }
+                        (
+                            void
+                        )apply_backend(impl.backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
+                        impl.bypassed = false;
+                    }
+
+                    // The slot makes the {decide, patch} pair atomic against a concurrent same-target install. Claim
+                    // it before the state CAS so a refusal changes nothing. A ledger that cannot decide the order
+                    // refuses.
+                    std::optional<TargetSlot> acquired_slot;
+                    TargetSlot &slot =
+                        kept_slot != nullptr ? *kept_slot : acquired_slot.emplace(impl.target, impl.ledger_id);
+                    if (slot.unavailable())
+                    {
+                        return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", impl.target});
+                    }
                     if (!slot.hold_coordinator("hook::enable", impl.name))
                     {
                         deferred_warning.arm(
@@ -619,21 +634,19 @@ namespace DetourModKit
                         {
                             return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
                         }
-                        // Active answers the request only over this hook's own patch. The patch of another layer
-                        // cannot prove that its chain still reaches this hook.
-                        if (before == PatchWitness::OwnedPatch)
+                        // Active answers the request over this hook's own patch, and under a newer layer whose chain
+                        // still reaches this hook.
+                        if (before == PatchWitness::OwnedPatch ||
+                            (before == PatchWitness::LayeredOver && backend_layer_chains_here(impl.backend)))
                         {
                             return {};
                         }
-                        if (before == PatchWitness::LayeredOver)
-                        {
-                            deferred_warning.arm("refused enable", impl.name, impl.target, witness_description(before));
-                            return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", impl.target});
-                        }
-                        // The bytes prove the target is unpatched. Rewrite the stale claim, then arm through the
-                        // ordinary path so byte authority and the population tally both stay exact.
+                        // A restore outside DMK removed this hook from the chain. Rewrite the stale claim, then arm
+                        // through the ordinary path so byte authority and the population tally both stay exact.
                         deferred_warning.arm(
-                            "has original bytes under an active state. This enable retries the arm",
+                            before == PatchWitness::LayeredOver
+                                ? "left the layer chain under an active state. This enable retries the arm"
+                                : "has original bytes under an active state. This enable retries the arm",
                             impl.name,
                             impl.target
                         );
@@ -648,11 +661,13 @@ namespace DetourModKit
                         false,
                         [&refusal](auto &backend) noexcept { return try_backend_enable(backend, &refusal); }
                     );
-                    // A thread runs the trampoline that the arm recaptures. It leaves by itself, so the arm lets the
-                    // coordinator go and tries again, with no count (`[B-110]`). Nothing changed yet.
-                    if (!backend_enabled && refusal == CoordinatorRefusal::TrampolineBusy && slot.release_coordinator())
+                    // A thread runs the trampoline that the arm recaptures. It leaves by itself, so the arm waits with
+                    // no DMK lock held and no count. Nothing changed yet.
+                    if (!backend_enabled && refusal == CoordinatorRefusal::TrampolineBusy && kept_slot == nullptr)
                     {
                         impl.status.store(HookState::Disabled, std::memory_order_release);
+                        acquired_slot.reset();
+                        guard.unlock();
                         if (!std::exchange(busy_logged, true))
                         {
                             (void)log().try_log(
@@ -664,6 +679,10 @@ namespace DetourModKit
                             );
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        if (!relock_call_gate(guard))
+                        {
+                            return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
+                        }
                         continue;
                     }
                     const bool patch_confirmed = backend_value_or(
@@ -698,7 +717,8 @@ namespace DetourModKit
                                 "the hook cannot chain to the layer on the target"
                             );
                         }
-                        else if (refusal == CoordinatorRefusal::CallerInTrampoline)
+                        else if (refusal == CoordinatorRefusal::CallerInTrampoline ||
+                                 refusal == CoordinatorRefusal::TrampolineBusy)
                         {
                             deferred_warning.arm(
                                 "refused enable",
@@ -796,18 +816,8 @@ namespace DetourModKit
                 return publish_bypass(*m_impl, *gate, nullptr, guard, nullptr, 0, std::nullopt);
             }
 
+            // Only a branch that can restore bytes takes the coordinator. A bypass writes no target byte.
             TargetSlot slot(m_impl->target, m_impl->ledger_id);
-            if (!slot.hold_coordinator("hook::disable", m_impl->name))
-            {
-                deferred_warning.arm(
-                    "refused disable",
-                    m_impl->name,
-                    m_impl->target,
-                    DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
-                );
-                return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
-            }
-            const PatchWitness before = witness_of(m_impl->backend);
             // The ledger failed to claim the slot, so the layer order is undecided and the toggle refuses unchanged.
             if (slot.unavailable() && !m_impl->bypassed)
             {
@@ -815,10 +825,12 @@ namespace DetourModKit
             }
 
             // A bypassed hook is already Disabled. Once it is the top layer over its own patch again, the restore
-            // removes its position. Any other answer keeps the bypass, which is a complete disarm.
+            // removes its position. Any other answer, a refused hold included, keeps the bypass, which is a complete
+            // disarm.
             if (m_impl->bypassed)
             {
-                if (slot.is_top_layer() && before == PatchWitness::OwnedPatch)
+                if (slot.is_top_layer() && slot.hold_coordinator("hook::disable", m_impl->name) &&
+                    witness_of(m_impl->backend) == PatchWitness::OwnedPatch)
                 {
                     (void)backend_value_or(
                         m_impl->backend,
@@ -844,28 +856,48 @@ namespace DetourModKit
             // An Active layer under a newer one cannot restore its saved prologue without clobbering the newer layer.
             // It bypasses instead.
             const bool active = m_impl->status.load(std::memory_order_acquire) == HookState::Active;
-            if (active && (slot.newer_layers() > 0 || !witness_permits_write(before)))
+            const auto bypass = [&](std::optional<PatchWitness> witness) noexcept -> Result<void>
             {
                 HookState expected = HookState::Active;
                 if (!m_impl->status.compare_exchange_strong(expected, HookState::Disabling, std::memory_order_acq_rel))
                 {
                     return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
                 }
-                return publish_bypass(
-                    *m_impl,
-                    *gate,
-                    &slot,
-                    guard,
-                    &deferred_warning,
-                    slot.newer_layers(),
-                    slot.newer_layers() > 0 ? std::nullopt : std::optional<PatchWitness>{before}
-                );
+                return publish_bypass(*m_impl, *gate, &slot, guard, &deferred_warning, slot.newer_layers(), witness);
+            };
+            if (active && slot.newer_layers() > 0)
+            {
+                return bypass(std::nullopt);
             }
 
             // A Disabled hook that restored keeps the newest-layer rule.
             if (!slot.is_top_layer())
             {
                 return std::unexpected(Error{ErrorCode::LayerConflict, "hook::disable", m_impl->target});
+            }
+
+            const bool held = slot.hold_coordinator("hook::disable", m_impl->name);
+            const PatchWitness before = witness_of(m_impl->backend);
+            // Bytes of another participant or foreign bytes also bypass. Under a refused hold the read is not
+            // settled, and a torn read can only turn a restore into this bypass.
+            if (active && !witness_permits_write(before))
+            {
+                return bypass(before);
+            }
+            if (!held)
+            {
+                // A restored hook needs no write, so a repeat disable succeeds.
+                if (!active && before == PatchWitness::Original)
+                {
+                    return {};
+                }
+                deferred_warning.arm(
+                    "refused disable",
+                    m_impl->name,
+                    m_impl->target,
+                    DetourModKit::detail::coordinator_hold_refusal_description(slot.coordinator_refusal())
+                );
+                return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
             }
 
             // Classify before the transition claim (see enable()). The unconditional prologue restore clobbers a

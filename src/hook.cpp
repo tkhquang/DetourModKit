@@ -3314,6 +3314,23 @@ namespace DetourModKit
             }
             if (!armed)
             {
+                // The teardown runs before the null store, so no thread that enters the detour reads a null original.
+                // A pinned backend keeps its detour reachable and its trampoline valid, so its original stays.
+                const auto failed = std::ranges::find_if(
+                    hooks,
+                    [&stored](const std::unique_ptr<Hook> &hook) noexcept { return hook.get() == &stored; }
+                );
+                bool pinned = false;
+                if (failed != hooks.end())
+                {
+                    std::unique_ptr<Hook> destroyed = std::move(*failed);
+                    hooks.erase(failed);
+                    pinned = teardown(*destroyed, CountedDrainProof::Required) == TeardownOutcome::Pinned;
+                }
+                if (!pinned)
+                {
+                    publish_original(original, nullptr);
+                }
                 return std::unexpected(armed.error());
             }
             return std::ref(stored);

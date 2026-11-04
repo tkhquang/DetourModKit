@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <functional>
@@ -5778,5 +5779,148 @@ TEST(HookBackendArmOrder, HookEnableFromInsideTheTrampolineIsRejected)
     EXPECT_EQ(read_prologue_span(page), newer_patch);
     newer.reset();
     EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+namespace
+{
+    /// The bound for a busy arm to return after the parked thread leaves. A lock held across the wait never returns.
+    constexpr std::chrono::seconds BUSY_ARM_DEADLINE{10};
+
+    /// The exit codes of run_busy_arm_probe. Each failure names the step that failed.
+    constexpr int BUSY_ARM_PASSED = 0;
+    constexpr int BUSY_ARM_SETUP_FAILED = 10;
+    constexpr int BUSY_ARM_NOT_PARKED = 11;
+    constexpr int BUSY_ARM_DID_NOT_WAIT = 12;
+    constexpr int BUSY_ARM_DEADLOCK = 13;
+    constexpr int BUSY_ARM_CALLEE_BLOCKED = 14;
+    constexpr int BUSY_ARM_FAILED = 15;
+    constexpr int BUSY_ARM_WRONG_RESULT = 16;
+
+    /// The hook that the parked thread queries with is_enabled(), or toggles with disable().
+    std::atomic<Hook *> s_busy_queried{nullptr};
+    std::atomic<Hook *> s_busy_toggled{nullptr};
+    std::atomic<bool> s_busy_callee_entered{false};
+    std::atomic<bool> s_busy_answer{false};
+
+    /// Parks on its first entry inside the relocated call, then calls into DMK on the selected hook.
+    DMK_TEST_NOINLINE int busy_arm_callee() noexcept
+    {
+        if (s_busy_callee_entered.exchange(true, std::memory_order_acq_rel))
+        {
+            return LEAF_RESULT;
+        }
+        s_parked_callee_reached.store(true, std::memory_order_release);
+        while (!s_parked_callee_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        if (Hook *queried = s_busy_queried.load(std::memory_order_acquire))
+        {
+            s_busy_answer.store(queried->is_enabled(), std::memory_order_release);
+        }
+        if (Hook *toggled = s_busy_toggled.load(std::memory_order_acquire))
+        {
+            s_busy_answer.store(toggled->disable().has_value(), std::memory_order_release);
+        }
+        return LEAF_RESULT;
+    }
+
+    /// Waits until @p flag is set or @p deadline passes, and returns the flag.
+    [[nodiscard]] bool wait_for_flag(const std::atomic<bool> &flag, std::chrono::steady_clock::duration deadline)
+    {
+        const auto end = std::chrono::steady_clock::now() + deadline;
+        while (!flag.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < end)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return flag.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Arms an older hook under a newer one while a thread parks in the older trampoline, then exits.
+     * @param query_the_arming_hook True: the parked thread calls is_enabled() on the hook that arms, which needs its
+     *        call gate. False: it calls disable() on the newer hook, which needs the target slot.
+     * @details It runs in a death-test subprocess. An arm that keeps a lock across the wait deadlocks with the parked
+     *          thread, and no join can end that deadlock.
+     */
+    [[noreturn]] void run_busy_arm_probe(bool query_the_arming_hook)
+    {
+        dmk_test::ScratchPage page;
+        if (!page.ok())
+        {
+            std::_Exit(BUSY_ARM_SETUP_FAILED);
+        }
+        plant_relocated_call(page, &busy_arm_callee);
+        Result<Hook> older = inline_at(
+            InlineRequest{.name = "BusyArmOlder", .target = Address{page.addr(0)}},
+            reinterpret_cast<void (*)()>(&upper_chaining_detour)
+        );
+        Result<Hook> newer = inline_at(
+            InlineRequest{.name = "BusyArmNewer", .target = Address{page.addr(0)}},
+            reinterpret_cast<void (*)()>(&successor_detour)
+        );
+        if (!older || !newer || !newer->enable())
+        {
+            std::_Exit(BUSY_ARM_SETUP_FAILED);
+        }
+        const LeafFn entry = older->original<LeafFn>();
+        const UpperOriginalScope upper_original{reinterpret_cast<void *>(entry)};
+        (query_the_arming_hook ? s_busy_queried : s_busy_toggled)
+            .store(query_the_arming_hook ? &*older : &*newer, std::memory_order_release);
+        ParkedCaller caller{reinterpret_cast<std::uintptr_t>(entry)};
+        if (!wait_for_flag(s_parked_callee_reached, BUSY_ARM_DEADLINE))
+        {
+            std::_Exit(BUSY_ARM_NOT_PARKED);
+        }
+
+        std::atomic<bool> arm_returned{false};
+        std::atomic<bool> armed{false};
+        std::thread arming{[&older, &arm_returned, &armed]
+                           {
+                               armed.store(older->enable().has_value(), std::memory_order_release);
+                               arm_returned.store(true, std::memory_order_release);
+                           }};
+        std::this_thread::sleep_for(BUSY_ARM_HOLD);
+        if (arm_returned.load(std::memory_order_acquire))
+        {
+            std::_Exit(BUSY_ARM_DID_NOT_WAIT);
+        }
+        s_parked_callee_release.store(true, std::memory_order_release);
+        if (!wait_for_flag(arm_returned, BUSY_ARM_DEADLINE))
+        {
+            std::_Exit(BUSY_ARM_DEADLOCK);
+        }
+        arming.join();
+        if (caller.release_and_join() != LEAF_RESULT)
+        {
+            std::_Exit(BUSY_ARM_CALLEE_BLOCKED);
+        }
+        if (!armed.load(std::memory_order_acquire))
+        {
+            std::_Exit(BUSY_ARM_FAILED);
+        }
+        // The gate case answers false while the arm waits, and the older layer then chains to the newer one. The
+        // disable restores the newer top layer, so the older layer arms over the original bytes.
+        const bool answer = s_busy_answer.load(std::memory_order_acquire);
+        const bool answered = query_the_arming_hook ? !answer : answer;
+        const int expected = query_the_arming_hook ? SUCCESSOR_RESULT + UPPER_BONUS : LEAF_RESULT + UPPER_BONUS;
+        std::_Exit(answered && call_target(page) == expected ? BUSY_ARM_PASSED : BUSY_ARM_WRONG_RESULT);
+    }
+} // namespace
+
+// A thread that parks in the trampoline of the hook that arms asks that hook is_enabled(). The arm waits with its call
+// gate released, so the query answers false, the thread leaves, and the arm chains both detours.
+TEST(HookBackendArmOrder, BusyArmReleasesTheCallGate)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_busy_arm_probe(true), ::testing::ExitedWithCode(BUSY_ARM_PASSED), "");
+}
+
+// A thread that parks in the trampoline of the hook that arms disables the newer hook of the same target. The arm
+// waits with the target slot released, so the disable restores the newer hook, the thread leaves, and the arm succeeds.
+TEST(HookBackendArmOrder, BusyArmReleasesTheTargetSlot)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_busy_arm_probe(false), ::testing::ExitedWithCode(BUSY_ARM_PASSED), "");
 }
 #endif // DMK_ENABLE_TEST_SEAMS

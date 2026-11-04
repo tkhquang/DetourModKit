@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -721,6 +722,7 @@ namespace DetourModKit::detail
 {
     extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
     void set_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
+    [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -812,33 +814,208 @@ TEST(HookStackTest, InstallPublishesTheOriginalBeforeTheArm)
     EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
 }
 
-// A failed arm keeps the created hook stored and Disabled, so the stack still owns its teardown.
-TEST(HookStackTest, InstallKeepsAFailedArmInTheStack)
+// A failed arm rolls back, as a failed create does. An exception before the mutation and one after it both leave no
+// stack entry, a null original, and an unhooked target.
+TEST(HookStackTest, InstallRollsBackAFailedArm)
 {
-    s_stack_install_original.store(nullptr);
-    HookStack stack;
-    const Address target = addr_of(&stack_install_target);
-    Result<std::reference_wrapper<Hook>> failed = std::unexpected(Error{});
+    for (const auto &[after_mutation, code] :
+         {std::pair{false, ErrorCode::EnableFailed}, std::pair{true, ErrorCode::BackendFailed}})
     {
-        DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target.raw()), false);
-        failed = stack.install<&stack_install_detour>(InlineInstallRequest{
+        SCOPED_TRACE(after_mutation ? "after the mutation" : "before the mutation");
+        s_stack_install_original.store(nullptr);
+        HookStack stack;
+        const Address target = addr_of(&stack_install_target);
+        DetourModKit::detail::set_backend_toggle_exception_for_test(
+            reinterpret_cast<void *>(target.raw()),
+            after_mutation
+        );
+        const Result<std::reference_wrapper<Hook>> failed = stack.install<&stack_install_detour>(InlineInstallRequest{
             .name = "StackInstallFailedArm",
             .target = target,
             .original = &s_stack_install_original,
         });
         DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, code);
+        EXPECT_EQ(stack.size(), 0u);
+        EXPECT_EQ(s_stack_install_original.load(), nullptr);
+        EXPECT_FALSE(is_target_hooked(target));
+        EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
     }
-    ASSERT_FALSE(failed.has_value());
-    EXPECT_EQ(failed.error().code, ErrorCode::EnableFailed);
-    ASSERT_EQ(stack.size(), 1u);
-    EXPECT_TRUE(is_target_hooked(target));
-    EXPECT_NE(s_stack_install_original.load(), nullptr);
-    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
+}
 
-    // The failed result names no hook, so the stack teardown proves that the stack owns it.
-    stack.clear();
-    EXPECT_FALSE(is_target_hooked(target));
-    EXPECT_EQ(call_unfolded(&stack_install_target, 7), 7);
+namespace
+{
+    DMK_PROOF_TARGET int pinned_arm_target(int x)
+    {
+        volatile int r = x;
+        volatile int tag = 23;
+        (void)tag;
+        return r;
+    }
+
+    std::atomic<StackInstallFn> s_pinned_arm_original{nullptr};
+    std::atomic<bool> s_pinned_arm_go{false};
+    std::atomic<bool> s_pinned_arm_entered{false};
+    std::atomic<bool> s_pinned_arm_release{false};
+
+    /// The exit codes of run_pinned_arm_rollback. Each failure names the step that failed.
+    constexpr int PINNED_ARM_PASSED = 0;
+    constexpr int PINNED_ARM_INSTALLED = 10;
+    constexpr int PINNED_ARM_NOT_PARKED = 11;
+    constexpr int PINNED_ARM_NULL_ORIGINAL = 12;
+    constexpr int PINNED_ARM_WRONG_RESULT = 13;
+
+    /// Parks past the counted drain bound, then calls the original. A null original answers -1.
+    int pinned_arm_detour(int x) noexcept
+    {
+        s_pinned_arm_entered.store(true, std::memory_order_release);
+        while (!s_pinned_arm_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        const StackInstallFn original = s_pinned_arm_original.load(std::memory_order_acquire);
+        return original != nullptr ? original(x) + 4000 : -1;
+    }
+
+    /// Sends a call into the detour that the failed arm published, before the rollback tears it down.
+    void park_in_the_failed_arm(bool armed, bool, bool, bool) noexcept
+    {
+        if (!armed)
+        {
+            return;
+        }
+        s_pinned_arm_go.store(true, std::memory_order_release);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (!s_pinned_arm_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < end)
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    /**
+     * @brief Fails an install arm after its mutation while a counted call stays in the detour, then exits.
+     * @details The teardown of the rollback pins the hook, because the call outlasts the drain bound. It runs in a
+     *          death-test subprocess, because the pinned hook stays in the process.
+     */
+    [[noreturn]] void run_pinned_arm_rollback()
+    {
+        std::atomic<int> parked_result{0};
+        std::thread parked{[&parked_result]
+                           {
+                               while (!s_pinned_arm_go.load(std::memory_order_acquire))
+                               {
+                                   std::this_thread::yield();
+                               }
+                               parked_result.store(call_unfolded(&pinned_arm_target, 7), std::memory_order_release);
+                           }};
+        HookStack stack;
+        const Address target = addr_of(&pinned_arm_target);
+        const TogglePublicationProbeScope probe{&park_in_the_failed_arm};
+        DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target.raw()), true);
+        const Result<std::reference_wrapper<Hook>> failed = stack.install<&pinned_arm_detour>(InlineInstallRequest{
+            .name = "StackInstallPinnedArm",
+            .target = target,
+            .original = &s_pinned_arm_original,
+        });
+        DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false);
+        if (failed.has_value() || stack.size() != 0)
+        {
+            std::_Exit(PINNED_ARM_INSTALLED);
+        }
+        if (!s_pinned_arm_entered.load(std::memory_order_acquire))
+        {
+            std::_Exit(PINNED_ARM_NOT_PARKED);
+        }
+        if (s_pinned_arm_original.load(std::memory_order_acquire) == nullptr)
+        {
+            std::_Exit(PINNED_ARM_NULL_ORIGINAL);
+        }
+        s_pinned_arm_release.store(true, std::memory_order_release);
+        parked.join();
+        std::_Exit(parked_result.load(std::memory_order_acquire) == 4007 ? PINNED_ARM_PASSED : PINNED_ARM_WRONG_RESULT);
+    }
+} // namespace
+
+// A failed arm whose teardown pins the hook keeps its detour reachable, so the original stays published. A call that
+// outlasts the drain bound then still reaches the original.
+TEST(HookStackTest, InstallRollbackKeepsTheOriginalOfAPinnedHook)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_pinned_arm_rollback(), ::testing::ExitedWithCode(PINNED_ARM_PASSED), "");
+}
+
+namespace
+{
+    DMK_PROOF_TARGET int idle_pass_target(int x)
+    {
+        volatile int r = x;
+        volatile int tag = 19;
+        (void)tag;
+        return r;
+    }
+
+    std::atomic<StackInstallFn> s_idle_pass_lower{nullptr};
+    std::atomic<StackInstallFn> s_idle_pass_upper{nullptr};
+
+    int idle_pass_lower_detour(int x)
+    {
+        return s_idle_pass_lower.load(std::memory_order_acquire)(x) + 100;
+    }
+
+    int idle_pass_upper_detour(int x)
+    {
+        return s_idle_pass_upper.load(std::memory_order_acquire)(x) + 20;
+    }
+} // namespace
+
+// An install arm over the bytes that its create saved never recaptures. It runs no idle pass, so its kept slot never
+// meets a busy trampoline. An enable() that recaptures an armed layer runs the pass.
+TEST(HookStackTest, InstallOverAnArmedLayerRunsNoIdlePass)
+{
+    using DetourModKit::detail::backend_idle_pass_calls_for_test;
+    const Address target = addr_of(&idle_pass_target);
+    {
+        HookStack stack;
+        const auto lower = stack.install(
+            InlineInstallRequest{.name = "IdlePassStackLower", .target = target, .original = &s_idle_pass_lower},
+            &idle_pass_lower_detour
+        );
+        ASSERT_TRUE(lower.has_value()) << lower.error().message();
+        const std::size_t passes_before = backend_idle_pass_calls_for_test();
+        const auto upper = stack.install(
+            InlineInstallRequest{.name = "IdlePassStackUpper", .target = target, .original = &s_idle_pass_upper},
+            &idle_pass_upper_detour
+        );
+        ASSERT_TRUE(upper.has_value()) << upper.error().message();
+        EXPECT_EQ(backend_idle_pass_calls_for_test(), passes_before) << "the install arm recaptured its window";
+        EXPECT_EQ(call_unfolded(&idle_pass_target, 5), 125);
+    }
+    EXPECT_EQ(call_unfolded(&idle_pass_target, 5), 5);
+
+    Result<Hook> created_older = inline_at(
+        InlineRequest{.name = "IdlePassOlder", .target = target},
+        reinterpret_cast<void (*)()>(&idle_pass_lower_detour)
+    );
+    ASSERT_TRUE(created_older.has_value()) << created_older.error().message();
+    std::optional<Hook> older{std::move(*created_older)};
+    s_idle_pass_lower.store(older->original<StackInstallFn>(), std::memory_order_release);
+    Result<Hook> created_newer = inline_at(
+        InlineRequest{.name = "IdlePassNewer", .target = target},
+        reinterpret_cast<void (*)()>(&idle_pass_upper_detour)
+    );
+    ASSERT_TRUE(created_newer.has_value()) << created_newer.error().message();
+    std::optional<Hook> newer{std::move(*created_newer)};
+    s_idle_pass_upper.store(newer->original<StackInstallFn>(), std::memory_order_release);
+    ASSERT_TRUE(newer->enable().has_value());
+    const std::size_t passes_before = backend_idle_pass_calls_for_test();
+    ASSERT_TRUE(older->enable().has_value());
+    EXPECT_GT(backend_idle_pass_calls_for_test(), passes_before) << "the recapture ran no idle pass";
+    EXPECT_EQ(call_unfolded(&idle_pass_target, 5), 125);
+    // The older hook armed last, so it is the newest layer and restores first.
+    older.reset();
+    newer.reset();
+    EXPECT_EQ(call_unfolded(&idle_pass_target, 5), 5);
 }
 #endif
 
