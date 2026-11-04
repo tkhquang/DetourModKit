@@ -109,7 +109,7 @@ index c05d06f..53c7df5 100644
      static void combine_adjacent_freenodes(Memory& memory);
      [[nodiscard]] static std::expected<uint8_t*, Error> allocate_nearby_memory(
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..d579f0b 100644
+index 58801fa..b2cdaf2 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
 @@ -8,6 +8,7 @@
@@ -692,7 +692,7 @@ index 58801fa..d579f0b 100644
 +    [[nodiscard]] std::expected<bool, Error> prepare_arm(ProcessCoordinator& coordinator);
 +    /// @brief Relocates a layered window into the trampoline after one idle pass. Returns false while it is busy.
 +    [[nodiscard]] std::expected<bool, Error> recapture_window(ProcessCoordinator& coordinator, uint8_t* destination);
-+    /// @brief Rewrites the relocated region, the boundaries, the return sites, and the relay cell. Runs with every
++    /// @brief Rewrites the relocated region, the first boundary, the return sites, and the relay cell. Runs with every
 +    ///        other thread suspended, so it allocates nothing and takes no lock. Returns false when a cache flush
 +    ///        failed.
 +    [[nodiscard]] bool recapture_in_place(ProcessCoordinator& coordinator, uint8_t* destination) noexcept;
@@ -925,7 +925,7 @@ index 68e44fd..b2bfcca 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..0a2a29e 100644
+index 8cb1fbe..39e3a53 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -2,9 +2,12 @@
@@ -957,7 +957,7 @@ index 8cb1fbe..0a2a29e 100644
  
  struct SystemInfo {
      uint32_t page_size;
-@@ -65,9 +70,310 @@ struct SystemInfo {
+@@ -65,9 +70,311 @@ struct SystemInfo {
  
  SystemInfo SAFETYHOOK_API system_info();
  
@@ -1125,7 +1125,8 @@ index 8cb1fbe..0a2a29e 100644
 +/// @brief Runs one idle pass of threads_idle_outside and, when it holds, runs @p action before any thread resumes.
 +/// @details The current thread's stack is read before @p action. No thread can therefore be inside the ranges, or
 +///          return into them, while @p action rewrites them, even when an entry into the ranges stays open.
-+/// @param action Runs with every other thread suspended. It must not allocate, take a lock, or call back.
++/// @param action Runs with every other thread suspended. It must not allocate, take a lock, or call back. At
++///        `_ITERATOR_DEBUG_LEVEL` 2, every MSVC container member that makes or drops an iterator takes such a lock.
 +/// @return As threads_idle_outside. True means that @p action ran.
 +[[nodiscard]] std::expected<bool, OsError> SAFETYHOOK_API threads_idle_outside(std::span<const AddressRange> ranges,
 +    std::span<const ReturnSites* const> return_sites, IdleRefusal* refusal, void (*action)(void* context) noexcept,
@@ -1514,7 +1515,7 @@ index 268ce9b..d5cc250 100644
 +Allocator::~Allocator() = default;
 +} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..ffb320d 100644
+index a5b3700..167d6b7 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
 @@ -1,5 +1,16 @@
@@ -2720,7 +2721,7 @@ index a5b3700..ffb320d 100644
  
      // jmp from trampoline to original.
      auto src = reinterpret_cast<uint8_t*>(&trampoline_epilogue->jmp_to_original);
-@@ -409,77 +1380,1507 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -409,77 +1380,1509 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
          return std::unexpected{result.error()};
      }
  
@@ -2918,6 +2919,8 @@ index a5b3700..ffb320d 100644
 +    IdleRefusal refusal{};
 +    const auto idle = threads_idle_outside(ranges, sites, &refusal, rewrite, &request);
 +    if (idle.has_value() && *idle) {
++        // The shrink frees nothing, but it takes the MSVC debug-iterator lock, so it waits for the resume.
++        m_instruction_boundaries.resize(1);
 +        if (!request.flushed)
 +            return std::unexpected{Error::failed_to_flush_instruction_cache(m_trampoline.data())};
 +        return true;
@@ -2943,10 +2946,10 @@ index a5b3700..ffb320d 100644
 +    // region. The entry, the epilogue, the relay, and the cell keep their offsets.
 +    store(trampoline, make_jmp_e9(trampoline, jump_target));
 +    std::fill(trampoline + sizeof(JmpE9), trampoline + m_relocated_size, uint8_t{0x90});
-+    std::copy_n(m_target, m_original_bytes.size(), m_original_bytes.begin());
++    std::copy_n(m_target, m_original_bytes.size(), m_original_bytes.data());
 +    // Only the jump at the window start is reachable, so it is the one boundary that a trap moves a thread across.
-+    m_instruction_boundaries.resize(1);
-+    m_instruction_boundaries.front() = InstructionBoundary{0, 0};
++    // recapture_window drops the others after the threads resume.
++    *m_instruction_boundaries.data() = InstructionBoundary{0, 0};
 +    m_trampoline_return_sites.offsets = {};
 +    m_trampoline_return_sites.count = 0;
 +    if (m_route_control != nullptr)
@@ -2958,7 +2961,7 @@ index a5b3700..ffb320d 100644
 +        const auto original_size =
 +            static_cast<uint32_t>(std::min(m_original_bytes.size(), RELAY_CELL_ORIGINAL_CAPACITY));
 +        store(cell + offsetof(RelayCellBody, original_size), original_size);
-+        std::copy_n(m_original_bytes.begin(), original_size, cell + offsetof(RelayCellBody, original));
++        std::copy_n(m_original_bytes.data(), original_size, cell + offsetof(RelayCellBody, original));
 +    }
 +#endif
 +    return vm_flush_instruction_cache(trampoline, m_trampoline.size()) &&

@@ -430,6 +430,12 @@ namespace DetourModKit
         /// Returns the number of backend idle passes, so a proof can count the passes of one operation.
         [[nodiscard]] std::size_t backend_idle_pass_calls_for_test() noexcept;
 
+        /// Parks every backend idle pass before its thread suspension while @p hold is true.
+        void set_backend_idle_scan_hold_for_test(bool hold) noexcept;
+
+        /// Reports whether an idle pass reached the park since the hold was set.
+        [[nodiscard]] bool backend_idle_scan_reached_for_test() noexcept;
+
         /// Returns the number of backend idle passes that walked a thread snapshot in place of NtGetNextThread.
         [[nodiscard]] std::size_t backend_idle_snapshot_walks_for_test() noexcept;
 

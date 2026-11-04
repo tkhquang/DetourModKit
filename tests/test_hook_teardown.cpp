@@ -1431,6 +1431,71 @@ TEST(HookLedgerTargetSlot, BlocksConcurrentInstallUntilSlotReleased)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
+// An install that queues behind the slot of an arm creates over the armed patch. The promote of the arm keeps the
+// queued reservation newer, so the armed id counts it as one newer layer.
+TEST(HookLedgerTargetSlot, PromoteKeepsAQueuedInstallNewer)
+{
+    using DetourModKit::detail::HookLedger;
+    auto &ledger = HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BAC000;
+    const auto newer_than = [&ledger](std::uint64_t id)
+    {
+        const std::size_t newer = ledger.acquire_target_slot(target, id);
+        ledger.release_target_slot(target, id);
+        return newer;
+    };
+
+    const auto armed = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(armed.status, HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook(target, armed.id));
+    ASSERT_EQ(ledger.acquire_target_slot(target, armed.id), 0u);
+
+    std::atomic<bool> install_started{false};
+    std::atomic<bool> install_returned{false};
+    std::atomic<std::uint64_t> queued_id{0};
+    std::thread installer(
+        [&ledger, &install_started, &install_returned, &queued_id]
+        {
+            install_started.store(true, std::memory_order_release);
+            const auto queued = ledger.try_reserve_hook(target, false);
+            EXPECT_EQ(queued.status, HookLedger::ReserveStatus::Reserved);
+            queued_id.store(queued.id, std::memory_order_relaxed);
+            install_returned.store(true, std::memory_order_release);
+        }
+    );
+    while (!install_started.load(std::memory_order_acquire))
+    {
+        Sleep(1);
+    }
+    // The reservation appends its id before it waits behind the held slot.
+    Sleep(100);
+    EXPECT_FALSE(install_returned.load(std::memory_order_acquire)) << "the install passed the held slot";
+
+    EXPECT_NE(ledger.promote_to_newest(target, armed.id), 0u);
+    ledger.release_target_slot(target, armed.id);
+    installer.join();
+    const std::uint64_t queued = queued_id.load(std::memory_order_relaxed);
+    ASSERT_NE(queued, 0u);
+    ASSERT_TRUE(ledger.commit_hook(target, queued));
+    EXPECT_EQ(newer_than(armed.id), 1u) << "the promote moved the armed id past the queued install";
+    EXPECT_EQ(newer_than(queued), 0u);
+
+    // A kept-slot commit settles its id, so a later arm of an older hook promotes past it.
+    const auto kept = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(kept.status, HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook_keep_slot(target, kept.id));
+    ledger.release_target_slot(target, kept.id);
+    ASSERT_EQ(ledger.acquire_target_slot(target, armed.id), 2u);
+    EXPECT_NE(ledger.promote_to_newest(target, armed.id), 0u);
+    ledger.release_target_slot(target, armed.id);
+    EXPECT_EQ(newer_than(armed.id), 0u) << "the kept-slot commit left its id queued";
+
+    (void)ledger.release_hook(target, kept.id);
+    (void)ledger.release_hook(target, queued);
+    (void)ledger.release_hook(target, armed.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+}
+
 // release_target_slot removes serialization but preserves the creation entry. Queries and strict installs must still
 // see the retained backend.
 TEST(HookLedgerTargetSlot, ReleaseSlotOnlyKeepsOrderEntry)
