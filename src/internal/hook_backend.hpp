@@ -227,6 +227,8 @@ namespace DetourModKit
                 Required,
                 /// HookStack::retire switched every relay of its stack off and drained every counted detour.
                 ProvenByRetire,
+                /// As Required. No caller proves a raw inline detour idle, so one whose patch committed pins.
+                InstallRollback,
             };
 
             /// An inline or mid hook target that the HookLedger reserved for one install.

@@ -734,7 +734,9 @@ namespace DetourModKit
 
             /**
              * @brief Works as the counted @ref install, for the raw inline hook of @ref inline_at.
-             * @details The constraint sends a mid callback to the mid form, also from a braced request.
+             * @details The constraint sends a mid callback to the mid form, also from a braced request. A failed arm
+             *          whose patch committed pins the hook with its detour reachable and keeps the original, because
+             *          no drain covers a raw detour (HookStackTest.InstallRollbackPinsACommittedRawHook).
              * @warning Quiescence of the raw detour stays caller-owned, as the raw @ref inline_at states.
              * @note Setup/control-plane only: the install waits as @ref Hook states.
              */

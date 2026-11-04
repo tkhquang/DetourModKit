@@ -894,11 +894,13 @@ namespace
     }
 
     /**
-     * @brief Fails an install arm after its mutation while a counted call stays in the detour, then exits.
-     * @details The teardown of the rollback pins the hook, because the call outlasts the drain bound. It runs in a
-     *          death-test subprocess, because the pinned hook stays in the process.
+     * @brief Fails an install arm after its mutation while a call stays in the detour, then exits.
+     * @param counted True installs the counted form, whose call outlasts the drain bound. False installs the raw
+     *        form, which no drain covers.
+     * @details The teardown of the rollback pins the hook in both forms. It runs in a death-test subprocess, because
+     *          the pinned hook stays in the process.
      */
-    [[noreturn]] void run_pinned_arm_rollback()
+    [[noreturn]] void run_pinned_arm_rollback(bool counted)
     {
         std::atomic<int> parked_result{0};
         std::thread parked{[&parked_result]
@@ -913,11 +915,13 @@ namespace
         const Address target = addr_of(&pinned_arm_target);
         const TogglePublicationProbeScope probe{&park_in_the_failed_arm};
         DetourModKit::detail::set_backend_toggle_exception_for_test(reinterpret_cast<void *>(target.raw()), true);
-        const Result<std::reference_wrapper<Hook>> failed = stack.install<&pinned_arm_detour>(InlineInstallRequest{
+        const InlineInstallRequest request{
             .name = "StackInstallPinnedArm",
             .target = target,
             .original = &s_pinned_arm_original,
-        });
+        };
+        const Result<std::reference_wrapper<Hook>> failed =
+            counted ? stack.install<&pinned_arm_detour>(request) : stack.install(request, &pinned_arm_detour);
         DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false);
         if (failed.has_value() || stack.size() != 0)
         {
@@ -942,7 +946,13 @@ namespace
 TEST(HookStackTest, InstallRollbackKeepsTheOriginalOfAPinnedHook)
 {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
-    EXPECT_EXIT(run_pinned_arm_rollback(), ::testing::ExitedWithCode(PINNED_ARM_PASSED), "");
+    EXPECT_EXIT(run_pinned_arm_rollback(true), ::testing::ExitedWithCode(PINNED_ARM_PASSED), "");
+}
+
+TEST(HookStackTest, InstallRollbackPinsACommittedRawHook)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_pinned_arm_rollback(false), ::testing::ExitedWithCode(PINNED_ARM_PASSED), "");
 }
 
 namespace
